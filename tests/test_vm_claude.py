@@ -29,6 +29,9 @@ import time
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "lib"))
 import vm_claude as vc  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import runports  # noqa: E402  (this run's own port numbers: tests/runports.py)
+SSH_PORT = runports.port()
 
 CLAUDE_PY = os.path.join(LAB, "lib", "vm_claude.py")
 GUEST = os.path.join(LAB, "lib", "vm_claude_guest.sh")
@@ -262,7 +265,7 @@ def env_for(td, **extra):
     env.update(HOME=os.path.join(td, "home"), PATH=os.path.join(td, "bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
                TMUX_TMPDIR=os.path.join(td, "tmux"), MCOMP_RUN_DIR=os.path.join(td, "run"),
                MCOMP_ACTION_LOG_DIR=os.path.join(td, "actions"), MCOMP_ACTION_LOG_KEY=os.path.join(td, "keys", "action-log"),
-               MCOMP_VM_NAME="testvm", MCOMP_GUEST_USER="cua", MCOMP_SSH_PORT="1", XDG_RUNTIME_DIR=os.path.join(td, "xdg"),
+               MCOMP_VM_NAME="testvm", MCOMP_GUEST_USER="cua", MCOMP_SSH_PORT=str(SSH_PORT), XDG_RUNTIME_DIR=os.path.join(td, "xdg"),
                MCOMP_SELF=os.path.join(td, "fake-vault"), FAKE_VAULT_DIR=os.path.join(td, "vault"),
                FAKE_CLAUDE_SRC=os.path.join(td, "fake-claude"), MCOMP_SH_GRACE_S="5", MCOMP_KEEPER_POLL_S="1",
                FAKE_PY=sys.executable, FAKE_CLAUDE_PY=CLAUDE_PY,

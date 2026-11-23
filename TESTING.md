@@ -1117,6 +1117,14 @@ outlives its first certificate (each probe makes its own).
 
 Each of these needs no VM and takes seconds.
 
+The suites whose stand-in VM is told apart by its SSH port (`test_handoff`, `test_hub`, `test_hidden_text`,
+`test_owners`, `test_vm_shell`, `test_vm_claude`, `test_session_guard`) take their port numbers from
+`tests/runports.py`: free loopback ports held bound (never listening) while the run lasts, so two runs on one Mac at the
+same time (two suites, two checkouts, two copies of one suite) never see each other's stand-in connections as their own
+VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_vm_shell`'s long sleeps, which it finds
+(and ends) with `pgrep`/`pkill -f`, carry digits of the run's own (`sleep 31.7NNNNN`), and `test_handoff` and
+`test_agent_setup` keep their locks in folders of their own (`MCOMP_LOCK_DIR`), never the account's.
+
 - `python3 tests/test_update.py`: `metacomputer update` and `version` and the step every install ends with
   (`lib/update.py`) against a temporary repository with three releases: `--check` says what's new and changes
   nothing; main moves forward to the latest release (a detached checkout to it) and install.sh runs; local changes,

@@ -30,11 +30,18 @@ import tempfile
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import runports  # noqa: E402
 TD = tempfile.mkdtemp(prefix="mcomp-handoff-")
+# The stand-in VMs' ports are this run's own (tests/runports.py): connections are told apart by the VM's SSH port, and
+# with fixed numbers a second run at the same time (another checkout's, another suite's) saw this one's stand-in
+# connections as its own VM's, and the other way round.
+SSH_PORT, VNC, VSSH, FSSH, FVNC, LSSH = (runports.port() for _ in range(6))
 ENV = {"MCOMP_RUN_DIR": os.path.join(TD, "run"), "MCOMP_LOG_DIR": os.path.join(TD, "logs"),
        "MCOMP_EVENTS_DIR": os.path.join(TD, "events"), "MCOMP_EVENTS_SPOOL": os.path.join(TD, "spool"),
-       "MCOMP_VM_NAME": "hotest", "MCOMP_SSH_PORT": "1", "MCOMP_SSH_DIR": os.path.join(TD, "ssh"),
-       "MCOMP_ACTIVE_S": "600", "MCOMP_SESSIONS_DIR": os.path.join(TD, "sessions")}
+       "MCOMP_VM_NAME": "hotest", "MCOMP_SSH_PORT": str(SSH_PORT), "MCOMP_SSH_DIR": os.path.join(TD, "ssh"),
+       "MCOMP_ACTIVE_S": "600", "MCOMP_SESSIONS_DIR": os.path.join(TD, "sessions"),
+       "MCOMP_LOCK_DIR": os.path.join(TD, "locks")}      # its locks too: never the account's, shared by every run
 os.environ.update(ENV)
 for k in ("MCOMP_CONFIG", "MCOMP_VM_STATE"):
     os.environ.pop(k, None)
@@ -624,7 +631,7 @@ def lifecycle_checks():
     open(lume, "w").write(LIFECYCLE_LUME)
     os.chmod(lume, 0o755)
     cfg = os.path.join(ld, "test.env")
-    open(cfg, "w").write(f'VM_NAME=lctest\nBASELINE_NAME=lctest-baseline\nSSH_DIR="{ld}/ssh"\nSSH_PORT=59875\n'
+    open(cfg, "w").write(f'VM_NAME=lctest\nBASELINE_NAME=lctest-baseline\nSSH_DIR="{ld}/ssh"\nSSH_PORT={LSSH}\n'
                          f'VNC_PORT=59876\nRUN_DIR="{ENV["MCOMP_RUN_DIR"]}"\nLOG_DIR="{ld}/logs"\nLUME="{lume}"\n')
     e = env(MCOMP_CONFIG=cfg, LUME_LOG=llog, MCOMP_LOCK_DIR=os.path.join(ld, "locks"), MCOMP_STOP_DEADLINE="3")
     for k in ("MCOMP_RUN_DIR", "MCOMP_LOG_DIR", "MCOMP_SSH_DIR", "MCOMP_VM_NAME"):
@@ -813,7 +820,7 @@ def input_reset_checks():
         open(src, "w").write("#include <unistd.h>\nint main(void) { sleep(60); return 0; }\n")
         subprocess.run(["/usr/bin/cc", "-o", exe, src], capture_output=True)
         if os.path.exists(exe):
-            conn = subprocess.Popen([exe, "-T", "-o", f"IdentityFile={TD}/ssh/mcp", "-p", owners.SSH_PORT or "1",
+            conn = subprocess.Popen([exe, "-T", "-o", f"IdentityFile={TD}/ssh/mcp", "-p", owners.SSH_PORT,
                                      "cua@127.0.0.1"])
             time.sleep(0.3)
             try:
@@ -1024,8 +1031,8 @@ def fill_checks():
     open(lume, "w").write('#!/bin/sh\ncase "$1" in get) echo \'{"name": "fltest", "status": "running"}\' ;; esac\n')
     os.chmod(lume, 0o755)
     cfg = os.path.join(fd, "test.env")
-    open(cfg, "w").write(f'VM_NAME=fltest\nBASELINE_NAME=fltest-baseline\nSSH_DIR="{fd}/ssh"\nSSH_PORT=59873\n'
-                         f'VNC_PORT=59874\nRUN_DIR="{ENV["MCOMP_RUN_DIR"]}"\nLOG_DIR="{fd}/logs"\nLUME="{lume}"\n')
+    open(cfg, "w").write(f'VM_NAME=fltest\nBASELINE_NAME=fltest-baseline\nSSH_DIR="{fd}/ssh"\nSSH_PORT={FSSH}\n'
+                         f'VNC_PORT={FVNC}\nRUN_DIR="{ENV["MCOMP_RUN_DIR"]}"\nLOG_DIR="{fd}/logs"\nLUME="{lume}"\n')
     e = env(MCOMP_CONFIG=cfg, MCOMP_VAULT_BIN=vault, MCOMP_VAULT_ALLOW_TEST_BUILD="1", VAULT_LOG=log)
     for k in ("MCOMP_RUN_DIR", "MCOMP_LOG_DIR", "MCOMP_SSH_DIR", "MCOMP_VM_NAME"):
         e.pop(k, None)
@@ -1332,8 +1339,8 @@ def view(vd, stub, lume, ssh, *args, store="file", extra_cfg="", stdin=None, **e
     shared argv log, and on a busy machine it lands in a later check's window (which then sees an osascript call that
     isn't its command's). A check that asks for one waits for it (wait_file)."""
     cfg = os.path.join(vd, "test.env")
-    open(cfg, "w").write(f'VM_NAME=hvtest\nBASELINE_NAME=hvtest-baseline\nSSH_DIR="{ssh}"\nSSH_PORT=59872\n'
-                         f'VNC_PORT=59871\nRUN_DIR="{vd}/run"\nLOG_DIR="{vd}/logs"\nLUME="{lume}"\n'
+    open(cfg, "w").write(f'VM_NAME=hvtest\nBASELINE_NAME=hvtest-baseline\nSSH_DIR="{ssh}"\nSSH_PORT={VSSH}\n'
+                         f'VNC_PORT={VNC}\nRUN_DIR="{vd}/run"\nLOG_DIR="{vd}/logs"\nLUME="{lume}"\n'
                          f'VNC_PASSWORD_STORE={store}\n{extra_cfg}')
     e = env(MCOMP_CONFIG=cfg, STUB=stub, PATH=stub + os.pathsep + os.environ.get("PATH", ""),
             MCOMP_VIEW_CLIPBOARD_S=extra.pop("clear", 0), **extra)
@@ -1384,7 +1391,7 @@ def view_checks():
           "clipboard" in r.stdout and "Cmd+V" in r.stdout and "isn't" in r.stdout and "cleared" in r.stdout, r.stdout)
     opened = [l for l in read(argv).splitlines() if l.startswith("open ")]
     check("Screen Sharing is opened at vnc://127.0.0.1:PORT, with no password in the URL",
-          opened == ["open vnc://127.0.0.1:59871"], opened)
+          opened == [f"open vnc://127.0.0.1:{VNC}"], opened)
     check("the password is in no argument, no output and no log", VNC_PW not in read(argv)
           and VNC_PW not in r.stdout + r.stderr and VNC_PW not in everything_but_clip(vd), read(argv))
     check("after the delay the clipboard is cleared (it still held the password)", wait_file(clip, ""), read(clip))
@@ -1447,7 +1454,7 @@ def view_checks():
     os.remove(os.path.join(vd, "run", "owners", owners.HANDOFF_FILE))
     check("...not while a handoff is open, from anything but the user's own terminal (the dialog's button, an "
           "agent): opening the handoff did it; Screen Sharing still opens", r.returncode == 0
-          and "ssh input-reset" not in read(argv) and "open vnc://127.0.0.1:59871" in read(argv)
+          and "ssh input-reset" not in read(argv) and f"open vnc://127.0.0.1:{VNC}" in read(argv)
           and "virtual input" not in r.stdout, (r.stdout, read(argv)))
     open(os.path.join(stub, "reset_out"), "w").write("0\n")
 
@@ -1456,7 +1463,7 @@ def view_checks():
     open(argv, "w").close()
     r = view(vd, stub, lume, ssh, "--open", store="keychain", SSH_CONNECTION="10.0.0.2 5000 10.0.0.1 22")
     check("over SSH: exit 1 with how to do it instead (the Mac's screen, the tunnel, --tailnet)", r.returncode == 1
-          and "came in over SSH" in r.stdout and "ssh -N -L 59871:127.0.0.1:59871" in r.stdout
+          and "came in over SSH" in r.stdout and f"ssh -N -L {VNC}:127.0.0.1:{VNC}" in r.stdout
           and "view --tailnet" in r.stdout and "metacomputer view --open" in r.stdout, (r.stdout, r.stderr))
     check("over SSH: no clipboard, no Screen Sharing, no password read", read(clip) == "untouched"
           and not any(l.split()[0] in ("pbcopy", "open", "security", "osascript") for l in read(argv).splitlines()),
@@ -1479,8 +1486,8 @@ def view_checks():
     r = view(vd, stub, lume, ssh, "--tailnet")
     ts = [l for l in read(argv).splitlines() if l.startswith("tailscale ")]
     check("--tailnet prints the serve command, its undo and the tailnet name", r.returncode == 0
-          and "tailscale serve --tcp 59871 tcp://127.0.0.1:59871" in r.stdout
-          and "tailscale serve --tcp 59871 off" in r.stdout and "box.example-tailnet.ts.net:59871" in r.stdout
+          and f"tailscale serve --tcp {VNC} tcp://127.0.0.1:{VNC}" in r.stdout
+          and f"tailscale serve --tcp {VNC} off" in r.stdout and f"box.example-tailnet.ts.net:{VNC}" in r.stdout
           and "your choice" in r.stdout, r.stdout)
     check("--tailnet runs nothing but `tailscale status`", ts == ["tailscale status --json"], ts)
     r = view(vd, stub, lume, ssh, "--bogus")
@@ -1514,8 +1521,8 @@ def view_tty(vd, stub, lume, ssh, *args, answer=None, store="file", extra_cfg=""
     """bin/metacomputer view at a terminal (stdin and stdout a pty): answers the question with `answer` when it's
     asked. Returns (exit status, everything the terminal showed, whether the question was asked)."""
     cfg = os.path.join(vd, "test.env")
-    open(cfg, "w").write(f'VM_NAME=hvtest\nBASELINE_NAME=hvtest-baseline\nSSH_DIR="{ssh}"\nSSH_PORT=59872\n'
-                         f'VNC_PORT=59871\nRUN_DIR="{vd}/run"\nLOG_DIR="{vd}/logs"\nLUME="{lume}"\n'
+    open(cfg, "w").write(f'VM_NAME=hvtest\nBASELINE_NAME=hvtest-baseline\nSSH_DIR="{ssh}"\nSSH_PORT={VSSH}\n'
+                         f'VNC_PORT={VNC}\nRUN_DIR="{vd}/run"\nLOG_DIR="{vd}/logs"\nLUME="{lume}"\n'
                          f'VNC_PASSWORD_STORE={store}\n{extra_cfg}')
     e = env(MCOMP_CONFIG=cfg, STUB=stub, PATH=stub + os.pathsep + os.environ.get("PATH", ""),
             MCOMP_VIEW_CLIPBOARD_S="0", **extra)
@@ -1562,7 +1569,7 @@ def remember_checks():
     fake_kc = os.path.join(vd, "login.keychain-db")
     open(fake_kc, "w").close()
     open(os.path.join(stub, "kcpath"), "w").write(fake_kc)
-    label = "metacomputer live view (127.0.0.1:59871)"
+    label = f"metacomputer live view (127.0.0.1:{VNC})"
 
     def lines(prefix):
         return [x for x in read(argv).splitlines() if x.startswith(prefix)]
@@ -1575,14 +1582,14 @@ def remember_checks():
     saved = read(item).splitlines()
     check("the first time, at a terminal: it asks; Enter is yes", asked and rc == 0, (rc, out))
     check("…the password goes to the keychain item on osascript's stdin, for Screen Sharing's address",
-          read(os.path.join(stub, "kc.pw")) == VNC_PW and saved[:2] == ["127.0.0.1:59871", label]
+          read(os.path.join(stub, "kc.pw")) == VNC_PW and saved[:2] == [f"127.0.0.1:{VNC}", label]
           and saved[2].startswith("mcomp-") and saved[3] == "/System/Applications/Utilities/Screen Sharing.app"
           and read(os.path.join(stub, "kc.used")).strip() == fake_kc, (saved, read(os.path.join(stub, "kc.used"))))
     check("…the login keychain's path comes from security login-keychain, and nothing else is asked of security",
           lines("security ") == ["security login-keychain"] * len(lines("security ")) and lines("security "),
           lines("security "))
     check("…then Screen Sharing opens with nothing to paste: no clipboard", "Saved the live-view password" in out
-          and "nothing to paste" in out and not clipped() and lines("open ") == ["open vnc://127.0.0.1:59871"],
+          and "nothing to paste" in out and not clipped() and lines("open ") == [f"open vnc://127.0.0.1:{VNC}"],
           (out, lines("open ")))
     check("…and the password is in no argument, no output and no log", VNC_PW not in read(argv) and VNC_PW not in out
           and VNC_PW not in everything_but_clip(vd), out)
@@ -1646,7 +1653,7 @@ def remember_checks():
     check("…and with VIEW_REMEMBER=off it isn't asked again", rc == 0 and not asked and not os.path.exists(item), out)
     r = view(vd, stub, lume, ssh, "--open", extra_cfg="VIEW_REMEMBER=on\n")
     check("VIEW_REMEMBER=on: saved without a question, even without a terminal", r.returncode == 0
-          and read(item).splitlines()[:2] == ["127.0.0.1:59871", label] and "nothing to paste" in r.stdout, r.stdout)
+          and read(item).splitlines()[:2] == [f"127.0.0.1:{VNC}", label] and "nothing to paste" in r.stdout, r.stdout)
     os.remove(item)
     open(argv, "w").close()
     rc, out, asked = view_tty(vd, stub, lume, ssh, "--remember")
@@ -1660,7 +1667,7 @@ def remember_checks():
     open(argv, "w").close()
     rc, out, asked = view_tty(vd, stub, lume, ssh, "--open", "--remember")
     check("view --open --remember that can't save: the live view opens with the clipboard, and the command fails",
-          rc != 0 and "locked" in out and clipped() and lines("open ") == ["open vnc://127.0.0.1:59871"], (rc, out))
+          rc != 0 and "locked" in out and clipped() and lines("open ") == [f"open vnc://127.0.0.1:{VNC}"], (rc, out))
     os.remove(os.path.join(stub, "kc.fail"))
     os.rename(os.path.join(stub, "kcpath"), os.path.join(stub, "kcpath.off"))
     rc, out, asked = view_tty(vd, stub, lume, ssh, "--remember")
@@ -1677,14 +1684,14 @@ def remember_checks():
     open(argv, "w").close()
     rc, out, asked = view_tty(vd, stub, lume, ssh, answer="\n")
     check("plain view at a terminal on the Mac's screen opens the live view (asking first)", rc == 0 and asked
-          and lines("open ") == ["open vnc://127.0.0.1:59871"] and os.path.exists(item), (rc, out))
+          and lines("open ") == [f"open vnc://127.0.0.1:{VNC}"] and os.path.exists(item), (rc, out))
     open(argv, "w").close()
     rc, out, asked = view_tty(vd, stub, lume, ssh, SSH_CONNECTION="10.0.0.2 5000 10.0.0.1 22")
     check("plain view over SSH, even at a terminal: how to connect, nothing opened or asked", rc == 0 and not asked
-          and "ssh -N -L 59871:127.0.0.1:59871" in out and not lines("open ") and not lines("osascript "),
+          and f"ssh -N -L {VNC}:127.0.0.1:{VNC}" in out and not lines("open ") and not lines("osascript "),
           (rc, asked, lines("open "), [x[:60] for x in lines("osascript ")], out[-250:]))
     r = view(vd, stub, lume, ssh, "--print")
-    check("view --print: how to connect, nothing opened", r.returncode == 0 and "ssh -N -L 59871" in r.stdout
+    check("view --print: how to connect, nothing opened", r.returncode == 0 and f"ssh -N -L {VNC}" in r.stdout
           and not lines("open "), r.stdout)
     rc, out, asked = view_tty(vd, stub, lume, ssh, "--open", extra_cfg="VIEW_REMEMBER=maybe\n")
     check("view --open with a VIEW_REMEMBER that isn't ask, on or off: counts as off (says so), no question, no write",
@@ -1708,7 +1715,7 @@ def remember_helper_checks():
     lv = [sys.executable, os.path.join(LAB, "lib", "liveview.py")]
 
     def call(*args, setting=None, conf="", tty=False):
-        open(cfg, "w").write(f"VM_NAME=hvtest\nVNC_PORT=59871\n{conf}")
+        open(cfg, "w").write(f"VM_NAME=hvtest\nVNC_PORT={VNC}\n{conf}")
         e = env(MCOMP_CONFIG=cfg, STUB=stub, PATH=stub + os.pathsep + os.environ.get("PATH", ""),
                 MCOMP_VIEW_REMEMBER=setting)
         open(os.path.join(stub, "argv.log"), "w").close()
@@ -1753,53 +1760,53 @@ def remember_helper_checks():
         return any(f" {op} " in x for x in read(os.path.join(stub, "argv.log")).splitlines()
                    for op in ("save", "refresh", "forget"))
 
-    r = call("remember", "--port", "59871")
+    r = call("remember", "--port", f"{VNC}")
     check("remember with the password piped in and no --from-view: refused, the keychain never reached",
           r.returncode == 1 and "needs your yes" in r.stderr and not wrote() and not os.path.exists(item), r.stderr)
-    r = call("remember", "--port", "59871", "--from-view", setting="off")
+    r = call("remember", "--port", f"{VNC}", "--from-view", setting="off")
     check("remember --from-view with MCOMP_VIEW_REMEMBER=off: refused", r.returncode == 1
           and "VIEW_REMEMBER is off" in r.stderr and not wrote(), r.stderr)
-    r = call("remember", "--port", "59871", "--from-view", setting="on", conf="VIEW_REMEMBER=off\n")
+    r = call("remember", "--port", f"{VNC}", "--from-view", setting="on", conf="VIEW_REMEMBER=off\n")
     check("…and with the settings file's VIEW_REMEMBER=off, an environment that says on can't loosen it",
           r.returncode == 1 and "VIEW_REMEMBER is off" in r.stderr and not wrote(), r.stderr)
-    r = call("remember", "--port", "59871", "--from-view", setting="yes please")
+    r = call("remember", "--port", f"{VNC}", "--from-view", setting="yes please")
     check("an unknown MCOMP_VIEW_REMEMBER counts as off (fails closed)", r.returncode == 1
           and "VIEW_REMEMBER is off" in r.stderr and not wrote(), r.stderr)
-    r = call("refresh", "--port", "59871", setting="ask")
+    r = call("refresh", "--port", f"{VNC}", setting="ask")
     check("refresh with nothing saved: makes nothing (exit 1, says so)", r.returncode == 1
           and "no saved live-view password" in r.stderr and not os.path.exists(item), (r.returncode, r.stderr))
-    r = call("refresh", "--port", "59871", conf="VIEW_REMEMBER=maybe\n")
-    r2 = call("remember", "--port", "59871", "--from-view", conf="VIEW_REMEMBER=maybe\n")
+    r = call("refresh", "--port", f"{VNC}", conf="VIEW_REMEMBER=maybe\n")
+    r2 = call("remember", "--port", f"{VNC}", "--from-view", conf="VIEW_REMEMBER=maybe\n")
     check("a VIEW_REMEMBER in the settings file that isn't ask, on or off counts as off (fails closed)",
           r.returncode == 1 and r2.returncode == 1 and "VIEW_REMEMBER is off" in r.stderr + r2.stderr
           and r.stderr.count("VIEW_REMEMBER is off") == 1 and not wrote(), (r.stderr, r2.stderr))
-    r = call("refresh", "--port", "59871", conf="VIEW_REMEMBER=\n")
+    r = call("refresh", "--port", f"{VNC}", conf="VIEW_REMEMBER=\n")
     check("…while an empty one means ask, as unset does", r.returncode == 1 and "VIEW_REMEMBER is off" not in r.stderr
           and "no saved live-view password" in r.stderr, r.stderr)
-    r = call("remember", "--port", "59871", tty=True)
+    r = call("remember", "--port", f"{VNC}", tty=True)
     check("remember with the password typed at a terminal (stdin is one): allowed", r.returncode == 0
           and r.stdout.strip() == "created" and os.path.exists(item), (r.returncode, r.stdout, r.stderr))
     check("…typed with echo off on that terminal, so the password never shows there, and echo back on afterwards",
           r.echo_off and VNC_PW not in r.shown and r.echo_back and read(os.path.join(stub, "kc.pw")) == VNC_PW,
           (r.echo_off, r.shown, r.echo_back, r.stderr))
     tag = read(item).splitlines()[2]
-    r = call("refresh", "--port", "59871", setting="ask")
+    r = call("refresh", "--port", f"{VNC}", setting="ask")
     check("refresh with metacomputer's item there: updated in place, no terminal needed", r.returncode == 0
           and r.stdout.strip() == "updated" and read(item).splitlines()[2] != tag, (r.returncode, r.stderr))
     tag = read(item).splitlines()[2]
-    r = call("refresh", "--port", "59871", conf="VIEW_REMEMBER=off\n")
-    r2 = call("refresh", "--port", "59871", setting="off")
+    r = call("refresh", "--port", f"{VNC}", conf="VIEW_REMEMBER=off\n")
+    r2 = call("refresh", "--port", f"{VNC}", setting="off")
     check("refresh while VIEW_REMEMBER is off (settings file or environment): refused, the item untouched",
           r.returncode == 1 and r2.returncode == 1 and read(item).splitlines()[2] == tag and not wrote(),
           (r.stderr, r2.stderr))
-    r = call("forget", "--port", "59871")
+    r = call("forget", "--port", f"{VNC}")
     check("forget with no terminal and no --from-view: refused, the item stays", r.returncode == 1
           and "needs your yes" in r.stderr and os.path.exists(item) and not wrote(), r.stderr)
-    r = call("forget", "--port", "59871", "--from-view")
+    r = call("forget", "--port", f"{VNC}", "--from-view")
     check("forget --from-view (what bin/metacomputer passes after its own check): removed", r.returncode == 0
           and r.stdout.strip() == "removed" and not os.path.exists(item), (r.returncode, r.stderr))
-    for bad in (["remember", "--port", "59871", "--json"], ["refresh", "--port", "59871", "--from-view"],
-                ["remembered", "--port", "59871", "--from-view"]):
+    for bad in (["remember", "--port", f"{VNC}", "--json"], ["refresh", "--port", f"{VNC}", "--from-view"],
+                ["remembered", "--port", f"{VNC}", "--from-view"]):
         r = call(*bad)
         check(f"liveview.py {' '.join(bad)}: a usage error", r.returncode == 2 and "usage" in r.stderr, r.stderr)
 
@@ -1849,40 +1856,40 @@ def keychain_checks():
         def lvrun(*a, data=None):
             return subprocess.run(lv + list(a), input=data, capture_output=True, text=True, timeout=60, env=senv,
                                   stdin=None if data is not None else subprocess.DEVNULL)
-        r = lvrun("refresh", "--port", "59871", data=fake + "\n")
-        r0 = lvrun("remembered", "--port", "59871")
+        r = lvrun("refresh", "--port", f"{VNC}", data=fake + "\n")
+        r0 = lvrun("remembered", "--port", f"{VNC}")
         check("refresh with nothing there: makes nothing (exit 1)", r.returncode == 1 and r0.returncode == 1,
               (r.returncode, r.stdout, r.stderr, r0.returncode))
-        r = lvrun("remember", "--port", "59871", data=fake + "\n")
+        r = lvrun("remember", "--port", f"{VNC}", data=fake + "\n")
         check("remember without a terminal or --from-view: refused, nothing made", r.returncode == 1
-              and "needs your yes" in r.stderr and lvrun("remembered", "--port", "59871").returncode == 1, r.stderr)
-        r = lvrun("remember", "--port", "59871", "--from-view", data=fake + "\n")
+              and "needs your yes" in r.stderr and lvrun("remembered", "--port", f"{VNC}").returncode == 1, r.stderr)
+        r = lvrun("remember", "--port", f"{VNC}", "--from-view", data=fake + "\n")
         check("remember: the item is created in the keychain it was given", r.returncode == 0
               and r.stdout.strip() == "created", (r.returncode, r.stdout, r.stderr))
-        r = lvrun("remembered", "--port", "59871", "--json")
+        r = lvrun("remembered", "--port", f"{VNC}", "--json")
         a = json.loads(r.stdout or "{}") if r.stdout.strip().startswith("{") else {}
-        check("its attributes are Screen Sharing's key for vnc://127.0.0.1:59871: server 127.0.0.1:59871, port 0, "
+        check(f"its attributes are Screen Sharing's key for vnc://127.0.0.1:{VNC}: server 127.0.0.1:{VNC}, port 0, "
               "type 'vncl', no account; metacomputer's label and a one-time tag", r.returncode == 0
-              and a.get("server") == "127.0.0.1:59871" and a.get("port") == "0" and a.get("type") == "1986945900"
-              and a.get("account") is None and a.get("label") == "metacomputer live view (127.0.0.1:59871)"
+              and a.get("server") == f"127.0.0.1:{VNC}" and a.get("port") == "0" and a.get("type") == "1986945900"
+              and a.get("account") is None and a.get("label") == f"metacomputer live view (127.0.0.1:{VNC})"
               and str(a.get("comment", "")).startswith("mcomp-"), (r.returncode, r.stdout, r.stderr))
         tag1 = a.get("comment")
-        r = lvrun("refresh", "--port", "59871", data="Ot" + secrets.token_hex(3) + "\n")
-        a2 = json.loads(lvrun("remembered", "--port", "59871", "--json").stdout or "null") or {}
+        r = lvrun("refresh", "--port", f"{VNC}", data="Ot" + secrets.token_hex(3) + "\n")
+        a2 = json.loads(lvrun("remembered", "--port", f"{VNC}", "--json").stdout or "null") or {}
         check("refresh: updated in place (the same key, a new tag)", r.returncode == 0
               and r.stdout.strip() == "updated" and a2.get("comment") not in (None, tag1), (r.stdout, r.stderr, a2))
-        r = lvrun("remember", "--port", "59871", "--from-view", data="Ot" + secrets.token_hex(3) + "\n")
-        a3 = json.loads(lvrun("remembered", "--port", "59871", "--json").stdout or "null") or {}
+        r = lvrun("remember", "--port", f"{VNC}", "--from-view", data="Ot" + secrets.token_hex(3) + "\n")
+        a3 = json.loads(lvrun("remembered", "--port", f"{VNC}", "--json").stdout or "null") or {}
         check("remember again: updated in place too", r.returncode == 0 and r.stdout.strip() == "updated"
               and a3.get("comment") not in (None, tag1, a2.get("comment")), (r.stdout, r.stderr, a3))
-        r = lvrun("remembered", "--port", "59872")
+        r = lvrun("remembered", "--port", f"{VSSH}")
         check("another port isn't that item (exit 1)", r.returncode == 1, (r.returncode, r.stderr))
-        r = lvrun("forget", "--port", "59871")
+        r = lvrun("forget", "--port", f"{VNC}")
         check("forget without a terminal or --from-view: refused, the item stays", r.returncode == 1
-              and lvrun("remembered", "--port", "59871").returncode == 0, r.stderr)
-        r = lvrun("forget", "--port", "59871", "--from-view")
-        r2 = lvrun("remembered", "--port", "59871")
-        r3 = lvrun("forget", "--port", "59871", "--from-view")
+              and lvrun("remembered", "--port", f"{VNC}").returncode == 0, r.stderr)
+        r = lvrun("forget", "--port", f"{VNC}", "--from-view")
+        r2 = lvrun("remembered", "--port", f"{VNC}")
+        r3 = lvrun("forget", "--port", f"{VNC}", "--from-view")
         check("forget removes it, so there was exactly one; a second forget finds none", r.stdout.strip() == "removed"
               and r2.returncode == 1 and r3.stdout.strip() == "none", (r.stdout, r.stderr, r2.returncode, r3.stdout))
         calls = read(os.path.join(stub, "calls")).split("\n")
@@ -1906,8 +1913,8 @@ def dialog_checks():
     open(os.path.join(ssh, "vnc-pass"), "w").write(VNC_PW + "\n")
     os.chmod(os.path.join(ssh, "vnc-pass"), 0o600)
     cfg = os.path.join(vd, "test.env")
-    open(cfg, "w").write(f'VM_NAME=hvtest\nBASELINE_NAME=hvtest-baseline\nSSH_DIR="{ssh}"\nSSH_PORT=59872\n'
-                         f'VNC_PORT=59871\nRUN_DIR="{vd}/run"\nLOG_DIR="{vd}/logs"\nLUME="{lume}"\n'
+    open(cfg, "w").write(f'VM_NAME=hvtest\nBASELINE_NAME=hvtest-baseline\nSSH_DIR="{ssh}"\nSSH_PORT={VSSH}\n'
+                         f'VNC_PORT={VNC}\nRUN_DIR="{vd}/run"\nLOG_DIR="{vd}/logs"\nLUME="{lume}"\n'
                          f'VNC_PASSWORD_STORE=file\n')
     path = stub + os.pathsep + os.environ.get("PATH", "")
     argv = os.path.join(stub, "argv.log")
@@ -1988,7 +1995,7 @@ def dialog_checks():
     p = opened(SAY)
     wait_for(lambda: dfile("dialog.args"))
     open(os.path.join(stub, "dialog.answer"), "w").write("Open live view\n")
-    got = wait_for(lambda: "open vnc://127.0.0.1:59871" in read(argv), 30)
+    got = wait_for(lambda: f"open vnc://127.0.0.1:{VNC}" in read(argv), 30)
     rc, o, e = end_it(p)
     check("Open live view runs metacomputer view --open (Screen Sharing at the live view; no terminal, so the "
           "clipboard here, nothing saved)", got and not os.path.exists(os.path.join(stub, "kc.item"))
