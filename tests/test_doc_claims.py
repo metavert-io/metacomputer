@@ -1777,7 +1777,7 @@ CLAIMS = [
      and "remote_py delete" not in fn_src("scripts/remote-build.sh", "cleanup_failed")
      and "cleanup_failed $rc" in raw("scripts/remote-build.sh") and "trap 'exit 143' TERM" in raw("scripts/remote-build.sh")
      and 'for i in a.api.instances(s["VM_NAME"], op=op):' in py_top_fn("lib/remote.py", "cmd_abort")
-     and 'if not st.get("had_nsg") and not others:' in py_top_fn("lib/remote.py", "cmd_abort")
+     and 'if st.get("made_nsg") and not others:' in py_top_fn("lib/remote.py", "cmd_abort")
      and "raise Refused(" in raw("lib/remote.py") and "deleted again" in raw("lib/remote.py")),
     ("SECURITY.md", r"`start` checks\s+that no session or handoff has the computer, and never hard-stops a running instance unless its whole console\s+capture ends with the guest's power-off",
      lambda m: "def powered_off(self, name):" in raw("lib/cloud/oci.py") and "Nothing was stopped" in raw("lib/cloud/oci.py")
@@ -1793,20 +1793,49 @@ CLAIMS = [
      and "**provider_kw(args.provider)" in py_top_fn("lib/remote.py", "cmd_cloud")
      and "with self._network_lock():" in raw("lib/cloud/oci.py")),
     ("SECURITY.md", r"A fresh connection is never one shared with a connection you have open \(`ControlMaster=no`, `ControlPath=none`\)",
-     lambda m: "OWN_OPTS=(-o ControlMaster=no -o ControlPath=none" in raw("scripts/remote-build.sh")
-     and 'OWN=(ssh -o BatchMode=yes "${OWN_OPTS[@]}"' in raw("scripts/remote-build.sh")
-     and 'ssh -tt "${OWN_OPTS[@]}"' in raw("scripts/remote-build.sh")
-     and "local own=(ssh -o ControlMaster=no -o ControlPath=none" in raw("scripts/vm-commands.sh")),
+     lambda m: "MC_OWNER_OPTS=(-o ControlMaster=no -o ControlPath=none" in fn_src("scripts/lib.sh", "mc_owner_ssh_opts")
+     and 'OWN=(ssh -o BatchMode=yes "${MC_OWNER_OPTS[@]}"' in raw("scripts/remote-build.sh")
+     and 'ssh -tt "${MC_OWNER_OPTS[@]}"' in raw("scripts/remote-build.sh")
+     and 'local own=(ssh -o BatchMode=yes "${MC_OWNER_OPTS[@]}"' in raw("scripts/vm-commands.sh")),
+    ("SECURITY.md", r"no connection as your account forwards anything of your Mac's to the server, even\s+if your ssh config would",
+     lambda m: all(o in fn_src("scripts/lib.sh", "mc_owner_ssh_opts") for o in (
+         "-o ForwardAgent=no", "-o ForwardX11=no", "-o ClearAllForwardings=yes", "-o PermitLocalCommand=no",
+         "-o RemoteCommand=none", "-o GSSAPIDelegateCredentials=no", "-o Tunnel=no"))),
     ("SECURITY.md", r"`lib/remote.py`\s+takes them out of its own environment first and hands them to the adapter as a value",
      lambda m: "    take_credentials()\n    try:" in py_top_fn("lib/remote.py", "main")
      and "env=child_env()" in py_top_fn("lib/remote.py", "mac_lock")
      and '{"env": dict(CREDS)}' in py_top_fn("lib/remote.py", "provider_kw")),
     ("SECURITY.md", r"An API token is for the computer it was made for: each request checks that the\s+binding and the identity beside the computer's keys still name it",
-     lambda m: "token.computer == b.computer_id" in raw("vault/Proxy.swift")
-     and "readComputerID(computerIDPath(opsKey: $0.ops_key_path))" in raw("vault/Proxy.swift")
+     lambda m: "guard let b = p.vms[t.vm], t.computer == b.computer_id else { return false }" in raw("vault/Proxy.swift")
+     and "readComputerID(computerIDPath(opsKey: b.ops_key_path)) == want" in raw("vault/Proxy.swift")
      and "closeTunnel(l)" in raw("vault/Proxy.swift") and "withLock({ l.tunnelFor }) != want" in raw("vault/Proxy.swift")
      and "computer: t.binding.computer_id)" in raw("vault/Server.swift")
      and 'MCOMP_VAULT_DIR="$own_vault" "$VAULT_BIN" lock' in raw("scripts/vm-commands.sh").split("vm_delete_remote() {", 1)[1]),
+    ("SECURITY.md", r"when the request arrives, again just before it's\s+forwarded \(its body may take minutes\), and every second while its answer streams",
+     lambda m: "guard computerStill(token, p2) else {" in raw("vault/Proxy.swift")
+     and raw("vault/Proxy.swift").index("guard computerStill(token, p2) else {") < raw("vault/Proxy.swift").index("guard let url = URL(string:")
+     and "if readComputerID(idp) != token.computer {" in raw("vault/Proxy.swift")
+     and "|| !computerStill(t, p)" in raw("vault/Proxy.swift")
+     and 'revoke --vm "$VM_NAME"' in raw("scripts/vm-commands.sh").split("vm_delete_remote() {", 1)[1]),
+    ("SECURITY.md", r"records it as kept, so no later try takes it for a\s+lost launch, then stops it",
+     lambda m: py_top_fn("lib/remote.py", "cmd_abort").index("st.update(instance=found[0][\"id\"], op=op, kept=now()")
+     < py_top_fn("lib/remote.py", "cmd_abort").index('a.api.action(i["id"], "STOP")')),
+    ("SECURITY.md", r"What a build makes of the shared network and its computer's\s+group is recorded under the network lock, as it's made; the journal is on the disk \(`F_FULLFSYNC`\) before anything\s+billable is launched",
+     lambda m: 'made("made_network")' in raw("lib/cloud/oci.py") and 'made("made_nsg")' in raw("lib/cloud/oci.py")
+     and raw("lib/cloud/oci.py").index("with self._network_lock():\n            # What this operation makes")
+     < raw("lib/cloud/oci.py").index('made("made_network")')
+     and "had_network" not in raw("lib/remote.py") and "durable(f.fileno())" in py_top_fn("lib/remote.py", "write_state")
+     and "durable(dfd)" in py_top_fn("lib/remote.py", "write_state") and "F_FULLFSYNC" in py_top_fn("lib/remote.py", "durable")),
+    ("SECURITY.md", r"every failure ends it inside and\s+outside, and it ends by itself 3 hours after the setup started",
+     lambda m: "SETUP_MAX_S=10800" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and "meta time < %s" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and "end_setup_egress' ERR" in raw("provisioning/guest/provision.sh")
+     and "close_guest_setup_egress" in fn_src("scripts/remote-build.sh", "cleanup_failed")
+     and "close_provider_setup_egress" in fn_src("scripts/remote-build.sh", "cleanup_failed")),
+    ("SECURITY.md", r"and DHCP, whichever network stack sends it, matched by its privileged ports and a DHCP server's\s+destinations",
+     lambda m: "udp sport 546 udp dport 547 ip6 daddr { ff02::1:2, fe80::/10 } accept" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall").count("  dhcp_rules\n") == 2
+     and "skuid %s meta l4proto udp th dport { 67, 547 }" not in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")),
     ("SECURITY.md", r"\(systemd-networkd or\s+NetworkManager, the two Ubuntu uses; a server whose network something else manages is refused\)",
      lambda m: "Requires=metacomputer-firewall.service" in raw(
          "provisioning/remote/rootfs/etc/systemd/system/NetworkManager.service.d/10-metacomputer-firewall.conf")

@@ -16,7 +16,15 @@ LOG=/var/log/metacomputer-provision.log
 STATE=/var/lib/metacomputer
 mkdir -p "$STATE"
 exec > >(tee -a "$LOG") 2>&1
-trap 'echo "PROVISION FAILED at line $LINENO: $BASH_COMMAND"; date -Is > "$STATE/failed"' ERR
+# A failed setup ends its own downloads at once (EGRESS=off's apt exception): the marker goes and the configured
+# policy is loaded again. The build's failure handling does the same from outside, and the marker expires anyway.
+end_setup_egress() {
+  [ -e /etc/metacomputer/setup-egress ] || return 0
+  rm -f /etc/metacomputer/setup-egress
+  if [ -x /opt/metacomputer/bin/guest-firewall ]; then /opt/metacomputer/bin/guest-firewall apply || true; fi
+  sync                      # on the disk before anything powers it off (a provider's stop is a power-off)
+}
+trap 'echo "PROVISION FAILED at line $LINENO: $BASH_COMMAND"; date -Is > "$STATE/failed"; end_setup_egress' ERR
 step() { echo; echo "=== [$(date -Is)] $*"; }
 
 # shellcheck source=/dev/null

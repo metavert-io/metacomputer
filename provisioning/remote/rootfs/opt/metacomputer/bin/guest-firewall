@@ -27,8 +27,13 @@
 #     123), matched by their accounts;
 #   - EGRESS=internet (the default): the rest of the internet is open; EGRESS=off: nothing else leaves (package updates
 #     included), as the provider's rules say too where it has them.
-#   - While the computer is being set up (/etc/metacomputer/setup-egress, which finalize.sh removes), EGRESS=off lets
-#     out apt's downloads too (the _apt account, TCP 80 and 443, public addresses only): what the setup installs.
+#   - While the computer is being set up (/etc/metacomputer/setup-egress, which finalize.sh, a failed setup and the
+#     build's own failure handling remove), EGRESS=off lets out apt's downloads too (the _apt account, TCP 80 and 443,
+#     public addresses only): what the setup installs. That ends by itself as well: a marker older than the setup's
+#     longest time (3 hours) is ignored, and the rule itself holds only until then (nftables' meta time).
+#   - DHCP, whichever network stack runs it (systemd-networkd as its own account, NetworkManager as root): matched by
+#     its ports, which only a privileged process can bind (68 -> 67, 546 -> 547), and its destinations (broadcast, the
+#     local network's private and link-local addresses, ff02::1:2).
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 CONF=/etc/metacomputer/egress
@@ -36,6 +41,7 @@ PORTS_CONF=/etc/metacomputer/ssh-ports
 TABLE=metacomputer
 MARK=/run/metacomputer/firewall-fallback
 SETUP=/etc/metacomputer/setup-egress
+SETUP_MAX_S=10800                   # the setup's longest time: an older marker is ignored, and the rule ends then
 
 private4="0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/3"
 private6="::/127, ::ffff:0:0/96, 64:ff9b::/96, 64:ff9b:1::/48, 100::/64, 2001:db8::/32, fc00::/7, fe80::/10, ff00::/8"
@@ -92,8 +98,15 @@ EOF
 EOF
 }
 
-render() { # EGRESS PORTS UIDS (EGRESS: internet, off, or setup: off but apt's downloads, while it's being set up)
-  egress="$1"; ports="$(ports_of "$2")"; uids="$3"
+dhcp_rules() { # the DHCP clients' requests, whichever stack sends them: by their privileged source ports and the
+  # destinations a DHCP server has (broadcast, the local network's private and link-local addresses; ff02::1:2 and
+  # link-local for DHCPv6). systemd-networkd sends them as its own account, NetworkManager as root.
+  printf '\t\tudp sport 68 udp dport 67 ip daddr { 255.255.255.255, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 } accept comment "DHCPv4 client"\n'
+  printf '\t\tudp sport 546 udp dport 547 ip6 daddr { ff02::1:2, fe80::/10 } accept comment "DHCPv6 client"\n'
+}
+
+render() { # EGRESS PORTS UIDS [UNTIL] (EGRESS: internet, off, or setup: off but apt's downloads until UNTIL, a time)
+  egress="$1"; ports="$(ports_of "$2")"; uids="$3"; until="${4:-}"
   case "$egress" in internet|off|setup) ;; *) echo "guest-firewall: egress must be internet or off, not '$egress'" >&2; exit 2 ;; esac
   r="$(pick resolve "$uids")"; n="$(pick network "$uids")"; t="$(pick timesync "$uids")"; a="$(pick apt "$uids")"
   echo "# metacomputer guest firewall (guest-firewall render; EGRESS=$egress)"
@@ -106,12 +119,13 @@ render() { # EGRESS PORTS UIDS (EGRESS: internet, off, or setup: off but apt's d
 		meta l4proto ipv6-icmp icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-report, mld2-listener-report } accept comment "IPv6 neighbour discovery"
 EOF
   [ -z "$r" ] || printf '\t\tmeta skuid %s meta l4proto { tcp, udp } th dport 53 accept comment "the DNS resolver"\n' "$r"
-  [ -z "$n" ] || printf '\t\tmeta skuid %s meta l4proto udp th dport { 67, 547 } accept comment "the DHCP client"\n' "$n"
+  dhcp_rules
   [ -z "$t" ] || printf '\t\tmeta skuid %s meta l4proto udp th dport 123 accept comment "the clock"\n' "$t"
   printf '\t\tip daddr @private4 counter reject comment "metadata, link-local and private ranges"\n'
   printf '\t\tip6 daddr @private6 counter reject comment "metadata, link-local and private ranges"\n'
   if [ "$egress" = setup ]; then
-    [ -z "$a" ] || printf '\t\tmeta skuid %s meta l4proto tcp th dport { 80, 443 } accept comment "apt downloads, during the setup only"\n' "$a"
+    case "$until" in ''|*[!0-9]*) echo "guest-firewall: the setup's downloads need the time they end (--until)" >&2; exit 2 ;; esac
+    [ -z "$a" ] || printf '\t\tmeta skuid %s meta time < %s meta l4proto tcp th dport { 80, 443 } accept comment "apt downloads, during the setup only"\n' "$a" "$until"
     printf '\t\tcounter reject comment "EGRESS=off"\n'
   fi
   [ "$egress" != off ] || printf '\t\tcounter reject comment "EGRESS=off"\n'
@@ -119,23 +133,24 @@ EOF
 }
 
 render_emergency() { # PORTS UIDS: SSH in; out, nothing but replies to it and the DHCP client (to keep the address)
-  ports="$(ports_of "$1")"; n="$(pick network "$2")"
+  ports="$(ports_of "$1")"
   echo "# metacomputer guest firewall: the SSH-only fallback (the full rules didn't load)"
   head_rules "$ports"
   printf '\tchain output {\n\t\ttype filter hook output priority filter; policy drop;\n\t\toif "lo" accept\n'
   printf '\t\tct direction reply accept comment "replies to SSH"\n'
   printf '\t\tmeta l4proto ipv6-icmp icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept\n'
-  [ -z "$n" ] || printf '\t\tmeta skuid %s meta l4proto udp th dport { 67, 547 } accept comment "the DHCP client"\n' "$n"
+  dhcp_rules
   printf '\t}\n}\n'
 }
 
-opts() { # parse --egress --ports --uids into EG PT UI
-  EG=internet; PT=""; UI=""
+opts() { # parse --egress --ports --uids --until into EG PT UI UN
+  EG=internet; PT=""; UI=""; UN=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --egress) EG="${2:-}"; shift ;;   # internet, off or setup
       --ports) PT="${2:-}"; shift ;;
       --uids) UI="${2:-}"; shift ;;
+      --until) UN="${2:-}"; shift ;;
       *) echo "usage: guest-firewall render [--egress internet|off] [--ports LIST] [--uids LIST]" >&2; exit 2 ;;
     esac
     shift
@@ -147,10 +162,17 @@ opts() { # parse --egress --ports --uids into EG PT UI
 case "${1:-}" in
   apply)
     egress="$(head -n 1 "$CONF" 2>/dev/null | tr -d ' \t\r' || true)"; [ -n "$egress" ] || egress=internet
-    [ "$egress" != off ] || [ ! -e "$SETUP" ] || egress=setup      # off, but the setup's apt downloads
+    # off, but the setup's apt downloads: only while the marker is younger than the setup's longest time, and the
+    # rule holds only until that time (it ends by itself even if nothing loads the rules again)
+    until=""
+    if [ "$egress" = off ] && [ -e "$SETUP" ]; then
+      born="$(date -r "$SETUP" +%s 2>/dev/null || echo 0)"
+      until=$(( born + SETUP_MAX_S ))
+      [ "$until" -le "$(date +%s)" ] || egress=setup
+    fi
     install -d -m 0755 /run/metacomputer
     tmp="$(mktemp /run/metacomputer-firewall.XXXXXX)"
-    if (render "$egress" "$(saved_ports)" "$(system_uids)") > "$tmp" 2>/dev/null && nft -c -f "$tmp" && nft -f "$tmp"; then
+    if (render "$egress" "$(saved_ports)" "$(system_uids)" "$until") > "$tmp" 2>/dev/null && nft -c -f "$tmp" && nft -f "$tmp"; then
       rm -f "$tmp" "$MARK"
       echo "guest-firewall: EGRESS=$egress loaded (SSH in on $(ports_of "$(saved_ports)"))"
       exit 0
@@ -165,7 +187,7 @@ case "${1:-}" in
     rm -f "$tmp"
     echo "guest-firewall: not even the fallback loaded; the network stays down (fix it from the provider's console)" >&2
     exit 1 ;;
-  render) shift; opts "$@"; render "$EG" "$PT" "$UI" ;;
+  render) shift; opts "$@"; render "$EG" "$PT" "$UI" "$UN" ;;
   render-emergency) shift; opts "$@"; render_emergency "$PT" "$UI" ;;
   status)
     [ ! -e "$MARK" ] || echo "the SSH-only fallback is loaded (since $(cat "$MARK")): the full rules didn't load"

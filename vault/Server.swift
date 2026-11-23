@@ -1723,9 +1723,11 @@ final class UnlockServer {
     /// flush: deliver the record to the audit sinks now (not while a question waits: the next delivery takes it).
     func opRevoke(_ req: [String: Any], _ who: Requester, flush: Bool = true) -> [String: Any] {
         let id = req["id"] as? String
+        let vm = req["vm"] as? String
         guard id == nil || (id.map { matches($0, "^[0-9a-f]{8}$") } ?? false) else { return ["ok": false, "status": "error", "reason": "bad token id"] }
-        let gone = hub.revoke(id)
-        say("\(clockTime())  revoked \(gone.count) token(s)" + (id.map { " (\($0))" } ?? " (all)") + ", asked by \(who.describe)")
+        guard vm == nil || (id == nil && validName(vm!)) else { return ["ok": false, "status": "error", "reason": "bad VM name"] }
+        let gone = vm.map { hub.revokeVM($0) } ?? hub.revoke(id)
+        say("\(clockTime())  revoked \(gone.count) token(s)" + (id.map { " (\($0))" } ?? vm.map { " (VM \($0))" } ?? " (all)") + ", asked by \(who.describe)")
         record(["op": "revoke", "result": "ok", "token_ids": gone.map { $0.id }, "requester": who.record])
         if flush { flushSinks(force: true) }
         return ["ok": true, "status": "ok", "revoked": gone.map { $0.id }]

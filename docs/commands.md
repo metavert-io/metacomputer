@@ -260,7 +260,7 @@ metacomputer: this Codex session's MCP tools act on demo, but this command would
   `secrets list|status|audit|tokens|requests|selftest|settle|version`, `secrets rule list` and `secrets audit-sink
   list|show`); what a command
   that passed starts for the same computer; anything run outside an agent session.
-- **Forms that only read the VM, or who controls it** (`who`, `status`, `inspect`, `logs`, `get`, `shot`, `view --print|--tailnet`, `hub`
+- **Forms that only read the VM, or who controls it** (`who`, `status`, `inspect`, `logs`, `get`, `shot`, `view --print|--tailnet|--tunnel`, `hub`
   and `hub status`, `claude read|wait|status`, `handoff status|wait`, `security` without `apply`, `record` and `record
   status`, `browser profiles`, `input-reset --check`, `net` and `net status`) go ahead, with a note on stderr naming both computers. A form is
   read from the arguments as the command itself parses them, in whatever order they come (`security --json apply`

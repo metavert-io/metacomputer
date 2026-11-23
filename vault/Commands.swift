@@ -918,12 +918,15 @@ func cmdTokens(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdRevoke(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["all"])
-    guard a.has("all") != (a.positional.count == 1), a.positional.allSatisfy({ matches($0, "^[0-9a-f]{8}$") }) else {
-        throw usageError("usage: revoke ID | revoke --all")
+    let a = try parseArgs(argv, values: ["vm"], flags: ["all"])
+    let byVM = a.last("vm")
+    guard [a.has("all"), a.positional.count == 1, byVM != nil].filter({ $0 }).count == 1,
+          a.positional.allSatisfy({ matches($0, "^[0-9a-f]{8}$") }), byVM.map(validName) ?? true else {
+        throw usageError("usage: revoke ID | revoke --vm VM | revoke --all")
     }
     var req: [String: Any] = ["op": "revoke"]
     if let id = a.positional.first { req["id"] = id }
+    if let vm = byVM { req["vm"] = vm }
     do {
         let res = try request(paths, req, timeout: 15)
         let gone = res["revoked"] as? [String] ?? []

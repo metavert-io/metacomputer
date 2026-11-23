@@ -324,6 +324,12 @@ the CLI checks run in a copy of the checkout with its own HOME and a fake runner
   and `vm delete --remove-from-server`'s after the removal both see that a new connection is refused (skipped where
   there's no sshd). The vault's tokens for a computer elsewhere (`tests/test_vault_tokens.py` 6b): refused, revoked
   and their tunnel closed when the identity beside its keys changes; a new tunnel for a new binding.
+- Round four: a request whose body is still coming, and an answer that streams, when the computer changes (refused
+  before forwarding; cut within seconds), pruning on a new binding and `revoke --vm`; your own account's ssh options
+  under `ssh -G` over a config that forwards everything; DHCP for both network stacks in the full rules and the
+  fallback; the setup marker's expiry (`meta time`, an old marker ignored) and the closing of the setup's egress on a
+  failed, kept or resumed build; a kept instance recorded before a retry; network ownership recorded under the lock;
+  the journal made durable before the launch.
 
 The live path (a real VM elsewhere) is run by hand: `metacomputer --vm NAME build`, then the GUI suite and
 `tests/test_vault_vm.py` with `MCOMP_CONFIG=config/vms/NAME.env`; for Oracle Cloud, with its credentials in the

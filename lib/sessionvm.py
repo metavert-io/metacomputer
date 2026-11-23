@@ -93,7 +93,7 @@ def _input_reset(a):    # do_input_reset: only the first argument counts; --chec
 def _view(a):           # do_view, any order: --open (and plain view, which opens at a terminal on the Mac's screen)
     if "--open" in a:   # first removes the agent's leftover input devices in the VM (lib/input_reset.py for_view)
         return "act"
-    if "--print" in a or "--tailnet" in a:
+    if "--print" in a or "--tailnet" in a or "--tunnel" in a:    # --tunnel: a computer elsewhere's live view, only its tunnel
         return "read"
     return "exempt" if "--forget" in a or "--remember" in a else "act"   # those two only touch the Mac's keychain
 

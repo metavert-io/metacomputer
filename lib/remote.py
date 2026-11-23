@@ -130,14 +130,36 @@ def read_state(rd):
 
 
 def write_state(rd, d):
+    """The record, replaced whole and durable: its contents reach the disk (F_FULLFSYNC on macOS, which plain fsync
+    doesn't promise there) before it takes the old one's place, and the folder's entry after, so a crash or a power
+    cut never loses a launch's journal once the launch could have started."""
     os.makedirs(rd, mode=0o700, exist_ok=True)
     p = os.path.join(rd, STATE_FILE)
     fd, tmp = tempfile.mkstemp(prefix=".remote.", dir=rd)
     with os.fdopen(fd, "w") as f:
         json.dump(d, f, indent=2, sort_keys=True)
         f.write("\n")
+        f.flush()
+        durable(f.fileno())
     os.chmod(tmp, 0o600)
     os.replace(tmp, p)
+    dfd = os.open(rd, os.O_RDONLY)
+    try:
+        durable(dfd)
+    finally:
+        os.close(dfd)
+
+
+def durable(fd):
+    """What's written to fd is on the disk when this returns (macOS: F_FULLFSYNC; elsewhere, fsync)."""
+    import fcntl
+    if hasattr(fcntl, "F_FULLFSYNC"):
+        try:
+            fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
+            return
+        except OSError:
+            pass                                     # a file system without it: fsync is what there is
+    os.fsync(fd)
 
 
 # Tests hand in a stand-in for the provider's SDK facade (a callable that returns one); never set otherwise.
@@ -241,16 +263,23 @@ def cmd_create(s, args):
             a.api.wait_state(i["id"], "TERMINATED", timeout=900)
     ud = user_data(s)
     t0 = time.time()
-    # What exists before this operation is never this operation's to delete: the record says what it found.
-    had_nsg = a.api.nsg(s["VM_NAME"]) is not None
-    had_network = a.api.network() is not None
-    write_state(rd, dict(st, provider=a.name, launching=op, had_nsg=had_nsg, had_network=had_network))
+    st = {k: v for k, v in st.items() if k not in ("made_network", "made_nsg", "kept")}
+    write_state(rd, dict(st, provider=a.name, launching=op))   # the journal, durable before anything is billed
+
+    def made_here(what):
+        # Called under the network lock the moment this operation makes the network or the computer's group: only
+        # what's recorded here as made by it is ever its to delete (cmd_abort).
+        cur = read_state(rd)
+        if cur.get("launching") == op:
+            write_state(rd, dict(cur, **{what: True}))
     print(f"metacomputer: making {s['VM_NAME']} on {a.manifest['label']} ({s.get('SIZE') or 'the default size'})",
           file=sys.stderr)
     made = a.create(s["VM_NAME"], size=s.get("SIZE") or None, persist=s.get("PERSIST") or "auto", user_data=ud,
-                    egress="internet", op=op)    # public addresses while it's set up: remote-build.sh sets EGRESS after
+                    egress="internet", op=op,    # public addresses while it's set up: remote-build.sh sets EGRESS after
+                    made=made_here)
+    mine = read_state(rd)
     st = {"provider": a.name, "created": now(), "launch_started": t0, "op": op, "made_by_build": True,
-          "had_nsg": had_nsg, "had_network": had_network, **made}
+          "made_network": bool(mine.get("made_network")), "made_nsg": bool(mine.get("made_nsg")), **made}
     try:
         write_state(rd, st)                  # the instance is recorded before anything else can fail
     except OSError as e:
@@ -292,9 +321,17 @@ def cmd_abort(s, args):
         return 0
     if args.keep:
         from cloud.oci import STOP_WAIT_S
+        found = a.api.instances(s["VM_NAME"], op=op)
+        if found:
+            # Recorded first, durably: this operation's instance, kept. A launch whose answer was lost is only in the
+            # journal as `launching`; left so, the next try would take it for a lost launch and delete it.
+            st = {k: v for k, v in st.items() if k != "launching"}
+            st.update(instance=found[0]["id"], op=op, kept=now(), provider=a.name)
+            write_state(rd, st)
         stopped = []
-        for i in a.api.instances(s["VM_NAME"], op=op):
-            a.api.action(i["id"], "STOP")
+        for i in found:
+            if i.get("state") not in ("STOPPED", "STOPPING"):
+                a.api.action(i["id"], "STOP")
             a.api.wait_state(i["id"], "STOPPED", timeout=STOP_WAIT_S)
             stopped.append(i["id"])
         print("stopped" if stopped else "nothing to stop")
@@ -307,13 +344,13 @@ def cmd_abort(s, args):
     if gone:
         print(f"deleted the instance this build made, and its boot volume ({a.manifest['label']})", file=sys.stderr)
     others = a.api.instances(s["VM_NAME"])
-    if not st.get("had_nsg") and not others:
+    if st.get("made_nsg") and not others:
         a.api.delete_nsg(s["VM_NAME"])
     if st.get("instance") in gone or st.get("launching") == op:
         st = {k: v for k, v in st.items() if k not in ("instance", "launching", "host", "op")}
         st["aborted"] = now()
         write_state(rd, st)
-    if not st.get("had_network"):
+    if st.get("made_network"):
         try:
             with mac_lock("oci-network"):
                 if not a.api.instances() and not a.api.nsg_names() and a.api.delete_network():

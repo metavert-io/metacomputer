@@ -261,10 +261,11 @@ def firewall():
               net in out.split("set private6")[1].split("}")[0])
     check("...refused for every account (no uid on the reject), after only the system exceptions",
           "ip daddr @private4 counter reject" in outp and outp.index("@private4") > outp.index("th dport 123"))
-    check("...the exceptions: the resolver (53), the DHCP client (67/547) and the clock (123), each by its account",
+    check("...the exceptions: the resolver (53) and the clock (123), each by its account; DHCP by its ports",
           "meta skuid 991 meta l4proto { tcp, udp } th dport 53 accept" in outp
-          and "meta skuid 998 meta l4proto udp th dport { 67, 547 } accept" in outp
-          and "meta skuid 995 meta l4proto udp th dport 123 accept" in outp)
+          and "meta skuid 995 meta l4proto udp th dport 123 accept" in outp
+          and "udp sport 68 udp dport 67 ip daddr {" in outp and "udp sport 546 udp dport 547 ip6 daddr { ff02::1:2, fe80::/10 } accept" in outp)
+    dhcp_stacks()
     check("EGRESS=internet: the rest goes out (no final reject)", "EGRESS=off" not in outp and "policy accept;" in outp)
     off = render("off").stdout
     check("EGRESS=off: everything else refused, package downloads too (as the provider's rules say)",
@@ -281,22 +282,27 @@ def firewall():
     check("...port 22 when none is known", "tcp dport { 22 } accept" in render("internet", ports="").stdout)
     miss = render("internet", "resolve= network=998 timesync=x").stdout
     check("an account the system hasn't: no exception for it (never a rule for a uid that isn't a number)",
-          "th dport 53" not in miss and "th dport 123" not in miss and "skuid 998" in miss, miss[-400:])
+          "th dport 53" not in miss and "th dport 123" not in miss and "udp sport 68 udp dport 67" in miss, miss[-400:])
     check("an egress setting that isn't one is refused", render("sometimes").returncode == 2)
     st = subprocess.run(["/bin/sh", FIREWALL, "render", "--egress", "setup", "--ports", "22", "--uids",
-                         uids + " apt=42"], capture_output=True, text=True).stdout
+                         uids + " apt=42", "--until", "1795000000"], capture_output=True, text=True).stdout
     sto = st.split("chain output")[1] if "chain output" in st else ""
     check("EGRESS=off while it's being set up: apt's downloads (_apt, TCP 80/443) after the private refusals, then "
           "everything else refused (found by review: a new computer with EGRESS=off couldn't install anything)",
-          "meta skuid 42 meta l4proto tcp th dport { 80, 443 } accept" in sto and sto.index("@private4") < sto.index("skuid 42")
-          < sto.index('"EGRESS=off"'), sto[-600:])
+          "meta skuid 42 meta time < 1795000000 meta l4proto tcp th dport { 80, 443 } accept" in sto
+          and sto.index("@private4") < sto.index("skuid 42") < sto.index('"EGRESS=off"'), sto[-600:])
+    nountil = subprocess.run(["/bin/sh", FIREWALL, "render", "--egress", "setup", "--uids", uids + " apt=42"],
+                             capture_output=True, text=True)
+    check("...the setup's downloads never without the time they end (refused without --until)",
+          nountil.returncode == 2 and "--until" in nountil.stderr, nountil.stderr)
     check("...and once set up, off is off: no apt exception", "skuid 42" not in render("off", uids + " apt=42").stdout)
     em = subprocess.run(["/bin/sh", FIREWALL, "render-emergency", "--ports", "2222", "--uids", uids], capture_output=True,
                         text=True).stdout
     emo = em.split("chain output")[1]
     check("the SSH-only fallback: SSH in on its ports; out, policy drop with only replies, lo, ND and DHCP",
           "tcp dport { 2222 } accept" in em and "policy drop;" in emo and "ct direction reply accept" in emo
-          and "th dport 53" not in emo and "th dport 123" not in emo and "skuid 998" in emo, em)
+          and "th dport 53" not in emo and "th dport 123" not in emo and "udp sport 546 udp dport 547" in emo
+          and "udp sport 68 udp dport 67" in emo, em)
     # The guest firewall's private set is the provider rules' (ubuntu_vm.PRIVATE_V4): one list, two layers.
     from cloud import ubuntu_vm
     fw = open(FIREWALL).read()
@@ -320,6 +326,10 @@ def fail_closed():
                     'case "$FAIL" in all) exit 1 ;; element) grep -q "10.0.0.0/33" "$file" && exit 1 ;; esac\n'
                     '[ "$1" = -c ] || cp "$file" "$LOADED"\nexit 0\n')
         os.chmod(os.path.join(fake, "nft"), 0o755)
+        with open(os.path.join(fake, "id"), "w") as f:     # the guest's system accounts (this Mac has none of them)
+            f.write('#!/bin/sh\ncase "$2" in systemd-resolve) echo 991 ;; systemd-network) echo 998 ;; _chrony) echo 995 ;;\n'
+                    '  _apt) echo 42 ;; *) exit 1 ;; esac\n')
+        os.chmod(os.path.join(fake, "id"), 0o755)
         etc = os.path.join(td, "etc")
         os.makedirs(etc)
         open(os.path.join(etc, "egress"), "w").write("internet\n")
@@ -350,6 +360,21 @@ def fail_closed():
         r = apply("all")
         check("not even the fallback loads: exit 1 (the network, which requires it, doesn't come up)",
               r.returncode == 1 and not os.path.exists(loaded) and "network stays down" in r.stderr, r.stderr)
+        # The setup's downloads (EGRESS=off): while the marker is young, until its time plus 3 hours; older, ignored.
+        open(os.path.join(etc, "egress"), "w").write("off\n")
+        marker = os.path.join(etc, "setup-egress")
+        open(marker, "w").write("x\n")
+        born = int(os.stat(marker).st_mtime)
+        r = apply("")
+        got = open(loaded).read() if os.path.exists(loaded) else ""
+        check("apply with the setup's marker: apt's downloads, in a rule that ends 3 hours after the marker was made "
+              "(nftables' meta time: it ends by itself)", r.returncode == 0 and f"meta time < {born + 10800} " in got
+              and '"EGRESS=off"' in got, (r.stderr, got[-500:]))
+        os.utime(marker, (time.time() - 4 * 3600, time.time() - 4 * 3600))
+        r = apply("")
+        got = open(loaded).read() if os.path.exists(loaded) else ""
+        check("...a marker older than that is ignored: off is off (found by review: a failed setup kept the exception "
+              "for good)", r.returncode == 0 and "80, 443" not in got and '"EGRESS=off"' in got, got[-400:])
     finally:
         shutil.rmtree(td, ignore_errors=True)
     def readf(*parts):
@@ -400,6 +425,15 @@ def fail_closed():
           "which loads the rules again", "/etc/metacomputer/setup-egress" in boot and "/etc/metacomputer/setup-egress" in fn
           and in_order(readf("provisioning", "guest", "finalize.sh"), "rm -f /etc/metacomputer/setup-egress",
                        "/opt/metacomputer/bin/guest-firewall apply", "finalized"))
+    prov_fail = prov.split("end_setup_egress() {", 1)[1].split("\n}\n", 1)[0] if "end_setup_egress() {" in prov else ""
+    check("a failed setup ends its downloads itself: provision.sh's failure handler removes the marker and loads the "
+          "configured policy again", "rm -f /etc/metacomputer/setup-egress" in prov_fail
+          and "guest-firewall apply" in prov_fail and "end_setup_egress' ERR" in prov)
+    rbs = open(os.path.join(LAB, "scripts", "remote-build.sh")).read()
+    closing = rbs.split("close_guest_setup_egress() {", 1)[1].split("\n}\n", 1)[0] if "close_guest_setup_egress() {" in rbs else ""
+    check("...and both make it reach the disk (sync) before anything can power it off: a provider's stop is a power-off "
+          "(found live: the marker came back after one)", "sync" in prov_fail
+          and "guest-firewall apply && sync'" in closing)
     uninstall_order()
 
 
@@ -646,6 +680,147 @@ def oci_driver():
           and isinstance(_err(u.wake, "box"), NotSupported))
     check("...only the live view is forwarded", isinstance(_err(u.port_forward, "box", 22), NotSupported))
     check("...its egress setting is read from its settings", u.egress("box")["setting"] == "internet")
+
+
+def dhcp_stacks():
+    """F6: the DHCP clients of both network stacks get out, in the full rules and in the fallback: systemd-networkd's
+    (its own account) and NetworkManager's (root, DHCPv6 to ff02::1:2). Matched by ports and destinations, never by an
+    account, and before the private-range refusals."""
+    for stack, uids in (("systemd-networkd", "resolve=991 network=998 timesync=995 apt=42"),
+                        ("NetworkManager (no systemd-network account, root DHCP)", "resolve=991 network= timesync=995 apt=42")):
+        for what, args in (("full rules", ["render", "--egress", "off"]), ("fallback", ["render-emergency"])):
+            out = subprocess.run(["/bin/sh", FIREWALL, *args, "--ports", "22", "--uids", uids], capture_output=True,
+                                 text=True).stdout
+            o = out.split("chain output")[1] if "chain output" in out else ""
+            v4 = next((ln for ln in o.splitlines() if "udp sport 68 udp dport 67" in ln), "")
+            v6 = next((ln for ln in o.splitlines() if "udp sport 546 udp dport 547" in ln), "")
+            stop = o.find("@private") if "@private" in o else len(o)
+            check(f"{stack}, {what}: DHCPv4 (68 -> 67: broadcast, private and link-local) and DHCPv6 (546 -> 547: "
+                  "ff02::1:2, link-local) let out for any account, before any refusal (found by review: only "
+                  "systemd-network's account was)",
+                  v4 and v6 and "skuid" not in v4 + v6 and "255.255.255.255" in v4 and "169.254.0.0/16" in v4
+                  and "ff02::1:2" in v6 and "fe80::/10" in v6 and o.find(v4) < stop and o.find(v6) < stop, o[:900])
+
+
+def owner_ssh_options():
+    """F2: every connection as your own account forwards nothing of this Mac's, whatever your ssh config says: ssh -G
+    over a config that turns on the agent, X11, every kind of forwarding, a local command and a master."""
+    td = tempfile.mkdtemp(prefix="mcopt-")
+    try:
+        cfg = os.path.join(td, "config")
+        open(cfg, "w").write("Host *\n  ForwardAgent yes\n  ForwardX11 yes\n  ForwardX11Trusted yes\n"
+                             "  LocalForward 9999 127.0.0.1:22\n  RemoteForward 9998 127.0.0.1:22\n  DynamicForward 9997\n"
+                             "  PermitLocalCommand yes\n  LocalCommand touch /tmp/never\n  ControlMaster auto\n"
+                             f"  ControlPath {td}/cm-%C\n  GSSAPIDelegateCredentials yes\n  Tunnel yes\n  RemoteCommand echo hi\n")
+        lib = open(os.path.join(LAB, "scripts", "lib.sh")).read()
+        fn = lib[lib.find("mc_owner_ssh_opts() {"):] if "mc_owner_ssh_opts() {" in lib else ""
+        fn = fn[:fn.find("\n}\n") + 3] if fn else ""
+        r = subprocess.run(["/bin/bash", "-c", fn + '\nmc_owner_ssh_opts 2222; /usr/bin/ssh -G -F "$1" "${MC_OWNER_OPTS[@]}" '
+                            'owner@192.0.2.5', "_", cfg], capture_output=True, text=True)
+        g = dict(ln.split(" ", 1) for ln in r.stdout.splitlines() if " " in ln)
+        check("your own account's connections, over an ssh config that forwards everything: no agent, no X11, no "
+              "forwardings, no local command, no shared connection, no delegated credentials (found by review: the "
+              "agent was forwarded)",
+              g.get("forwardagent") == "no" and g.get("forwardx11") == "no" and g.get("forwardx11trusted") == "no"
+              and g.get("clearallforwardings") == "yes" and g.get("permitlocalcommand") == "no"
+              and g.get("controlmaster") == "false" and "controlpath" not in g and "remotecommand" not in g
+              and g.get("gssapidelegatecredentials") == "no" and g.get("tunnel") == "false"
+              and not any(k in g for k in ("localforward", "remoteforward", "dynamicforward")) and g.get("port") == "2222",
+              {k: g.get(k) for k in ("forwardagent", "forwardx11", "clearallforwardings", "permitlocalcommand",
+                                     "controlmaster", "controlpath", "localforward", "tunnel")})
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    rb = open(os.path.join(LAB, "scripts", "remote-build.sh")).read()
+    vc = open(os.path.join(LAB, "scripts", "vm-commands.sh")).read()
+    check("...and those are the options of every such connection: the build's checks and bootstrap (OWN, ssh -tt) and "
+          "the uninstall", 'OWN=(ssh -o BatchMode=yes "${MC_OWNER_OPTS[@]}"' in rb and 'ssh -tt "${MC_OWNER_OPTS[@]}"' in rb
+          and 'local own=(ssh -o BatchMode=yes "${MC_OWNER_OPTS[@]}"' in vc
+          and rb.count('mc_owner_ssh_opts "${SSH_HOST_PORT:-22}"') == 1 and vc.count('mc_owner_ssh_opts "${SSH_HOST_PORT:-22}"') == 1)
+
+
+def journal_r4():
+    """F3, F4, F7: a kept instance is recorded before it's reported (a retry never deletes it); what an operation
+    made is recorded under the network lock when it's made; the journal is on the disk before anything is launched."""
+    print("\nthe launch journal")
+    import contextlib
+    import remote as remote_mod
+    rd = tempfile.mkdtemp(prefix="mcjr-")
+    old_ud, old_lock, old_durable = remote_mod.user_data, remote_mod.mac_lock, getattr(remote_mod, "durable", None)
+    try:
+        os.environ["MCOMP_LOCK_DIR"] = os.path.join(rd, "locks")
+        remote_mod.user_data = lambda s: "#cloud-config\n"
+        settings = {"VM_NAME": "box", "PLACE": "oci", "PROVIDER": "oci", "SIZE": "arm-1x6", "EGRESS": "internet",
+                    "RUN_DIR": rd, "SSH_DIR": rd}
+        # F3: a launch whose answer was lost (only `launching` in the journal), kept by --keep-on-failure
+        api = FakeOCI()
+        remote_mod.API_FACTORY = lambda: api
+        op = "d" * 32
+        api.inst["i-lost"] = {"id": "i-lost", "state": "RUNNING", "shape": "x", "name": "box", "ad": "AD-1", "op": op}
+        remote_mod.write_state(rd, {"provider": "oci", "launching": op})
+        remote_mod.cmd_abort(settings, type("A", (), {"op": op, "keep": True})())
+        st = remote_mod.read_state(rd)
+        check("--keep-on-failure on a launch whose answer was lost: the instance found is recorded as this computer's, "
+              "kept, before it's stopped and reported", st.get("instance") == "i-lost" and st.get("kept")
+              and "launching" not in st and api.inst["i-lost"]["state"] == "STOPPED", st)
+        n_act = len(api.actions)
+        remote_mod.cmd_abort(settings, type("A", (), {"op": op, "keep": True})())
+        check("...kept again (a second failure): an instance already stopped isn't asked to stop again",
+              len(api.actions) == n_act and remote_mod.read_state(rd).get("instance") == "i-lost", api.actions)
+        why = raises(remote_mod.cmd_create, settings, type("A", (), {"op": "e" * 32})(), kind=remote_mod.Refused)
+        check("...a later try never deletes it (found by review: the retry terminated it as a lost launch)",
+              why and api.inst["i-lost"]["state"] == "STOPPED", (why, api.inst["i-lost"]["state"]))
+        # F4: the network appears (another create, or cloud setup) between a look from outside the lock and the lock
+        api = FakeOCI(full={"AD-1", "AD-2", "AD-3"})
+        remote_mod.API_FACTORY = lambda: api
+        rd2 = os.path.join(rd, "two")
+        os.makedirs(rd2)
+
+        @contextlib.contextmanager
+        def lock_after_setup(name):
+            if name == "oci-network" and api.net is None:
+                api.make_network()                   # `cloud setup` got the lock first and made it
+            yield
+        remote_mod.mac_lock = lock_after_setup
+        s2 = dict(settings, RUN_DIR=rd2, SSH_DIR=rd2)
+        raises(remote_mod.cmd_create, s2, type("A", (), {"op": "f" * 32})(), kind=Exception)
+        st2 = remote_mod.read_state(rd2)
+        remote_mod.cmd_abort(s2, type("A", (), {"op": "f" * 32, "keep": False})())
+        check("a network another operation made just before this one took the lock: not this one's (made_network not "
+              "recorded), so its failed create's clean-up leaves it; the group it did make goes",
+              not st2.get("made_network") and st2.get("made_nsg") and api.net is not None and "box" not in api.nsgs,
+              (st2, api.net, api.nsgs))
+        remote_mod.mac_lock = old_lock
+        # F7: the journal is on the disk (contents, then the folder's entry) before the launch
+        events = []
+        real = remote_mod.durable
+
+        def spy(fd):
+            events.append("durable")
+            real(fd)
+        remote_mod.durable = spy
+        api = FakeOCI()
+        remote_mod.API_FACTORY = lambda: api
+        real_launch = api.launch
+
+        def launch(*a, **k):
+            events.append("launch:" + str(remote_mod.read_state(rd3).get("launching")))
+            return real_launch(*a, **k)
+        api.launch = launch
+        rd3 = os.path.join(rd, "three")
+        os.makedirs(rd3)
+        remote_mod.cmd_create(dict(settings, RUN_DIR=rd3, SSH_DIR=rd3), type("A", (), {"op": "a1" * 16})())
+        first_launch = next((i for i, e in enumerate(events) if e.startswith("launch")), -1)
+        check("the journal (its contents and its folder's entry) is made durable before anything billable is launched "
+              "(found by review: a crash could lose it), F_FULLFSYNC on macOS",
+              first_launch >= 2 and events[:first_launch].count("durable") >= 2 and events[first_launch] == "launch:" + "a1" * 16
+              and "F_FULLFSYNC" in open(os.path.join(LAB, "lib", "remote.py")).read(), events[:8])
+    finally:
+        os.environ.pop("MCOMP_LOCK_DIR", None)
+        remote_mod.API_FACTORY = None
+        remote_mod.user_data, remote_mod.mac_lock = old_ud, old_lock
+        if old_durable is not None:
+            remote_mod.durable = old_durable
+        shutil.rmtree(rd, ignore_errors=True)
 
 
 def uninstall_order():
@@ -1099,7 +1274,8 @@ def review(td):
         b.run("vm", "create", "own1", "--on", "server", "--host", "192.0.2.10", "--user", "owner", "--no-build", "--yes")
         b.run("vm", "create", "arm1", "--on", "oci", "--size", "arm-1x6", "--no-build", "--yes")
         for part in (review_credentials, review_identity, review_default, review_egress, review_delete_recheck,
-                     review_remove_from_server, review_build_cleanup, review_start_owners, review_create_journal):
+                     review_remove_from_server, review_build_cleanup, review_resumed_failure, review_start_owners,
+                     review_create_journal):
             if REVIEW_GUARD:
                 REVIEW_GUARD(part.__name__, part, c)
             else:
@@ -1265,6 +1441,12 @@ def review_build_cleanup(c):
         ops = open(oplog).read().splitlines() if os.path.exists(oplog) else []
         cr = next((o for o in ops if o.startswith("create --vm arm1 --op ")), "")
         ab = next((o for o in ops if o.startswith(want)), "")
+        if keep:
+            eg = [i for i, o in enumerate(ops) if o.startswith("egress --vm arm1 --set internet")]
+            ka = [i for i, o in enumerate(ops) if o.startswith("abort --vm arm1") and "--keep" in o]
+            check("build --keep-on-failure: the setup's egress closed too, the provider's rules set back to EGRESS after "
+                  "the instance is recorded as kept (found by review: a kept instance kept the setup's egress)",
+                  eg and ka and ka[0] < eg[0] and "end the setup's downloads" in r.stdout + r.stderr, (ops, r.stdout[-300:]))
         check(f"build {' '.join(keep) or '(default)'} that fails after making the instance: abort with this build's own "
               "operation id (the one its create was given), " + ("--keep" if keep else "deleting only what it made")
               + ", and say what's left billing", r.returncode != 0 and cr and ab and ab.split()[4] == cr.split()[4]
@@ -1291,6 +1473,43 @@ def review_build_cleanup(c):
     check("a build killed (SIGTERM) after making the instance: what it made deleted, and said",
           pr.returncode != 0 and any(o.startswith("abort --vm arm1 --op ") and "--keep" not in o for o in ops)
           and "nothing this build made is left billing" in out, (pr.returncode, ops, out[-300:]))
+
+
+def review_resumed_failure(c):
+    """F5: a build that set up again an instance it found stopped (kept earlier) and failed: the setup's egress closed
+    (the provider's rules back to EGRESS) and the instance stopped again; nothing deleted."""
+    b, td, tmv = c["b"], c["td"], c["tmv"]
+    fakepy = os.path.join(td, "fake-oci-python-2")
+    oplog = os.path.join(td, "ops2.log")
+    with open(fakepy, "w") as f:
+        f.write("\n".join([
+            "#!" + tmv.PY,
+            "import json, os, sys",
+            "cmd = sys.argv[2] if len(sys.argv) > 2 else ''",
+            "open(%r, 'a').write(' '.join(sys.argv[2:]) + chr(10))" % oplog,
+            "if cmd == 'plan':",
+            "    print('kind=made', 'arch=arm64', 'label=Oracle Cloud', 'idle_stop=15', 'egress=off', sep=chr(10))",
+            "elif cmd == 'status':",
+            "    print(json.dumps({'provider_state': 'STOPPED'}))",
+            "elif cmd == 'egress':",
+            "    print('off')",
+            ""]))
+    os.chmod(fakepy, 0o755)
+    rd = os.path.join(b.co, ".run-vms", "arm1")
+    os.makedirs(rd, exist_ok=True)
+    json.dump({"instance": "i-kept", "host": "192.0.2.1", "provider": "oci", "op": "c" * 32, "kept": "x"},
+              open(os.path.join(rd, "remote.json"), "w"))
+    os.makedirs(os.path.join(b.home, ".ssh", "metacomputer-arm1"), exist_ok=True)
+    open(os.path.join(b.home, ".ssh", "metacomputer-arm1", "known_hosts"), "w").write("mcomp-arm1 " + KEY + "\n")
+    r = subprocess.run([b.mc, "--vm", "arm1", "build"], capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL,
+                       env=b.env(OCI_PYTHON=fakepy, OCI_USER="u", OCI_API_KEY_PEM="k", MCOMP_REMOTE_SSH_WAIT="1"))
+    ops = open(oplog).read().splitlines() if os.path.exists(oplog) else []
+    check("a build that set up again an instance it found stopped, and failed: the provider's rules back to EGRESS=off "
+          "and the instance stopped again; nothing deleted or aborted (found by review: resumed instances kept the "
+          "setup's egress)", r.returncode != 0 and "wake --vm arm1" in ops and "egress --vm arm1 --set off" in ops
+          and "sleep --vm arm1 --force" in ops and ops.index("egress --vm arm1 --set off") < ops.index("sleep --vm arm1 --force")
+          and not any(o.startswith(("abort", "delete")) for o in ops), (ops, r.stdout[-400:]))
+    os.remove(os.path.join(rd, "remote.json"))
 
 
 def review_start_owners(c):
@@ -1557,6 +1776,8 @@ def main():
     oci_driver()
     network_race()
     credentials_children()
+    owner_ssh_options()
+    journal_r4()
     abort_scoped()
     cloud_lock()
     remote_helpers()

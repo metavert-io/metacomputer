@@ -1663,9 +1663,13 @@ provider's rules outside it where the provider enforces them, and no more than t
   applies to every account, root included, though root in the guest could remove it; the desktop's accounts have no
   root (`cua` has no sudo, `cuaadmin` may run only `metacomputer-admin`). It refuses the cloud's metadata services and
   every link-local address (169.254.0.0/16, fe80::/10) and private, shared and reserved ranges (10/8, 172.16/12,
-  192.168/16, 100.64/10, fc00::/7, ...), except the DNS resolver, the DHCP client and the clock, each to its one port
-  and matched by its account. `EGRESS=off` lets nothing else out (while the computer is being set up, apt's downloads
-  too: the `_apt` account, TCP 80 and 443, public addresses only; the setup ends that and reads both layers back). It
+  192.168/16, 100.64/10, fc00::/7, ...), except the DNS resolver and the clock, each to its one port and matched by
+  its account, and DHCP, whichever network stack sends it, matched by its privileged ports and a DHCP server's
+  destinations (68 to 67: broadcast, private and link-local; 546 to 547: ff02::1:2 and link-local). `EGRESS=off` lets
+  nothing else out (while the computer is being set up, apt's downloads too: the `_apt` account, TCP 80 and 443,
+  public addresses only; a successful setup ends that and reads both layers back, every failure ends it inside and
+  outside, and it ends by itself 3 hours after the setup started: the marker is ignored then and the rule's own time
+  runs out). It
   has no allowlist of names (`net allow` is refused). A tightened rule applies to connections already open (only replies to connections made to the computer
   pass as part of one), and `net egress` changes nothing unless it can apply the change and read it back.
 - **Fail closed.** The firewall's service runs before the network, and the network requires it (systemd-networkd or
@@ -1677,7 +1681,9 @@ provider's rules outside it where the provider enforces them, and no more than t
   settings first, checks your account's access before its settings apply and with a fresh connection of yours after
   the bootstrap, the setup and the reboot, and takes its SSH settings and firewall back off if your account can't sign
   in. A fresh connection is never one shared with a connection you have open (`ControlMaster=no`, `ControlPath=none`):
-  it authenticates on its own. `vm delete NAME --remove-from-server` takes the setup off again (`remote-uninstall
+  it authenticates on its own. And no connection as your account forwards anything of your Mac's to the server, even
+  if your ssh config would (no agent, X11, port forwardings, tunnel, local or remote command, delegated credentials):
+  your agent signs it in and stays on your Mac. `vm delete NAME --remove-from-server` takes the setup off again (`remote-uninstall
   all`, which removes the network's dependency on the firewall before stopping it, so the network keeps running), with
   the same fresh check after.
 - **Keys of its own, and a host key that's never trusted on first use.** Each computer has its own set of keys in
@@ -1700,12 +1706,17 @@ provider's rules outside it where the provider enforces them, and no more than t
 - **The vault binds a computer, not a name.** A binding to a computer elsewhere names its identity (its provider
   instance or your server's setup, with its pinned host key, hashed); one deleted and made again under the same name
   is refused until it's bound again. An API token is for the computer it was made for: each request checks that the
-  binding and the identity beside the computer's keys still name it, and otherwise the token is revoked, nothing is
-  sent and the tunnel is closed; a binding that names another computer gets a new tunnel. `vm delete` removes the
-  identity (so its tokens stop at their next use) and locks the computer's own vault, which ends them at once.
+  binding and the identity beside the computer's keys still name it, when the request arrives, again just before it's
+  forwarded (its body may take minutes), and every second while its answer streams; otherwise the token is revoked,
+  nothing (more) is sent and the tunnel is closed. A binding that names another computer gets a new tunnel, and the
+  tokens made for the computer before are pruned. `vm delete` removes the identity, revokes the VM's tokens in
+  whatever vault it uses, and locks the computer's own vault.
 - **Nothing left billing by surprise, and nothing deleted that a build didn't make.** A build that fails or is
   interrupted after making an instance deletes what that build made, found by the operation it tagged its launch with,
-  and never an instance it found (or, with `--keep-on-failure`, stops it and says what still bills); `start` checks
+  and never an instance it found (or, with `--keep-on-failure`, records it as kept, so no later try takes it for a
+  lost launch, then stops it and says what still bills). What a build makes of the shared network and its computer's
+  group is recorded under the network lock, as it's made; the journal is on the disk (`F_FULLFSYNC`) before anything
+  billable is launched. `start` checks
   that no session or handoff has the computer, and never hard-stops a running instance unless its whole console
   capture ends with the guest's power-off; a stop is waited for through OCI's 15-minute shutdown window; `vm delete`
   checks again, under the computer's lock, that no session is using it before anything is stopped; the shared network

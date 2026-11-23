@@ -636,6 +636,16 @@ remote_py() { # lib/remote.py with the Python that has the provider's SDK (OCI_P
   [ "${PROVIDER:-}" != oci ] || [ -z "${OCI_PYTHON:-}" ] || py="$OCI_PYTHON"
   ( mc_export_provider_env; exec "$py" "$LAB_ROOT/lib/remote.py" "$@" )
 }
+# Every connection made as your own account to your own server (the setup's checks, its bootstrap, the uninstall):
+# your ssh config and agent sign it in, but it never shares a connection you have open (each check authenticates on
+# its own), and nothing of this Mac goes to the server through it: no agent, no X11, no port forwardings, no local or
+# remote command from a config file, no delegated credentials. PORT -> MC_OWNER_OPTS.
+mc_owner_ssh_opts() {
+  MC_OWNER_OPTS=(-o ControlMaster=no -o ControlPath=none -o ForwardAgent=no -o ForwardX11=no -o ForwardX11Trusted=no
+    -o ClearAllForwardings=yes -o PermitLocalCommand=no -o RemoteCommand=none -o GSSAPIDelegateCredentials=no
+    -o Tunnel=no -o PreferredAuthentications=publickey -o PasswordAuthentication=no
+    -o KbdInteractiveAuthentication=no -o ConnectTimeout=15 -p "${1:-22}")
+}
 remote_can_ask() { # whether the provider can be asked from here (its credentials are in this command's environment)
   case "${PROVIDER:-}" in oci) [ -n "${OCI_USER:-}" ] && [ -n "${OCI_API_KEY_PEM:-}" ] ;; *) return 1 ;; esac
 }

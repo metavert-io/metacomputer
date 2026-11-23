@@ -490,7 +490,7 @@ class OCI(RemoteVM):
 
     # lifecycle
     def create(self, name, region=None, size=None, persist="auto", user_data=None, ads=None, egress="internet",
-               op=None):
+               op=None, made=None):
         """Launch the instance for `name` (its network and its own security group first). Tries the availability
         domains in order once each when one has no capacity, then stops. `op` tags the instance with the build that
         launched it, so a launch whose record was lost can be found (and deleted). Returns {instance, ad, shape,
@@ -511,8 +511,16 @@ class OCI(RemoteVM):
         if api.instances(name):
             raise AdapterError(f"Oracle Cloud has an instance for {name} already (metacomputer cloud status oci)")
         with self._network_lock():
+            # What this operation makes is told to `made` here, under the lock, when it's made: an absence seen
+            # earlier proves nothing (another create or `cloud setup` could have made it since).
+            new_net = api.network() is None
             net = api.make_network()
+            if new_net and made:
+                made("made_network")
+            new_nsg = api.nsg(name) is None
             nsg = api.make_nsg(name, egress)
+            if new_nsg and made:
+                made("made_nsg")
         img = api.image(shape)
         tried = []
         ads = ads or api.availability_domains(shape)

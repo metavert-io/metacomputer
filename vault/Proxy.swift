@@ -83,6 +83,15 @@ final class Tunnel: @unchecked Sendable {
     }
 }
 
+/// Whether a token's computer is still the one its VM is bound to: the binding names it, and for a computer elsewhere
+/// the identity beside its keys (lib/remote.py identity) is still that one (deleted: no file; made again: another).
+func computerStill(_ t: APIToken, _ p: Payload) -> Bool {
+    guard let b = p.vms[t.vm], t.computer == b.computer_id else { return false }
+    guard b.isRemote else { return true }
+    guard let want = b.computer_id else { return false }
+    return readComputerID(computerIDPath(opsKey: b.ops_key_path)) == want
+}
+
 final class ProxyListener: @unchecked Sendable {
     let vm: String
     let fd: Int32
@@ -261,11 +270,21 @@ final class ProxyHub: @unchecked Sendable {
         withLock { tokens = [:] }
     }
 
-    /// Drop tokens whose secret is gone or changed (set --replace, delete); returns them.
+    /// Drop tokens whose secret is gone or changed (set --replace, delete), or whose computer isn't the one their VM
+    /// is bound to any more (bound again to another, or its identity removed by vm delete); returns them.
     @discardableResult
     func prune(_ p: Payload) -> [APIToken] {
         withLock {
-            let gone = tokens.values.filter { t in p.secrets[t.name].map { !t.fits($0) } ?? true }
+            let gone = tokens.values.filter { t in (p.secrets[t.name].map { !t.fits($0) } ?? true) || !computerStill(t, p) }
+            for t in gone { tokens[t.hash] = nil }
+            return gone
+        }
+    }
+
+    /// The live tokens of one VM end (vm delete of a computer elsewhere: its tokens, whatever vault it shares).
+    func revokeVM(_ vm: String) -> [APIToken] {
+        withLock {
+            let gone = tokens.values.filter { $0.vm == vm }
             for t in gone { tokens[t.hash] = nil }
             return gone
         }
@@ -552,15 +571,15 @@ final class ProxyHub: @unchecked Sendable {
         }
         // The token covers the computer it was made for: the VM's binding and the identity beside its keys must still
         // name it (a computer elsewhere deleted, or made again under the same name, is another computer).
-        let bound = p.vms[l.vm]
-        let nowID: String? = bound.flatMap { $0.isRemote ? readComputerID(computerIDPath(opsKey: $0.ops_key_path)) : nil }
-        guard let b = bound, token.computer == b.computer_id, !b.isRemote || (b.computer_id != nil && nowID == b.computer_id) else {
+        guard computerStill(token, p) else {
             _ = revoke(token.id)
             closeTunnel(l)
             respond(c, 401, "the computer bound as VM \(l.vm) was deleted or made again since this token was made: nothing was sent")
             log(401, 0, token, host, "the computer changed since the token was made")
             return
         }
+        // Where its identity is read from while the answer streams (a computer elsewhere: beside its keys).
+        let idPath: String? = p.vms[l.vm].flatMap { $0.isRemote ? computerIDPath(opsKey: $0.ops_key_path) : nil }
         // The token covers the secret as it was approved: not a newer value, host or scope.
         guard token.fits(s) else {
             _ = revoke(token.id)
@@ -606,6 +625,15 @@ final class ProxyHub: @unchecked Sendable {
             log(401, 0, token, host, "the secret changed while waiting")
             return
         }
+        // The body may have taken minutes: the computer must still be the one the token was made for, now, with the
+        // binding as the vault has it now and the identity beside its keys as it is now.
+        guard computerStill(token, p2) else {
+            _ = revoke(token.id)
+            closeTunnel(l)
+            respond(c, 401, "the computer bound as VM \(l.vm) was deleted or made again while this request waited: nothing was sent")
+            log(401, 0, token, host, "the computer changed while waiting")
+            return
+        }
         guard let url = URL(string: "\(upstreamScheme)://\(host)\(rest)\(query)") else { respond(c, 400, "bad path"); return }
         var u = URLRequest(url: url)
         u.httpMethod = req.method
@@ -631,8 +659,18 @@ final class ProxyHub: @unchecked Sendable {
         // Wait for the answer in short steps: it ends with its token (revoked, expired without a renewal, its secret
         // replaced or deleted, the vault locking) or at its time limit, whichever comes first.
         var cut: (code: Int, why: String)? = nil
+        var idChecked = Date()
         while stream.done.wait(timeout: .now() + 0.25) == .timedOut {
             refreshIfVaultChanged()
+            if let idp = idPath, Date().timeIntervalSince(idChecked) >= 1 {
+                idChecked = Date()
+                if readComputerID(idp) != token.computer {
+                    _ = revoke(token.id)
+                    closeTunnel(l)
+                    cut = (401, "the computer bound as VM \(l.vm) was deleted or made again during the answer; cancelled")
+                    break
+                }
+            }
             if !stillLive(token) {
                 cut = withLock({ closed }) ? (503, "the vault locked during the answer; cancelled")
                     : (401, "the token ended during the answer (revoked, expired without a renewal, or its secret changed); cancelled")

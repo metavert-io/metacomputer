@@ -807,6 +807,70 @@ def run(td, procs):
     st_4, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF4))
     check("re-bound to another computer while the old tunnel was still open: a new tunnel, the old one closed, the new "
           "token works", rc == 0 and len(tun_4) == 1 and old_closed and st_4 == 200, (rc, len(tun_4), old_closed, st_4))
+
+    def rebind_as(ch):
+        open(ident, "w").write(ch * 64 + "\n")
+        rc, out = tty([BIN, "bind", "farvm", *far], [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
+        check(f"(bound again as computer {ch * 4}...)", rc == 0, out[-400:])
+        return rc
+
+    def token_ids():
+        return {t["id"] for t in tokens_json().values() if t.get("vm") == "farvm"}
+
+    # A request whose body is still coming when the computer changes: checked again just before it's forwarded.
+    rebind_as("f")
+    tokS1 = js(client("token", "api1", "--vm", "farvm", "--ttl", "10m").stdout)
+    proxy_port()
+    n_up = len(up.got)
+    sk = socket.create_connection(("127.0.0.1", mport[0]), timeout=30)
+    sk.sendall(("POST /api1/v1/echo HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + tokS1.get("token", "x")
+                + "\r\nContent-Length: 10\r\n\r\nabc").encode())
+    time.sleep(1.5)
+    open(ident, "w").write("5" * 64 + "\n")             # deleted and made again while the body was on its way
+    sk.sendall(b"defghij")
+    got = b""
+    try:
+        while True:
+            d = sk.recv(4096)
+            if not d:
+                break
+            got += d
+    except OSError:
+        pass
+    sk.close()
+    first = got.split(b"\r\n", 1)[0].decode(errors="replace")
+    check("a request whose body was still coming when its computer was made again: refused just before it would be "
+          "forwarded (401), nothing reaches the API (found by review: the check came before the body only)",
+          " 401 " in first and b"while this request waited" in got and len(up.got) == n_up, (first, got[-200:], len(up.got) - n_up))
+    # An answer streaming when the computer changes: cut within about a second.
+    rebind_as("7")
+    tokS2 = js(client("token", "api-long", "--vm", "farvm", "--ttl", "10m").stdout)
+    proxy_port()
+    hold = {}
+    th = threading.Thread(target=stream, args=("/api-long/v1/drip", tokS2, hold, "s"))
+    th.start()
+    time.sleep(1.5)
+    t_change = time.time()
+    open(ident, "w").write("6" * 64 + "\n")
+    th.join(30)
+    secs, body = hold.get("s", (99, b""))
+    check("an answer streaming when its computer is made again: cut within seconds (no DRIP-END), the token revoked "
+          "(found by review: streams went on)", b"tick" in body and b"DRIP-END" not in body and secs < 5.5
+          and tokS2.get("token_id") not in token_ids(), (secs, body[-80:], round(time.time() - t_change, 1), tokS2))
+    # Bound again to another computer: the old binding's tokens are pruned even if nothing uses them.
+    rebind_as("8")
+    tokS3 = js(client("token", "api1", "--vm", "farvm", "--ttl", "10m").stdout)
+    alive_before = tokS3.get("token_id") in token_ids()
+    rebind_as("9")
+    check("bound again to another computer: the tokens made for the one before are pruned at once (tokens lists none)",
+          alive_before and tokS3.get("token_id") not in token_ids(), (alive_before, token_ids(), tokS3))
+    # vm delete revokes the VM's tokens in whatever vault it uses.
+    tokS4 = js(client("token", "api1", "--vm", "farvm", "--ttl", "10m").stdout)
+    r = client("revoke", "--vm", "farvm")
+    check("revoke --vm NAME (what vm delete runs): that VM's tokens end, others stay", r.returncode == 0
+          and tokS4.get("token_id") not in token_ids() and "Revoked" in r.stdout, (r.stdout, r.stderr))
+    tokF4 = js(client("token", "api1", "--vm", "farvm", "--ttl", "10m").stdout)
+    proxy_port()
     os.remove(ident)                                   # vm delete removes the identity
     st_del, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF4))
     check("...deleted (no identity beside its keys): its token stops too", st_del == 401, st_del)

@@ -46,7 +46,10 @@ metacomputer vm create work --on server --host 203.0.113.5 --user ubuntu [--port
   connection of yours is checked; if it can't sign in, the setup's SSH settings and firewall are taken back off
   (`/opt/metacomputer/bin/remote-uninstall rollback`) and the build stops, saying so. A fresh connection is a new ssh
   process that never shares one you have open (`-o ControlMaster=no -o ControlPath=none` over your own ssh config), so
-  a check can't pass through a connection made before the setup changed anything. Your account keeps its own
+  a check can't pass through a connection made before the setup changed anything. None of these connections forwards
+  anything of your Mac's to the server, whatever your ssh config says (`ForwardAgent=no`, `ForwardX11=no`,
+  `ClearAllForwardings=yes`, `PermitLocalCommand=no`, no tunnel, remote command or delegated credentials;
+  `scripts/lib.sh mc_owner_ssh_opts`): your agent signs them in from your Mac. Your account keeps its own
   `sudo`.
 - metacomputer never powers your server on or off; `metacomputer --vm work stop` only closes this Mac's connection.
 - `metacomputer vm delete work` removes it here (settings, runtime folder, its identity) and leaves the server as it
@@ -142,7 +145,10 @@ metacomputer's API user can't set or enforce one, so keep a budget alert there.
 **A build that fails** (or is interrupted: Ctrl-C, the terminal closed, killed) after it made the instance deletes what
 that build made, and nothing else: the build names an operation, its launch is tagged and journaled with it, and the
 clean-up (`lib/remote.py abort --op`) deletes the instances tagged with it, then the security group and the network
-only if that operation made them and nothing else uses them. An instance it found (say, one of the same name whose
+only if that operation made them (recorded under the network lock as it makes them) and nothing else uses them. The
+journal is on the disk before the launch (`F_FULLFSYNC`), so a crash of this Mac never loses a launch it started.
+With `--keep-on-failure`, the instance is recorded as this computer's, kept, before it's stopped (a later build sets
+it up again instead of taking it for a lost launch). An instance it found (say, one of the same name whose
 record this Mac lost) is left alone. It says nothing of it is left billing, or exactly what could not be deleted.
 `build --keep-on-failure` stops it through the API instead, so its disk can be looked at, and says what still bills
 (its boot volume) and how to delete it. An instance whose record can't be written on the Mac is deleted at once; a
@@ -215,8 +221,15 @@ nothing that's already right:
     else out, package downloads included (updates come again with `net egress internet`). A computer made with
     `EGRESS=off` is still set up: until its setup ends, its own firewall lets out apt's downloads too (the `_apt`
     account, TCP 80 and 443, public addresses only; `net status` says `setup`), and its provider's rules the public
-    addresses; at the end of the setup both are set to `off` and read back, or the build fails. There's no allowlist
+    addresses; at the end of the setup both are set to `off` and read back, or the build fails. A setup that fails
+    ends it too: `provision.sh`'s own failure handler, and the build's (its own firewall, then the provider's rules,
+    for a computer it keeps, one it set up again or your own server). And it ends by itself 3 hours after the setup
+    started: an older marker is ignored, and the rule's own time (nftables' `meta time`) runs out then. There's no allowlist
     of names here, and `net allow` is refused.
+  - **DHCP**, whichever network stack sends it (systemd-networkd as its own account, NetworkManager as root): let out
+    by its privileged ports and a DHCP server's destinations (68 to 67: broadcast, private and link-local; 546 to 547:
+    `ff02::1:2` and link-local), in the full rules and in the fallback, so the computer keeps its address after a
+    reboot.
   - **Fail closed.** The firewall's service runs before the network, and the network requires it (a drop-in for
     `systemd-networkd` and one for `NetworkManager`, the two Ubuntu uses; the setup refuses a server whose network
     something else manages, putting its own settings back): if its rules don't load, an SSH-only fallback does (SSH
@@ -239,7 +252,9 @@ nothing that's already right:
   host key). A computer deleted and made again under the same name has another one, and the vault refuses it until
   it's bound again (`metacomputer secrets bind`). API tokens are for the computer they were made for: a request on a
   token whose computer isn't the bound one any more is refused (nothing sent), the token revoked and the tunnel
-  closed; a new binding gets a new tunnel. `vm delete` locks the computer's own vault, which ends its tokens at once.
+  closed, checked when a request arrives, again just before it's forwarded, and every second while an answer streams;
+  a new binding gets a new tunnel and prunes the old computer's tokens. `vm delete` revokes the VM's tokens in
+  whatever vault it uses and locks the computer's own vault.
 - **Provider credentials reach one program.** `bin/metacomputer`, `scripts/lib.sh` and `scripts/remote-build.sh`
   take `OCI_*` out of the environment before they do anything else; only `lib/remote.py` is started with them, and it
   takes them out of its own environment first, so nothing it starts gets them.

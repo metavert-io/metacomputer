@@ -639,10 +639,9 @@ vm_delete_remote() {
   if [ "$remove_from_server" = 1 ]; then
     say "taking metacomputer's setup off $SSH_HOST (as ${SETUP_USER:-?}, with your sudo)"
     # Never through a shared connection (your ssh config's ControlMaster): the check after the removal is a new
-    # process that authenticates on its own.
-    local own=(ssh -o ControlMaster=no -o ControlPath=none -o BatchMode=yes -o PreferredAuthentications=publickey
-               -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o ConnectTimeout=15 -p "${SSH_HOST_PORT:-22}"
-               "${SETUP_USER:-}@${SSH_HOST:-}")
+    # process that authenticates on its own; nothing of this Mac's is forwarded (scripts/lib.sh mc_owner_ssh_opts).
+    mc_owner_ssh_opts "${SSH_HOST_PORT:-22}"
+    local own=(ssh -o BatchMode=yes "${MC_OWNER_OPTS[@]}" "${SETUP_USER:-}@${SSH_HOST:-}")
     "${own[@]}" 'sudo -n /opt/metacomputer/bin/remote-uninstall all' </dev/null \
       || die "it couldn't be taken off (above: your own SSH, with sudo that doesn't ask, is needed); nothing here was deleted"
     "${own[@]}" true </dev/null || die "after the removal your own account can't sign in to ${SSH_HOST:-?}: use your provider's console. Nothing here was deleted"
@@ -651,8 +650,12 @@ vm_delete_remote() {
   fi
   remote_py identity --vm "$VM_NAME" --remove >/dev/null 2>&1 || true
   # Its identity is gone, so its vault binding refuses, and every token made for it stops at its next use (the vault
-  # checks the identity then). Its own vault is locked too (anyone may lock: it only restricts), which ends its
-  # tokens and closes its tunnel now, whether or not --delete-vault removes the folder after.
+  # checks the identity then, and again while an answer streams). Its tokens are revoked now, in whatever vault it
+  # uses (anyone may revoke: it only restricts); its own vault is locked too, which also closes its tunnel now,
+  # whether or not --delete-vault removes the folder after.
+  if [ -S "$(mc_vault_dir)/vault.sock" ] && [ -x "$VAULT_BIN" ]; then
+    MCOMP_VAULT_DIR="$(mc_vault_dir)" "$VAULT_BIN" revoke --vm "$VM_NAME" >/dev/null 2>&1 || true
+  fi
   if [ "$(mc_vault_dir)" = "$own_vault" ] && [ -S "$own_vault/vault.sock" ] && [ -x "$VAULT_BIN" ]; then
     MCOMP_VAULT_DIR="$own_vault" "$VAULT_BIN" lock >/dev/null 2>&1 && gone+=("its vault's live tokens and tunnel (the vault is locked)")
   fi
