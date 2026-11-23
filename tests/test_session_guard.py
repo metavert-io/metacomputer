@@ -154,6 +154,12 @@ FORMS = [
     ("vm", ["delete", "x", "--confirm", "x", "--remove-from-server"], "exempt"),
     ("vm", ["create", "x", "--on", "oci", "--egress", "off", "--yes"], "exempt"),
     ("cloud", ["status", "oci"], "exempt"), ("cloud", ["doctor", "oci", "--json"], "exempt"),
+    # Fly Sprites (docs/sprites.md): its own forms
+    ("vm", ["create", "x", "--on", "sprites", "--org", "o", "--sprite", "x", "--yes"], "exempt"),
+    ("cloud", ["status", "sprites", "--org", "o"], "exempt"), ("cloud", ["doctor", "sprites"], "exempt"),
+    ("net", ["allow", "example.com", "--exact"], "act"), ("checkpoint", ["ck", "--replace"], "act"),
+    ("restore", ["ck", "--yes"], "act"), ("reset", ["--yes"], "act"), ("baseline", ["--yes"], "act"),
+    ("desktop-restart", [], "act"),
     ("cloud", ["setup", "oci"], "exempt"), ("cloud", ["teardown", "oci"], "exempt"),
     # trace
     ("trace", ["list"], "exempt"), ("trace", ["show", "t"], "exempt"), ("trace", ["export", "t", "--out", "f"], "exempt"),

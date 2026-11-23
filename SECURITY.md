@@ -1731,6 +1731,49 @@ provider's rules outside it where the provider enforces them, and no more than t
   `reset`, volumes and Mac folders, and the event watcher's health checks. Your own server's other software and
   accounts are yours to keep apart; give metacomputer a server of its own.
 
+## Fly Sprites
+
+A computer can be a Fly.io Sprite ([docs/sprites.md](docs/sprites.md)): a persistent VM that pauses by itself when
+nothing is connected. It's a computer elsewhere as above (the Mac stays the controller; keys of its own; a host key
+pinned before the first connection, read over Fly's authenticated channel), with these differences:
+
+- **Fly's management API is hidden from the desktop and from SSH sessions.** A Sprite's API socket,
+  `/.sprite/api.sock`, is world-writable (`srw-rw-rw-`, root), and it can create services, which run as the Sprite's
+  `sprite` account, which has sudo: any account that reaches it has root (checked on a Sprite: the desktop account
+  made a service that ran `sudo -n id` as root). It can also create tasks that keep the Sprite awake and billing, and
+  make or restore checkpoints. This is the provider's, and it was reported to Fly. metacomputer's mitigation: the
+  desktop (Xvfb, XFCE and everything started in it) and sshd (so every SSH session: the driver, `metacomputer sh`, the
+  vault's fill and proxy accounts, `cuaadmin`) run in private mount namespaces where `hide-sprite-api` mounts an empty
+  tmpfs over `/.sprite` before the program starts (`provisioning/sprite/rootfs/opt/metacomputer/sprite/`). There the
+  socket isn't there ("connection refused"); the desktop's accounts have no root to unmount it, a user namespace of
+  their own can't (the mount is locked), and `/proc/1/root` is closed to them (checked live, Firefox's own sandbox
+  processes included). Fly's own channel (`sprite exec`, the services Fly starts) keeps the real `/.sprite`: it's the
+  controller's, as the Mac's owner is for a VM on the Mac, and only Fly's sign-in on your Mac reaches it. If Fly
+  changes the socket's path or permissions the mask must follow; `bootstrap.sh` refuses a Sprite without it.
+- **Egress is Fly's network policy, outside the VM, and nothing else.** A list of DNS names that nothing in the Sprite,
+  root included, can change. While one is in force, Fly refuses raw IP addresses (an address is let through only after
+  an allowed name resolved to it), private ranges, the metadata service and Fly's own private network, even through a
+  name that resolves to one of them (checked live: 10/8, 172.16/12, 192.168/16, 100.64/10, 169.254.169.254, Fly's
+  private network refused or unanswered). With no rules Fly enforces nothing, so metacomputer always sets one:
+  `EGRESS=internet` (every name), `EGRESS=off` (no name), or an allowlist (`net allow`; addresses are refused, and
+  anything that widens it runs only at your own terminal). Each change is read back. There's no firewall in the guest:
+  the manifest's `outside_egress` claims what Fly enforces and nothing more. The browsers' own DNS over HTTPS is
+  locked off, so names go through the policy.
+- **SSH only through Fly's tunnel.** sshd listens on the Sprite's loopback by number (`localhost` is the Sprite's
+  network address there), reached only through `sprite proxy -W :22`, signed in to Fly, then metacomputer's keys and
+  the pinned host key. Every tunnel runs through a wrapper that ends it when ssh goes, and leaves ssh's process group
+  first, so a group kill aimed at ssh (the hub's, the vault's) can't end it before the tunnel: an open tunnel keeps a
+  Sprite awake and billing (found live, and fixed: `hub stop` used to leave one). The vault pins Fly's `sprite`
+  command (path and contents) and the tunnel's arguments at `secrets bind`, runs it through itself (`mcomp-vault
+  _tunnel`), and refuses a command that changed since.
+- **Fly's sign-in stays Fly's.** The `sprite` command keeps its own token in your login keychain; metacomputer runs it
+  with `HOME`, `PATH` and `LANG` only, never reads or prints the token, and runs `sprite exec` with
+  `--no-port-forward` (otherwise ports a command opens in the Sprite would be forwarded to your Mac).
+- **Input is foreground only** (no `/dev/uinput` in a Sprite's kernel): the hub sends keys, typing and pixel clicks in
+  the foreground, and says so; a person watching the live view sees the pointer move.
+- **Fly holds what's in the VM**, as any provider does: use a VM on your Mac for work you wouldn't put there.
+- **What isn't there:** volumes and Mac folders, `SSH_AUTH=cert`, the event watcher's health checks, update timers.
+
 ## Secrets and logins (`metacomputer secrets`)
 
 Some tasks need a login or an API key. A password typed into the conversation lands

@@ -16,6 +16,7 @@ import base64
 import hmac
 import io
 import json
+import re
 import os
 import pty
 import pwd
@@ -638,6 +639,25 @@ def run(td, procs):
                    *common], [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
     check("bind a computer elsewhere: its address, alias and identity pinned, and no gateway", rc == 0
           and "203.0.113.9:22" in out and "mcomp-remotevm" in out and "no gateway" in out and "aaaaaaaaaaaaaaaa" in out, out)
+    # A computer with no address of its own (Fly Sprites): its provider's tunnel, pinned (program and contents, and its
+    # arguments), run by the vault as ssh's ProxyCommand through itself (`_tunnel`).
+    tunnel_prog = os.path.join(td, "sprite-standin")
+    open(tunnel_prog, "w").write("#!/bin/sh\nexit 0\n")
+    os.chmod(tunnel_prog, 0o755)
+    targs = ["-o", "some-org", "-s", "spritevm", "proxy", "-W", ":22"]
+    rc, out = tty([BIN, "bind", "spritevm", "--port", "22", "--host", "spritevm", "--host-key-alias", "mcomp-spritevm",
+                   "--tunnel", tunnel_prog, *[f"--tunnel-arg={x}" for x in targs], *common],
+                  [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
+    check("bind a computer reached through its provider's tunnel: the program, its arguments and its contents pinned",
+          rc == 0 and "tunnel" in out and tunnel_prog in out and "proxy -W :22" in out and "sha256" in out
+          and "ended when ssh goes" in out, out)
+    for extra, why in ((["--host", "203.0.113.9", "--host-key-alias", "mcomp-x", "--tunnel", "/nonexistent/sprite"], "no tunnel program"),
+                       (["--tunnel", tunnel_prog], "--tunnel is for a computer at --host"),
+                       (["--host", "x", "--host-key-alias", "mcomp-x", "--tunnel", tunnel_prog, "--tunnel-arg=a b"], "--tunnel-arg"),
+                       (["--host", "x", "--host-key-alias", "mcomp-x", "--tunnel", tunnel_prog, "--tunnel-arg=%h"], "--tunnel-arg"),
+                       (["--host", "x", "--host-key-alias", "mcomp-x", "--tunnel-arg=-o"], "--tunnel-arg goes with --tunnel")):
+        r = client("bind", "badtunnel", "--port", "22", *extra, *common)
+        check(f"bind {' '.join(extra)[-50:]}: refused", r.returncode in (1, 64) and why in r.stderr, r.stderr)
     for extra, why in ((["--host", "203.0.113.9", "--host-key-alias", "mcomp-x", "--gateway", my_exe], "--gateway is for a VM on this Mac"),
                        (["--host", "203.0.113.9"], "--host-key-alias"),
                        (["--host", "-oProxyCommand=x", "--host-key-alias", "mcomp-x"], "--host"),
@@ -745,6 +765,21 @@ def run(td, procs):
           "HostKeyAlias=mcomp-remotevm" in c["argv"] and c["known_hosts"] == f"mcomp-remotevm {hostkey}\n"
           and "StrictHostKeyChecking=yes" in c["argv"] and "ProxyCommand=none" in c["argv"], (c["known_hosts"], c["argv"]))
     check("...the value on ssh's stdin only", json.loads(c["stdin"]).get("value") == PW_VALUE and PW_VALUE not in " ".join(c["argv"]))
+    r = client("fill", "web-login", "--vm", "spritevm", "--field", "password")
+    c = calls()[-1]
+    pc = next((x for x in c["argv"] if x.startswith("ProxyCommand=")), "")
+    words = re.findall(r"'([^']*)'", pc)          # each word single-quoted (ssh hands the line to /bin/sh)
+    check("fill a computer through its provider's tunnel: ssh's ProxyCommand is the pinned program, through the vault",
+          r.returncode == 0 and c["user"] == "mcfill" and "mcfill@spritevm" in c["argv"]
+          and pc == "ProxyCommand=" + " ".join(f"'{w}'" for w in words) and len(words) == 4 + len(targs)
+          and os.path.realpath(words[0]) == os.path.realpath(BIN) and words[1:3] == ["_tunnel", "--"]
+          and os.path.realpath(words[3]) == os.path.realpath(tunnel_prog) and words[4:] == targs
+          and "HostKeyAlias=mcomp-spritevm" in c["argv"] and c["argv"].count("ProxyCommand=none") == 0, (r.stdout, pc))
+    n = len(calls())
+    open(tunnel_prog, "a").write("# changed\n")          # the tunnel program isn't the one pinned at bind any more
+    r = client("fill", "web-login", "--vm", "spritevm", "--field", "password")
+    check("...its tunnel program changed since bind: refused, nothing sent, bind again",
+          r.returncode == 2 and "isn't the one pinned at bind" in js(r).get("reason", "") and len(calls()) == n, r.stdout)
     n = len(calls())
     open(ident, "w").write("b" * 64 + "\n")          # the computer of that name was deleted and made again
     r = client("fill", "web-login", "--vm", "remotevm", "--field", "password")

@@ -1765,7 +1765,8 @@ CLAIMS = [
      and 'permitopen="127.0.0.1:5900"' in raw("lib/cloud/guest.py")),
     ("SECURITY.md", r"A provider's computer gets a host key made\s+on your Mac, given to cloud-init and pinned before the first connection",
      lambda m: 'ssh-keygen -q -t ed25519 -N \'\' -C "mcomp-$VM_NAME-host" -f "$SSH_DIR/hostkey"' in raw("scripts/remote-build.sh")
-     and raw("scripts/remote-build.sh").index('> "$KNOWN_HOSTS"') < raw("scripts/remote-build.sh").index("remote_py create")
+     and (lambda made: made.index('> "$KNOWN_HOSTS"') < made.index("remote_py create"))(
+         raw("scripts/remote-build.sh").split('elif [ "$KIND" = made ]; then', 1)[1])
      and "StrictHostKeyChecking=yes" in fn_src("scripts/lib.sh", "ssh_base")),
     ("SECURITY.md", r"`lib/remote.py`, the one program that calls OCI, is started with\s+them, and nothing else metacomputer starts is",
      lambda m: all(raw(f).index('do export -n "$mc_k"; done') < raw(f).index(first) for f, first in (
@@ -2210,6 +2211,53 @@ CLAIMS = [
     ("docs/commands.md", r"A plugin you turned off stays off, and the install leaves the rest of Claude Code's setup as it is: it adds no MCP server then",
      lambda m: re.search(r"\n +2\) # turned off: left so, and so is everything else of Claude Code's\n[^\n]*\n[^\n]*;;\n",
                          raw("install.sh")) is not None),
+    # Fly Sprites (docs/sprites.md, SECURITY.md "Fly Sprites"): the promises its code keeps.
+    ("SECURITY.md", r"run in private mount namespaces where `hide-sprite-api` mounts an empty tmpfs over `/\.sprite` before the program starts",
+     lambda m: "mount -t tmpfs" in raw("provisioning/sprite/rootfs/opt/metacomputer/sprite/hide-sprite-api")
+     and raw("provisioning/sprite/rootfs/opt/metacomputer/sprite/hide-sprite-api").rstrip().endswith('exec "$@"')
+     and all("exec unshare -m --propagation private -- /opt/metacomputer/sprite/hide-sprite-api" in
+             raw(f"provisioning/sprite/rootfs/opt/metacomputer/sprite/{svc}") for svc in ("svc-xvfb", "svc-desktop", "svc-sshd"))
+     and '/opt/metacomputer/sprite/services sshd' in raw("provisioning/sprite/bootstrap.sh")),
+    ("SECURITY.md", r"With no rules Fly enforces nothing, so metacomputer always sets one",
+     lambda m: 'kind, _ = a.set_policy(s["VM_NAME"], cloud_sprites.rules_for("internet"))' in raw("lib/remote.py")
+     and 'remote_py egress --vm "$VM_NAME" --set "$want_egress"' in raw("scripts/remote-build.sh")
+     and 'return [{"domain": "*", "action": "deny"}]' in raw("lib/cloud/sprites.py")
+     and "if not names or len(names) > MAX_NAMES" in raw("lib/cloud/sprites.py")),
+    ("SECURITY.md", r"metacomputer runs it with `HOME`, `PATH` and `LANG` only, never reads or prints the token, and runs `sprite exec` with `--no-port-forward`",
+     lambda m: 'return {"HOME": os.environ.get("HOME") or os.path.expanduser("~"), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",' in raw("lib/spritecli.py")
+     and 'env=self.env())' in raw("lib/spritecli.py") and '"exec", "--no-port-forward", "--"' in raw("lib/spritecli.py")
+     and "exec --no-port-forward" not in raw("scripts/remote-build.sh")),
+    ("SECURITY.md", r"Every tunnel runs through a wrapper that ends it when ssh goes, and leaves ssh's process group first",
+     lambda m: "    leave_group()\n    return run(argv[1:])" in raw("lib/proxywrap.py") and "os.setsid()" in raw("lib/proxywrap.py")
+     and "_ = setsid()" in raw("vault/Guest.swift") and "WRAPPER = (sys.executable, os.path.join(LIB, \"proxywrap.py\"))" in raw("lib/remote.py")),
+    ("SECURITY.md", r"The vault pins Fly's `sprite` command \(path and contents\) and the tunnel's arguments at `secrets bind`, runs it through itself \(`mcomp-vault _tunnel`\), and refuses a command that changed since",
+     lambda m: "guard let have = fileSHA256(prog), have == want else" in raw("vault/Guest.swift")
+     and "if let why = tunnelProblem(t.binding) { return (why, true) }" in raw("vault/Guest.swift")
+     and '([me, "_tunnel", "--", prog] + (b.tunnel_args ?? []))' in raw("vault/Guest.swift")
+     and 'tunnel_program: tunnelProgram, tunnel_sha256: tunnelSHA, tunnel_args: tunnelArgs' in raw("vault/Commands.swift")),
+    ("docs/sprites.md", r"Anything that widens what the computer can reach \(adding names to a list in force, a list where `EGRESS=off`, `net clear` or `net egress internet` with a list in force\) runs only at your own terminal",
+     lambda m: raw("lib/remote.py").count("owners.at_user_terminal((0, 2))") >= 3
+     and 'widens = kind in ("off", "none", "other") or (kind == "allowlist" and not set(new) <= set(have))' in raw("lib/remote.py")),
+    ("docs/sprites.md", r"Addresses can't be listed: only names",
+     lambda m: not __import__("cloud.sprites").sprites.DOMAIN.fullmatch("10.0.0.1")
+     and not __import__("cloud.sprites").sprites.DOMAIN.fullmatch("169.254.169.254")
+     and __import__("cloud.sprites").sprites.DOMAIN.fullmatch("example.com") is not None),
+    ("docs/sprites.md", r"sshd listens on the Sprite's own loopback, by number",
+     lambda m: "ListenAddress 127.0.0.1\nListenAddress ::1" in raw("provisioning/sprite/rootfs/etc/ssh/sshd_config.d/05-metacomputer-sprite.conf")
+     and "printf '127.0.0.1\\n' > /etc/metacomputer/vnc-listen" in raw("provisioning/guest/provision.sh")),
+    ("docs/sprites.md", r"The browsers' own DNS over HTTPS is locked off",
+     lambda m: '.policies.DNSOverHTTPS = {"Enabled": false, "Locked": true}' in raw("provisioning/guest/provision.sh")
+     and '{"DnsOverHttpsMode": "off"}' in raw("provisioning/guest/provision.sh")),
+    ("docs/sprites.md", r"one that exists already in the organization is refused \(metacomputer never takes over a Sprite it didn't make\)",
+     lambda m: 'if self.cli.info(org, sprite) is not None:' in raw("lib/cloud/sprites.py")
+     and 'if cur is not None and cur.get("id") != st["instance"]:' in raw("lib/cloud/sprites.py")
+     and "return cur if made >= float(st.get(\"launch_t\") or 0) - 5 else None" in raw("lib/remote.py")),
+    ("SECURITY.md", r"Fly refuses raw IP addresses \(an address is let through only after an allowed name resolved to it\), private ranges, the metadata service and Fly's own private network",
+     lambda m: '"outside_egress": {"enforced": True, "private_ranges": True, "metadata": True, "off": True}' not in raw("lib/cloud/sprites.py")
+     and 'outside_egress={"enforced": True, "private_ranges": True, "metadata": True, "off": True}' in raw("lib/cloud/sprites.py")),
+    ("docs/sprites.md", r"The hub sends keys, typing and pixel clicks in the foreground \(the desktop's own pointer and keyboard, XTEST\) and says so in the result; clicks and actions on an element \(`element_token`\) still go through accessibility",
+     lambda m: 'and not a.get("element_token")' in raw("lib/mcp_hub.py") and 'self.foreground_only = self.env.get("MCOMP_BACKGROUND_INPUT", "on") == "off"' in raw("lib/mcp_hub.py")
+     and "sprites) printf off" in raw("scripts/lib.sh") and 'input={"background": False' in raw("lib/cloud/sprites.py")),
 ]
 
 
