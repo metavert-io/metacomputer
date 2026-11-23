@@ -39,7 +39,8 @@ LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TD = tempfile.mkdtemp(prefix="mcomp-events-test-")
 ENV = {"MCOMP_EVENTS_DIR": os.path.join(TD, "cfg"), "MCOMP_EVENTS_SPOOL": os.path.join(TD, "spool"),
        "MCOMP_LOG_DIR": os.path.join(TD, "logs"), "MCOMP_RUN_DIR": os.path.join(TD, "run"),
-       "MCOMP_VM_NAME": "testvm", "MCOMP_SSH_DIR": os.path.join(TD, "ssh"), "MCOMP_DRIVER_MODE": "standard"}
+       "MCOMP_VM_NAME": "testvm", "MCOMP_SSH_DIR": os.path.join(TD, "ssh"), "MCOMP_DRIVER_MODE": "standard",
+       "MCOMP_SESSIONS_DIR": os.path.join(TD, "sessions")}
 os.environ.update(ENV)
 for k in ("MCOMP_ACTION_LOG", "MCOMP_CONFIG"):
     os.environ.pop(k, None)

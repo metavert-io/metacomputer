@@ -13,7 +13,8 @@ or the tasks you give it send it, as described below.
 
 - **The virtual computer** and everything in it: files, browser profiles, the sites you sign in to there.
 - **Records metacomputer keeps:** recordings and screenshots, the action log, task folders, the event spool, its
-  settings, and the lessons `metacomputer learn` proposes. `learn` reads your Claude Code and Codex session files
+  settings, which computer each coding-agent session uses (process ids, VM names and settings paths, removed once the
+  session ends), and the lessons `metacomputer learn` proposes. `learn` reads your Claude Code and Codex session files
   on your Mac and keeps only structured fields (classes of mistakes, counts, tool and app names), never their text.
 - **The secrets vault:** the passwords, one-time-code seeds and API keys you add, encrypted on your Mac. The vault
   types a value into a page in the VM, or uses a key for a request the VM makes through its proxy; it never gives a

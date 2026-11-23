@@ -170,6 +170,16 @@ def fill_types():
 VC, VCG = "lib/vm_claude.py", "lib/vm_claude_guest.sh"
 
 
+def py_fn_body(text, name):
+    """One method's or function's source in text (from its def to the next def at the same or a lower indent)."""
+    m = re.search(r"^( *)def " + re.escape(name) + r"\(", text, re.M)
+    if not m:
+        return ""
+    rest = text[m.end():]
+    end = re.search(r"^ {0,%d}def " % len(m.group(1)), rest, re.M)
+    return text[m.start():m.end() + (end.start() if end else len(rest))]
+
+
 def py_top_fn(rel, name):
     """One top-level function of a Python file, as written (to the next top-level def)."""
     c = raw(rel)
@@ -1580,6 +1590,91 @@ CLAIMS = [
      lambda m: 'on_resolve() {' in raw("bin/metacomputer") and '|| exit 1' in fn_src("bin/metacomputer", "on_resolve")
      and raw("bin/metacomputer").index("*) on_resolve ;;") < raw("bin/metacomputer").index("*) vm_target_check ;; esac")
      and "PROVIDERS = cloud.providers()" in raw("lib/placement.py")),
+    # An agent session's computer (lib/sessionvm.py, bin/metacomputer session_guard, lib/mcp_lazy.py)
+    ("docs/commands.md", r"a command that names no computer and would act on another computer than\s+the one the session holds refuses before it does anything",
+     lambda m: "3) exit 1 ;;" in fn_src("bin/metacomputer", "session_guard")
+     and raw("bin/metacomputer").index("*) vm_target_check ;; esac") < raw("bin/metacomputer").index('*) session_guard "$@" ;;')
+     < raw("bin/metacomputer").index("test) vm_notice ;;") < raw("bin/metacomputer").index("  start)      do_start")
+     and "return REFUSED" in py_top_fn("lib/sessionvm.py", "guard")),
+    ("docs/commands.md", r"\*\*Not checked:\*\* a command that names its computer \(`--vm NAME`, `MCOMP_VM`, `MCOMP_CONFIG`, or a caller that pinned\s+it\)",
+     lambda m: '[ -z "$MC_VM_SAID$MC_ENV_SAID${MCOMP_EXPECT_VM:-}" ] || return 0' in fn_src("bin/metacomputer", "session_guard")
+     and 'MC_ENV_SAID="$MC_ENV_VM$MC_ENV_CONFIG"' in raw("bin/metacomputer")),
+    ("docs/commands.md", r"Each names the session's process and the one that holds the computer\s+\(the MCP server, or the claim's holder\) by process id and start time, and counts only while those same processes are\s+there",
+     lambda m: 'proc_start(h) != rec["holder_start"]' in py_top_fn("lib/sessionvm.py", "_stands")
+     and "agent in owners.ancestors(h, table)" in py_top_fn("lib/sessionvm.py", "_stands")
+     and 'rec.get("claude_pid") == agent and rec.get("bridge_pid") == holder' in py_top_fn("lib/sessionvm.py", "_session_claim")
+     and 'if rec["agent_start"] == me and _stands(rec, agent, table):' in py_top_fn("lib/sessionvm.py", "held")
+     and "kp_proc.p_starttime" in py_top_fn("lib/sessionvm.py", "proc_start")),
+    ("docs/commands.md", r"A claim keeps the session's start time from when its holder took it \(a hub's lease for calls a session left\s+running keeps it through every refresh\), so a later process that reuses the pid isn't tied to it; a\s+claim without one \(written before they were kept\) can't be shown to be any session's, so it doesn't\s+count, and nothing gives it one later",
+     lambda m: "_session_start" not in py_top_fn("lib/owners.py", "write_claim") and "proc_start(" not in py_top_fn("lib/owners.py", "write_claim")
+     and '"claude_start": who[2] if len(who) > 2 else None' in py_top_fn("lib/owners.py", "claim_for_shell")
+     and '"claude_start": client.claude_start, "agent": client.agent,' in raw("lib/mcp_hub.py")
+     and '"claude_start": lease.get("claude_start"),' in raw("lib/mcp_hub.py")
+     and '"claude_start": c.get("claude_start")' in raw("lib/vm_claude.py") and '"claude_start": start})' in raw("lib/vm_claude.py")
+     and "a_start, h_start = agent_start, proc_start(holder_pid)" in py_top_fn("lib/sessionvm.py", "note_claim")
+     and 'rec.get("claude_start") == agent_start' in py_top_fn("lib/sessionvm.py", "_session_claim")),
+    ("docs/commands.md", r"checked again for every write, which goes through the\s+folder opened as the one checked",
+     lambda m: "dfd = _open_store(d)" in py_top_fn("lib/sessionvm.py", "_write")
+     and "(now.st_dev, now.st_ino) == (st.st_dev, st.st_ino)" in py_top_fn("lib/sessionvm.py", "_open_store")
+     and "dir_fd=dfd)" in py_top_fn("lib/sessionvm.py", "_write")),
+    ("docs/commands.md", r"The folder must be this account's and writable by no one else \(permissions are never changed to make it so",
+     lambda m: "chmod" not in raw("lib/sessionvm.py")
+     and "st.st_uid != os.getuid() or st.st_mode & 0o022" in py_top_fn("lib/sessionvm.py", "folder")
+     and "safedelete.check(d, safedelete.protected())" in py_top_fn("lib/sessionvm.py", "store_ok")
+     and "_STORE_CHECKED" not in raw("lib/sessionvm.py") and "store_ok(d)" in py_top_fn("lib/sessionvm.py", "_open_store")
+     and "dfd = _open_store(d)" in py_top_fn("lib/sessionvm.py", "_write")
+     and "src_dir_fd=dfd, dst_dir_fd=dfd" in py_top_fn("lib/sessionvm.py", "_write")),
+    ("docs/commands.md", r"Only files that are records written here are ever\s+removed \(those of sessions that have ended, or that no longer stand\), through `lib/safedelete.py`",
+     lambda m: "safedelete.remove_records(d, names, FILE_RE)" in py_top_fn("lib/sessionvm.py", "_prune")
+     and "os.remove(" not in raw("lib/sessionvm.py") and raw("lib/sessionvm.py").count("os.unlink(") == 1
+     and "os.unlink(tmp, dir_fd=dfd)" in py_top_fn("lib/sessionvm.py", "_write")
+     and "continue                                # not a record of this module's" in py_top_fn("lib/sessionvm.py", "held")),
+    ("docs/commands.md", r"in whatever order they come \(`security --json apply`\s+applies, so it's checked as acting\)",
+     lambda m: 'all(x == "--json" for x in a)' in py_top_fn("lib/sessionvm.py", "_security")
+     and 'apply) apply=1 ;;' in fn_src("bin/metacomputer", "do_security")),
+    ("docs/commands.md", r"When the process table can't be read, the command goes on and says so",
+     lambda m: "owners.ps_table(strict=True)" in py_top_fn("lib/sessionvm.py", "guard")
+     and "going on" in py_top_fn("lib/sessionvm.py", "guard") and "0|2) ;;" in fn_src("bin/metacomputer", "session_guard")),
+    ("docs/commands.md", r"Refused while a call is still running, for a name this checkout has no settings for, and for a computer with `MCP_HUB=off` other than the one the session started on",
+     lambda m: "busy = len(self.outstanding)" in raw("lib/mcp_lazy.py")
+     and '["--vm", name, "hub", "env", "--json"], self.base_env()' in raw("lib/mcp_lazy.py")
+     and 'if mcp_hub.mode(env) == "off":' in raw("lib/mcp_lazy.py")
+     and raw("lib/mcp_lazy.py").index('elif name == start.get("vm"):') < raw("lib/mcp_lazy.py").index('if mcp_hub.mode(env) == "off":')),
+    ("docs/commands.md", r"only what that connection holds, so a claim a later connection in the same name wrote stays, and the MCP server waits for it before it exits",
+     lambda m: 'if not isinstance(rec, dict) or rec.get("conn") != conn:' in py_top_fn("lib/owners.py", "drop_claim")
+     and "owners.drop_claim(client.peer_pid, self.conn_id(client))" in raw("lib/mcp_hub.py")
+     and raw("lib/mcp_hub.py").count('extra={"conn": self.conn_id(client)') == 2
+     and 'sid=client.sid, extra={"conn": self.conn_id(client)})' in raw("lib/mcp_hub.py")
+     and not re.search(r"owners\.drop_claim\((?:lease\[\"drop_pid\"\]|l\[\"drop_pid\"\]|client\.peer_pid)\)", raw("lib/mcp_hub.py"))
+     and "self.retiring.append(t)" in raw("lib/mcp_lazy.py")
+     and raw("lib/mcp_lazy.py").index("for t in list(self.retiring):") < raw("lib/mcp_lazy.py").index("        os._exit(0)\n")),
+    ("docs/commands.md", r"Refused too when the hub of the computer it would leave is from an earlier metacomputer \(its hello doesn't say `conn_claims`",
+     lambda m: 'FEATURES = ("conn_claims",)' in raw("lib/mcp_hub.py") and '"features": list(FEATURES)' in raw("lib/mcp_hub.py")
+     and '"conn_claims" not in (info.get("features") or [])' in raw("lib/mcp_lazy.py")
+     and "self.legacy_hubs[k] = (pid, sessionvm.proc_start(pid)" in raw("lib/mcp_lazy.py")
+     and "elif self.legacy_hub(cur) is None:" in raw("lib/mcp_lazy.py")
+     and raw("lib/mcp_lazy.py").index("refused = self.older_hub_refusal(cur)") < raw("lib/mcp_lazy.py").index("                    self.switch_to(env)")
+     and "self.legacy_hubs[k] = (pid" in py_fn_body(raw("lib/mcp_lazy.py"), "older_hub_refusal")
+     and "retire" not in py_fn_body(raw("lib/mcp_lazy.py"), "older_hub_refusal") and "hub stop`" in raw("lib/mcp_lazy.py")
+     and "stop_hub" not in raw("lib/mcp_lazy.py")),
+    ("docs/commands.md", r"A signal only asks the MCP server to end: it ends from its own main loop, once any switch or close under way is done, waiting for the computer it left; from then on it opens no connection and answers new calls with an error",
+     lambda m: "signal.signal(signal.SIGTERM, self.on_signal)" in raw("lib/mcp_lazy.py")
+     and "def on_signal(self, *_):" in raw("lib/mcp_lazy.py") and "        self.stop_requested = True\n\n    def finish" in raw("lib/mcp_lazy.py")
+     and "while self.switching:\n                self.switch_cv.wait()" in raw("lib/mcp_lazy.py")
+     and "while not self.stop_requested:" in raw("lib/mcp_lazy.py") and "request_shutdown" not in raw("lib/mcp_lazy.py")
+     and raw("lib/mcp_lazy.py").count("self.retire(old)") == 1
+     and "            if self.stopping:\n                return ENDING" in raw("lib/mcp_lazy.py")
+     and "            c, self.conn = self.conn, None" in raw("lib/mcp_lazy.py")
+     and "            if self.stopping:\n                if msg.get(\"id\") is not None" in raw("lib/mcp_lazy.py")),
+    ("docs/commands.md", r"the command to use for it in the shell: bare when it does, else one that names it \(`metacomputer --vm NAME`, or its own `MCOMP_CONFIG` file when its settings are outside this checkout\)",
+     lambda m: "is_default = bool(bare) and same_computer(bare, new)" in raw("lib/mcp_lazy.py")
+     and 'sessionvm.naming(new) if new.get("lab")' in raw("lib/mcp_lazy.py")
+     and 'for k in ("vm", "ssh_port", "run_dir")' in py_top_fn("lib/mcp_lazy.py", "same_computer")
+     and 'return f"MCOMP_CONFIG={shlex.quote(comp[\'config\'])} {cli_of(comp[\'lab\'])}"' in py_top_fn("lib/sessionvm.py", "naming")),
+    ("docs/commands.md", r"The computer before lets go of the session \(its claim, its driver session\), as when the session ends",
+     lambda m: "old.retired = True" in raw("lib/mcp_lazy.py") and 'target=old.close, kwargs={"keep_for_handoff": True}' in raw("lib/mcp_lazy.py")
+     and "self.hand_over_claim(client, running, drop_own=client.holder == client.peer_pid)" in raw("lib/mcp_hub.py")
+     and 'client.holder = (client.claude or parent or client.peer_pid) if kind == "call" else client.peer_pid' in raw("lib/mcp_hub.py")),
     ("SECURITY.md", r"Its name, baseline \(always `NAME-baseline`\), previous baseline and checkpoint names may not be another VM's",
      lambda m: 'BASELINE_NAME must be $VM_NAME-baseline' in raw("scripts/lib.sh") and "def check_identity" in raw("lib/vms.py")
      and 'raise Refused(f"the name {n} is {owner}' in raw("lib/vms.py")),

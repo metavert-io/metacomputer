@@ -703,7 +703,7 @@ ports; its SSH keys, runtime folders, vault folder and event spool are fixed by 
 name, beside the main VM's, so `--vm NAME` needs nothing else. A bare `metacomputer` means your default computer:
 `config/local.env`'s VM unless `metacomputer default NAME` chose another (a default that doesn't resolve refuses,
 never another VM), and `MCOMP_CONFIG=FILE` still works; since v0.3.1 a file for another VM must set its own
-`SSH_DIR`, `RUN_DIR` and `LOG_DIR`, or building, resetting or deleting that VM is refused. Commands that change a VM say which one first,
+`SSH_DIR`, `RUN_DIR` and `LOG_DIR`, or building, resetting or deleting that VM is refused. From Claude Code or Codex, a command that names no computer refuses when it would act on another one than the session's MCP tools (the agent names it with `--vm`, or moves its tools with the MCP tool `select_computer`; [commands](docs/commands.md#an-agent-sessions-computer)). Commands that change a VM say which one first,
 and anything unclear is refused rather than guessed: a checkout with no settings of
 its own, with other VMs in the runner, makes you say which with `--vm`. `vm delete`
 never takes the VM in use without `--force`, and keeps volumes and the vault folder

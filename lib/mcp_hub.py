@@ -80,6 +80,11 @@ LAB = owners.LAB
 MCOMP_CLI = os.path.join(LAB, "bin", "metacomputer")
 SEED_CACHE = os.path.join(LAB, "config", "driver-mcp-cache.json")
 PROTOCOL = 1                        # the hub's hello
+# What this hub does that an earlier one didn't, said in its hello's answer (clients that need one check for it):
+# conn_claims: each claim it writes carries the client connection that wrote it, and a client that goes drops only its
+# own (owners.drop_claim(pid, conn)), never one a later connection in the same name wrote (lib/mcp_lazy.py's
+# select_computer needs it to leave a computer and come back).
+FEATURES = ("conn_claims",)
 MAX_CLIENT_MSG = 8 << 20            # a client's message (requests are small; run_script is at most 64 KiB)
 MAX_UPSTREAM_MSG = 64 << 20         # a message from the driver (screenshots are a few MB)
 MAX_BACKLOG_MSGS = 256              # what may wait for one client before it's disconnected
@@ -520,6 +525,7 @@ class Client:
         self.kind, self.cwd, self.session, self.auto_session = "unknown", None, None, None
         self.claude, self.mine, self.holder, self.sid = None, set(), peer_pid, None
         self.agent = None           # "Claude Code" or "Codex": the agent session process self.claude is
+        self.claude_start = None    # that process's start time when it connected (lib/sessionvm.py proc_start)
         self.hello = False
         self.has_claim = False
         self.expired = False            # attached when a bounded session ended: reconnect to start a new one
@@ -929,6 +935,8 @@ class Hub:
             client.mine = set(owners.ancestors(client.peer_pid, table)) if client.peer_pid else set()
             client.claude = owners.claude_of(client.peer_pid, table) if client.peer_pid else None
             client.agent = owners.agent_kind(table.get(client.claude, (None, ""))[1]) if client.claude else None
+            # Which process that session is, from now on: its claims and a lease after it's gone keep this start time.
+            client.claude_start = owners._session_start(client.claude) if client.claude else None
             client.sid = owners.sid_of(client.peer_pid) if client.peer_pid else None
             parent = table.get(client.peer_pid, (None, ""))[0]
         except Exception:
@@ -945,7 +953,8 @@ class Hub:
         client.send({"jsonrpc": "2.0", "id": mid, "result": {
             "hub_pid": self.pid, "client": client.cid, "mode": "local" if self.local else "hub",
             "vm": self.settings.get("vm_name"), "connected": self.connected(),
-            "session": client.session or client.auto_session, "coord_guard": "on" if self.coord_on else "off"}})
+            "session": client.session or client.auto_session, "coord_guard": "on" if self.coord_on else "off",
+            "features": list(FEATURES)}})
         if live and client.tools_hash and client.tools_hash != tool_names_hash(self.live_tools):
             client.tools_hash = tool_names_hash(self.live_tools)
             client.send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
@@ -1089,20 +1098,22 @@ class Hub:
                         keys.add(key)
                 if keys:
                     tools = sorted({str(t) for k, t in running if k in keys and t})
-                    lease = {"keys": keys, "tool": ", ".join(tools)[:60] or "a call", "claude": client.claude, "agent": client.agent,
+                    lease = {"keys": keys, "tool": ", ".join(tools)[:60] or "a call", "claude": client.claude,
+                             "claude_start": client.claude_start, "agent": client.agent,
                              "cwd": client.cwd, "client_pid": client.peer_pid, "kind": client.kind,
                              "t0": time.monotonic(), "written": False, "refreshed": 0.0,
-                             "drop_pid": client.peer_pid if drop_own and client.peer_pid != self.pid else None}
+                             "drop_pid": client.peer_pid if drop_own and client.peer_pid != self.pid else None,
+                             "drop_conn": self.conn_id(client)}
                     self.leases[client.cid] = lease
 
             def swap():
                 if lease:
                     self._write_lease(lease)        # first, so there's no moment without a claim
                     if lease["written"] and lease["drop_pid"]:
-                        owners.drop_claim(lease["drop_pid"])
+                        owners.drop_claim(lease["drop_pid"], lease["drop_conn"])
                         lease["drop_pid"] = None    # else kept, and dropped once a later write works
                 elif drop_own:
-                    owners.drop_claim(client.peer_pid)
+                    owners.drop_claim(client.peer_pid, self.conn_id(client))   # its own claim, not a later one
             try:
                 with owners.lock():
                     swap()
@@ -1120,6 +1131,7 @@ class Hub:
         try:
             owners.write_claim(self.pid, lease["claude"], lease["cwd"] or os.getcwd(), lease["tool"], time.time(),
                                kind="lease", extra={"client_pid": lease["client_pid"], "via": lease["kind"],
+                                                    "claude_start": lease.get("claude_start"),
                                                     **({"agent": lease["agent"]} if lease.get("agent") else {})})
             lease["written"], lease["refreshed"] = True, time.monotonic()
         except OSError as e:
@@ -1272,7 +1284,7 @@ class Hub:
             for l in leases:
                 l["written"], l["refreshed"] = True, newest["refreshed"]
                 if l["drop_pid"]:
-                    owners.drop_claim(l["drop_pid"])
+                    owners.drop_claim(l["drop_pid"], l["drop_conn"])
                     l["drop_pid"] = None
 
     def _pend_finished(self, key, pend):
@@ -1306,7 +1318,7 @@ class Hub:
                         return False
                 owners.drop_claim(self.pid)
                 if lease.get("drop_pid"):
-                    owners.drop_claim(lease["drop_pid"])
+                    owners.drop_claim(lease["drop_pid"], lease.get("drop_conn"))
                 return True
             try:
                 with owners.lock():
@@ -1787,6 +1799,12 @@ class Hub:
             res["structuredContent"] = {hub_notes.NOTE_KEY: text, **structured}
         self.reply(client, msg, res)
 
+    def conn_id(self, client):
+        """One client connection's own identity, for the claim it writes: this core's process and the client's number
+        (Client numbers are never reused in a process, across cores too), so a connection that's gone releases only
+        its own claim, never one a later connection in the same name wrote."""
+        return f"{self.pid}.{client.cid}"
+
     def client_info(self, client):
         return {"client": client.cid, "kind": client.kind, "pid": client.peer_pid, "claude_pid": client.claude,
                 "agent": client.agent, "cwd": client.cwd, "session": client.session or client.auto_session}
@@ -2114,10 +2132,11 @@ class Hub:
             # that ran it, kept for the activity window after the last call even when that shell is gone,
             # and the same controller for later calls from the same terminal session (owners.claims()).
             owners.write_claim(client.holder, None, client.cwd or os.getcwd(), tool, started, kind="shell",
-                               sid=client.sid)
+                               sid=client.sid, extra={"conn": self.conn_id(client)})
         else:
             owners.write_claim(client.holder, client.claude, client.cwd or os.getcwd(), tool, started,
-                               extra={"agent": client.agent} if client.agent else None)
+                               extra={"conn": self.conn_id(client), "claude_start": client.claude_start,
+                                      **({"agent": client.agent} if client.agent else {})})
         client.has_claim = True
         if not existed:
             self.event(client, "lifecycle", "controller_connected",

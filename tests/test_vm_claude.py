@@ -265,7 +265,8 @@ def env_for(td, **extra):
                MCOMP_VM_NAME="testvm", MCOMP_GUEST_USER="cua", MCOMP_SSH_PORT="1", XDG_RUNTIME_DIR=os.path.join(td, "xdg"),
                MCOMP_SELF=os.path.join(td, "fake-vault"), FAKE_VAULT_DIR=os.path.join(td, "vault"),
                FAKE_CLAUDE_SRC=os.path.join(td, "fake-claude"), MCOMP_SH_GRACE_S="5", MCOMP_KEEPER_POLL_S="1",
-               FAKE_PY=sys.executable, FAKE_CLAUDE_PY=CLAUDE_PY)
+               FAKE_PY=sys.executable, FAKE_CLAUDE_PY=CLAUDE_PY,
+               MCOMP_SESSIONS_DIR=os.path.join(td, "sessions"))   # lib/sessionvm.py's records: never the account's
     env.update({k: str(v) for k, v in extra.items()})
     return env
 

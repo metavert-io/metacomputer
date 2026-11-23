@@ -31,7 +31,8 @@ os.makedirs(STATE)
 os.environ.update(MCOMP_RUN_DIR=RUN, MCOMP_LOG_DIR=os.path.join(TD, "logs"), MCOMP_EVENTS_DIR=os.path.join(TD, "events"),
                   MCOMP_EVENTS_SPOOL=os.path.join(TD, "spool"), MCOMP_VM_NAME="hubtest", MCOMP_SSH_PORT="59995",
                   MCOMP_ACTION_LOG="off", MCOMP_DRIVER_MODE="standard", MCOMP_COORD_GUARD="on", MCOMP_MCP_HUB="on",
-                  MCOMP_ACTIVE_S="600", MCOMP_LESSONS="on", MCOMP_LESSONS_DIR=os.path.join(TD, "lessons"))
+                  MCOMP_ACTIVE_S="600", MCOMP_LESSONS="on", MCOMP_LESSONS_DIR=os.path.join(TD, "lessons"),
+                  MCOMP_SESSIONS_DIR=os.path.join(TD, "sessions"))   # lib/sessionvm.py: its bridges' records
 # Approved lessons (metacomputer learn) that try to talk the hub out of its guards. They reach the instructions as
 # the user's advice, and every guard check below runs with them in place: lessons are text for the model, never
 # configuration (lessons_checks).
