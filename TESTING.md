@@ -394,6 +394,15 @@ The live path (a real VM elsewhere) is run by hand: `metacomputer --vm NAME buil
 environment. The vault's remote binding (its address, alias and the computer's identity, no gateway) is in
 `tests/test_secrets.py`.
 
+- `view --tunnel`, its output read through pipes by a program, returns once the tunnel is up (a stand-in ssh whose
+  background half keeps its output open); what ssh said is shown escaped and kept in a private log (0600 in a 0700
+  folder; a link or a hard link there is refused, a wider folder of this account's made 0700) that stops at 1 MB when
+  the background half prints 5 MB; a provider's tunnel (ssh without -f) is up once ssh listens on the port.
+- Oracle Cloud's groups, round 2: a group re-tagged for another operation while the create waited for it gets no
+  rule and nothing is launched; `cloud teardown` racing another Mac's new group (its look came first) refuses with
+  the group and the network left, and the network's deletion takes only groups its records name, still tagged for
+  that computer and operation.
+
 ## Places and providers: `tests/test_cloud_adapters.py`
 
 `python3 tests/test_cloud_adapters.py` (194 checks, a second) needs no VM and makes no network call.
@@ -499,6 +508,13 @@ and `sh -c ... -- --help` are the guest's and the script's own, never metacomput
 `scripts/`, `install.sh`, `get.sh` and every `lib/` program with a `__main__`, run on its own with `-h` and `--help`,
 calls nothing and writes nothing; those a person runs (`scripts/`, the installers, `lib/mcp_client.py`) print their
 usage and exit 0. A command added to the dispatch without rows in the table fails it.
+bin/metacomputer's table of options that take a value (`mc_value_options`) is checked against each command's own
+parser (the argparse parsers its programs build, vm_shell's, vm_claude's, mcomp_sdk's, each.py's, guest_put's, the
+vault's `parseArgs` sets, vm-commands.sh's and bin/metacomputer's own), and so are the subcommands whose usage is asked
+for; after every such option `--help` is that option's value, after the value it asks for usage. And for every
+command and every option that takes a value, `OPT --help WORD` (WORD one that would act: `cancel`, `delete`,
+`teardown`, ...) acts on nothing: no call beyond the runner's lookups, and the vault only asked for its version or
+refusing an option as its command.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 

@@ -189,6 +189,20 @@ def basic_checks():
     r = run("guard")
     check("guard: exit 4 with the refusal", r.returncode == 4 and "Paused: the user has the computer" in r.stderr,
           (r.returncode, r.stderr))
+    # --help is usage and nothing else, wherever it comes: never an option's value followed by an action. Through
+    # bin/metacomputer's help shortcut (which passes on fixed words only) and handoff.py itself.
+    mc = os.path.join(LAB, "bin", "metacomputer")
+    for argv, via_mc in ((["--transport", "1", "--help", "cancel"], True),
+                         (["--transport", "1", "-h", "done", "--note", "x"], True),
+                         (["--transport", "2", "ssh", "--help", "cancel"], True),
+                         (["cancel", "--note", "--help"], False)):     # a value there: bin/metacomputer runs handoff
+        r = subprocess.run([mc, "handoff", *argv], env=env(), capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL) if via_mc else None
+        r2 = run(*argv, claude=None)
+        check(f"handoff {' '.join(argv)}: usage only ({'bin/metacomputer and ' if via_mc else ''}handoff.py), the "
+              "handoff still open", (not via_mc or (r.returncode == 0 and "usage:" in r.stdout))
+              and r2.returncode == 0 and "usage:" in r2.stdout and (owners.open_handoff() or {}).get("say") == SAY,
+              (r and (r.returncode, r.stdout[-200:], r.stderr[-300:]), r2.returncode, r2.stderr[-200:]))
     r = run("status", "--json")
     st = json.loads(r.stdout or "{}")
     check("status --json: open, with the instructions", st.get("open") and st["handoff"]["say"] == SAY, r.stdout)

@@ -753,6 +753,9 @@ def main(argv):
             print("vm_shell.py: --transport N WORD...", file=sys.stderr)
             return EXIT_USAGE
         transport, argv = argv[2:2 + n], argv[2 + n:]
+        if any(w in ("-h", "--help") for w in transport):     # never a word of the command that reaches the VM
+            print(USAGE)
+            return 0
     want_json = "--json" in argv
     try:
         o = parse(argv)

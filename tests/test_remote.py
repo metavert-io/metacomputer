@@ -2798,6 +2798,7 @@ class OracleStandIn:
         self.vnics = {}
         self.fail_rules = False
         self.full = set()
+        self.net_deleted = []     # the network's parts deleted (subnet, gateway, VCN)
         ns = types.SimpleNamespace
         st = self
 
@@ -2815,7 +2816,30 @@ class OracleStandIn:
 
         class Net:
             def list_vcns(self, compartment):
-                return [vcn] if compartment == st.compartment else []
+                return [vcn] if compartment == st.compartment and "vcn-1" not in st.net_deleted else []
+
+            def _part(self, rid):
+                if rid in st.net_deleted:
+                    raise OracleStandIn.ServiceError(404, "NotAuthorizedOrNotFound")
+                return ns(data=ns(id=rid, lifecycle_state="AVAILABLE"))
+
+            def delete_subnet(self, rid):
+                st.net_deleted.append(rid)
+
+            def delete_internet_gateway(self, rid):
+                st.net_deleted.append(rid)
+
+            def delete_vcn(self, rid):
+                st.net_deleted.append(rid)
+
+            def get_subnet(self, rid):
+                return self._part(rid)
+
+            def get_internet_gateway(self, rid):
+                return self._part(rid)
+
+            def get_vcn(self, rid):
+                return self._part(rid)
 
             def list_subnets(self, compartment, vcn_id=None):
                 return [ns(id="subnet-1", lifecycle_state="AVAILABLE")]
@@ -3058,6 +3082,54 @@ def oci_groups():
               "nothing else (the same-named group of another operation stays, rules unchanged)",
               made3 and made3 != theirs3 and o3.deleted == [made3] and theirs3 in o3.groups and not o3.touched(theirs3),
               (made3, o3.deleted, o3.rule_changes))
+        # 7. (round 2) The group is re-read by its id right before its first rule is written: one re-tagged for another
+        #    operation while the create waited for it gets no rule, the build stops, and the journal keeps its id.
+        o4 = OracleStandIn()
+        remote_mod.API_FACTORY = o4.sdk
+
+        def retag(*a, **k):                     # what happens to the group while the create waits for it
+            for g in o4.groups.values():
+                if g["freeform_tags"].get(oci.OP_TAG) == OP:
+                    g["freeform_tags"][oci.OP_TAG] = THEIRS
+        o4.oci.wait_until = retag
+        s4 = box("r2-retagged")
+        why = raised(remote_mod.cmd_create, s4, args(op=OP))
+        made4 = remote_mod.read_state(s4["RUN_DIR"]).get("made_nsg")
+        check("(OCI groups, round 2) a group re-tagged for another operation while the create waited for it: no rule "
+              "is written to it, nothing is launched, and its id stays in the journal",
+              why and not why.startswith("WRONG") and made4 in o4.groups and not o4.touched(made4) and not o4.instances,
+              (why, made4, o4.rule_changes, list(o4.instances)))
+        # 8. (round 2) Deleting metacomputer's network deletes only the groups this Mac's records name (read by id,
+        #    tagged for that computer and one of its operations). Another Mac's group made after cloud teardown looked
+        #    (the race no lock here covers) stops it, with nothing deleted: not the group, not the network.
+        o5 = OracleStandIn()
+        foreign = o5.plant("other", THEIRS)
+
+        def raced():                            # teardown's look for groups came before the other Mac made its own
+            s = o5.sdk()
+            s.nsg_names = lambda: []
+            return s
+        remote_mod.API_FACTORY = raced
+        why = raised(remote_mod.cmd_cloud, type("A", (), {"provider": "oci", "action": "teardown", "json": True,
+                                                         "org": None, "forget": None})())
+        check("(OCI groups, round 2) cloud teardown racing another Mac's new group: refused, the group and the network "
+              "left as they are", why and not why.startswith("WRONG") and foreign in o5.groups and not o5.deleted
+              and not o5.net_deleted, (why, o5.deleted, o5.net_deleted))
+        mine5 = o5.plant("box", OP)
+        o5.groups.pop(foreign)
+        why = raised(o5.sdk().delete_network, kind=Exception)
+        check("(OCI groups, round 2) ...nor a group of a computer of this Mac's that the call wasn't told about",
+              why and mine5 in o5.groups and not o5.net_deleted, (why, o5.deleted, o5.net_deleted))
+        sdk5 = o5.sdk()
+        o5.groups[mine5]["freeform_tags"][oci.OP_TAG] = THEIRS
+        why = raised(sdk5.delete_network, [(mine5, "box", [OP])], kind=Exception)
+        check("(OCI groups, round 2) ...nor a recorded group now tagged for another operation",
+              why and mine5 in o5.groups and not o5.net_deleted, (why, o5.deleted, o5.net_deleted))
+        o5.groups[mine5]["freeform_tags"][oci.OP_TAG] = OP
+        done = quiet(sdk5.delete_network, [(mine5, "box", [OP])])
+        check("(OCI groups, round 2) ...and a group the records name, still tagged for that computer and operation, "
+              "goes with the network", done is True and mine5 not in o5.groups and "vcn-1" in o5.net_deleted,
+              (done, o5.deleted, o5.net_deleted))
         # 7. A computer made by an earlier version: its recorded group carries no operation. Rules: refused (delete it
         #    and make it again); vm delete removes exactly that recorded group, and never another operation's.
         o4 = OracleStandIn()
@@ -4065,17 +4137,36 @@ set -u
 die() { echo "DIE: $*" >&2; exit 1; }
 ok() { echo "OK: $*"; }; warn() { echo "WARN: $*" >&2; }; say() { echo "SAY: $*"; }
 vm_running() { return 0; }; ssh_base() { SSH_ARGS=(-p 2222 box); }; mc_tilde() { printf '%s' "$1"; }
-MC_REMOTE=1 TRANSPORT=ssh VM_NAME=box VNC_PORT=$PORT
+MC_REMOTE=1 TRANSPORT=${TRANSPORT_KIND:-ssh} VM_NAME=box VNC_PORT=$PORT
+'''
+
+# The tunnel's ssh, standing in: it says something while it connects; with -f (`ssh -f`) it leaves a background half
+# that keeps its output open (and, with FLOOD, prints 5 MB) and exits 0; without -f (a provider's tunnel) it listens on
+# the port itself, as ssh's forward does, and stays.
+VT_SSH = r'''#!/bin/bash
+echo "ssh $*" >> "$CALLS"
+printf "Warning: the tunnel \033[31msays\033[0m this\n" >&2
+if [ "${SSH_FAILS:-0}" = 1 ]; then echo "Permission denied (publickey)." >&2; exit 255; fi
+case " $* " in
+  *" -f "*) if [ "${FLOOD:-0}" = 1 ]; then ( head -c 5000000 /dev/zero | tr '\0' 'x'; echo; echo FLOOD-END; sleep 2 ) &
+            else ( sleep 15 ) & fi
+            exit 0 ;;
+  *) exec "$PY" -c 'import socket, sys, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen(1); time.sleep(15)' "$PORT" ;;
+esac
 '''
 
 
 def view_tunnel_pipes():
-    """`view --tunnel` to a computer reached over SSH, its output read through pipes by a program (an agent's tool call,
-    a script): it returns as soon as the tunnel is up, not when the tunnel closes. `ssh -f` stays in the background with
-    the descriptors it started with; a stand-in ssh does the same (its background half holds them for 15 s)."""
+    """`view --tunnel` to a computer elsewhere, its output read through pipes by a program (an agent's tool call, a
+    script): it returns as soon as the tunnel is up, not when the tunnel closes (`ssh -f` stays in the background with
+    the descriptors it was started with). What ssh says goes to a private log (0600 in a 0700 folder) that never grows
+    past its cap, however much the VM's end makes ssh print (lib/tunnellog.py)."""
     import re as _re
     import socket as _socket
     import time as _time
+    cap, cut = 1 << 20, b"left out of this log"     # lib/tunnellog.py's CAP and the words of its CUT line
     src = open(os.path.join(LAB, "bin", "metacomputer")).read()
     m = _re.search(r"^view_tunnel\(\) \{.*?^\}$", src, _re.S | _re.M)
     if not m:
@@ -4087,43 +4178,77 @@ def view_tunnel_pipes():
         os.makedirs(bindir)
         os.makedirs(logdir)
         with open(os.path.join(bindir, "ssh"), "w") as f:
-            f.write('#!/bin/bash\n'
-                    'echo "ssh $*" >> "$CALLS"\n'
-                    'printf "Warning: the tunnel \\033[31msays\\033[0m this\\n" >&2\n'
-                    'if [ "${SSH_FAILS:-0}" = 1 ]; then echo "Permission denied (publickey)." >&2; exit 255; fi\n'
-                    '( sleep 15 ) &\n'           # the background half: keeps stdout and stderr as they were given
-                    'exit 0\n')
+            f.write(VT_SSH)
         os.chmod(os.path.join(bindir, "ssh"), 0o755)
-        with _socket.socket() as so:            # a port nothing listens on
-            so.bind(("127.0.0.1", 0))
-            port = so.getsockname()[1]
-        res = {}
-        for case, fails in (("up", "0"), ("refused", "1")):
+        log = os.path.join(logdir, "tunnel", "view-tunnel.log")
+
+        def free_port():
+            with _socket.socket() as so:
+                so.bind(("127.0.0.1", 0))
+                return so.getsockname()[1]
+
+        def run(case, **extra):
             calls = os.path.join(td, f"calls-{case}.log")
-            env = dict(os.environ, PATH=bindir + ":" + os.environ.get("PATH", ""), CALLS=calls, SSH_FAILS=fails,
-                       PORT=str(port), LOG_DIR=logdir, LAB_ROOT=LAB, PY=sys.executable)
+            env = dict(os.environ, PATH=bindir + ":" + os.environ.get("PATH", ""), CALLS=calls, PORT=str(free_port()),
+                       LOG_DIR=logdir, LAB_ROOT=LAB, PY=sys.executable, **extra)
             t0 = _time.monotonic()
             try:
                 r = subprocess.run(["bash", "-c", VT_STUBS + m.group(0) + "\nview_tunnel"], capture_output=True,
                                    text=True, env=env, timeout=10)
-                res[case] = (r.returncode, r.stdout, r.stderr, round(_time.monotonic() - t0, 1),
-                             open(calls).read() if os.path.exists(calls) else "")
+                return (r.returncode, r.stdout, r.stderr, round(_time.monotonic() - t0, 1),
+                        open(calls).read() if os.path.exists(calls) else "")
             except subprocess.TimeoutExpired:
-                res[case] = ("timeout", "", "", round(_time.monotonic() - t0, 1), "")
-        rc, out, err, secs, calls = res["up"]
+                return ("timeout", "", "", round(_time.monotonic() - t0, 1), "")
+
+        rc, out, err, secs, calls = res = run("up")
         check("view --tunnel, its output read through pipes: it returns once the tunnel is up (not when the background "
-              "ssh ends)", rc == 0 and secs < 6 and "ssh -f -T -L" in calls and "live view tunnel" in out, res["up"])
-        log = os.path.join(logdir, "view-tunnel.log")
+              "ssh ends)", rc == 0 and secs < 6 and "ssh -f -T -L" in calls and "live view tunnel" in out, res)
         check("...what ssh said while it connected is still shown, on stderr, escaped (termsafe), and kept in its log",
               "Warning: the tunnel" in err and "\x1b[31m" not in err
               and "Warning: the tunnel" in (open(log).read() if os.path.exists(log) else ""), (err, os.path.exists(log)))
-        rc, out, err, secs, calls = res["refused"]
+        modes = [oct(os.stat(x).st_mode & 0o777) if os.path.exists(x) else None for x in (log, os.path.dirname(log))]
+        check("...its log is private: the file 0600, its folder 0700", modes == ["0o600", "0o700"], modes)
+        rc, out, err, secs, calls = res = run("refused", SSH_FAILS="1")
         check("...a tunnel that can't open: refused promptly, saying what ssh said and where its log is",
               rc == 1 and secs < 6 and "Permission denied" in err and "view-tunnel.log" in err
-              and "couldn't open the live view's SSH tunnel" in err, res["refused"])
-        check("...a provider's tunnel (Fly Sprites) still runs ssh in the background through daemonize (lib/proxywrap.py "
-              "ends it with ssh), never `ssh -f`",
-              'daemonize "$LOG_DIR/view-tunnel.log" ssh -T -o ExitOnForwardFailure=yes' in m.group(0))
+              and "couldn't open the live view's SSH tunnel" in err, res)
+        # The VM's end makes ssh print without end, after it went to the background: the log stops at its cap.
+        rc, out, err, secs, calls = res = run("flood", FLOOD="1")
+        end = _time.monotonic() + 30
+        while _time.monotonic() < end and os.path.exists(log) and cut not in open(log, "rb").read():
+            _time.sleep(0.2)
+        _time.sleep(1.5)                     # the background half goes on printing; nothing more may reach the log
+        size = os.path.getsize(log) if os.path.exists(log) else -1
+        check("...the VM's end making ssh print 5 MB after it went to the background: the command still returns at "
+              "once, and its log stops at its cap (1 MB), saying the rest was left out",
+              rc == 0 and secs < 6 and 0 < size <= cap + 200 and cut in open(log, "rb").read()
+              and b"FLOOD-END" not in open(log, "rb").read(), (res[:4], size))
+        # A log that's a link, or shared with another file (a hard link): refused, nothing written through it.
+        if os.path.lexists(log):
+            os.remove(log)
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        target = os.path.join(td, "elsewhere")
+        open(target, "w").write("keep me\n")
+        os.symlink(target, log)
+        rc, out, err, secs, calls = res = run("link")
+        check("...a log that's a link: refused, nothing written through it, no ssh started", rc == 1 and not calls
+              and open(target).read() == "keep me\n" and "link" in err, res)
+        os.remove(log)
+        os.link(target, log)
+        rc, out, err, secs, calls = res = run("hardlink")
+        check("...a log that's another file's hard link: refused, that file untouched", rc == 1 and not calls
+              and open(target).read() == "keep me\n", res)
+        os.remove(log)
+        os.chmod(os.path.dirname(log), 0o755)
+        rc, out, err, secs, calls = res = run("widefolder")
+        check("...a log folder of this account's that others could read is made 0700 first",
+              rc == 0 and oct(os.stat(os.path.dirname(log)).st_mode & 0o777) == "0o700", (res, oct(os.stat(os.path.dirname(log)).st_mode)))
+        # A provider's tunnel (Fly Sprites): ssh stays in the helper's session (lib/proxywrap.py ends the tunnel when
+        # ssh goes), and the command returns once ssh listens on the port.
+        rc, out, err, secs, calls = res = run("listen", TRANSPORT_KIND="sprite")
+        check("...a provider's tunnel (Fly Sprites): ssh without -f, up once it listens on the port; the command "
+              "returns at once, and what ssh said is shown", rc == 0 and secs < 8 and "ssh -T -o ExitOnForwardFailure=yes"
+              in calls and " -f " not in calls and "Warning: the tunnel" in err, res)
     finally:
         shutil.rmtree(td, ignore_errors=True)
 

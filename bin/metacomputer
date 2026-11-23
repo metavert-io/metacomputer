@@ -169,8 +169,70 @@ done
 # the runner, SSH, a provider, the vault or the network, and no file is written (tests/test_help.py). `ssh ROLE CMD...`
 # leaves them to the guest's command. A program with a usage text of its own prints it (Python with -B: no bytecode
 # is written); anything else, or a program that can't, gets this file's usage lines for the command.
-mc_help_asked() { # CMD ARGS...
-  local c="${1:-help}" a; [ $# -gt 0 ] && shift
+# Options that take a value, by command: the word after one is that option's value (a file, a name, a text), never a
+# request for usage, so `sh --file --help` still reads the file named --help and `handoff --say --help` is still the
+# handoff's own error. tests/test_help.py checks this table against each command's own parser (argparse's, vm_shell's,
+# vm_claude's, mcomp_sdk's, each.py's, guest_put's, the vault's parseArgs, vm-commands.sh's and this file's).
+mc_value_options() { # CMD
+  case "$1" in
+    sh) echo "-c --command --file --cwd --timeout --max-output" ;;
+    claude) echo "--session --token --ttl --model --cwd --file --timeout --quiet --lines" ;;
+    call) echo "--session --timeout" ;;
+    each) echo "--timeout" ;;
+    put) echo "--to" ;;
+    get|shot) echo "--task" ;;
+    inspect) echo "--minutes --top" ;;
+    browser) echo "--new --delete" ;;
+    checkpoint) echo "--delete" ;;
+    vm) echo "\
+      --on --host --user --port --size --region --egress --idle-stop --org --sprite --ssh-port --vnc-port \
+      --confirm" ;;
+    list) echo "--on" ;;
+    cloud) echo "--org --forget" ;;
+    handoff) echo "--why --say --timeout --note" ;;
+    notify) echo "--why --action" ;;
+    events) echo "\
+      --action --data --debounce --field --message --severity --ca --families --header --header-env --kind \
+      --min-severity --url" ;;
+    learn) echo "--since --project --transcripts --logs --min --model --config --tasks --budget --cap --run-id" ;;
+    net) echo "--for" ;;
+    volume) echo "--size --dir --folder --bucket --endpoint --region --prefix" ;;
+    refdisk) echo "--from --dir" ;;
+    shop) echo "--wait --shop --instrument --account --spend-request" ;;
+    trace) echo "--session --out --url" ;;
+    update) echo "--ref" ;;
+    web) echo "\
+      --task --browser --device --wait --widths --threshold --baseline --watch --max-chars --name \
+      --downloads" ;;
+    secrets) echo "\
+      --account --agent --allow-frame --answer-timeout --api-host --api-path-prefix --app --approval \
+      --auth-file --browser --browser-pid --ca --checkout-jwt --cli --confirm --csv --currency --days \
+      --expires --extra --field --file --fill --fill-key --fill-user --for --frame-origin --from \
+      --from-host --from-profile --gateway --header --host --host-key-alias --host-key-line --instrument \
+      --into --kind --label --length --link-host --max-per --max-purchase --merchant-max --name \
+      --on-behalf-pid --ops-key --ops-user --origin --password-selector --pattern --pay --port --profile \
+      --project --proxy-key --proxy-port --proxy-user --purchase --request --request-id --runtime --scope \
+      --secret --selector --session --shop --site --spend-request --tail --timeout --to --to-profile \
+      --total-label --total-selector --ttl --tunnel --tunnel-arg --tunnel-check-arg --tunnel-id --ucp-file \
+      --url --username --username-selector --vm --wait --why --window-id" ;;
+  esac
+}
+# The subcommands a command's own usage text is asked for (`metacomputer volume create --help` prints create's): only
+# these exact words are passed on, never anything else the person typed (tests/test_help.py checks them too).
+mc_help_subcommands() { # CMD
+  case "$1" in
+    volume) echo "create list delete resize keys test sync" ;;
+    refdisk) echo "create list delete" ;;
+    events) echo "status tail emit drain sink sink:add sink:list sink:show sink:test sink:remove" ;;
+    learn) echo "report review list approve reject remove edit add reseal bench" ;;
+    shop) echo "status login complete card" ;;
+    handoff) echo "done cancel wait status" ;;
+    web) echo "compare responsive a11y open-untrusted gpu debug read page" ;;
+    trace) echo "start stop list show delete export" ;;
+  esac
+}
+mc_help_asked() { # CMD ARGS...: 0 when -h or --help is a flag here (not an option's value, not after `--`)
+  local c="${1:-help}" a skip=0 vals; [ $# -gt 0 ] && shift
   case "$c" in help|-h|--help) return 0 ;; esac
   case "$c:${1:-}" in vm:help|claude:help|secrets:help) return 0 ;; esac    # their own word for it
   if [ "$c" = ssh ]; then     # ssh [ROLE] [CMD...]: the role, then the guest's command (ls -h is the guest's)
@@ -178,8 +240,11 @@ mc_help_asked() { # CMD ARGS...
     case "${2:-}" in -h|--help) return 0 ;; esac
     return 1
   fi
+  vals=" $(mc_value_options "$c") "
   for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
     case "$a" in --) return 1 ;; -h|--help) return 0 ;; esac
+    case "$vals" in *" $a "*) skip=1 ;; esac
   done
   return 1
 }
@@ -219,17 +284,29 @@ mc_help() { # CMD ARGS...: the usage, on stdout; exit 0
   local c="${1:-help}" py="" mod="" out; [ $# -gt 0 ] && shift
   local margs=()
   case "$c" in help|-h|--help) sed -n '2,/^set -uo/p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+  # The program is asked with fixed words only: exactly --help, after its own prefix and, when the person named one,
+  # a subcommand from mc_help_subcommands (that word, not theirs). Nothing else they typed is passed on: an option's
+  # value or another word there could be taken for an action (`handoff --transport 1 --help cancel`).
+  local w sub2=""
+  for w in $(mc_help_subcommands "$c"); do
+    case "$w" in
+      *:*) [ "${1:-}:${2:-}" = "$w" ] && sub2="$w" ;;
+      *)   [ -z "$sub2" ] && [ "${1:-}" = "$w" ] && sub2="$w" ;;
+    esac
+  done
+  local subw=(); [ -z "$sub2" ] || subw=(${sub2//:/ })
   case "$c" in
     sh)              mod=vm_shell; margs=(--help) ;;
     claude)          mod=vm_claude; margs=(--help) ;;
     call)            mod=mcomp_sdk; margs=(call --help) ;;
-    volume|refdisk)  mod=storage; margs=("$c" "$@") ;;
-    notify)          mod=events; margs=(notify "$@") ;;
-    events)          [ "${1:-}" = watcher ] || { mod=events; margs=("$@"); } ;;
-    version|update)  mod=update; margs=("$c" "$@") ;;
-    learn|agents|shop|handoff) mod="$c"; margs=("$@") ;;
-    web)             mod=browser_tools; margs=("$@") ;;
-    trace)           mod=traces; margs=("$@") ;;
+    volume|refdisk)  mod=storage; margs=("$c" ${subw[@]+"${subw[@]}"} --help) ;;
+    notify)          mod=events; margs=(notify --help) ;;
+    events)          [ "${1:-}" = watcher ] || { mod=events; margs=(${subw[@]+"${subw[@]}"} --help); } ;;
+    version|update)  mod=update; margs=("$c" --help) ;;
+    agents)          mod=agents; margs=(--help) ;;
+    learn|shop|handoff) mod="$c"; margs=(${subw[@]+"${subw[@]}"} --help) ;;
+    web)             mod=browser_tools; margs=(${subw[@]+"${subw[@]}"} --help) ;;
+    trace)           mod=traces; margs=(${subw[@]+"${subw[@]}"} --help) ;;
   esac
   if [ -n "$mod" ]; then
     py="${PY:-}"; [ -n "$py" ] && [ -x "$py" ] || py=/opt/homebrew/bin/python3
@@ -753,31 +830,25 @@ view_tunnel() { # a computer elsewhere: an SSH tunnel from 127.0.0.1:VNC_PORT he
   if lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh; then return 0; fi
   ! lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN >/dev/null 2>&1 || die "something else on this Mac listens on 127.0.0.1:$VNC_PORT (VNC_PORT); nothing was opened"
   ssh_base view
+  # lib/tunnellog.py starts it in the background and keeps what ssh says in a private log (0600, in a 0700 folder), at
+  # most 1 MB of it however long the tunnel lasts (the VM's end can make ssh print without end), drained by a reader
+  # that holds none of this command's descriptors: a program reading this command's output sees it end once the
+  # tunnel is up, not when the tunnel closes. What ssh said until then is shown here, escaped, as before.
+  local mode tlog="$LOG_DIR/tunnel/view-tunnel.log" out trc=0
   if [ "${TRANSPORT:-ssh}" != ssh ]; then
     # A provider's tunnel (Fly Sprites) runs through lib/proxywrap.py, which ends it when the ssh that started it goes:
-    # `ssh -f` forks away from it (and the tunnel would end at once), so ssh runs in the background here instead, in
-    # a session of its own, and the forward is waited for. It ends as `ssh -f`'s would: with the key's forced sleep, or
-    # the viewer.
-    daemonize "$LOG_DIR/view-tunnel.log" ssh -T -o ExitOnForwardFailure=yes -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" "${SSH_ARGS[@]}" view
-    local i
-    for i in $(seq 1 60); do
-      lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh && break
-      sleep 0.25
-    done
-    lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh \
-      || die "couldn't open the live view's SSH tunnel to $VM_NAME (its log: $(mc_tilde "$LOG_DIR")/view-tunnel.log)"
+    # `ssh -f` forks away from it (and the tunnel would end at once), so ssh stays in the foreground of the helper's
+    # own session, and the forward is waited for. It ends as `ssh -f`'s would: with the key's forced sleep, or the
+    # viewer.
+    mode=(--listen "$VNC_PORT" --wait 15 -- ssh -T -o ExitOnForwardFailure=yes)
   else
-  # The command ("view") is only what ssh needs to go to the background: the key's forced command runs instead. What
-  # ssh says goes to its log, never to this command's own output: `ssh -f` stays in the background with the
-  # descriptors it was started with, and a program reading this command's output through a pipe would wait until the
-  # tunnel closes (the key's 20 s, or the viewer) before it saw the command end. What it said while it connected is
-  # shown here once it's up (or has failed), escaped, as before.
-  local tlog="$LOG_DIR/view-tunnel.log" trc=0
-  : 2>/dev/null > "$tlog" || true
-  ssh -f -T -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" "${SSH_ARGS[@]}" view </dev/null >>"$tlog" 2>&1 || trc=$?
-  if [ -s "$tlog" ]; then "$PY" "$LAB_ROOT/lib/termsafe.py" --max 65536 < "$tlog" >&2 || true; fi
-  [ "$trc" = 0 ] || die "couldn't open the live view's SSH tunnel to $VM_NAME (its log: $(mc_tilde "$LOG_DIR")/view-tunnel.log)"
+    # The command ("view") is only what ssh needs to go to the background: the key's forced command runs instead.
+    mode=(--fork -- ssh -f -T)
   fi
+  out="$("$PY" "$LAB_ROOT/lib/tunnellog.py" --log "$tlog" "${mode[@]}" -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" \
+         "${SSH_ARGS[@]}" view </dev/null)" || trc=$?
+  if [ -n "$out" ]; then printf '%s\n' "$out" | "$PY" "$LAB_ROOT/lib/termsafe.py" --max 65536 >&2 || true; fi
+  [ "$trc" = 0 ] || die "couldn't open the live view's SSH tunnel to $VM_NAME (its log: $(mc_tilde "$tlog"))"
   ok "live view tunnel: 127.0.0.1:$VNC_PORT -> $VM_NAME's 127.0.0.1:5900, over SSH (connect within 20 s; it closes when the viewer does)"
 }
 

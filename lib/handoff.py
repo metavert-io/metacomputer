@@ -768,7 +768,36 @@ def cmd_guard(argv):
     return 0
 
 
+def sub_parser(sub):
+    ap = argparse.ArgumentParser(prog=f"metacomputer handoff {sub}")
+    if sub in ("done", "cancel"):
+        ap.add_argument("--note", help="what Claude should know (at most 500 characters)")
+    if sub in ("wait", "status"):
+        ap.add_argument("--json", action="store_true")
+    return ap
+
+
+def open_parser():
+    ap = argparse.ArgumentParser(
+        prog="metacomputer handoff",
+        description="Hand the virtual computer to the user and wait until they hand it back "
+                    "(docs/guide.md, \"When Claude needs you\"). Also: done [--note], cancel [--note], wait, status.")
+    ap.add_argument("--why", default="other", choices=owners.HANDOFF_WHY)
+    ap.add_argument("--say", required=True, help="what the user should do, in one line (no secrets or full links)")
+    ap.add_argument("--timeout", default=f"{DEFAULT_TIMEOUT_S // 60}m", help="time limit (default 15m, at most 2h)")
+    ap.add_argument("--json", action="store_true", help="the outcome as one JSON line at the end")
+    ap.add_argument("--override", action="store_true", help="open it while another session is using the computer "
+                                                            "(only after the user agreed)")
+    return ap
+
+
 def main(argv):
+    if any(a in ("-h", "--help") for a in argv):
+        # Usage, and nothing else, wherever it's asked for: never an option's value (bin/metacomputer's --transport
+        # words, a --note) followed by an action (`--transport 1 --help cancel` once cancelled the open handoff).
+        words = [a for a in argv if a in ("done", "cancel", "wait", "status")]
+        (sub_parser(words[0]) if words else open_parser()).print_help()
+        return 0
     if argv[:1] == ["--transport"]:
         # bin/metacomputer's SSH command for the VM (lib/input_reset.py), ahead of the user's arguments
         try:
@@ -788,12 +817,7 @@ def main(argv):
         sub, rest = argv[0], argv[1:]
         if sub == "guard":
             return cmd_guard(rest)
-        ap = argparse.ArgumentParser(prog=f"metacomputer handoff {sub}")
-        if sub in ("done", "cancel"):
-            ap.add_argument("--note", help="what Claude should know (at most 500 characters)")
-        if sub in ("wait", "status"):
-            ap.add_argument("--json", action="store_true")
-        a = ap.parse_args(rest)
+        a = sub_parser(sub).parse_args(rest)
         try:
             if sub in ("done", "cancel"):
                 return cmd_end(a, sub)
@@ -801,18 +825,7 @@ def main(argv):
         except (OSError, TimeoutError) as e:
             err(str(e))
             return EXIT_ERROR
-    ap = argparse.ArgumentParser(
-        prog="metacomputer handoff",
-        description="Hand the virtual computer to the user and wait until they hand it back "
-                    "(docs/guide.md, \"When Claude needs you\"). Also: done [--note], cancel [--note], wait, status.")
-    ap.add_argument("--why", default="other", choices=owners.HANDOFF_WHY)
-    ap.add_argument("--say", required=True, help="what the user should do, in one line (no secrets or full links)")
-    ap.add_argument("--timeout", default=f"{DEFAULT_TIMEOUT_S // 60}m", help="time limit (default 15m, at most 2h)")
-    ap.add_argument("--json", action="store_true", help="the outcome as one JSON line at the end")
-    ap.add_argument("--override", action="store_true", help="open it while another session is using the computer "
-                                                            "(only after the user agreed)")
-    a = ap.parse_args(argv)
-    return cmd_open(a)
+    return cmd_open(open_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

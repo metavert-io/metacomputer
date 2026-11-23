@@ -256,6 +256,9 @@ def main(argv):
             continue
         if a == "--overwrite":
             overwrite = True
+        elif a in ("-h", "--help"):        # usage only, never a file to copy
+            print(__doc__)
+            return 0
         else:
             files.append(a)
         i += 1

@@ -278,6 +278,13 @@ class SDK:
             on_made(g.id)
         self.oci.wait_until(self.net, self.net.get_network_security_group(g.id), "lifecycle_state", "AVAILABLE",
                             max_wait_seconds=300)
+        # The wait can be minutes: read it again by its id right before its first rule is written, and write nothing to
+        # a group that isn't still tagged for this computer and this operation (its id stays in the journal).
+        who = self.nsg_owner(g.id)
+        if who != (name, op):
+            raise AdapterError(f"the security group this build made ({g.id}) is no longer tagged for {name}'s operation "
+                               f"{op[:12]} (it shows {str((who or ('gone', ''))[0])[:64]!r}, operation "
+                               f"{str((who or ('', 'none'))[1] or 'none')[:12]}): no rule was written to it")
         self.nsg_egress(g.id, egress)
         return g.id
 
@@ -421,20 +428,39 @@ class SDK:
         self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, gid)
         return True
 
-    def delete_network(self):
-        """Deletes every network of metacomputer's in the compartment (called once no instance is left)."""
+    def delete_network(self, recorded=()):
+        """Deletes every network of metacomputer's in the compartment (called once no instance is left). `recorded`:
+        the groups this Mac's records name, as (id, computer, operations); a group in the network that isn't one of
+        them, read by its id and tagged for that computer and one of those operations, stops it with nothing deleted:
+        another Mac's computer (or one being made) can have a group there that no lock here sees."""
         done = False
-        while self._delete_one_network():
+        while self._delete_one_network(recorded):
             done = True
         return done
 
-    def _delete_one_network(self):
+    def _delete_one_network(self, recorded=()):
         n = self.network()
         if not n:
             return False
+        mine = {gid: (name, set(ops)) for gid, name, ops in recorded}
+        ours, others = [], []
         for g in self._all(self.net.list_network_security_groups, compartment_id=self.compartment, vcn_id=n["vcn"]):
-            if g.lifecycle_state != "TERMINATED" and (g.freeform_tags or {}).get(TAG):
-                self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, g.id)
+            if g.lifecycle_state in ("TERMINATED", "TERMINATING"):
+                continue
+            want = mine.get(g.id)
+            who = self.nsg_owner(g.id) if want else None
+            if want and who and who[0] == want[0] and who[1] in want[1]:
+                ours.append(g.id)
+            else:
+                others.append(g.id)
+        if others:
+            raise AdapterError(f"{len(others)} security group(s) in metacomputer's network at Oracle Cloud that no "
+                               "computer's record on this Mac names (another Mac's computer, or one being made): nothing "
+                               "was deleted. Once you know they're no one's, delete them in Oracle Cloud's console "
+                               "(Networking > Virtual cloud networks > metacomputer > Network security groups), then "
+                               "this again")
+        for gid in ours:
+            self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, gid)
         self._delete_network_parts(n)
         return True
 

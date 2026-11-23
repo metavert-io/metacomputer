@@ -790,6 +790,13 @@ CLAIMS = [
      < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')
      and 'case "$a" in --) return 1 ;; -h|--help) return 0 ;; esac' in raw("bin/metacomputer")
      and "test_help" in raw("scripts/release.sh")),
+    ("docs/commands.md", r"Right after an option that takes a value it's that value, as before \(`sh --file --help` runs "
+                         r"the file named `--help`\); the usage comes from the command's own program asked with fixed "
+                         r"words only, never the rest of what was typed",
+     lambda m: 'case "$vals" in *" $a "*) skip=1 ;; esac' in raw("bin/metacomputer")
+     and "def value_option_checks():" in raw("tests/test_help.py")
+     and 'margs=("$c" "$@")' not in raw("bin/metacomputer") and 'margs=("$@")' not in raw("bin/metacomputer")
+     and 'mod="$c"; margs=(${subw[@]+"${subw[@]}"} --help)' in raw("bin/metacomputer")),
     ("docs/codex.md", r"one that only asks for its usage \(`--help` or `-h`\) prints it, since it runs nothing",
      lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
      < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')),
@@ -3005,6 +3012,21 @@ CLAIMS = [
      and "pending = a.api.nsg_names()" in py_top_fn("lib/remote.py", "cmd_cloud")
      and "ops=ops))" in py_top_fn("lib/remote.py", "cmd_create")
      and '"ops": mine.get("ops") or [op]' in py_top_fn("lib/remote.py", "cmd_create")),
+    ("docs/remote.md", r"its\s+first rules, written after it's read again once the create's wait is over",
+     lambda m: (lambda mk: mk.index("self.oci.wait_until(") < mk.index("who = self.nsg_owner(g.id)")
+                < mk.index("if who != (name, op):") < mk.index("self.nsg_egress(g.id, egress)"))(
+         raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0])),
+    ("docs/remote.md", r"one another Mac makes\s+after teardown looked stops the network's deletion too, with nothing deleted",
+     lambda m: (lambda d: d.index("if others:") < d.index("for gid in ours:") < d.index("self._delete_network_parts(n)")
+                and "(g.freeform_tags or {}).get(TAG)" not in d)(
+         raw("lib/cloud/oci.py").split("def _delete_one_network(", 1)[1].split("\n    def ", 1)[0])),
+    # The live view's tunnel log (lib/tunnellog.py): private, and bounded however much ssh prints.
+    ("docs/remote.md", r"what SSH says goes to a private log \(`tunnel/view-tunnel.log` in its log folder: 0600, in a\s+0700 "
+                       r"folder\), at most (\d) MB of it",
+     lambda m: int(m[1]) << 20 == __import__("tunnellog").CAP and "os.O_NOFOLLOW" in raw("lib/tunnellog.py")
+     and "os.fchmod(fd, 0o600)" in raw("lib/tunnellog.py") and "os.mkdir(folder, 0o700)" in raw("lib/tunnellog.py")
+     and 'tlog="$LOG_DIR/tunnel/view-tunnel.log"' in raw("bin/metacomputer")
+     and ">>\"$tlog\"" not in raw("bin/metacomputer")),
 ]
 
 

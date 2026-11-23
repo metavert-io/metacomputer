@@ -106,9 +106,9 @@ Allow group <group> to inspect compartments in tenancy
 - each computer's own **network security group** (`metacomputer-NAME-` and the first 12 digits of the build's
   operation, tagged with the computer and that operation), made new by each build before its instance (never one
   found by its name: a group of the same name another Mac or an earlier try made is left as it is) and deleted with
-  it. Its OCID is recorded from the create's answer before anything configures it, and everything afterwards (`net
-  egress`, `vm delete`, the clean-up) acts only on that recorded OCID, read again and still tagged for this computer
-  and this operation; a group an earlier version made carries no operation, so `net egress` refuses to change it
+  it. Its OCID is recorded from the create's answer before anything configures it, and everything afterwards (its
+  first rules, written after it's read again once the create's wait is over; `net egress`, `vm delete`, the clean-up)
+  acts only on that recorded OCID, read again and still tagged for this computer and this operation; a group an earlier version made carries no operation, so `net egress` refuses to change it
   (delete the computer and make it again). With `EGRESS=internet` it lets out every public IPv4 address (103 blocks: everything except the private,
   shared, loopback, link-local, documentation, benchmarking, multicast and reserved ranges the guest firewall also
   refuses), with `EGRESS=off` nothing once the computer is set up (while it's set up, the public addresses, for the
@@ -294,7 +294,8 @@ size, stop or delete it when you're done.
 credentials, the network's rules), `cloud setup oci` (makes the network) and `cloud teardown oci` (deletes the
 network when no instance is left and no computer is being made in it: its security group there without an instance
 yet; a group no computer's record on this Mac names, another Mac's or one whose record is gone, is never deleted on
-its name: teardown says so, and you delete it in OCI's console once you know it's no one's). Both change the network
+its name: teardown says so, and you delete it in OCI's console once you know it's no one's; one another Mac makes
+after teardown looked stops the network's deletion too, with nothing deleted). Both change the network
 under the same lock as `vm create`. For `hetzner`, `digitalocean` and `vultr`: `cloud
 status` lists the servers, firewalls and keys metacomputer made there (Hetzner: and their IPv4 addresses), `cloud
 doctor` checks the token and each computer's firewall (SSH only in; out, public addresses or nothing), `cloud setup`
@@ -333,8 +334,9 @@ nothing that's already right:
   computer it makes. The live view's VNC server listens on the computer's own `127.0.0.1:5900` only; `metacomputer
   view --open` (or `view --tunnel`, for another VNC client) opens an SSH tunnel to it from `127.0.0.1:VNC_PORT` on
   your Mac with the `view` key, which may open that one forward and nothing else; the tunnel closes when the viewer
-  does. The command returns once the tunnel is up (what SSH says goes to `view-tunnel.log` in its log folder, shown once it
-  connects), so a program that reads its output doesn't wait for the tunnel to close. There's no public port for it,
+  does. The command returns once the tunnel is up (what SSH says goes to a private log (`tunnel/view-tunnel.log` in its log folder: 0600, in a
+  0700 folder), at most 1 MB of it however much the VM's end makes SSH print, and what it said while it connected is
+  shown), so a program that reads its output doesn't wait for the tunnel to close. There's no public port for it,
   and `view --tailnet` is refused.
 - **Out, in two layers**, each said for what it is:
   - **Outside the VM, where the provider enforces it.** On Oracle Cloud, the computer's own network security group

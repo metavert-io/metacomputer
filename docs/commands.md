@@ -14,7 +14,9 @@ short overview, and the [guide](guide.md) shows what each is for, task by task.
 alias). `metacomputer help` prints a summary. `--help` or `-h` anywhere in a command (after it, its
 subcommand or its arguments, before a `--`) prints that command's usage and exits 0 without doing anything: no
 settings are read, and nothing reaches the VM, its runner, SSH, a provider, the vault or the network (`ssh ROLE CMD`
-leaves them to the guest's command). `metacomputer --vm NAME COMMAND`
+leaves them to the guest's command). Right after an option that takes a value it's that value, as before (`sh --file
+--help` runs the file named `--help`); the usage comes from the command's own program asked with fixed words only,
+never the rest of what was typed. `metacomputer --vm NAME COMMAND`
 runs any command on the VM `NAME`; without `--vm`, a command acts on your default
 computer ([More than one VM](#more-than-one-vm)).
 

@@ -19,6 +19,7 @@ No VM, no network; nothing of this Mac's VMs, settings, vault or agents is read 
 import concurrent.futures
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -435,11 +436,244 @@ def run_forms(td, items, tag):
             if item[0] == "direct":
                 out.append((item, None, run_direct(lab, item[1], item[2])))
                 continue
+            if item[0] == "shape":
+                out.append((item, None, lab.run(list(item[1]), item[2], list(item[3]))))
+                continue
             vm, cmd, args = item
             out.append(((tuple(vm), cmd, tuple(args)), None, lab.run(vm, cmd, args)))
         return out
     finally:
         lab.close()
+
+
+
+# --- options that take a value (bin/metacomputer mc_value_options) ------------------------------------------------
+# The word after one of these is its value, never a request for usage (`sh --file --help` reads the file named --help,
+# as before); every other -h or --help before `--` is. The table must say what each command's own parser does.
+
+def bash_tables():
+    """mc_value_options and mc_help_subcommands for every command, as bin/metacomputer has them."""
+    src = open(os.path.join(LAB, "bin", "metacomputer")).read()
+    found = [re.search(rf"^{n}\(\) \{{.*?^\}}$", src, re.S | re.M) for n in ("mc_value_options", "mc_help_subcommands",
+                                                                           "mc_help_asked")]
+    fns = "\n".join(m.group(0) if m else f"{n}() {{ :; }}"     # a checkout without one: an empty table
+                    for m, n in zip(found, ("mc_value_options", "mc_help_subcommands", "mc_help_asked")))
+    cmds = sorted(dispatch_commands())
+    script = fns + '\nfor c in "$@"; do printf "%s\\t%s\\t%s\\n" "$c" "$(mc_value_options "$c" | tr -s " \\n" " ")" ' \
+                   '"$(mc_help_subcommands "$c")"; done'
+    out = subprocess.run(["/bin/bash", "-c", script, "_", *cmds], capture_output=True, text=True, timeout=60).stdout
+    vals, subs = {}, {}
+    for line in out.splitlines():
+        c, v, s = (line.split("\t") + ["", ""])[:3]
+        vals[c] = set(v.split())
+        subs[c] = set(s.split())
+    return vals, subs, fns
+
+
+def argparse_options():
+    """{prog: {option: takes a value}} and {prog: subcommand names} of the argparse entry points, from the parsers their
+    main() builds when asked for --help (in this process, nothing else run)."""
+    import argparse
+    import contextlib
+    import importlib
+    import io
+    sys.path.insert(0, os.path.join(LAB, "lib"))
+    seen, subs = {}, {}
+    real_add, real_sub = argparse.ArgumentParser.add_argument, argparse._SubParsersAction.add_parser
+    flagish = (argparse._StoreTrueAction, argparse._StoreFalseAction, argparse._CountAction, argparse._HelpAction,
+               argparse._VersionAction, argparse._StoreConstAction, argparse._AppendConstAction)
+
+    def add(self, *a, **k):
+        act = real_add(self, *a, **k)
+        for o in act.option_strings:
+            seen.setdefault(self.prog, {})[o] = act.nargs != 0 and not isinstance(act, flagish)
+        return act
+
+    def add_parser(self, name, **k):
+        p = real_sub(self, name, **k)
+        subs.setdefault(self._prog_prefix, set()).add(name)
+        return p
+    argparse.ArgumentParser.add_argument, argparse._SubParsersAction.add_parser = add, add_parser
+    old_env = dict(os.environ)
+    try:
+        os.environ["HOME"] = tempfile.mkdtemp(prefix="mchelp-parse-")
+        for mod, argvs in (("events", [["--help"]]), ("handoff", [["--help"]] + [[s, "--help"] for s in ("done", "cancel",
+                                                                                                        "wait", "status")]),
+                           ("learn", [["--help"]]), ("agents", [["--help"]]), ("shop", [["--help"]]),
+                           ("browser_tools", [["--help"]]), ("traces", [["--help"]]), ("update", [["version", "--help"]]),
+                           ("storage", [["--help"]]), ("netpolicy", [["--help"]]), ("remote", [["--help"]])):
+            m = importlib.import_module(mod)
+            for argv in argvs:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        m.main(argv)
+                    except SystemExit:
+                        pass
+    finally:
+        argparse.ArgumentParser.add_argument, argparse._SubParsersAction.add_parser = real_add, real_sub
+        shutil.rmtree(os.environ["HOME"], ignore_errors=True)
+        os.environ.clear()
+        os.environ.update(old_env)
+    return seen, subs
+
+
+def hand_parsed(rel, pattern):
+    """Options of a hand-written parser that take a value: each `== "OPT"` (or `in ("A", "B")`) branch whose body (up
+    to the next branch) takes the following word (pattern)."""
+    src = open(os.path.join(LAB, rel)).read().splitlines()
+    out = set()
+    for i, line in enumerate(src):
+        m = re.search(r'(?:==|in) \(?((?:"-[-a-z]+"(?:, )?)+)\)?:\s*$', line)
+        if not m:
+            continue
+        ind = len(line) - len(line.lstrip())
+        body = []
+        for x in src[i + 1:i + 12]:
+            if x.strip() and len(x) - len(x.lstrip()) <= ind:
+                break
+            body.append(x)
+        if any(re.search(pattern, x) for x in body):
+            out |= set(re.findall(r'"(-[-a-z]+)"', m.group(1)))
+    return out
+
+
+def vault_values():
+    src = "".join(open(os.path.join(LAB, "vault", f)).read() for f in sorted(os.listdir(os.path.join(LAB, "vault")))
+                  if f.endswith(".swift"))
+    consts = {m.group(1): re.findall(r'"([a-z][a-z0-9-]*)"', m.group(2))
+              for m in re.finditer(r"let (\w+)\s*(?::\s*Set<String>)?\s*=\s*(?:Set\()?\[([^\]]*)\]", src)}
+    vals = set()
+    for m in re.finditer(r"parseArgs\(", src):
+        depth, i = 1, m.end()
+        while depth and i < len(src):
+            depth += {"(": 1, ")": -1}.get(src[i], 0)
+            i += 1
+        v = re.search(r"values:\s*(.*?)(?:,\s*flags:|$)", src[m.end():i - 1], re.S)
+        if v:
+            vals |= set(re.findall(r'"([a-z][a-z0-9-]*)"', v.group(1)))
+            for ident in re.findall(r"\b([a-z]\w*(?:Flags|Values))\b", v.group(1)):
+                vals |= set(consts.get(ident, []))
+    return {"--" + x for x in vals}
+
+
+def bash_fn(rel, name):
+    src = open(os.path.join(LAB, rel)).read()
+    m = re.search(rf"^{name}\(\) \{{.*?^\}}$", src, re.S | re.M)
+    return m.group(0) if m else ""
+
+
+def real_value_options():
+    """What each command's own parser takes a value for."""
+    seen, _subs = argparse_options()
+
+    def progs(prefix, skip=()):
+        return {o for p, opts in seen.items() if p == prefix or p.startswith(prefix + " ")
+                if not any(p == f"{prefix} {s}" for s in skip) for o, takes in opts.items() if takes}
+    real = {
+        "events": progs("metacomputer events", skip=("notify", "_recording", "watch", "has-sinks", "needs-watcher")),
+        "notify": progs("metacomputer events notify"),
+        "handoff": progs("metacomputer handoff"), "learn": progs("metacomputer learn"),
+        "net": progs("metacomputer net", skip=("_expire", "render")), "volume": progs("metacomputer volume"),
+        "refdisk": progs("metacomputer refdisk"), "shop": progs("metacomputer shop"), "trace": progs("metacomputer trace"),
+        "web": progs("metacomputer web"), "update": progs("metacomputer update"), "version": progs("metacomputer version"),
+        "agents": progs("metacomputer agents"), "cloud": progs("remote.py cloud"),
+        "sh": hand_parsed("lib/vm_shell.py", r"value\(\)"),
+        "claude": hand_parsed("lib/vm_claude.py", r"value\(\)"),
+        "call": hand_parsed("lib/mcomp_sdk.py", r"next\(it"),
+        "put": hand_parsed("lib/guest_put.py", r"rest\[i \+ 1\]"),
+        "each": set(re.findall(r'argv\[0\]\.startswith\("(--[a-z-]+)"\)', open(os.path.join(LAB, "lib", "each.py")).read())),
+        "secrets": vault_values(),
+        # bin/metacomputer's and scripts/vm-commands.sh's own parsers: an option whose branch reads the next word ($2)
+        "vm": set(re.findall(r'^\s*(--[a-z-]+)\) \[ \$# -ge 2 \][^\n]*"\$2"', open(os.path.join(LAB, "scripts",
+                                                                                               "vm-commands.sh")).read(), re.M)),
+        "list": set(re.findall(r'^\s*(--[a-z-]+)\)[^\n]*"\$2"', bash_fn("scripts/vm-commands.sh", "vm_list"), re.M)),
+        "inspect": {o for g in re.findall(r'^\s*((?:--[a-z-]+\|?)+)\)[^\n]*"\$\{?2', bash_fn("bin/metacomputer", "do_inspect"),
+                                          re.M) for o in g.split("|")},
+        "get": set(re.findall(r'(--[a-z-]+)\) \w+="\$\{2:-\}"; shift 2', bash_fn("bin/metacomputer", "do_get"))),
+        "shot": set(re.findall(r'(--[a-z-]+)\) \w+="\$\{2:-\}"; shift 2', bash_fn("bin/metacomputer", "do_shot"))),
+        "browser": {o for g in re.findall(r'case "\$\{2:-\}" in\n\s*((?:--[a-z-]+\|?)+)\)', bash_fn("bin/metacomputer",
+                                                                                                    "do_browser"))
+                    for o in g.split("|")},
+        "checkpoint": set(re.findall(r'"\$\{1:-\}" = "(--[a-z-]+)" \]; then\n\s*ckpt_name "\$\{2:-\}"',
+                                     bash_fn("bin/metacomputer", "do_checkpoint"))),
+    }
+    return real, _subs
+
+
+def value_option_checks():
+    print("\noptions that take a value: bin/metacomputer's table against each command's own parser")
+    vals, subs, fns = bash_tables()
+    real, parsed_subs = real_value_options()
+    for cmd in sorted(set(real) | {c for c, v in vals.items() if v}):
+        want, have = real.get(cmd, set()), vals.get(cmd, set())
+        check(f"{cmd}: mc_value_options names exactly the options its own parser takes a value for",
+              want == have and (want or cmd in ("version", "agents")), (sorted(want - have), sorted(have - want)))
+    # The subcommands whose own usage is asked for exist in that parser (a word not there would be an error there).
+    prefix = {"volume": "metacomputer volume", "refdisk": "metacomputer refdisk", "events": "metacomputer events",
+              "learn": "metacomputer learn", "shop": "metacomputer shop", "web": "metacomputer web",
+              "trace": "metacomputer trace"}
+    for cmd, words in sorted(subs.items()):
+        if not words:
+            continue
+        if cmd == "handoff":
+            ok = words == {"done", "cancel", "wait", "status"}
+        else:
+            known = parsed_subs.get(prefix[cmd], set()) | {f"sink:{s}" for s in parsed_subs.get("metacomputer events sink", ())}
+            ok = words <= known
+        check(f"{cmd}: mc_help_subcommands names only subcommands its parser has", ok, sorted(words))
+    # The scanner: an option's value is never a request for usage; -h or --help in a flag's place always is.
+    pairs = sorted({(c, o) for c, v in vals.items() for o in v}
+                   | {("sh", "--file"), ("sh", "-c"), ("handoff", "--note"), ("put", "--to"), ("secrets", "--field"),
+                      ("vm", "--confirm"), ("volume", "--size")})
+    script = fns + '\nwhile IFS=$\'\\t\' read -r c o; do\n' \
+                   '  mc_help_asked "$c" "$o" --help && a=help || a=value\n' \
+                   '  mc_help_asked "$c" "$o" x --help && b=help || b=value\n' \
+                   '  mc_help_asked "$c" "$o" x -h && d=help || d=value\n' \
+                   '  printf "%s %s %s %s %s\\n" "$c" "$o" "$a" "$b" "$d"\ndone'
+    out = subprocess.run(["/bin/bash", "-c", script], input="".join(f"{c}\t{o}\n" for c, o in pairs),
+                         capture_output=True, text=True, timeout=120).stdout.split("\n")
+    wrong = [ln for ln in out if ln and ln.split()[2:] != ["value", "help", "help"]]
+    check(f"the early scanner: after each of the {len(pairs)} options that take a value, --help is that value "
+          "(`sh --file --help` reads the file named --help); after the value, --help and -h ask for usage",
+          len([ln for ln in out if ln]) == len(pairs) and not wrong, wrong[:6])
+
+
+# The P1 shape (codex audit, fix-cli round 2): an option that takes a value, then --help, then a word that would act
+# (`handoff --transport 1 --help cancel` once cancelled the open handoff through the help path). For every command and
+# every such option, nothing acts: the help path passes on fixed words only, and where --help is the option's value
+# the command's own parser gets it as before and refuses the rest.
+ACTING_WORD = {"sh": "rm", "claude": "stop", "call": "click", "each": "reset", "put": "f", "get": "x", "shot": "x",
+               "inspect": "windows", "browser": "--yes", "checkpoint": "ck", "vm": "delete", "list": "delete",
+               "cloud": "teardown", "handoff": "cancel", "notify": "hi", "events": "remove", "learn": "remove",
+               "net": "clear", "volume": "delete", "refdisk": "delete", "shop": "complete", "trace": "delete",
+               "update": "--yes", "web": "open-untrusted", "secrets": "delete"}
+
+
+def shape_forms():
+    """Every option that takes a value, by its command's own parser and by the table, then --help, then a word that
+    would act."""
+    vals, _subs, _fns = bash_tables()
+    real, _ = real_value_options()
+    out = [([], "handoff", ["--transport", "1", "--help", "cancel"]), ([], "handoff", ["--transport", "1", "-h", "done"])]
+    for c in sorted(set(vals) | set(real)):
+        for o in sorted(vals.get(c, set()) | real.get(c, set())):
+            out.append(([], c, [o, "--help", ACTING_WORD.get(c, "delete"), "x"]))
+    return out
+
+
+def acting(called):
+    """The calls that act: anything but the runner's lists and lookups, and the vault asked for its version or refusing
+    a first word that's an option (it takes its command from its first word: `unknown command`)."""
+    out = []
+    for c in called:
+        w = c.split()
+        if w[:2] == ["standin", "mcomp-vm"] and (w[2:3] in (["get"], ["ls"]) or w[2:4] == ["config", "get"]):
+            continue
+        if w[1:2] in (["mcomp-vault"], ["vault-stand-in"]) and (w[2:3] == ["version"]
+                                                                 or (len(w) > 2 and w[2].startswith("-"))):
+            continue
+        out.append(c)
+    return out
 
 
 def main():
@@ -450,7 +684,10 @@ def main():
         missing = sorted(dispatch_commands() - have)
         check("every command of bin/metacomputer's dispatch has --help rows here", not missing, missing)
 
-        todo = forms() + [("direct", rel, f) for rel in direct_targets() for f in FLAGS]
+        value_option_checks()
+
+        todo = (forms() + [("direct", rel, f) for rel in direct_targets() for f in FLAGS]
+                + [("shape", tuple(vm), cmd, tuple(a)) for vm, cmd, a in shape_forms()])
         workers = max(2, min(8, (os.cpu_count() or 4)))
         parts = [todo[i::workers] for i in range(workers)]
         results = []
@@ -461,6 +698,13 @@ def main():
         for key, problem, res in results:
             if problem:
                 check("the copy runs a plain command first (nothing called)", False, problem)
+                continue
+            if key[0] == "shape":
+                _, vm, cmd, args = key
+                rc, out, err, called, changed = res
+                words = " ".join(["metacomputer", *vm, cmd, *args])
+                check(f"{words}: nothing acts (--help never an option's value followed by an action)",
+                      rc != "timeout" and not acting(called), (rc, acting(called)[:4], err[-300:]))
                 continue
             if key[0] == "direct":
                 _, rel, flag = key
