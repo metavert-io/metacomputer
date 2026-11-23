@@ -71,6 +71,11 @@ struct VMBinding: Codable {
     var tunnel_program: String? = nil
     var tunnel_sha256: String? = nil
     var tunnel_args: [String]? = nil
+    // ...and the provider's own id for the computer, recorded when it was made, with the same program's arguments that
+    // ask the provider about it (an answer in JSON whose "id" must be this one), asked before every connection: a
+    // computer deleted and made again under the same name (by anyone) is another, and gets nothing.
+    var tunnel_id: String? = nil
+    var tunnel_check_args: [String]? = nil
 }
 
 extension VMBinding {

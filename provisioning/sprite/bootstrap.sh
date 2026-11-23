@@ -27,11 +27,11 @@ for f in keys-guest keys-admin rootfs/opt/metacomputer/sprite/svc-sshd; do [ -s 
 [ -e /.sprite/api.sock ] || fail "this isn't a Sprite (no /.sprite/api.sock)"
 export DEBIAN_FRONTEND=noninteractive
 
-# The SSH server (Fly's image has none) and what the service scripts use.
-if ! command -v sshd >/dev/null || ! command -v unshare >/dev/null; then
+# The SSH server (Fly's image has none) and what the service scripts use (tini: the session's init).
+if ! command -v sshd >/dev/null || ! command -v nsenter >/dev/null || [ ! -x /usr/bin/tini ]; then
   apt-get -y -q -o Acquire::Retries=5 update >/dev/null
   apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --no-install-recommends \
-    openssh-server util-linux >/dev/null || fail "couldn't install openssh-server"
+    openssh-server util-linux procps tini >/dev/null || fail "couldn't install openssh-server and tini"
 fi
 
 install -d -o root -g root -m 0755 /etc/metacomputer /opt/metacomputer /opt/metacomputer/sprite /var/lib/metacomputer
@@ -75,12 +75,16 @@ visudo -cf /etc/sudoers.d/89-metacomputer-setup >/dev/null
 [ -s /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key
 install -d -m 0755 /run/sshd
 sshd -t || fail "sshd refused its settings"
-# Not Ubuntu's own ssh service (it needs systemd): the Sprites service, which hides /.sprite from every session.
-/opt/metacomputer/sprite/services sshd >/dev/null || fail "couldn't create the sshd service"
+# Not Ubuntu's own ssh service (it needs systemd): the Sprites services session and sshd, so every session runs in
+# namespaces where /.sprite is covered and nothing outside them is visible.
+/opt/metacomputer/sprite/services sshd >/dev/null || fail "couldn't create the session and sshd services"
 for _ in $(seq 1 50); do
   if (exec 3<>/dev/tcp/127.0.0.1/22) 2>/dev/null; then break; fi
   sleep 0.2
 done
 (exec 3<>/dev/tcp/127.0.0.1/22) 2>/dev/null || fail "sshd isn't listening on 127.0.0.1:22"
-echo "bootstrap: accounts $GUSER and $AUSER ready; sshd on the Sprite's loopback, /.sprite hidden from it"
+# sshd must be in the session: its namespaces aren't this one's, and /.sprite is covered there.
+sp="$(pgrep -x sshd | while read -r p; do [ "$(readlink "/proc/$p/ns/pid")" != "$(readlink /proc/self/ns/pid)" ] && echo "$p"; done | head -n 1)"
+[ -n "$sp" ] && grep -q ' /.sprite rw,[^ ]* - tmpfs sprite-hidden ' "/proc/$sp/mountinfo" || fail "sshd isn't in the session's namespaces"
+echo "bootstrap: accounts $GUSER and $AUSER ready; sshd on the Sprite's loopback, in the session (/.sprite covered)"
 echo "HOSTKEY $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"

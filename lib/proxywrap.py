@@ -12,7 +12,9 @@ exits, the whole group gets SIGTERM, then SIGKILL after a grace period, and this
 empty, whatever the program's own children do. The handlers are in place before the program starts. The program
 inherits only standard input, output and error; its exit status is this process's. Standard library only.
 
-This process leaves the process group (and session) ssh started it in, first thing: whoever ends ssh's connection
+It notes its parent (ssh) first thing, and a parent that's gone already (launchd, pid 1) gets no tunnel: an ssh that
+exited while this process was starting can't leave one behind. It checks the parent again before the tunnel starts,
+and from then on every half second. It leaves the process group (and session) ssh started it in right after: whoever ends ssh's connection
 may SIGKILL that whole group at once (the hub does, after a grace period), and a SIGKILL would end this process before
 it could end the tunnel, which isn't in that group. Out of it, this process outlives ssh by the half second it takes
 to notice, then ends the tunnel (found live: `hub stop` left `sprite proxy` running, and the Sprite awake).
@@ -75,6 +77,10 @@ def run(argv, parent=None):
         stop.append(signum)
     for s in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
         signal.signal(s, on_signal)          # before the program starts: no window where a signal is missed
+    # The parent this process was started by (ssh), seen before anything else ran: one that's gone already (this process
+    # was orphaned before it could look: its parent is launchd now) never gets a tunnel.
+    if parent <= 1 or os.getppid() != parent or stop:
+        return 1
     child = subprocess.Popen(argv, stdin=0, stdout=1, stderr=2, close_fds=True, start_new_session=True)
     pgid = child.pid                          # its own session and group, which only it and its children are in
     try:
@@ -93,8 +99,9 @@ def main(argv):
     if len(argv) < 2 or argv[0] != "--":
         print("usage: proxywrap.py -- PROGRAM [ARGS...]", file=sys.stderr)
         return 2
+    parent = os.getppid()        # first: ssh, before anything else can happen (an orphan sees launchd here: refused)
     leave_group()
-    return run(argv[1:])
+    return run(argv[1:], parent=parent)
 
 
 if __name__ == "__main__":

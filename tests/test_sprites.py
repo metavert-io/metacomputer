@@ -81,6 +81,8 @@ if cmd == "api":
         st["n"] += 1
         info = {"id": "sprite-%04d" % st["n"], "name": name, "status": "cold", "organization": org,
                 "created_at": st.get("now") or time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime())}
+        if body.get("labels"):
+            info["labels"] = list(body["labels"])
         sp[name] = {"org": org, "info": info, "policy": [], "checkpoints": [], "v": 1}
         save()
         if st.get("lose_create"):
@@ -117,6 +119,13 @@ if cmd == "exec":
     data = sys.stdin.buffer.read() if not sys.stdin.isatty() else b""
     st.setdefault("execs", []).append({"sprite": sprite, "argv": rest, "stdin": len(data)}); save()
     if rest == ["true"]: sys.exit(0)
+    if rest[:1] == ["flood"]:              # a guest's output that never ends (a hostile log line)
+        chunk = b"x" * 65536
+        try:
+            while True:
+                sys.stdout.buffer.write(chunk)
+        except BrokenPipeError:
+            sys.exit(0)
     if "bootstrap.sh" in " ".join(rest):
         print("bootstrap: accounts ready"); print("HOSTKEY ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq5" + "A" * 39)
     sys.exit(0)
@@ -196,6 +205,20 @@ def transport_and_policy():
         check(f"allowlist name {bad!r} refused (Fly's API takes anything)", raises(r, allow=[bad], kind=ValueError) is not None)
     check("...and a list too long", raises(r, allow=[f"n{i}.example.com" for i in range(40)], kind=ValueError) is not None)
     check("EGRESS that isn't one refused", raises(r, "maybe", kind=AdapterError) is not None)
+    w = sprites.widens
+    A = r(allow=["a.com"])
+    cases = [("internet", [], r("off"), False), ("internet", [], A, False), ("internet", [], r("internet"), False),
+             ("off", [], r("internet"), True), ("off", [], A, True), ("off", [], r("off"), False),
+             ("allowlist", ["a.com", "*.a.com"], r("internet"), True),
+             ("allowlist", ["a.com", "*.a.com"], r(allow=["a.com"], exact=True), False),
+             ("allowlist", ["a.com"], r(allow=["a.com"]), True),
+             ("allowlist", ["a.com", "*.a.com"], r(allow=["b.com"]), True),
+             ("other", [], r("internet"), True), ("other", [], A, True), ("other", [], r("off"), False),
+             (None, [], r("internet"), True), ("none", [], r("internet"), False)]
+    bad = [c for c in cases if w(c[0], c[1], c[2]) != c[3]]
+    check("widens(): judged on the policy a change ends with (found by review: off, then every name, got through); "
+          "nothing never widens, every name widens anything but every name, a list widens unless each name is allowed, "
+          "and what can't be told counts as narrowest", not bad, bad)
     pk = sprites.policy_kind
     check("read back: internet, off, an allowlist, none (no rules: nothing enforced), other",
           pk(r("internet"))[0] == "internet" and pk(r("off"))[0] == "off" and pk([])[0] == "none"
@@ -244,10 +267,13 @@ def adapter(td):
         comp = {"VM_NAME": "box", "PROVIDER": "sprites", "PLACE": "sprites", "SPRITE_ORG": "my-org", "SPRITE_NAME": "box",
                 "EGRESS": "internet", "SPRITE_CLI": cli_path}
         a = sprites.Sprites(computers={"box": comp}, states={"box": {}}, cli=cli)
-        made = a.create("box")
+        check("create needs its build's operation", raises(a.create, "box", kind=AdapterError) is not None)
+        made = a.create("box", op="e" * 32)
         check("create: the Sprite, its id recorded", made["instance"] == "sprite-0001" and made["sprite"] == "box"
               and made["org"] == "my-org", made)
-        why = raises(a.create, "box", kind=AdapterError)
+        check("...labelled, when Fly makes it, with metacomputer's label and its build's operation",
+              standin_state(home)["sprites"]["box"]["info"].get("labels") == ["metacomputer", "mcop-" + "e" * 32])
+        why = raises(a.create, "box", op="e" * 32, kind=AdapterError)
         check("create again: refused, a Sprite of that name exists (never someone else's)", why and "already" in why, why)
         log = standin_log(home)
         check("the command runs with HOME, PATH and LANG only (no caller's variables, no credentials)",
@@ -291,12 +317,50 @@ def adapter(td):
         sp["box"]["info"]["id"] = "sprite-other"
         set_state(home, sprites=sp)
         check("status: a Sprite of that name with another id is another one (absent here)", a.status("box")["state"] == "absent")
+        # Found by review: only status and delete checked the id; the rest addressed the Sprite by name.
+        pol_before = standin_state(home)["sprites"]["box"]["policy"]
+        n_cp = len(standin_state(home)["sprites"]["box"]["checkpoints"])
+        restored_before = standin_state(home)["sprites"]["box"].get("restored")
+        refused = {}
+        for what, fn in (("set_policy", lambda: a.set_policy("box", sprites.rules_for("off"))),
+                         ("apply_egress", lambda: a.apply_egress("box", "internet")),
+                         ("set_egress", lambda: a.set_egress("box", ["example.org"])),
+                         ("egress", lambda: a.egress("box")),
+                         ("wake", lambda: a.wake("box")),
+                         ("exec", lambda: a.exec("box", ["id"])),
+                         ("snapshot", lambda: a.snapshot("box", "ck9")),
+                         ("snapshots", lambda: a.snapshots("box")),
+                         ("restore", lambda: a.restore("box", "baseline")),
+                         ("delete_snapshot", lambda: a.delete_snapshot("box", "baseline"))):
+            refused[what] = raises(fn, kind=AdapterError)
+        st_now = standin_state(home)["sprites"]["box"]
+        check("a Sprite of that name with another id (deleted and made again): policy, checkpoints, restore, exec, wake "
+              "all refused, and nothing reached it",
+              all(v and "isn't the one" in v for v in refused.values()) and st_now["policy"] == pol_before
+              and len(st_now["checkpoints"]) == n_cp and st_now.get("restored") == restored_before
+              and not any(e["argv"] == ["id"] for e in standin_state(home).get("execs", [])), refused)
+        a.states["box"] = dict(made, org="other-org")
+        sp["box"]["info"]["id"] = "sprite-0001"
+        set_state(home, sprites=sp)
+        check("...and settings that name another organization than it was made in: refused too",
+              "it was made as" in (raises(a.set_policy, "box", sprites.rules_for("off"), kind=AdapterError) or ""))
+        a.states["box"] = made
+        sp["box"]["info"]["id"] = "sprite-other"
+        set_state(home, sprites=sp)
         why = raises(a.delete, "box", kind=AdapterError)
         check("delete: never a Sprite of that name with another id", why and "isn't the one" in why
               and "box" in standin_state(home)["sprites"], why)
         sp["box"]["info"]["id"] = "sprite-0001"
         set_state(home, sprites=sp)
         check("delete: its own", a.delete("box") == {"deleted": True} and "box" not in standin_state(home)["sprites"])
+        # Output the command prints is capped (found by review: a guest's log line could fill this Mac's memory).
+        small = spritecli.SpriteCLI(cli_path, max_stdout=1 << 20)
+        why = raises(small.exec, "my-org", "box", ["flood"], timeout=60, kind=AdapterError)
+        check("a command whose output never ends: ended past the cap (1 MB here), refused, nothing passed on",
+              why and "more than 1048576 bytes" in why, why)
+        why = raises(spritecli.SpriteCLI(cli_path).exec, "my-org", "box", ["flood"], timeout=60, max_output=4096,
+                     kind=AdapterError)
+        check("...and exec's own cap (remote.py exec --max-output) applies", why and "more than 4096 bytes" in why, why)
         set_state(home, fail=True)
         why = raises(a.status, "box", kind=AdapterError)
         check("a command that isn't signed in: refused, saying so (never its output whole)", why and "sprite login" in why, why)
@@ -333,25 +397,45 @@ def journal(td):
         r = remote.create_sprite(comp, adapter_now(), rd, remote.read_state(rd), "b" * 32)
         st = remote.read_state(rd)
         log = [c for c in standin_log(home) if "DELETE" in c["argv"]]
-        check("the next try finds the lost launch by name and time, deletes it, then makes its own",
+        check("the next try finds the lost launch by its operation's label, deletes it, then makes its own",
               r == 0 and st.get("instance") == "sprite-0002" and len(log) == 1 and st.get("op") == "b" * 32, st)
         check("...and its network policy is set for the setup (every name), read back",
               standin_state(home)["sprites"]["box"]["policy"] == [{"domain": "*", "action": "allow"}])
-        # An older Sprite of that name (someone else's, made before the journal) is never taken for a lost launch.
+        # Found by review: a name and a time were taken as proof. A Sprite of that name made just after the journal,
+        # by someone else (no label of this operation's), is left alone, by create, abort and delete alike.
         os.remove(os.path.join(rd, "remote.json"))
         sp = standin_state(home)["sprites"]
-        sp["box"]["info"]["created_at"] = "2020-01-01T00:00:00.000000Z"
+        sp["box"]["info"]["created_at"] = "2099-01-01T00:00:00.000000Z"     # after any journal
+        sp["box"]["info"]["labels"] = ["metacomputer", "mcop-" + "f" * 32]  # another build's (or none)
         set_state(home, sprites=sp)
-        remote.write_state(rd, {"launching": "c" * 32, "launch_t": 1800000000.0})
-        check("an older Sprite of that name isn't a lost launch", remote.lost_sprite(adapter_now(), comp, remote.read_state(rd)) is None)
+        remote.write_state(rd, {"launching": "c" * 32, "launch_t": 1800000000.0, "provider": "sprites"})
+        why = raises(remote.lost_sprite, adapter_now(), comp, remote.read_state(rd), kind=AdapterError)
+        check("a Sprite of that name without this operation's label isn't a lost launch: said, left alone",
+              why and "left alone" in why, why)
         why = raises(remote.create_sprite, comp, adapter_now(), rd, remote.read_state(rd), "c" * 32, kind=AdapterError)
-        check("...and creating over it is refused; it stays", why and "already" in why and "box" in standin_state(home)["sprites"], why)
-        # abort: deletes what this operation made, keeps on --keep
-        sp["box"]["info"]["created_at"] = "2099-01-01T00:00:00.000000Z"
+        remote.abort_sprite(comp, adapter_now(), rd, dict(remote.read_state(rd), launching="c" * 32), "c" * 32, keep=False) \
+            if False else None
+        try:
+            remote.abort_sprite(comp, adapter_now(), rd, remote.read_state(rd), "c" * 32, keep=False)
+        except AdapterError:
+            pass
+        st = remote.read_state(rd)
+        check("...create refuses over it, abort deletes nothing, and it's still there",
+              why and "box" in standin_state(home)["sprites"] and not st.get("instance")
+              and not [c for c in standin_log(home) if "DELETE" in c["argv"]][1:], why)
+        for labels in ([], None):
+            sp["box"]["info"].pop("labels", None)
+            if labels is not None:
+                sp["box"]["info"]["labels"] = labels
+            set_state(home, sprites=sp)
+            why = raises(remote.lost_sprite, adapter_now(), comp, remote.read_state(rd), kind=AdapterError)
+            check(f"...nor one with no labels at all ({labels!r})", why and "left alone" in why, why)
+        # abort: deletes what this operation made (its label), keeps on --keep
+        sp["box"]["info"]["labels"] = ["metacomputer", "mcop-" + "d" * 32]
         set_state(home, sprites=sp)
         remote.write_state(rd, {"launching": "d" * 32, "launch_t": 1800000000.0, "provider": "sprites"})
         remote.abort_sprite(comp, adapter_now(), rd, remote.read_state(rd), "d" * 32, keep=True)
-        check("abort --keep: a lost launch of this operation recorded as its own, and kept",
+        check("abort --keep: a lost launch of this operation (its label) recorded as its own, and kept",
               remote.read_state(rd).get("instance") == sp["box"]["info"]["id"] and remote.read_state(rd).get("kept")
               and "box" in standin_state(home)["sprites"])
         remote.abort_sprite(comp, adapter_now(), rd, remote.read_state(rd), "d" * 32, keep=False)
@@ -373,16 +457,22 @@ def hub_guard():
     a = {"text": "hi", "delivery_mode": "background"}
     check("typing asked for in the background: in the foreground", fo("type_text", a) and a["delivery_mode"] == "foreground")
     a = {"element_token": "s0000abcd:3"}
-    check("an action on an element: left on its route (accessibility works there)", fo("click", a) is None
+    check("a click on an element: left on its route (accessibility works there)", fo("click", a) is None
           and "delivery_mode" not in a)
+    for tool, extra in (("hotkey", {"keys": ["ctrl", "a"]}), ("press_key", {"key": "Return"}), ("type_text", {"text": "x"})):
+        a = dict(extra, element_token="s0000abcd:3")
+        check(f"{tool} aimed at an element: still keyboard input, sent in the foreground (found by review)",
+              fo(tool, a) and a["delivery_mode"] == "foreground", a)
     a = {"delivery_mode": "foreground"}
     check("already foreground: nothing to say", fo("press_key", a) is None)
     check("a read: nothing", fo("get_window_state", {"pid": 1}) is None)
     b = {"steps": [{"tool": "click", "args": {"element_token": "s0000abcd:1"}}, {"press_key": {"key": "Return"}},
-                   {"tool": "type_text", "args": {"text": "x", "delivery_mode": "foreground"}}]}
+                   {"tool": "type_text", "args": {"text": "x", "delivery_mode": "foreground"}},
+                   {"hotkey": {"keys": ["ctrl", "a"], "element_token": "s0000abcd:2"}}]}
     n = fo("run_steps", b)
-    check("run_steps: each step by its effective mode (element steps left, keys moved)", n and
-          "delivery_mode" not in b["steps"][0]["args"] and b["steps"][1]["press_key"]["delivery_mode"] == "foreground", b)
+    check("run_steps: each step by its effective mode (element clicks left; keys moved, element-aimed ones too)", n and
+          "delivery_mode" not in b["steps"][0]["args"] and b["steps"][1]["press_key"]["delivery_mode"] == "foreground"
+          and b["steps"][3]["hotkey"]["delivery_mode"] == "foreground", b)
     b = {"delivery_mode": "foreground", "steps": [{"press_key": {"key": "a"}}]}
     check("...a batch already in the foreground: nothing", fo("run_steps", b) is None)
     h = mcp_hub.Hub(env={"MCOMP_BACKGROUND_INPUT": "off", "MCOMP_VM_NAME": "x"}, local=True)
@@ -397,13 +487,42 @@ def guest():
     hide = open(os.path.join(d, "hide-sprite-api")).read()
     check("hide-sprite-api: an empty tmpfs over /.sprite, then the program", "mount -t tmpfs" in hide
           and "/.sprite" in hide and hide.rstrip().endswith('exec "$@"'))
+    sess = open(os.path.join(d, "svc-session")).read()
+    check("svc-session: a mount namespace with /.sprite covered and a PID namespace with its own /proc, tini its init",
+          "exec unshare --mount --pid --fork --propagation private --mount-proc --" in sess
+          and "/opt/metacomputer/sprite/hide-sprite-api /usr/bin/tini --" in sess
+          and sess.index("session.pid") < sess.index("exec unshare"))
+    ins = open(os.path.join(d, "in-session")).read()
+    check("in-session: enters only the session svc-session made (its namespaces aren't the caller's, /.sprite covered, "
+          "no API socket under its root), mount and PID namespaces both",
+          'exec nsenter --target "$c" --mount --pid -- "$@"' in ins and "sprite-hidden" in ins
+          and '[ ! -e "/proc/$c/root/.sprite/api.sock" ]' in ins and "ns/pid" in ins and "ns/mnt" in ins)
+    # Found by review: xauth ran as the desktop user before its service entered the masked namespace, so another of that
+    # user's processes could reach the API socket through /proc/PID/root. Nothing runs as the desktop user (runuser,
+    # su, setpriv, sudo -u) in a service script before it's inside the session.
+    import re as _re
     for svc in ("svc-xvfb", "svc-desktop", "svc-sshd"):
         t = open(os.path.join(d, svc)).read()
-        check(f"{svc}: in a private mount namespace with /.sprite hidden before it starts",
-              "exec unshare -m --propagation private -- /opt/metacomputer/sprite/hide-sprite-api" in t, svc)
+        body = [ln for ln in t.splitlines() if not ln.lstrip().startswith("#")]
+        before = []
+        for ln in body:
+            if "/opt/metacomputer/sprite/in-session" in ln:
+                break
+            before.append(ln)
+        check(f"{svc}: joins the session (in-session) and runs nothing as the desktop user before it",
+              any("exec /opt/metacomputer/sprite/in-session" in ln for ln in body)
+              and not any(_re.search(r"\b(runuser|su|setpriv)\b|sudo -u", ln) for ln in before)
+              and "unshare -m" not in t, svc)
+    inner = open(os.path.join(d, "xvfb-inner")).read()
+    check("xvfb-inner: the X cookie and the server as the desktop user, only inside the session (checked first)",
+          inner.index("sprite-hidden") < inner.index("xauth") and 'exec runuser -u "$U" -- /usr/bin/Xvfb' in inner)
     x = open(os.path.join(d, "svc-xvfb")).read()
-    check("svc-xvfb: /dev/shm enlarged, a stale X lock removed, Xvfb as the desktop user, no TCP",
-          "remount,size=2g /dev/shm" in x and "stale" in x and "runuser -u" in x and "-nolisten tcp" in x)
+    check("svc-xvfb: /dev/shm enlarged and a stale X lock removed as root, then the server in the session",
+          "remount,size=2g /dev/shm" in x and "stale" in x and "exec /opt/metacomputer/sprite/in-session /opt/metacomputer/sprite/xvfb-inner" in x
+          and "-nolisten tcp" in inner)
+    svcs = open(os.path.join(d, "services")).read()
+    check("services: session first, sshd and xvfb in it, desktop after xvfb",
+          "mk session svc-session; mk sshd svc-sshd session" in svcs and "mk xvfb svc-xvfb session; mk desktop svc-desktop xvfb" in svcs)
     conf = open(os.path.join(LAB, "provisioning", "sprite", "rootfs", "etc", "ssh", "sshd_config.d",
                              "05-metacomputer-sprite.conf")).read()
     check("sshd listens on the Sprite's loopback, by number", "ListenAddress 127.0.0.1" in conf and "ListenAddress ::1" in conf
@@ -416,8 +535,9 @@ def guest():
     check("the live view on loopback only: x11vnc's IPv6 listener off too (it opened [::]:5900 despite -noipv6)",
           'LISTEN=127.0.0.1 V6="-rfbportv6 -1"' in si and '-listen "$LISTEN" -noipv6 $V6' in si)
     boot = open(os.path.join(LAB, "provisioning", "sprite", "bootstrap.sh")).read()
-    check("bootstrap.sh: sshd as a Sprites service (hidden /.sprite), its host key reported last",
-          "services sshd" in boot and boot.rstrip().splitlines()[-1].startswith('echo "HOSTKEY'))
+    check("bootstrap.sh: the session and sshd as Sprites services, sshd checked to be in the session, its host key last",
+          "services sshd" in boot and "tini" in boot and "sshd isn't in the session's namespaces" in boot
+          and boot.rstrip().splitlines()[-1].startswith('echo "HOSTKEY'))
     fin = open(os.path.join(LAB, "provisioning", "guest", "finalize.sh")).read()
     check("finalize.sh leaves a Sprite's own account's sudo (Fly's channel) and needs no cloud-init",
           '[ -e /etc/metacomputer/remote ] && [ -z "$OWNER" ]' in fin and "[ ! -d /etc/cloud ]" in fin)
@@ -449,17 +569,6 @@ def cli(td):
                   env=b.env(SPRITE_CLI="/nonexistent/sprite", PATH="/usr/bin:/bin"))
         check("vm create --on sprites without Fly's command: refused, saying to install it", r.returncode != 0
               and "sprite login" in r.stderr, r.stderr[-300:])
-        script = 'MCOMP_VM_ARG="$1"; . "$2/scripts/lib.sh"; ssh_base "$3"; printf "%s\\n" "${SSH_ARGS[@]}"'
-        r = subprocess.run(["/bin/bash", "-c", script, "_", "sp1", b.co, "ops"], env=env, capture_output=True,
-                           text=True, timeout=60)
-        o = r.stdout.splitlines()
-        pc = next((x for x in o if x.startswith("ProxyCommand=")), "")
-        check("ssh_base ops: through Fly's tunnel (sprite proxy -W :22) run by lib/proxywrap.py, pinned as mcomp-sp1",
-              f"-- {standin} -o my-org -s sp1 proxy -W :22" in pc and "proxywrap.py" in pc and o[-1] == "cua@sp1"
-              and "HostKeyAlias=mcomp-sp1" in o and "StrictHostKeyChecking=yes" in o and "ForwardAgent=no" in o, (pc, r.stderr))
-        r = subprocess.run(["/bin/bash", "-c", 'MCOMP_VM_ARG=sp1; . "$1/scripts/lib.sh"; export_options; echo "$MCOMP_BACKGROUND_INPUT"',
-                            "_", b.co], env=env, capture_output=True, text=True, timeout=60)
-        check("the hub is told this computer has no background input", r.stdout.strip() == "off", r.stdout + r.stderr)
         # A Sprite as if made: its record and the stand-in's.
         rd = os.path.join(b.co, ".run-vms", "sp1")
         os.makedirs(rd, exist_ok=True)
@@ -468,6 +577,30 @@ def cli(td):
         set_state(b.home, sprites={"sp1": {"org": "my-org", "info": {"id": "sprite-0001", "name": "sp1", "status": "cold",
                                                                      "created_at": "2026-11-23T00:00:00Z"},
                                            "policy": [{"domain": "*", "action": "allow"}], "checkpoints": [], "v": 1}}, n=1)
+        script = 'MCOMP_VM_ARG="$1"; . "$2/scripts/lib.sh"; ssh_base "$3"; printf "%s\\n" "${SSH_ARGS[@]}"'
+        r = subprocess.run(["/bin/bash", "-c", script, "_", "sp1", b.co, "ops"], env=env, capture_output=True,
+                           text=True, timeout=60)
+        o = r.stdout.splitlines()
+        pc = next((x for x in o if x.startswith("ProxyCommand=")), "")
+        check("ssh_base ops: through Fly's tunnel (sprite proxy -W :22) run by lib/proxywrap.py, pinned as mcomp-sp1",
+              f"-- {standin} -o my-org -s sp1 proxy -W :22" in pc and "proxywrap.py" in pc and o[-1] == "cua@sp1"
+              and "HostKeyAlias=mcomp-sp1" in o and "StrictHostKeyChecking=yes" in o and "ForwardAgent=no" in o, (pc, r.stderr))
+        # Found by review: connections went to whichever Sprite had the name. Now each is checked to be its own first.
+        sp_ = standin_state(b.home)["sprites"]
+        sp_["sp1"]["info"]["id"] = "sprite-9999"
+        set_state(b.home, sprites=sp_)
+        r = subprocess.run(["/bin/bash", "-c", script, "_", "sp1", b.co, "ops"], env=env, capture_output=True,
+                           text=True, timeout=60)
+        check("ssh_base: a Sprite of that name with another id (made again): no connection, said why",
+              r.returncode != 0 and "isn't the one sp1 was made as" in r.stderr and not r.stdout, r.stderr)
+        r = b.run("--vm", "sp1", "net", "allow", "example.com", env=env)
+        check("...nor any change through Fly's API (net allow)", r.returncode != 0 and "isn't the one" in r.stderr
+              and standin_state(b.home)["sprites"]["sp1"]["policy"] == [{"domain": "*", "action": "allow"}], r.stderr)
+        sp_["sp1"]["info"]["id"] = "sprite-0001"
+        set_state(b.home, sprites=sp_)
+        r = subprocess.run(["/bin/bash", "-c", 'MCOMP_VM_ARG=sp1; . "$1/scripts/lib.sh"; export_options; echo "$MCOMP_BACKGROUND_INPUT"',
+                            "_", b.co], env=env, capture_output=True, text=True, timeout=60)
+        check("the hub is told this computer has no background input", r.stdout.strip() == "off", r.stdout + r.stderr)
         r = b.run("--vm", "sp1", "net", "status", env=env)
         check("net status: the setting and Fly's policy in force, apart", r.returncode == 0 and "EGRESS=internet" in r.stdout
               and "Fly's network policy" in r.stdout and "internet: every name" in r.stdout, r.stdout + r.stderr)
@@ -488,10 +621,35 @@ def cli(td):
         r = b.run("--vm", "sp1", "net", "remove", "example.com", env=env)
         check("net remove the last name (it narrows): every name denied", r.returncode == 0
               and standin_state(b.home)["sprites"]["sp1"]["policy"] == [{"domain": "*", "action": "deny"}], r.stderr)
+        # Found by review: narrowing first let a second step widen without the terminal. Judged on where a change ends:
         r = b.run("--vm", "sp1", "net", "egress", "internet", "--override", env=env)
-        check("net egress internet: Fly's policy set and read back, then the setting", r.returncode == 0
-              and standin_state(b.home)["sprites"]["sp1"]["policy"] == [{"domain": "*", "action": "allow"}]
-              and "EGRESS=internet" in r.stdout, r.stdout + r.stderr)
+        check("net egress internet after the list's last name went (off to every name): only at the user's terminal",
+              r.returncode != 0 and "own terminal" in r.stderr
+              and standin_state(b.home)["sprites"]["sp1"]["policy"] == [{"domain": "*", "action": "deny"}], r.stderr)
+        r = b.run("--vm", "sp1", "net", "clear", env=env)
+        check("...nor net clear (back to EGRESS=internet from nothing)", r.returncode != 0 and "own terminal" in r.stderr
+              and standin_state(b.home)["sprites"]["sp1"]["policy"] == [{"domain": "*", "action": "deny"}], r.stderr)
+        r = b.run("--vm", "sp1", "net", "allow", "example.com", env=env)
+        check("...nor a list where nothing goes out", r.returncode != 0 and "own terminal" in r.stderr, r.stderr)
+        r = b.run("--vm", "sp1", "net", "egress", "off", "--override", env=env)
+        check("net egress off (the same or narrower): goes ahead, read back", r.returncode == 0
+              and "EGRESS=off" in r.stdout, r.stdout + r.stderr)
+        r = subprocess.run([PY, os.path.join(b.co, "lib", "remote.py"), "egress", "--vm", "sp1", "--set", "internet",
+                            "--setup"], env=env, capture_output=True, text=True, timeout=60)
+        check("the setup's own exception (egress --setup) opens it while the computer isn't set up",
+              r.returncode == 0 and standin_state(b.home)["sprites"]["sp1"]["policy"] == [{"domain": "*", "action": "allow"}],
+              r.stderr)
+        subprocess.run([PY, os.path.join(b.co, "lib", "remote.py"), "egress", "--vm", "sp1", "--set", "off"], env=env,
+                       capture_output=True, timeout=60)
+        r = subprocess.run([PY, os.path.join(b.co, "lib", "remote.py"), "setup-done", "--vm", "sp1"], env=env,
+                           capture_output=True, text=True, timeout=60)
+        r = subprocess.run([PY, os.path.join(b.co, "lib", "remote.py"), "egress", "--vm", "sp1", "--set", "internet",
+                            "--setup"], env=env, capture_output=True, text=True, timeout=60)
+        check("...and never once it's set up (setup-done)", r.returncode != 0 and "set up already" in r.stderr
+              and standin_state(b.home)["sprites"]["sp1"]["policy"] == [{"domain": "*", "action": "deny"}], r.stderr)
+        sp_ = standin_state(b.home)["sprites"]
+        sp_["sp1"]["policy"] = [{"domain": "*", "action": "allow"}]        # the user, at their terminal, opened it again
+        set_state(b.home, sprites=sp_)
         r = b.run("--vm", "sp1", "checkpoint", "ck1", env=env)
         r2 = b.run("--vm", "sp1", "checkpoints", env=env)
         check("checkpoint NAME: made at Fly while it runs; checkpoints lists it", r.returncode == 0 and "ck1\tv2" in r2.stdout,
@@ -509,9 +667,34 @@ def cli(td):
               r.stderr)
         r = b.run("--vm", "sp1", "volume", "list", env=env)
         check("volumes: refused, saying why", r.returncode != 0 and "volumes" in r.stderr)
-        r = b.run("--vm", "sp1", "stop", "--override", env=env)
-        check("stop: this Mac's connections closed; Fly pauses it by itself (nothing to send)", r.returncode == 0
-              and "pauses it about 10 s later" in r.stdout, r.stdout + r.stderr)
+        # stop closes the vault's tunnel too (found by review: its API proxy's tunnel kept the Sprite awake), then checks
+        # that no tunnel of this Mac's to the Sprite is left.
+        vlog = os.path.join(td, "vault-calls.log")
+        fake_vault = os.path.join(td, "fake-vault")
+        with open(fake_vault, "w") as fh:
+            fh.write(f"#!/bin/sh\necho \"$MCOMP_VAULT_DIR $*\" >> {vlog}\n")
+        os.chmod(fake_vault, 0o755)
+        vdir = os.path.join(b.app, "sp1")
+        os.makedirs(vdir, exist_ok=True)
+        import socket as _socket
+        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        srv.bind(os.path.join(vdir, "vault.sock"))
+        env_v = dict(env, MCOMP_VAULT_BIN=fake_vault)
+        r = b.run("--vm", "sp1", "stop", "--override", env=env_v)
+        calls = open(vlog).read().splitlines() if os.path.exists(vlog) else []
+        check("stop: this Mac's connections closed, the vault's tunnel to it included (disconnect --vm sp1, in its own "
+              "vault); Fly pauses it by itself", r.returncode == 0 and "pauses it about 10 s later" in r.stdout
+              and calls in ([f"{os.path.realpath(vdir)} disconnect --vm sp1"], [f"{vdir} disconnect --vm sp1"]),
+              (r.stdout + r.stderr, calls))
+        lingering = subprocess.Popen([PY, "-c", "import time; time.sleep(30)", "-o", "my-org", "-s", "sp1", "proxy", "-W", ":22"])
+        try:
+            r = b.run("--vm", "sp1", "stop", "--override", env=env_v, timeout=60)
+            check("...and when a tunnel to it is still running, stop says it stays awake (exit 1), never that it sleeps",
+                  r.returncode == 1 and "still open" in r.stderr and "pauses it about" not in r.stdout, r.stdout + r.stderr)
+        finally:
+            lingering.kill()
+            lingering.wait()
+            srv.close()
         r = b.run("cloud", "status", "sprites", "--json", env=env)
         try:
             listed = json.loads(r.stdout)["sprites"]
@@ -519,6 +702,20 @@ def cli(td):
             listed = []
         check("cloud status sprites: the organization's Sprites, each marked when it's one of this Mac's computers",
               r.returncode == 0 and listed and listed[0]["name"] == "sp1" and listed[0]["here"] is True, r.stdout + r.stderr)
+        # Found live: exec read its caller's standard input when it wasn't a terminal, and a pipe that never ends made
+        # desktop-restart wait for good. Now only with --stdin.
+        p_ = subprocess.Popen([PY, os.path.join(b.co, "lib", "remote.py"), "exec", "--vm", "sp1", "--", "true"], env=env,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            p_.wait(timeout=20)
+            err_ = p_.stderr.read().decode(errors="replace")
+            ok_ = p_.returncode == 0
+        except subprocess.TimeoutExpired:
+            p_.kill()
+            ok_, err_ = False, "timed out (it waited on its standard input)"
+        execs = [e for e in standin_state(b.home).get("execs", []) if e["sprite"] == "sp1"]
+        check("exec with an open, silent standard input (no --stdin): runs, and reads none of it", ok_
+              and execs and execs[-1]["argv"] == ["true"] and execs[-1]["stdin"] == 0, (err_, execs[-1:]))
         r = b.run("cloud", "teardown", "sprites", env=env)
         check("cloud teardown sprites: nothing to tear down (each Sprite goes with vm delete)", r.returncode != 0
               and "vm delete" in r.stderr, r.stderr)

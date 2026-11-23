@@ -19,7 +19,7 @@ remote half asks `target` here (lib/cloud/transport.py) once per command.
     remote.py rates --vm NAME [--json]         what it costs awake and asleep
     remote.py cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG]
         what metacomputer has made at a provider (tagged), checks, the provider's network, and removing it
-    remote.py exec --vm NAME -- ARGV...        Fly Sprites: a command in the Sprite through Fly's authenticated
+    remote.py exec --vm NAME [--stdin] -- ARGV...   Fly Sprites: a command in the Sprite through Fly's authenticated
                                                channel (the setup's first step: before its own SSH exists)
     remote.py checkpoint --vm NAME list|create|restore|delete [LABEL]   a provider's snapshots (Sprites' checkpoints)
     remote.py allow --vm NAME [--exact] [--remove] NAME... | --clear | --show   Fly Sprites: an allowlist of DNS
@@ -335,20 +335,12 @@ def cmd_create(s, args):
 
 
 def lost_sprite(a, s, st):
-    """The Sprite a launch journaled in `st` made but never recorded (its answer was lost): the Sprite of that name,
-    made after the journal was written, or None. One made before it is someone else's, and is never touched."""
-    from cloud import sprites as cloud_sprites
+    """The Sprite a launch journaled in `st` made though its answer was lost: only one that carries that launch's
+    operation label, set when Fly made it (lib/cloud/sprites.py owned_lost). A Sprite of that name without it is
+    nobody's this Mac can name: AdapterError, and it's left alone. A name and a time are never enough."""
     if not st.get("launching"):
         return None
-    org, sprite = cloud_sprites.org_of(s), cloud_sprites.sprite_of(s)
-    cur = a.cli.info(org, sprite)
-    if not cur:
-        return None
-    try:
-        made = datetime.datetime.fromisoformat(str(cur.get("created_at")).replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-    return cur if made >= float(st.get("launch_t") or 0) - 5 else None
+    return a.owned_lost(s["VM_NAME"], st["launching"])
 
 
 def create_sprite(s, a, rd, st, op):
@@ -357,8 +349,8 @@ def create_sprite(s, a, rd, st, op):
     from cloud import sprites as cloud_sprites
     lost = lost_sprite(a, s, st)
     if lost:
-        print(f"metacomputer: an earlier launch of {s['VM_NAME']} made a Sprite it never recorded: deleting it",
-              file=sys.stderr)
+        print(f"metacomputer: an earlier launch of {s['VM_NAME']} made a Sprite it never recorded (its label shows it): "
+              "deleting it", file=sys.stderr)
         a.cli.destroy(cloud_sprites.org_of(s), cloud_sprites.sprite_of(s))
     t0 = time.time()
     st = {k: v for k, v in st.items() if k not in ("kept", "aborted", "deleted")}
@@ -456,7 +448,7 @@ def abort_sprite(s, a, rd, st, op, keep):
     found by name and time) is deleted; --keep leaves it (asleep, it bills its disk only)."""
     from cloud import sprites as cloud_sprites
     org, sprite = cloud_sprites.org_of(s), cloud_sprites.sprite_of(s)
-    if not st.get("instance"):
+    if not st.get("instance") and st.get("launching") == op:
         lost = lost_sprite(a, s, st)
         if lost:
             st = dict({k: v for k, v in st.items() if k != "launching"}, instance=lost.get("id"), sprite=sprite,
@@ -553,7 +545,8 @@ def cmd_delete(s, args):
             if lost:
                 from cloud import sprites as cloud_sprites
                 a.cli.destroy(cloud_sprites.org_of(s), cloud_sprites.sprite_of(s))
-                print("deleted a Sprite launched for it that this Mac had no record of", file=sys.stderr)
+                print("deleted a Sprite launched for it that this Mac had no record of (its label shows it)",
+                      file=sys.stderr)
         st = {k: v for k, v in st.items() if k not in ("instance", "launching")}
         write_state(rd, dict(st, deleted=now()))
         return 0
@@ -757,9 +750,34 @@ def cmd_cloud(args):
 def cmd_target(args):
     """scripts/lib.sh ssh_base: the transport's options and destination, NUL-separated, from the values bash loaded
     (no second reading of the settings) and the provider's record (the address it gave)."""
-    out = transport.ssh_target(target_endpoint(args), args.user, wrapper=WRAPPER)
+    ep = target_endpoint(args)
+    if ep["transport"] == "sprite":
+        check_sprite(args, ep)              # every connection goes to the computer's own Sprite, or none
+    out = transport.ssh_target(ep, args.user, wrapper=WRAPPER)
     sys.stdout.write("\0".join(out) + "\0")
     return 0
+
+
+def check_sprite(args, ep, state=None):
+    """The Sprite a connection (or the vault's binding) goes to is the computer's own: made under the organization and
+    name the settings say, and the Sprite of that name at Fly has the id recorded when it was made. Refused otherwise
+    (one deleted and made again under the name is another, whoever made it). Returns its record."""
+    from cloud import sprites as cloud_sprites
+    state = read_state(args.run_dir) if state is None and args.run_dir else (state or {})
+    want = state.get("instance")
+    if not want:
+        raise Refused(f"{args.vm} has no Sprite on record: nothing to connect to")
+    org = cloud_sprites.org_of({"SPRITE_ORG": args.sprite_org})
+    if (state.get("org") and state["org"] != org) or (state.get("sprite") and state["sprite"] != ep["host"]):
+        raise Refused(f"{args.vm}'s settings name {ep['host']} in {org}, but it was made as {state.get('sprite')} in "
+                      f"{state.get('org')}: no connection was made")
+    cur = sprite_cli(ep["proxy"][0]).info(org, ep["host"])
+    if cur is None:
+        raise Refused(f"{args.vm}'s Sprite is gone from Fly: no connection was made (metacomputer vm delete {args.vm})")
+    if cur.get("id") != want:
+        raise Refused(f"the Sprite named {ep['host']} in {org} isn't the one {args.vm} was made as (another id): no "
+                      "connection was made")
+    return state
 
 
 def target_endpoint(args):
@@ -772,11 +790,26 @@ def target_endpoint(args):
 
 
 def cmd_tunnel(args):
-    """The program (and its arguments) that carries the computer's SSH, NUL-separated: what the vault's binding pins
-    (lib/cloud/transport.py endpoint's proxy). Nothing for a computer reached straight over SSH."""
+    """What the vault's binding pins for a computer behind a provider's tunnel, NUL-separated: --part proxy, the program
+    and arguments that carry its SSH (lib/cloud/transport.py endpoint's proxy); --part check, the same program's
+    arguments that ask the provider about it (an answer in JSON whose "id" must be --part id's); --part id, the
+    provider's own id for it, recorded when it was made. Nothing for a computer reached straight over SSH. The Sprite is
+    checked to be the computer's own first (check_sprite)."""
     ep = target_endpoint(args)
-    if ep["proxy"]:
-        sys.stdout.write("\0".join(ep["proxy"]) + "\0")
+    if not ep["proxy"]:
+        return 0
+    out = ep["proxy"]
+    if ep["transport"] == "sprite":
+        st = check_sprite(args, ep)
+        from cloud import sprites as cloud_sprites
+        org = cloud_sprites.org_of({"SPRITE_ORG": args.sprite_org})
+        if args.part == "check":
+            out = [ep["proxy"][0], "-o", org, "api", f"/v1/sprites/{ep['host']}", "--", "-sS"]
+        elif args.part == "id":
+            out = [st["instance"]]
+    elif args.part != "proxy":
+        return 0
+    sys.stdout.write("\0".join(out) + "\0")
     return 0
 
 
@@ -797,8 +830,10 @@ def cmd_probe(args):
             try:
                 from cloud import sprites as cloud_sprites
                 cur = sprite_cli(ep["proxy"][0]).info(cloud_sprites.org_of({"SPRITE_ORG": args.sprite_org}), ep["host"])
-                word = "absent" if cur is None else ("awake" if cur.get("status") == "running" else "asleep")
-            except AdapterError:
+                want = (read_state(args.run_dir) if args.run_dir else {}).get("instance")
+                word = ("absent" if cur is None or (want and cur.get("id") != want)
+                        else "awake" if cur.get("status") == "running" else "asleep")
+            except (AdapterError, Refused):
                 pass
         print(word)
         return 0
@@ -812,6 +847,38 @@ def cmd_probe(args):
     return 0
 
 
+def require_narrowing(s, a, st, new_rules, setup=False, what="that"):
+    """Fly Sprites: a change of the network policy whose end state lets out anything the policy in force doesn't runs
+    only at the user's own terminal, however it's split into steps (judged on the policy it ends with: lib/cloud/
+    sprites.py widens). The one exception is the setup's own: --setup, while this computer's setup hasn't finished
+    (its record says so: setup-done), opens it for the packages it downloads, and the build sets EGRESS after."""
+    from cloud import sprites as cloud_sprites
+    import owners
+    cur = a.egress(s["VM_NAME"])
+    if not cloud_sprites.widens(cur.get("outside"), cur.get("allow") or [], new_rules):
+        return
+    if setup:
+        if st.get("setup_done"):
+            raise Refused(f"{s['VM_NAME']} is set up already: the setup's exception doesn't apply. Nothing changed")
+        if new_rules != cloud_sprites.rules_for("internet"):
+            raise Refused("the setup opens the policy to every name, and nothing else. Nothing changed")
+        return
+    if not owners.at_user_terminal((0, 2)):
+        raise Refused(f"{what} lets the computer reach more than the policy in force does: only at your own terminal: "
+                      f"metacomputer --vm {s['VM_NAME']} {what}. Nothing changed")
+
+
+def cmd_setup_done(s, args):
+    """The build's end: this computer is set up, so the setup's exception to the network policy's rule (require_narrowing)
+    is over for good."""
+    rd = run_dir(s)
+    st = read_state(rd)
+    if not st.get("instance"):
+        raise Refused(f"{s['VM_NAME']} has no instance on record")
+    write_state(rd, dict(st, setup_done=now()))
+    return 0
+
+
 def cmd_egress(s, args):
     """EGRESS outside the computer (its provider's rules); the guest's own firewall is set over SSH by the CLI."""
     st = read_state(run_dir(s))
@@ -820,14 +887,9 @@ def cmd_egress(s, args):
         print("none: nothing outside the computer enforces its egress here (only its own firewall)")
         return 0
     if args.set:
-        if a.name == "sprites" and args.set == "internet" and st.get("instance"):
-            # An allowlist in force (net allow) is lifted by EGRESS=internet: that widens it, so only at the user's
-            # own terminal, as net clear (a computer being set up, with no list, opens it for its downloads).
-            import owners
-            if a.egress(s["VM_NAME"]).get("outside") == "allowlist" and not owners.at_user_terminal((0, 2)):
-                raise Refused("an allowlist is in force; EGRESS=internet lifts it, which widens what the computer can "
-                              f"reach: only at your own terminal: metacomputer --vm {s['VM_NAME']} net egress internet. "
-                              "Nothing changed")
+        if a.name == "sprites":
+            require_narrowing(s, a, st, __import__("cloud.sprites").sprites.rules_for(args.set), args.setup,
+                              f"net egress {args.set}")
         out = a.apply_egress(s["VM_NAME"], args.set)
     else:
         out = a.egress(s["VM_NAME"])
@@ -882,17 +944,22 @@ def sprites_only(s, what):
     return a, st
 
 
+EXEC_MAX_INPUT = 64 << 20          # the bootstrap's folder is about 30 KB
+
+
 def cmd_exec(s, args):
     """A command in the Sprite through Fly's own authenticated channel (`sprite exec`), with this command's standard
     input; its output and exit status are the command's. The setup's first step (before its own SSH exists)."""
     a, _st = sprites_only(s, "exec")
-    from cloud import sprites as cloud_sprites
     argv = list(args.argv[1:] if args.argv[:1] == ["--"] else args.argv)
     if not argv:
         raise Refused("exec needs a command")
-    data = sys.stdin.buffer.read() if not sys.stdin.isatty() else None
-    rc, out, err = a.cli.exec(cloud_sprites.org_of(s), cloud_sprites.sprite_of(s), argv, input=data,
-                              timeout=args.timeout)
+    # Its standard input only when asked (--stdin): a caller's own stdin may be a pipe that never ends (found live:
+    # desktop-restart from a background shell waited on it for good).
+    data = sys.stdin.buffer.read(EXEC_MAX_INPUT + 1) if args.stdin else None
+    if data is not None and len(data) > EXEC_MAX_INPUT:
+        raise Refused(f"exec takes at most {EXEC_MAX_INPUT} bytes on its standard input")
+    rc, out, err = a.exec(s["VM_NAME"], argv, input=data, timeout=args.timeout, max_output=args.max_output)
     sys.stdout.buffer.write(out)
     sys.stdout.flush()
     sys.stderr.buffer.write(err[-65536:])
@@ -930,13 +997,12 @@ def cmd_checkpoint(s, args):
 
 def cmd_allow(s, args):
     """Fly Sprites: the network policy as an allowlist of DNS names (each with its subdomains unless --exact), each change
-    read back. With a list in force, names are added (--add) or taken off (--remove); --clear goes back to EGRESS;
-    --show prints what's in force. Anything that widens what the computer can reach (adding to a list, a list where
-    EGRESS=off, lifting a list where EGRESS=internet) only at the user's own terminal (lib/owners.py)."""
+    read back. With a list in force, names are added or taken off (--remove); --clear goes back to EGRESS; --show
+    prints what's in force. A change whose resulting policy lets out more than the one in force only at the user's own
+    terminal (require_narrowing), judged on where it ends, whatever steps led there."""
     a, st = sprites_only(s, "an allowlist of names")
     if not st.get("instance"):
         raise Refused(f"{s['VM_NAME']} has no Sprite that this Mac knows of")
-    import owners
     from cloud import sprites as cloud_sprites
     name, setting = s["VM_NAME"], (s.get("EGRESS") or "internet")
     cur = a.egress(name)
@@ -944,9 +1010,7 @@ def cmd_allow(s, args):
     if args.show:
         out = cur
     elif args.clear:
-        if kind == "allowlist" and setting == "internet" and not owners.at_user_terminal((0, 2)):
-            raise Refused("lifting the allowlist lets the computer reach the whole internet again (EGRESS=internet): only "
-                          f"at your own terminal: metacomputer --vm {name} net clear. Nothing changed")
+        require_narrowing(s, a, st, cloud_sprites.rules_for(setting), what="net clear")
         out = a.apply_egress(name, setting)
     else:
         if not args.names:
@@ -959,15 +1023,13 @@ def cmd_allow(s, args):
             if kind != "allowlist":
                 raise Refused("no allowlist is in force to take names off (metacomputer net status)")
             left = [d for d in have if d not in want]
-            out = a.set_egress(name, left, exact=True) if left else a.apply_egress(name, "off")
+            new_rules = cloud_sprites.rules_for(allow=left, exact=True) if left else cloud_sprites.rules_for("off")
         else:
             new = list(dict.fromkeys((have if kind == "allowlist" else []) + want))
-            widens = kind in ("off", "none", "other") or (kind == "allowlist" and not set(new) <= set(have))
-            if widens and not owners.at_user_terminal((0, 2)):
-                raise Refused("that widens what the computer can reach (" + ("names added to the list in force" if kind ==
-                              "allowlist" else f"a list where EGRESS={setting}") + "): only at your own terminal: "
-                              f"metacomputer --vm {name} net allow {' '.join(args.names)}. Nothing changed")
-            out = a.set_egress(name, new, exact=True)
+            new_rules = cloud_sprites.rules_for(allow=new, exact=True)
+        require_narrowing(s, a, st, new_rules, what=f"net {'remove' if args.remove else 'allow'} {' '.join(args.names)}")
+        kind_new, names_new = cloud_sprites.policy_kind(new_rules)
+        out = a.set_egress(name, names_new, exact=True) if kind_new == "allowlist" else a.apply_egress(name, "off")
     print(json.dumps({"outside": out.get("outside"), "allow": out.get("allow", [])}, sort_keys=True))
     return 0
 
@@ -999,11 +1061,15 @@ def main(argv=None):
         p.add_argument("--sprite-org", default="")
         p.add_argument("--sprite-name", default="")
         p.add_argument("--sprite-cli", default="")
+        if name == "tunnel":
+            p.add_argument("--part", choices=("proxy", "check", "id"), default="proxy")
         if name == "probe":
             p.add_argument("--timeout", type=float, default=4.0)
     p = sub.add_parser("exec")
     p.add_argument("--vm", required=True)
     p.add_argument("--timeout", type=float, default=3600)
+    p.add_argument("--max-output", type=int, default=1 << 20, help="bytes of output at most (the command is ended past it)")
+    p.add_argument("--stdin", action="store_true", help="pass this command's standard input on (else none)")
     p.add_argument("argv", nargs=argparse.REMAINDER)
     p = sub.add_parser("checkpoint")
     p.add_argument("--vm", required=True)
@@ -1022,6 +1088,9 @@ def main(argv=None):
     p = sub.add_parser("egress")
     p.add_argument("--vm", required=True)
     p.add_argument("--set", choices=("internet", "off"))
+    p.add_argument("--setup", action="store_true", help="the build's own opening for its downloads (Fly Sprites)")
+    p = sub.add_parser("setup-done")
+    p.add_argument("--vm", required=True)
     p = sub.add_parser("identity")
     p.add_argument("--vm", required=True)
     g = p.add_mutually_exclusive_group(required=True)
@@ -1070,7 +1139,7 @@ def main(argv=None):
                 "status": cmd_status, "state": cmd_state, "rates": cmd_rates, "user-data": cmd_user_data,
                 "plan": cmd_plan, "key-lists": cmd_key_lists, "egress": cmd_egress,
                 "identity": cmd_identity, "exec": cmd_exec, "checkpoint": cmd_checkpoint,
-                "allow": cmd_allow}[a.cmd](s, a)
+                "allow": cmd_allow, "setup-done": cmd_setup_done}[a.cmd](s, a)
     except (Refused, AdapterError) as e:
         print(f"metacomputer: {e}", file=sys.stderr)
         return 1

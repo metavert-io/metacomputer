@@ -389,12 +389,19 @@ do_stop_remote() {
   fi
   if [ "${PROVIDER:-}" = sprites ]; then
     # Nothing to send: a Sprite pauses by itself about 10 s after its last connection closes. This Mac's are closed
-    # here: the hub (above), a recording (above), the live view's tunnel. Every tunnel runs through lib/proxywrap.py,
-    # which ends Fly's proxy when ssh goes, so none is left holding it awake.
+    # here: the hub (above), a recording (above), the live view's tunnel, and the vault's (its API proxy's tunnel).
+    # Every tunnel runs through a wrapper that ends Fly's proxy when ssh goes; then this checks none is left.
     view_tunnel_close
+    vault_disconnect
     remote_py sleep --vm "$VM_NAME" >/dev/null 2>&1 || true
+    local left; left="$(sprite_tunnels_left)"
+    if [ -n "$left" ]; then
+      warn "$left connection(s) of this Mac's to $VM_NAME are still open (ps: sprite proxy -W for ${SPRITE_NAME:-$VM_NAME}): it stays awake, and billing, until they close"
+      emit_event lifecycle stopped warning "The computer $VM_NAME was left to sleep, but $left connection(s) keep it awake" "" "forced=no"
+      return 1
+    fi
     emit_event lifecycle stopped info "The computer $VM_NAME was left to sleep" "" "forced=no"
-    ok "this Mac's connections to $VM_NAME are closed: Fly pauses it about 10 s later (asleep, only its disk is billed); the next command wakes it"
+    ok "this Mac's connections to $VM_NAME are closed (the hub's, the live view's, the vault's): Fly pauses it about 10 s later (asleep, only its disk is billed); the next command wakes it"
     return 0
   fi
   remote_can_ask || die "stopping $VM_NAME needs $(remote_where)'s credentials in this command's environment (docs/remote.md). Left alone, it powers itself off after ${IDLE_STOP:-15} minutes unused, but $(remote_where) counts it as running (and bills a billed size) until it's stopped there"
@@ -486,6 +493,22 @@ sprite_net_list() { # allow NAME... [--exact] | remove NAME... | clear: Fly's ne
   remote_py allow --vm "$VM_NAME" ${args[@]+"${args[@]}"} >/dev/null || exit 3
   emit_event security net_allowlist_changed info "The network allowlist of $VM_NAME changed ($sub)" "" "change=$sub"
   sprite_net_status
+}
+vault_disconnect() { # the vault's connections to this computer (its API proxy's tunnel), closed: in whatever vault it uses
+  [ -x "${VAULT_BIN:-}" ] || return 0
+  local d; d="$(mc_vault_dir)"
+  [ -S "$d/vault.sock" ] || return 0
+  MCOMP_VAULT_DIR="$d" "$VAULT_BIN" disconnect --vm "$VM_NAME" >/dev/null 2>&1 \
+    || warn "the vault didn't say it closed its tunnel to $VM_NAME (metacomputer secrets status)"
+}
+sprite_tunnels_left() { # how many of this Mac's tunnels to this Sprite are still running, after up to 6 s
+  local i n=0 pat="-o ${SPRITE_ORG:-} -s ${SPRITE_NAME:-$VM_NAME} proxy -W :22"
+  for i in $(seq 1 24); do
+    n="$(ps -axo command= 2>/dev/null | grep -F -- "$pat" | grep -cvE '^(ssh|grep) ' || true)"
+    [ "${n:-0}" -gt 0 ] || { echo ""; return 0; }
+    sleep 0.25
+  done
+  echo "$n"
 }
 view_tunnel_close() { # the live view's tunnel to a computer elsewhere, if this Mac's ssh holds it open
   local p
@@ -2485,6 +2508,20 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
         if [ ${#tun[@]} -gt 0 ]; then
           where+=(--tunnel "${tun[0]}")
           for x in "${tun[@]:1}"; do where+=("--tunnel-arg=$x"); done
+          # The provider's own id for the computer (recorded when it was made, checked against the provider now), and how
+          # the same program asks the provider about it: the vault asks before every connection.
+          local tid=() tchk=()
+          while IFS= read -r -d '' x; do tid+=("$x"); done < <("$PY" "$LAB_ROOT/lib/remote.py" tunnel --part id --vm "$VM_NAME" \
+            --run-dir "$RUN_DIR" "${MC_T_WHERE[@]}" 2>/dev/null)
+          while IFS= read -r -d '' x; do tchk+=("$x"); done < <("$PY" "$LAB_ROOT/lib/remote.py" tunnel --part check --vm "$VM_NAME" \
+            --run-dir "$RUN_DIR" "${MC_T_WHERE[@]}" 2>/dev/null)
+          if [ ${#tid[@]} -gt 0 ]; then
+            [ ${#tchk[@]} -gt 1 ] && [ "${tchk[0]}" = "${tun[0]}" ] || die "can't tell how to ask $(remote_where) about $VM_NAME"
+            where+=(--tunnel-id "${tid[0]}")
+            for x in "${tchk[@]:1}"; do where+=("--tunnel-check-arg=$x"); done
+          elif [ "${PROVIDER:-}" = sprites ]; then
+            die "$VM_NAME's Sprite isn't the one it was made as, or Fly can't be asked now (metacomputer --vm $VM_NAME status): nothing was bound"
+          fi
         fi
       fi
       [ -f "$SSH_DIR/fill" ] || die "no fill key ($SSH_DIR/fill): VMs built before secrets support have no fill account. Rebuild the VM to use secrets (metacomputer build --replace, or a new VM_NAME)"

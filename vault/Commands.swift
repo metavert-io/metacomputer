@@ -151,6 +151,7 @@ func runMain(_ argv: [String]) -> Int32 {
         case "token": return try cmdToken(paths, rest)
         case "tokens": return try cmdTokens(paths, rest)
         case "revoke": return try cmdRevoke(paths, rest)
+        case "disconnect": return try cmdDisconnect(paths, rest)
         case "audit-sink": return try cmdAuditSink(paths, rest)
         case "status": return try cmdStatus(paths, rest)
         case "audit": return try cmdAudit(paths, rest)
@@ -448,7 +449,8 @@ func checkKeyFile(_ raw: String, _ flag: String) throws -> String {
 func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U [--proxy-key PATH --proxy-user U --proxy-port N] (--gateway PATH | --host ADDRESS --host-key-alias mcomp-VM [--tunnel PROGRAM [--tunnel-arg=ARG ...]])"
     let a = try parseArgs(argv, values: ["port", "host-key-line", "fill-key", "fill-user", "ops-key", "ops-user", "proxy-key", "proxy-user",
-                                         "proxy-port", "gateway", "host", "host-key-alias", "tunnel", "tunnel-arg"])
+                                         "proxy-port", "gateway", "host", "host-key-alias", "tunnel", "tunnel-arg",
+                                         "tunnel-id", "tunnel-check-arg"])
     guard a.positional.count == 1, validName(a.positional[0]) else { throw usageError(usage) }
     let vm = a.positional[0]
     // A computer reached over SSH elsewhere (docs/remote.md): its address and the name its host key is pinned under,
@@ -463,7 +465,7 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     // A provider's tunnel (Fly Sprites: sprite proxy -W :22), ssh's ProxyCommand: its program pinned by contents, as
     // the gateway's is, and its arguments as they are now.
-    var tunnelProgram: String?, tunnelSHA: String?, tunnelArgs: [String]?
+    var tunnelProgram: String?, tunnelSHA: String?, tunnelArgs: [String]?, tunnelID: String?, tunnelCheck: [String]?
     if let t = a.last("tunnel") {
         guard host != nil else { throw usageError("--tunnel is for a computer at --host (its provider's tunnel carries SSH there)") }
         try checkPrintablePath(absolutePath(t), "tunnel")
@@ -479,8 +481,20 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         tunnelProgram = tp
         tunnelSHA = sha
         tunnelArgs = targs
-    } else if a.values["tunnel-arg"] != nil {
-        throw usageError("--tunnel-arg goes with --tunnel")
+        // The provider's own id for the computer, and how the program asks about it: both or neither.
+        let cargs = a.values["tunnel-check-arg"] ?? []
+        if let tid = a.last("tunnel-id") {
+            guard matches(tid, "^[A-Za-z0-9_-]{4,80}$") else { throw usageError("--tunnel-id: the provider's id for the computer") }
+            guard !cargs.isEmpty, cargs.count <= 16, cargs.allSatisfy(validTunnelArg) else {
+                throw usageError("--tunnel-id needs --tunnel-check-arg=ARG ...: how the tunnel's program asks the provider about it")
+            }
+            tunnelID = tid
+            tunnelCheck = cargs
+        } else if !cargs.isEmpty {
+            throw usageError("--tunnel-check-arg goes with --tunnel-id")
+        }
+    } else if a.values["tunnel-arg"] != nil || a.last("tunnel-id") != nil {
+        throw usageError("--tunnel-arg and --tunnel-id go with --tunnel")
     }
     guard let ps = a.last("port"), let port = Int(ps), port >= 1, port <= 65535 else { throw usageError("--port: the VM's SSH port (on 127.0.0.1, or at --host)") }
     guard let hkl = a.last("host-key-line"), let hostKey = normalizeHostKey(hkl) else {
@@ -525,7 +539,7 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let fp = hostKeyFingerprint(hostKey)
     oprint("""
     About to pin VM \(vm):
-      SSH           \(host.map { "\($0):\(port), a computer reached over SSH (its host key pinned as \(alias ?? ""))" } ?? "127.0.0.1:\(port)")\(computerID.map { "\n  computer      \(String($0.prefix(16)))... (made again under this name, it has another: bind again then)" } ?? "")\(tunnelProgram.map { "\n  tunnel        \($0) \((tunnelArgs ?? []).joined(separator: " ")) (sha256 \(String((tunnelSHA ?? "").prefix(16)))...), run by this vault as ssh's ProxyCommand and ended when ssh goes" } ?? "")
+      SSH           \(host.map { "\($0):\(port), a computer reached over SSH (its host key pinned as \(alias ?? ""))" } ?? "127.0.0.1:\(port)")\(computerID.map { "\n  computer      \(String($0.prefix(16)))... (made again under this name, it has another: bind again then)" } ?? "")\(tunnelProgram.map { "\n  tunnel        \($0) \((tunnelArgs ?? []).joined(separator: " ")) (sha256 \(String((tunnelSHA ?? "").prefix(16)))...), run by this vault as ssh's ProxyCommand and ended when ssh goes" + (tunnelID.map { "\n  provider id   \($0) (asked before every connection: another computer of that name gets nothing)" } ?? "") } ?? "")
       host key      \(fp) (\(hostKey.split(separator: " ").first ?? ""))
       fills         as \(fillUser), key \(fillKey)
       sessions      as \(opsUser), key \(opsKey)
@@ -543,7 +557,8 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let b = VMBinding(ssh_port: port, host_key_line: hostKey, ops_key_path: opsKey, guest_user: opsUser,
                       fill_key_path: fillKey, fill_user: fillUser, proxy_key_path: proxyKey, proxy_user: proxyUser, proxy_port: proxyPort,
                       gateway_path: gateway, gateway_sha256: gwSHA, bound: isoTime(), ssh_host: host, host_key_alias: alias,
-                      computer_id: computerID, tunnel_program: tunnelProgram, tunnel_sha256: tunnelSHA, tunnel_args: tunnelArgs)
+                      computer_id: computerID, tunnel_program: tunnelProgram, tunnel_sha256: tunnelSHA, tunnel_args: tunnelArgs,
+                      tunnel_id: tunnelID, tunnel_check_args: tunnelCheck)
     try updateVault(paths, key) { p in p.vms[vm] = b }
     audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway ?? "none",
                   "remote": host != nil, "proxy": proxyUser != nil, "tunnel": tunnelProgram != nil], macKey: vaultAuditKey(paths, key))
@@ -957,6 +972,24 @@ func cmdRevoke(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         return Exit.ok
     } catch ClientError.locked {
         oprint("The vault is locked: no tokens are live.")
+        return Exit.ok
+    }
+}
+
+/// `disconnect --vm VM`: the vault closes its connections to that VM (the API proxy's tunnel), now; its tokens stay, and
+/// the next request opens the tunnel again. `metacomputer stop` runs it for a computer that sleeps when nothing is
+/// connected (Fly Sprites): an open tunnel would keep it awake, and billing. Anyone may (it only closes); other VMs'
+/// connections are left as they are.
+func cmdDisconnect(_ paths: Paths, _ argv: [String]) throws -> Int32 {
+    let a = try parseArgs(argv, values: ["vm"])
+    guard a.positional.isEmpty, let vm = a.last("vm"), validName(vm) else { throw usageError("usage: disconnect --vm VM") }
+    do {
+        let res = try request(paths, ["op": "disconnect", "vm": vm], timeout: 15)
+        let n = res["closed"] as? Int ?? 0
+        oprint(n > 0 ? "Closed the vault's tunnel to \(vm)." : "The vault had no tunnel open to \(vm).")
+        return Exit.ok
+    } catch ClientError.locked {
+        oprint("The vault is locked: it has no tunnels open.")
         return Exit.ok
     }
 }

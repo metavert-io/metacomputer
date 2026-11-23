@@ -186,7 +186,7 @@ FORMS = [
     ("secrets", ["presence", "on"], "act"), ("secrets", ["import-passwords", "--csv", "f"], "act"),
     ("secrets", ["import-session", "--browser", "chrome"], "act"), ("secrets", ["session", "save", "n"], "act"),
     ("secrets", ["session", "policy", "n"], "act"), ("secrets", ["session", "delete", "n"], "act"),
-    ("secrets", ["revoke", "--all"], "act"), ("secrets", ["audit-sink", "add", "s"], "act"),
+    ("secrets", ["revoke", "--all"], "act"), ("secrets", ["disconnect", "--vm", "x"], "act"), ("secrets", ["audit-sink", "add", "s"], "act"),
     ("secrets", ["audit-sink", "remove", "s"], "act"), ("secrets", ["test-legacy-totp-link"], "act"),
 ]
 ORDER_FREE = sessionvm.READS | {"security", "recordings", "view"}

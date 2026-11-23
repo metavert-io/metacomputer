@@ -43,6 +43,10 @@ DOMAIN = re.compile(r"(?:\*\.)?(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])
                     r"\.(?=[a-z0-9-]*[a-z])[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 MAX_NAMES = 64
 CHECKPOINT_PREFIX = "metacomputer:"          # a checkpoint's comment: metacomputer:LABEL
+LABEL = "metacomputer"                       # every Sprite metacomputer makes carries it...
+OP_LABEL = "mcop-"                           # ...and its build's operation (mcop-<32 hex>), set atomically at creation:
+                                             # the only proof that a Sprite whose answer was lost is that build's
+OP_RE = re.compile(r"[0-9a-f]{32}")
 
 # Fly's list prices for Sprites (USD, fly.io/pricing, read 2026-11-22): CPU time used, memory in use, the disk while
 # awake (hot) and while asleep (cold). A Sprite has 8 CPUs and 8 GB here (its resources policy; Fly manages it).
@@ -147,6 +151,40 @@ def rules_for(egress=None, allow=None, exact=False):
     return [{"domain": "*", "action": "deny"}]
 
 
+def breadth(kind, names):
+    """What a policy lets out, for comparing two: None (everything: no rules enforce nothing), a frozenset of the
+    names it allows ("*" for every name), or False when that can't be told (rules metacomputer didn't set)."""
+    if kind == "none":
+        return None
+    if kind == "internet":
+        return frozenset({"*"})
+    if kind == "off":
+        return frozenset()
+    if kind == "allowlist":
+        return frozenset(names)
+    return False
+
+
+def widens(cur_kind, cur_names, new_rules):
+    """Whether the policy `new_rules` lets out anything the policy in force doesn't: judged on the policy a change ends
+    with, never on the step, so no split into steps gets around it. Only a policy that's provably the same or narrower
+    doesn't widen: nothing (off) never does; every name doesn't unless every name (or nothing enforced) is in force;
+    an allowlist doesn't when each of its names is already allowed, by name or by every name. What's in force but
+    can't be told counts as narrowest."""
+    new_kind, new_names = policy_kind(new_rules)
+    new = breadth(new_kind, new_names)
+    cur = breadth(cur_kind, cur_names)
+    if new == frozenset():
+        return False
+    if cur is None:
+        return False                     # nothing is enforced now: any policy narrows it
+    if cur is False or new is None or new is False:
+        return True
+    if "*" in cur:
+        return False
+    return "*" in new or not new <= cur
+
+
 def policy_kind(rules):
     """What a network policy read back does: "internet", "off", "allowlist" (its names), "none" (no rules: Fly
     enforces nothing then, raw IPs and private ranges included) or "other" (not what metacomputer sets)."""
@@ -192,12 +230,33 @@ class Sprites(RemoteVM):
                                "lists the organization's Sprites)")
         return st
 
+    def _live(self, name):
+        """(org, sprite, record) of the computer's own Sprite, checked against Fly's API before anything acts on it:
+        the organization and name it was made under are the settings' still, and the Sprite of that name has the id
+        recorded when it was made. A Sprite deleted and made again under the name (by anyone) is another one, and
+        nothing is done to it. AdapterError otherwise."""
+        org, sprite = self._where(name)
+        st = self._state(name)
+        if (st.get("org") and st["org"] != org) or (st.get("sprite") and st["sprite"] != sprite):
+            raise AdapterError(f"{name}'s settings name the Sprite {sprite} in {org}, but it was made as {st.get('sprite')} "
+                               f"in {st.get('org')}: nothing was done")
+        cur = self.cli.info(org, sprite)
+        if cur is None:
+            raise AdapterError(f"{name}'s Sprite ({sprite} in {org}) is gone from Fly: nothing was done "
+                               f"(metacomputer vm delete {name} forgets it)")
+        if cur.get("id") != st["instance"] or (cur.get("organization") not in (None, org)):
+            raise AdapterError(f"the Sprite named {sprite} in {org} isn't the one {name} was made as (another id: deleted "
+                               "and made again since?): metacomputer leaves it alone, and nothing was done")
+        return org, sprite, st
+
     # lifecycle
     def create(self, name, region=None, size=None, persist="auto", op=None):
-        """Make the computer's Sprite (refused when one of its name exists: never someone else's), and set its network
-        policy to EGRESS=internet for the setup (the build sets EGRESS when it ends). Returns {instance, sprite, org,
-        created}."""
+        """Make the computer's Sprite (refused when one of its name exists: never someone else's), labelled with its
+        build's operation (`op`, set at creation: what proves a lost launch is that build's). Returns {instance,
+        sprite, org, created_at}."""
         org, sprite = self._where(name)
+        if not OP_RE.fullmatch(op or ""):
+            raise AdapterError("a Sprite is made by a build's operation (32 hex digits)")
         from . import capabilities
         if region is not None or size is not None:
             raise NotSupported(self.name, "region or size", "Fly picks a Sprite's region and size (8 CPUs, memory as "
@@ -209,7 +268,7 @@ class Sprites(RemoteVM):
         if self.cli.info(org, sprite) is not None:
             raise AdapterError(f"the organization {org} has a Sprite named {sprite} already; metacomputer leaves it "
                                "alone (choose another name, or --sprite NAME)")
-        d = self.cli.create(org, sprite)
+        d = self.cli.create(org, sprite, labels=[LABEL, OP_LABEL + op])
         sid = d.get("id")
         if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", sid):
             got = self.cli.info(org, sprite) or {}
@@ -218,9 +277,25 @@ class Sprites(RemoteVM):
             raise AdapterError(f"Fly made the Sprite {sprite} but didn't say its id")
         return {"instance": sid, "sprite": sprite, "org": org, "created_at": d.get("created_at")}
 
-    def set_policy(self, name, rules):
+    def owned_lost(self, name, op):
+        """The Sprite a launch of operation `op` made though its answer was lost: the Sprite of the computer's name
+        that carries that operation's label (set atomically when it was made). None when there's none; AdapterError
+        when there's one without it (it can't be told whose it is: left alone, said)."""
         org, sprite = self._where(name)
-        self._state(name)
+        if not OP_RE.fullmatch(op or ""):
+            return None
+        cur = self.cli.info(org, sprite)
+        if cur is None:
+            return None
+        labels = cur.get("labels") if isinstance(cur.get("labels"), list) else []
+        if OP_LABEL + op in labels and cur.get("organization") in (None, org):
+            return cur
+        raise AdapterError(f"a Sprite named {sprite} exists in {org}, but nothing shows this build made it (no label "
+                           f"{OP_LABEL}{op[:8]}...): it's left alone. If it's yours and unused, delete it yourself "
+                           f"(sprite destroy {sprite}); or choose another name")
+
+    def set_policy(self, name, rules):
+        org, sprite, _ = self._live(name)
         self.cli.set_policy(org, sprite, rules)
         got = self.cli.policy(org, sprite)
         if got != rules:
@@ -229,8 +304,7 @@ class Sprites(RemoteVM):
 
     def wake(self, name):
         """A connection wakes a Sprite: one command run in it (`true`) is the check that it's there and answers."""
-        org, sprite = self._where(name)
-        self._state(name)
+        org, sprite, _ = self._live(name)
         t0 = time.monotonic()
         rc, _o, err = self.cli.exec(org, sprite, ["true"], timeout=120)
         if rc != 0:
@@ -245,9 +319,17 @@ class Sprites(RemoteVM):
         return {"name": name, "place": self.manifest["place"], "state": "asleep",
                 "note": "it pauses about 10 s after its last connection closes"}
 
+    def exec(self, name, argv, input=None, timeout=None, max_output=None):
+        """A command in the computer's own Sprite through Fly's channel (`sprite exec`), its id checked first."""
+        org, sprite, _ = self._live(name)
+        return self.cli.exec(org, sprite, argv, input=input, timeout=timeout, max_output=max_output)
+
     def delete(self, name):
         org, sprite = self._where(name)
         st = self._state(name)
+        if (st.get("org") and st["org"] != org) or (st.get("sprite") and st["sprite"] != sprite):
+            raise AdapterError(f"{name}'s settings name the Sprite {sprite} in {org}, but it was made as {st.get('sprite')} "
+                               f"in {st.get('org')}: nothing was deleted")
         cur = self.cli.info(org, sprite)
         if cur is not None and cur.get("id") != st["instance"]:
             raise AdapterError(f"the Sprite named {sprite} isn't the one this computer made (another id): metacomputer "
@@ -285,8 +367,7 @@ class Sprites(RemoteVM):
 
     # snapshots: Fly's checkpoints, named by their comment (metacomputer:LABEL)
     def _checkpoints(self, name):
-        org, sprite = self._where(name)
-        self._state(name)
+        org, sprite, _ = self._live(name)
         return org, sprite, self.cli.checkpoints(org, sprite)
 
     def snapshot(self, name, label):
@@ -312,16 +393,16 @@ class Sprites(RemoteVM):
         return max(found, key=lambda s: (str(s.get("created") or ""), int(s["version"][1:] or 0)))["version"]
 
     def restore(self, name, label):
-        org, sprite = self._where(name)
         v = self.version_of(name, label)
+        org, sprite, _ = self._live(name)          # again, right before: the version is that Sprite's
         self.cli.restore(org, sprite, v)
         return {"label": label, "version": v,
                 "note": "the Sprite's programs restarted: the desktop comes back as a service, open apps don't"}
 
     def delete_snapshot(self, name, label):
         """Deletes every checkpoint called `label`."""
-        org, sprite = self._where(name)
         gone = [s["version"] for s in self.snapshots(name) if s["label"] == check_name(label)]
+        org, sprite, _ = self._live(name)
         if not gone:
             raise AdapterError(f"{name} has no checkpoint {label}")
         for v in gone:
@@ -334,7 +415,8 @@ class Sprites(RemoteVM):
         out = {"model": "dns-allowlist", "setting": check_egress(s.get("EGRESS")), "allow": []}
         st = self.states.get(name) or {}
         if st.get("instance") and self._cli is not None:
-            kind, names = policy_kind(self.cli.policy(org_of(s), sprite_of(s)))
+            org, sprite, _ = self._live(name)
+            kind, names = policy_kind(self.cli.policy(org, sprite))
             out.update(outside=kind, allow=names)
         return out
 

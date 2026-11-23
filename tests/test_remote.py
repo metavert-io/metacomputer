@@ -195,6 +195,24 @@ def proxywrap():
             time.sleep(0.1)
         check("a SIGKILL to ssh's whole process group (as the hub ends a connection): the tunnel is still ended",
               os.path.exists(mark) and open(mark).read() == "TERM")
+        # Found by review: a wrapper whose ssh had already gone when it started took launchd for its parent, and ran the
+        # tunnel for good. Started orphaned (the shell that started it exits at once), it never leaves one running.
+        started = os.path.join(td, "started.pid")
+        starter = os.path.join(td, "starter.py")
+        with open(starter, "w") as f:
+            f.write(f"import os, time\nopen({started!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+        subprocess.run(["/bin/sh", "-c", f"{PY} {pw} -- {PY} {starter} </dev/null >/dev/null 2>&1 &"], timeout=10)
+        time.sleep(3)
+        alive = False
+        if os.path.exists(started):
+            pid = int(open(started).read() or 0)
+            try:
+                os.kill(pid, 0)
+                alive = True
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+        check("a wrapper started after its ssh had gone (orphaned from the start): no tunnel left running", not alive)
     finally:
         shutil.rmtree(td, ignore_errors=True)
 

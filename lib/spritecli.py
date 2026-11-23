@@ -5,7 +5,10 @@ hand it a stand-in. Plain values in and out; nothing the command prints is passe
 import json
 import os
 import re
+import selectors
+import signal
 import subprocess
+import time
 
 from cloud.adapter import AdapterError
 
@@ -15,34 +18,105 @@ class SpriteCLI:
     its place. The command runs with a small environment of its own (HOME and PATH: it reads its own sign-in), never
     the caller's, and nothing it prints is passed on whole."""
 
-    def __init__(self, path, timeout=120):
+    MAX_STDOUT = 4 << 20        # an API answer or a command's output: far more than any of them should be
+    MAX_STDERR = 64 << 10
+
+    def __init__(self, path, timeout=120, max_stdout=None, max_stderr=None):
         self.path = path
         self.timeout = timeout
+        self.max_stdout = max_stdout or self.MAX_STDOUT
+        self.max_stderr = max_stderr or self.MAX_STDERR
 
     def env(self):
         return {"HOME": os.environ.get("HOME") or os.path.expanduser("~"), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "LANG": "C.UTF-8"}
 
-    def run(self, args, input=None, timeout=None):
+    def run(self, args, input=None, timeout=None, max_output=None):
+        """The command's (exit status, stdout, stderr), read as it comes with a byte cap on each stream: what it prints
+        can come from the Sprite (`exec`: a guest's output, a log a hostile program wrote to), so nothing is buffered
+        past MAX_STDOUT (or max_output) and MAX_STDERR. Over the stdout cap, or past the timeout, the command (its whole
+        process group) is ended and AdapterError says so; stderr past its cap is read and dropped."""
+        cap = max_output or self.max_stdout
+        limit = timeout or self.timeout
         try:
-            r = subprocess.run([self.path, *args], input=input, capture_output=True, timeout=timeout or self.timeout,
-                               env=self.env())
+            p = subprocess.Popen([self.path, *args], stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env(), start_new_session=True)
         except FileNotFoundError:
             raise AdapterError(f"Fly's sprite command isn't at {self.path}") from None
-        except subprocess.TimeoutExpired:
-            raise AdapterError(f"Fly's sprite command didn't answer in {timeout or self.timeout} s") from None
-        return r
+        out, err, over = bytearray(), bytearray(), None
+        sel = selectors.DefaultSelector()
+        sel.register(p.stdout, selectors.EVENT_READ, "out")
+        sel.register(p.stderr, selectors.EVENT_READ, "err")
+        pending = memoryview(bytes(input)) if input is not None else None
+        if pending is not None:
+            os.set_blocking(p.stdin.fileno(), False)
+            if len(pending):
+                sel.register(p.stdin, selectors.EVENT_WRITE, "in")
+            else:
+                p.stdin.close()
+        deadline = time.monotonic() + limit
+        try:
+            while len(sel.get_map()) and over is None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    over = f"didn't finish in {limit} s"
+                    break
+                for key, _ in sel.select(min(left, 1.0)):
+                    if key.data == "in":
+                        try:
+                            n = os.write(p.stdin.fileno(), pending[:65536])
+                        except BlockingIOError:
+                            continue
+                        except (BrokenPipeError, OSError):
+                            n, pending = 0, pending[:0]
+                        pending = pending[n:]
+                        if not len(pending):
+                            sel.unregister(p.stdin)
+                            p.stdin.close()
+                        continue
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        sel.unregister(key.fileobj)
+                        continue
+                    if key.data == "out":
+                        out += chunk
+                        if len(out) > cap:
+                            over = f"printed more than {cap} bytes"
+                            break
+                    elif len(err) < self.max_stderr:
+                        err += chunk[:self.max_stderr - len(err)]
+        finally:
+            sel.close()
+            if over is not None:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            try:
+                p.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(p.pid, signal.SIGKILL)
+                p.wait()
+            for f in (p.stdin, p.stdout, p.stderr):
+                try:
+                    if f:
+                        f.close()
+                except OSError:
+                    pass
+        if over is not None:
+            raise AdapterError(f"Fly's sprite command {over}; it was ended (nothing it printed is passed on)")
+        return p.returncode, bytes(out), bytes(err)
 
     def api(self, org, path, method="GET", body=None, timeout=None):
         """(HTTP status, body text) of a Sprites API call, through `sprite api` (the CLI adds its own sign-in)."""
         args = ["-o", org, "api", path, "--", "-sS", "-X", method, "-w", "\n%{http_code}"]
         if body is not None:
             args += ["-H", "Content-Type: application/json", "--data-binary", "@-"]
-        r = self.run(args, input=json.dumps(body).encode() if body is not None else None, timeout=timeout)
-        out = r.stdout.decode(errors="replace")
+        rc, stdout, stderr = self.run(args, input=json.dumps(body).encode() if body is not None else None, timeout=timeout)
+        out = stdout.decode(errors="replace")
         text, _, code = out.rstrip("\n").rpartition("\n")
-        if r.returncode != 0 or not code.isdigit():
-            why = " ".join(r.stderr.decode(errors="replace").split())[-200:]
+        if rc != 0 or not code.isdigit():
+            why = " ".join(stderr.decode(errors="replace").split())[-200:]
             raise AdapterError(f"Fly's Sprites API didn't answer ({why or 'no reason given'}); is the sprite command "
                                "signed in to that organization? (sprite login)")
         return int(code), text
@@ -68,8 +142,11 @@ class SpriteCLI:
         items = (d or {}).get("sprites") or (d or {}).get("data") or []
         return [i for i in items if isinstance(i, dict) and isinstance(i.get("name"), str)]
 
-    def create(self, org, name):
-        d = self._json(org, "/v1/sprites", "POST", {"name": name}, ok=(200, 201))
+    def create(self, org, name, labels=()):
+        body = {"name": name}
+        if labels:
+            body["labels"] = list(labels)
+        d = self._json(org, "/v1/sprites", "POST", body, ok=(200, 201))
         if not isinstance(d, dict):
             raise AdapterError("Fly's Sprites API didn't make the Sprite")
         return d.get("data") if isinstance(d.get("data"), dict) else d
@@ -112,7 +189,8 @@ class SpriteCLI:
         if code not in (200, 202, 204, 404):
             raise AdapterError(f"Fly didn't delete the checkpoint {version}: HTTP {code}")
 
-    def exec(self, org, name, argv, input=None, timeout=None):
-        """`sprite exec` (no port forwards back to this Mac): returns (exit status, stdout bytes, stderr bytes)."""
-        r = self.run(["-o", org, "-s", name, "exec", "--no-port-forward", "--", *argv], input=input, timeout=timeout)
-        return r.returncode, r.stdout, r.stderr
+    def exec(self, org, name, argv, input=None, timeout=None, max_output=None):
+        """`sprite exec` (no port forwards back to this Mac): returns (exit status, stdout bytes, stderr bytes), each
+        capped (run)."""
+        return self.run(["-o", org, "-s", name, "exec", "--no-port-forward", "--", *argv], input=input,
+                        timeout=timeout, max_output=max_output)

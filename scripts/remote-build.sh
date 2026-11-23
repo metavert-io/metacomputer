@@ -176,7 +176,7 @@ if [ "$KIND" = sprite ]; then
     open_setup
     RESUMING=1
     # The setup's downloads: Fly's network policy lets every name out until the setup ends (then EGRESS).
-    remote_py egress --vm "$VM_NAME" --set internet >/dev/null || die "couldn't open Fly's network policy for the setup's downloads (above)"
+    remote_py egress --vm "$VM_NAME" --set internet --setup >/dev/null || die "couldn't open Fly's network policy for the setup's downloads (above)"
   fi
   # The first step through Fly's own channel (sprite exec, as the Sprite's `sprite` account, with sudo): the accounts,
   # their key lists and sshd as a Sprites service on the Sprite's loopback, with /.sprite hidden from its sessions.
@@ -187,7 +187,7 @@ if [ "$KIND" = sprite ]; then
   remote_py key-lists --vm "$VM_NAME" --dir "$BS" || die "couldn't write the key lists"
   say "bootstrap through Fly's own channel (sprite exec): accounts, and sshd on the Sprite's loopback with /.sprite hidden"
   out="$( (cd "$BS" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -cf - bootstrap.sh keys-guest keys-admin rootfs) \
-    | remote_py exec --vm "$VM_NAME" --timeout 900 -- sudo -n bash -c 'd="$(mktemp -d)"; tar -xf - -C "$d" --no-same-owner; bash "$d/bootstrap.sh" "$d"; rc=$?; rm -rf "$d"; exit $rc')" \
+    | remote_py exec --vm "$VM_NAME" --timeout 900 --stdin -- sudo -n bash -c 'd="$(mktemp -d)"; tar -xf - -C "$d" --no-same-owner; bash "$d/bootstrap.sh" "$d"; rc=$?; rm -rf "$d"; exit $rc')" \
     || { printf '%s\n' "$out" | grep -v '^HOSTKEY ' || true; die "the bootstrap failed (above)"; }
   "$LAB_ROOT/scripts/safe-rmtree.sh" --quiet "$BS"
   printf '%s\n' "$out" | grep -v '^HOSTKEY ' || true
@@ -427,6 +427,8 @@ case "$KIND" in
   *) ok "EGRESS=$want_egress: in force in its own firewall" ;;
 esac
 if [ "$KIND" = sprite ]; then
+  # Set up: the setup's exception to the network policy's rule (widening only at your own terminal) is over for good.
+  remote_py setup-done --vm "$VM_NAME" || die "couldn't record that $VM_NAME is set up"
   # Its baseline (metacomputer reset goes back to it): a checkpoint at Fly, taken while it runs.
   remote_py checkpoint --vm "$VM_NAME" create baseline --replace >/dev/null || die "couldn't make the baseline checkpoint (above)"
   ok "baseline: a checkpoint at Fly (metacomputer --vm $VM_NAME reset goes back to it)"

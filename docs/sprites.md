@@ -62,7 +62,7 @@ Everything works as on any computer: `metacomputer --vm work status`, the MCP to
 
 - **Sleep and wake.** The hub holds its SSH connection while it's used and lets go after `HUB_IDLE` (10 minutes) with
   no client; about 10 s later Fly pauses the Sprite. `metacomputer stop` closes this Mac's connections now (the hub, a
-  recording, the live view's tunnel). The next command wakes it, with Firefox and everything else as they were. Every
+  recording, the live view's tunnel, the vault's API proxy tunnel), and says so if one is still open. The next command wakes it, with Firefox and everything else as they were. Every
   connection's tunnel runs through `lib/proxywrap.py` (the vault's through `mcomp-vault _tunnel`), which ends Fly's
   `sprite proxy` when ssh goes: a tunnel left open would keep the Sprite awake, and billing.
 - **Checkpoints.** `metacomputer --vm work checkpoint NAME [--replace]`, `checkpoints`, `restore NAME`,
@@ -72,8 +72,8 @@ Everything works as on any computer: `metacomputer --vm work status`, the MCP to
   connection is cut, so launch them again afterwards. Files come back exactly as they were.
 - **Input is foreground only.** A Sprite's kernel has no `/dev/uinput`, so the driver has no virtual devices for
   background input. The hub sends keys, typing and pixel clicks in the foreground (the desktop's own pointer and
-  keyboard, XTEST) and says so in the result; clicks and actions on an element (`element_token`) still go through
-  accessibility. Fine on a desktop nobody else uses; the live view shows the pointer move.
+  keyboard, XTEST) and says so in the result, keys and typing aimed at an element too; clicks on an element
+  (`element_token`) still go through accessibility. Fine on a desktop nobody else uses; the live view shows the pointer move.
 - **Typing into Firefox pages goes in the foreground**, as on every computer: text inserted through accessibility
   (`type_text` with an element token, `set_value`) reports success but doesn't land in a web page's fields
   ([DESKTOP.md](../skills/metacomputer/DESKTOP.md), Firefox).
@@ -96,9 +96,9 @@ unanswered). There's no firewall in the guest: this is the one layer, and the ma
 - **An allowlist**: `net allow example.com other.org [--exact]` lists names (each with its subdomains unless
   `--exact`; `*.name` is the subdomains only); `net remove NAME` takes names off (the last one gone: no name at all);
   `net clear` goes back to `EGRESS`. A list stays until it's cleared (`--for` isn't available: nothing on your Mac
-  would be there to lift it). Anything that widens what the computer can reach (adding names to a list in force, a
-  list where `EGRESS=off`, `net clear` or `net egress internet` with a list in force) runs only at your own terminal;
-  narrowing it runs anywhere. Addresses can't be listed: only names.
+  would be there to lift it). A change whose resulting policy lets out anything the one in force doesn't (adding
+  names, a list where nothing goes out, every name where a list or nothing is in force) runs only at your own
+  terminal, however it's split into steps; narrowing it runs anywhere. Addresses can't be listed: only names.
 - **A blocked name looks like a DNS failure**: Firefox shows "Hmm. We're having trouble finding that site"
   (`dnsNotFound`), curl exit 6. That's the policy, not the site.
 - **The browsers' own DNS over HTTPS is locked off** (Firefox's and Chrome's policies): names must go through the
@@ -109,20 +109,28 @@ unanswered). There's no firewall in the guest: this is the one layer, and the ma
 - **Fly's management API is hidden from the desktop.** A Sprite's API socket (`/.sprite/api.sock`) is
   world-writable, and it can create services, which run as the Sprite's `sprite` account, which has sudo: so any
   account that reaches it has root, and can also keep the Sprite awake and billing, or make and restore checkpoints.
-  metacomputer runs the desktop (Xvfb, XFCE and everything started in it) and sshd (every SSH session: the driver,
-  `sh`, the vault's accounts, `cuaadmin`) in private mount namespaces where an empty tmpfs covers `/.sprite` before
-  the program starts (`hide-sprite-api`): the socket answers them "connection refused", they can't unmount it (they
-  have no root, and a user namespace of their own can't either: the mount is locked there), and `/proc/1/root` is
-  closed to them. Fly's own channel (`sprite exec`, its services) keeps the real one: that's the controller's, as the
-  Mac's owner is for a VM there. This was reported to Fly ([SECURITY.md](../SECURITY.md#fly-sprites)).
+  metacomputer runs everything of the desktop's and SSH's in one **session**: a mount namespace where an empty tmpfs
+  covers `/.sprite` (`hide-sprite-api`) and a PID namespace with its own `/proc`, made by the `session` service.
+  sshd, the X server and the desktop join it before anything runs as the desktop's account (`in-session`), so every
+  SSH session (the driver, `sh`, the vault's accounts, `cuaadmin`) and every desktop program is inside: the socket
+  answers "connection refused", the tmpfs can't be unmounted (no root; a user namespace of their own can't either:
+  the mount is locked there), and no process outside the session is visible, so no other process's `/proc/PID/root`
+  leads to the real `/.sprite`. Fly's own channel (`sprite exec`, its services) keeps the real one: that's the
+  controller's, as the Mac's owner is for a VM there. This was reported to Fly ([SECURITY.md](../SECURITY.md#fly-sprites)).
 - **SSH only through Fly's tunnel.** sshd listens on the Sprite's own loopback, by number (on a Sprite, `localhost`
   is its network address), and is reached from your Mac only through `sprite proxy -W :22`, with Fly's sign-in, then
   metacomputer's own keys and the pinned host key. The live view's x11vnc listens on `127.0.0.1:5900` only. Fly gives
   every Sprite a URL (`*.sprites.app`); metacomputer leaves it as Fly makes it, private to the organization, and serves
   nothing on it.
-- **The vault over the tunnel.** `secrets bind` pins Fly's `sprite` command (its path and contents) and the tunnel's
-  arguments, as it pins the gateway on your Mac; fills and API tokens go through it, run by the vault itself
-  (`mcomp-vault _tunnel`, which ends it when ssh goes). After the command changes (an update), bind again.
+- **The vault over the tunnel.** `secrets bind` pins Fly's `sprite` command (its path and contents), the tunnel's
+  arguments and the Sprite's own id, as it pins the gateway on your Mac; fills and API tokens go through the vault's
+  own copy of the command (checked again right before it runs), run by the vault itself (`mcomp-vault _tunnel`, which
+  ends it when ssh goes), after Fly's API says the Sprite of that name still has that id. After the command changes
+  (an update), bind again.
+- **Its own Sprite, and nothing else.** Every operation (the policy, checkpoints, restore, `sprite exec`, each SSH
+  connection) checks with Fly's API that the Sprite of that name has the id recorded when it was made; one deleted
+  and made again under the name is another, and nothing is done to it. A build whose answer was lost deletes only a
+  Sprite carrying its operation's label, set when Fly made it.
 - **Fly holds what's in the VM.** Its screen, disk and whatever is typed into it are on Fly's machines. Use a VM on
   your Mac for work you wouldn't put there. No file, secret or key of your Mac's goes to it.
 - **Fly's sign-in stays Fly's.** metacomputer runs the `sprite` command with only `HOME`, `PATH` and `LANG`, never

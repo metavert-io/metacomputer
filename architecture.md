@@ -1033,8 +1033,10 @@ otherwise).
   read back over that channel), then the common payload and `provision.sh` with
   `MCOMP_TARGET=sprite` (Xvfb, no systemd, DNS over HTTPS off) over SSH with one connection
   held open so the Sprite doesn't pause, then the `xvfb` and `desktop` services, the checks,
-  `finalize.sh` and a baseline checkpoint. The desktop and sshd run in private mount
-  namespaces with `/.sprite` hidden (`hide-sprite-api`). Egress is Fly's network policy
+  `finalize.sh` and a baseline checkpoint. The desktop and sshd run in one session (`svc-session`:
+  a mount namespace with `/.sprite` hidden by `hide-sprite-api`, and a PID namespace with its own
+  `/proc`), joined through `in-session` before anything runs as the desktop's account. Every
+  operation checks the Sprite's id with Fly's API first. Egress is Fly's network policy
   (DNS names, outside the VM); checkpoints are Fly's; the hub sends input in the foreground
   (`MCOMP_BACKGROUND_INPUT=off`, from the manifest's `input`).
 

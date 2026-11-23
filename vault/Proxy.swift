@@ -126,6 +126,7 @@ final class ProxyHub: @unchecked Sendable {
     let upstreamScheme: String
     var tokens: [String: APIToken] = [:]        // by token hash
     var listeners: [String: ProxyListener] = [:]
+    var providerChecked: [String: Date] = [:]   // VM -> when its provider last named the bound computer
     var closed = false
     /// Connections at once from one VM (each VM's listener has its own count, so one VM holding
     /// all of its slots never slows another). A connection over the limit waits up to slotWait
@@ -320,6 +321,16 @@ final class ProxyHub: @unchecked Sendable {
         }
     }
 
+    /// nil while the provider still names the bound computer (checked at most once a minute per VM), else why not.
+    func providerStill(_ vm: String, _ b: VMBinding) -> String? {
+        if let at = withLock({ providerChecked[vm] }), Date().timeIntervalSince(at) < 60 { return nil }
+        if let (why, denied) = providerProblem(b) {
+            return denied ? why : "the provider couldn't be asked about VM \(vm) (\(why)): nothing was sent"
+        }
+        withLock { providerChecked[vm] = Date() }
+        return nil
+    }
+
     // MARK: listeners and tunnels
 
     /// The VM's listener and tunnel, started if needed. Throws with the reason.
@@ -348,7 +359,16 @@ final class ProxyHub: @unchecked Sendable {
 
     /// What a tunnel is opened to: the computer (its identity, for one elsewhere), its address and port.
     func tunnelKey(_ b: VMBinding) -> String {
-        "\(b.computer_id ?? "-")|\(b.sshDestination)|\(b.ssh_port)|\(b.tunnel_program ?? "-")|\(b.tunnel_sha256 ?? "-")|\((b.tunnel_args ?? []).joined(separator: " "))"
+        "\(b.computer_id ?? "-")|\(b.sshDestination)|\(b.ssh_port)|\(b.tunnel_program ?? "-")|\(b.tunnel_sha256 ?? "-")|\((b.tunnel_args ?? []).joined(separator: " "))|\(b.tunnel_id ?? "-")"
+    }
+
+    /// `disconnect --vm VM`: that VM's tunnel closed (Tunnel.stop waits for ssh; the provider's tunnel ends with it);
+    /// returns how many were open. Its listener and tokens stay: the next request opens a tunnel again.
+    func disconnect(_ vm: String) -> Int {
+        guard let l = withLock({ listeners[vm] }) else { return 0 }
+        let open = l.tunnel?.alive == true
+        closeTunnel(l)
+        return open ? 1 : 0
     }
 
     /// Close a VM's tunnel (the computer it went to isn't the bound one any more): nothing more reaches the proxy from it.
@@ -586,6 +606,15 @@ final class ProxyHub: @unchecked Sendable {
             closeTunnel(l)
             respond(c, 401, "the computer bound as VM \(l.vm) was deleted or made again since this token was made: nothing was sent")
             log(401, 0, token, host, "the computer changed since the token was made")
+            return
+        }
+        // A computer behind a provider's tunnel: the provider's own id for it is still the bound one (asked again at most
+        // once a minute); otherwise every token of that VM ends and its tunnel closes.
+        if let b = p.vms[l.vm], b.tunnel_id != nil, let why = providerStill(l.vm, b) {
+            _ = revokeVM(l.vm)
+            closeTunnel(l)
+            respond(c, 401, why)
+            log(401, 0, token, host, "the provider's computer isn't the bound one")
             return
         }
         // Where its identity is read from while the answer streams (a computer elsewhere: beside its keys).

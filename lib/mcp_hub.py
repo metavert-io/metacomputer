@@ -312,17 +312,21 @@ def _foreground(v):
 
 
 FOREGROUND_ONLY_NOTE = ("metacomputer bridge: sent in the foreground (this computer has no background input: no "
-                        "/dev/uinput, as on Fly Sprites; actions on an element still go through accessibility)")
+                        "/dev/uinput, as on Fly Sprites; keys and typing always go in the foreground there, clicks on an "
+                        "element still go through accessibility)")
 
 
 def foreground_only(name, args):
-    """On a computer without the driver's background input (Fly Sprites): input that would need its virtual devices,
-    keys, typing and pixel clicks whose mode isn't foreground (each run_steps step by its effective mode), is sent in
-    the foreground; a call aimed at an element (element_token) keeps its route, accessibility, which works there.
-    Changes args in place; returns the note for the result, or None when nothing changed."""
+    """On a computer without the driver's background input (Fly Sprites): input that would need its virtual devices is
+    sent in the foreground, whatever its mode says (each run_steps step by its effective mode): keys and typing always
+    (an element_token names their target, but a key chord or typed text is still keyboard input; found by review), and
+    pointer input not aimed at an element. A pointer action on an element (a click by element_token) keeps its route,
+    accessibility, which works there. Changes args in place; returns the note for the result, or None when nothing
+    changed."""
     def needs(t, a, mode):
-        return (t in INPUT_TOOLS and isinstance(a, dict) and not a.get("element_token")
-                and not _foreground(a.get("delivery_mode", mode)))
+        if t not in INPUT_TOOLS or not isinstance(a, dict) or _foreground(a.get("delivery_mode", mode)):
+            return False
+        return t in KEY_TOOLS or not a.get("element_token")
     changed = False
     if name in INPUT_TOOLS:
         if needs(name, args, None):

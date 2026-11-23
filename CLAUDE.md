@@ -225,11 +225,16 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   Fly Sprites (docs/sprites.md; `PLACE=sprites`, `lib/cloud/sprites.py`, `lib/spritecli.py`, `provisioning/sprite/`) are
   reached through the `sprite` transport (`sprite proxy -W :22` through `lib/proxywrap.py`; the vault pins the program and
   runs it through `mcomp-vault _tunnel`, which ends it when ssh goes): a tunnel left open keeps a Sprite awake and billing.
-  Fly's `sprite` command keeps its own sign-in; `sprite exec` always with `--no-port-forward`. Keep `/.sprite` hidden
-  from the desktop and sshd (`hide-sprite-api` in a private mount namespace, before the program starts: the Sprite's
-  API socket is world-writable and gives root), keep sshd on the Sprite's loopback by number, always set a network
-  policy (an empty one enforces nothing) and never claim more than the manifest's `outside_egress`. No background
-  input there (no uinput): the hub sends keys, typing and pixel clicks in the foreground. Tests:
+  Fly's `sprite` command keeps its own sign-in, and what it prints is read with byte caps (`lib/spritecli.py`); `sprite
+  exec` always with `--no-port-forward`. Keep everything of the desktop's account inside the session (`svc-session`:
+  a mount namespace with `/.sprite` covered and a PID namespace with its own `/proc`; services join it with
+  `in-session` before anything runs as that account, `xauth` included): the Sprite's API socket is world-writable and
+  gives root, and a same-UID process outside would lead to it through `/proc/PID/root`. Every Sprite operation checks
+  the Sprite's id against Fly's API first (`_live`, `check_sprite`); a lost launch is only one carrying its operation's
+  label. A network policy change is judged on the policy it ends with (`widens`, `require_narrowing`). Keep sshd on the
+  Sprite's loopback by number, always set a network policy (an empty one enforces nothing) and never claim more than
+  the manifest's `outside_egress`. No background input there (no uinput): the hub sends keys and typing (aimed at an
+  element too) and pixel clicks in the foreground. Tests:
   `python3 tests/test_sprites.py` (a stand-in `sprite`; no VM, no network).
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every
   settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and

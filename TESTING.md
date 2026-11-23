@@ -299,8 +299,11 @@ Sprites API's answers in a file under its HOME.
   and LANG only, and `exec` never forwards ports back to the Mac.
 - `lib/remote.py`: the launch journal, a lost launch found by name and time and deleted (an older Sprite of that name
   left alone), abort and `--keep`.
-- The hub without background input (keys, typing, pixel clicks in the foreground; element actions left), the guest's
-  services (`/.sprite` hidden before each starts, sshd on the loopback, DNS over HTTPS off), and the CLI in a copy of
+- The hub without background input (keys and typing in the foreground, aimed at an element too; pixel clicks; element
+  clicks left), the guest's services (the session's mount and PID namespaces, joined before anything runs as the
+  desktop's account; sshd on the loopback, DNS over HTTPS off), each operation's check of the Sprite's id, lost
+  launches only by their operation's label, network policy changes judged on where they end, byte caps on what Fly's
+  command prints, and the CLI in a copy of
   the checkout: `vm create --on sprites`, `ssh_base`, `net status|egress|allow|remove|clear` (widening only at your
   own terminal), checkpoints, `stop`, `cloud status`, `vm delete`.
 
