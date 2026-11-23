@@ -1,7 +1,8 @@
 """Mining the user's own sessions with the metacomputer tools (`metacomputer learn report`, docs/learn.md).
 
-It finds the Claude Code transcripts that called the metacomputer tools (either prefix), plus action
-logs, event logs and benchmark results where present, and reports:
+It finds the Claude Code transcripts that called the metacomputer tools (either prefix), Codex's, Gemini CLI's,
+OpenClaw's and Hermes Agent's sessions that did (the last two from their SQLite databases, lib/session_dbs.py), plus
+action logs, event logs and benchmark results where present, and reports:
 - failed driver calls by class: malformed arguments, each hub guard's refusal, element not found, a pixel
   action without a screenshot frame, and the other classes the driver's messages name;
 - calls that returned `unverifiable` (or suspected_noop, did not settle), and how often the next call
@@ -26,6 +27,7 @@ import re
 import stat
 import time
 
+import session_dbs
 import transcripts
 
 # --- fixed vocabularies -----------------------------------------------------------------------------
@@ -162,13 +164,15 @@ def warning_of(text):
 
 
 def label_for(path, cwd, source, agent=None):
-    """A short label for a session from its folder on this Mac (two path parts), or its bench run/task."""
+    """A short label for a session from its folder on this Mac (two path parts), or its bench run/task (an OpenClaw or
+    Hermes Agent session without a folder: the agent's name)."""
     if source == "bench":
         parts = path.split(os.sep)
         base = "/".join(parts[-3:-1])
     else:
         c = (cwd or "").rstrip("/").split("/")
-        base = "/".join(x for x in c[-2:] if x) or os.path.basename(os.path.dirname(path))
+        base = "/".join(x for x in c[-2:] if x) or (source if source in session_dbs.READERS
+                                                    else os.path.basename(os.path.dirname(path)))
     base = LABEL_SAFE.sub("_", base)[-48:] or "session"
     return base + (" (subagent)" if agent else "")
 
@@ -529,11 +533,36 @@ def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), proje
             continue
         cut += 1 if item.pop("cut") else 0
         items.append(item)
-    return _dedupe(items, scanned, len(found), unreadable, cut)
+    # OpenClaw's and Hermes Agent's sessions, from their SQLite databases (lib/session_dbs.py): read, never written or
+    # locked; what couldn't be read is in the notes, never fatal
+    dbs, notes, with_tools = 0, [], len(found)
+    if projects:
+        try:
+            trs, dbs, bad, nb = session_dbs.sessions(env, cutoff)
+            unreadable, notes = unreadable + bad, nb.lines()
+        except Exception as e:                  # never the report's end: said, by its type only
+            trs, notes = [], [f"OpenClaw's and Hermes Agent's sessions weren't read ({type(e).__name__})"]
+        for tr in trs:
+            try:
+                item = _mine_tr(tr, tr.kind, cutoff, project)
+            except Exception:
+                unreadable += 1
+                continue
+            if item is not None:
+                with_tools += 1
+                cut += 1 if item.pop("cut") else 0
+                items.append(item)
+    kept, stats = _dedupe(items, scanned, with_tools, unreadable, cut)
+    stats.update(session_databases=dbs, notes=notes)
+    return kept, stats
 
 
 def _mine_one(path, source, cutoff, project):
-    tr = transcripts.parse(path, slim=True)
+    return _mine_tr(transcripts.parse(path, slim=True), source, cutoff, project)
+
+
+def _mine_tr(tr, source, cutoff, project):
+    path = tr.path
     if not tr.driver_calls:
         return None
     if source == "bench":
@@ -546,7 +575,7 @@ def _mine_one(path, source, cutoff, project):
         shift = end - (tr.last or 0.0)
         tr.first, tr.last = (tr.first or 0.0) + shift, (tr.last or 0.0) + shift
     else:
-        src = ("headless" if tr.kind == "stream" else "codex" if tr.kind == "codex" else "gemini" if tr.kind == "gemini"
+        src = ("headless" if tr.kind == "stream" else tr.kind if tr.kind in ("codex", "gemini", "openclaw", "hermes")
                else "claude-code")
     if project and src != "bench" and not _under(tr.cwd, project):
         return None
@@ -683,7 +712,8 @@ def aggregate(mined, stats, action, events, since_label, cutoff, project):
         "window": {"from": time.strftime("%Y-%m-%d", time.localtime(min(starts))) if starts else None,
                    "to": time.strftime("%Y-%m-%d", time.localtime(max(ends))) if ends else None},
         "sources": {"claude_code_sessions": src["claude-code"], "codex_sessions": src["codex"],
-                    "gemini_sessions": src["gemini"],
+                    "gemini_sessions": src["gemini"], "openclaw_sessions": src["openclaw"],
+                    "hermes_sessions": src["hermes"],
                     "headless_transcripts": src["headless"],
                     "benchmark_sessions": src["bench"], **stats},
         "sessions": n, "driver_calls": driver, "failed_calls": failed,

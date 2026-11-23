@@ -16,8 +16,7 @@ with Gemini CLI 0.70.0): a first line with sessionId and projectHash, then one l
 with the same id as its tool calls move on (the last copy counts) and {"$set": ...} lines for the first one. Its MCP tools
 are named mcp_<server>_<tool> (mcp_metacomputer_click); run_shell_command is read as a Bash call. The project folder comes
 from ~/.gemini/projects.json, which names each project's folder under tmp/.
-OpenClaw and Hermes Agent keep theirs in SQLite databases, and route MCP calls through a tool-search bridge by default;
-`learn` doesn't read them yet (docs/learn.md): their calls reach it through the hub's action log (ACTION_LOG=on).
+OpenClaw and Hermes Agent keep theirs in SQLite databases: lib/session_dbs.py reads those into this module's Transcript.
 
 Everything a tool result says came from the VM or from the hub, and the VM's part (window titles,
 page and document text) is untrusted. This module only parses; callers decide what to keep, and
@@ -324,7 +323,8 @@ class Transcript:
       id, name, tool (the driver tool, or None for other tools), input, ctx (the subagent's
       parent tool_use id, or ""), t_use, t_prev (the latest event before it), and, once its result
       came, error (bool), text (at most TEXT_KEEP characters), images, t_result;
-    plus session_id, cwd, kind ("stream", "project", "codex" or "gemini"), first/last (event times), final (the
+    plus session_id, cwd, kind ("stream", "project", "codex", "gemini", or lib/session_dbs.py's "openclaw" and "hermes"),
+    first/last (event times), final (the
     stream's result event) and init (its init event). Results are cut to TEXT_KEEP characters
     (TEXT_KEEP_WINDOWS for list_windows and launch_app)."""
 

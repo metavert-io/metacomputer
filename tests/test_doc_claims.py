@@ -2776,6 +2776,58 @@ CLAIMS = [
      lambda m: f"ttl: Int = {m[1]}," in raw("vault/Merchant.swift") and f'"valid_s": {m[1]}' in raw("vault/PaymentServer.swift")),
     ("docs/payments.md", r"Only you can add a card: the command needs your own terminal",
      lambda m: 'try requireTTY("set")' in raw("vault/Commands.swift") and 'value = Array(try readCardFromTerminal(name).encoded().utf8)' in raw("vault/Commands.swift")),
+    # learn reads OpenClaw's and Hermes Agent's SQLite databases (lib/session_dbs.py) without a write or a lock: their
+    # files opened read-only without following a link, the copy in memory (query_only), or SQLite's immutable mode in
+    # place; nothing in the module opens a file for writing or a database by its path any other way.
+    ("docs/learn.md", r"OpenClaw's and Hermes Agent's databases are read without the agent and without a write or a lock: each is "
+                      r"read into\s+memory as it was at its last commit.*?checked frame by frame as SQLite checks them\) and "
+                      r"opened there; the agent's own files are\s+only read, never changed, and nothing is made beside them. "
+                      r"One too large for that \(over (\d+) MB, a log over (\d+) MB, or a\s+log whose commits would make it "
+                      r"larger\) is opened in place read-only \(`immutable`\)",
+     lambda m: f"MAX_SNAPSHOT = {m[1]} << 20" in raw("lib/session_dbs.py") and f"MAX_WAL = {m[2]} << 20" in raw("lib/session_dbs.py")
+     and "fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)" in function_src("lib/session_dbs.py", "_open_in")
+     and "fd = _open_in(dfd, name)" in function_src("lib/session_dbs.py", "_read_file")
+     and "fd = _open_in(dfd, name)" in function_src("lib/session_dbs.py", "_read_head")
+     and "fd = _open_in(dfd, name)" in function_src("lib/session_dbs.py", "_in_place")
+     and raw("lib/session_dbs.py").count("os.open(") == 3
+     and 'sqlite3.connect(":memory:")' in function_src("lib/session_dbs.py", "_snapshot")
+     and "con.deserialize(bytes(db))" in function_src("lib/session_dbs.py", "_snapshot")
+     and 'sqlite3.connect(f"file:/dev/fd/{fd}?mode=ro&immutable=1", uri=True)' in function_src("lib/session_dbs.py", "_in_place")
+     and raw("lib/session_dbs.py").count("sqlite3.connect(") == 2
+     and 'con.execute("PRAGMA query_only = ON")' in function_src("lib/session_dbs.py", "_guard")
+     and all(function_src("lib/session_dbs.py", f).count("_guard(con, deadline)") == 1 for f in ("_snapshot", "_in_place"))
+     and 'if end > MAX_SNAPSHOT:\n                raise Unreadable("too large")' in function_src("lib/session_dbs.py", "apply_wal")
+     and function_src("lib/session_dbs.py", "apply_wal").index("if end > MAX_SNAPSHOT:")
+     < function_src("lib/session_dbs.py", "apply_wal").index("db.extend(")
+     and not re.search(r"O_WRONLY|O_RDWR|O_CREAT|open\([^)]*['\"][wa]|shutil|unlink|remove\(|rename\(|mkstemp|mkdtemp|"
+                       r"NamedTemporaryFile|\.write\(", raw("lib/session_dbs.py"))
+     and "if s != (fc1, fc2):\n            break" in function_src("lib/session_dbs.py", "apply_wal")
+     and "if (fs1, fs2) != (salt1, salt2) or pg == 0:\n            break" in function_src("lib/session_dbs.py", "apply_wal")),
+    ("docs/learn.md", r"Only your own files are read: from the agent's own folder \(.*?it may itself be a link you made\) down, no link "
+                      r"is followed, and a database whose\s+file or folder on the way another account owns is refused and noted\. "
+                      r"SQLite keeps its temporary data in memory \(no\s+temporary file ever holds a session\), and each "
+                      r"database gets (\w+) minutes, inside its queries too, and at most its\s+([\d,]+) most recent sessions",
+     lambda m: f"MAX_SECONDS = {dict(two=120.0).get(m[1])}" in raw("lib/session_dbs.py")
+     and f"MAX_SESSIONS = {m[2].replace(',', '')} " in raw("lib/session_dbs.py")
+     and "fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)" in function_src("lib/session_dbs.py", "_folder")
+     and "nfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)" in function_src("lib/session_dbs.py", "_folder")
+     and function_src("lib/session_dbs.py", "_folder").count("_mine(fd)") == 2
+     and "if st.st_uid != _me():\n        raise Unreadable(OTHERS)" in function_src("lib/session_dbs.py", "_mine")
+     and "if not stat.S_ISREG(_mine(fd).st_mode):" in function_src("lib/session_dbs.py", "_open_in")
+     and "dfd, name = _folder(path, root)" in function_src("lib/session_dbs.py", "open_db")
+     and 'p = _place(s, "agents", a, "agent", "openclaw-agent.sqlite")' in function_src("lib/session_dbs.py", "openclaw_dbs")
+     and 'con.execute("PRAGMA temp_store = MEMORY")' in function_src("lib/session_dbs.py", "_guard")
+     and "con.set_progress_handler(lambda: time.monotonic() > deadline, " in function_src("lib/session_dbs.py", "_guard")
+     and "deadline = time.monotonic() + MAX_SECONDS" in function_src("lib/session_dbs.py", "sessions")
+     and "ORDER BY w DESC LIMIT ?" in function_src("lib/session_dbs.py", "_recent")
+     and "(cutoff, MAX_SESSIONS + 1)" in function_src("lib/session_dbs.py", "_recent")
+     and all("_recent(con, " in function_src("lib/session_dbs.py", f) for f in ("read_openclaw", "read_hermes"))),
+    ("docs/learn.md", r"A database\s+of a layout this version doesn't know, or one that can't be read, is counted in the report's notes, "
+                      r"and the report\s+goes on",
+     lambda m: "except Layout:" in function_src("lib/session_dbs.py", "sessions")
+     and "except Unreadable as e:" in function_src("lib/session_dbs.py", "sessions")
+     and "trs, notes = [], [f\"OpenClaw's and Hermes Agent's sessions weren't read ({type(e).__name__})\"]"
+     in function_src("lib/learn_mine.py", "mine_sessions")),
 ]
 
 

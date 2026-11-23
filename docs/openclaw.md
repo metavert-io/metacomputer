@@ -94,10 +94,13 @@ or an SSH session, not through an agent.
   computers, a command from either that names no computer refuses: name it with `--vm`.
 - **The vault** treats requests from under the gateway like those from Codex's app server: "for this session" answers,
   project rules and session tokens don't apply, and each use asks. A one-off `openclaw agent exec` is a session.
-- **`metacomputer learn`** doesn't read OpenClaw's sessions yet: they're kept in SQLite databases
-  (`~/.openclaw/agents/<agent>/agent/openclaw-agent.sqlite`, partly compressed), and with tool search on, the MCP calls
-  are recorded as `dispatch_action` calls. The hub's action log (`ACTION_LOG=on`) records every client's calls, and
-  learn reads that.
+- **`metacomputer learn`** reads OpenClaw's sessions from its SQLite databases
+  (`~/.openclaw/agents/<agent>/agent/openclaw-agent.sqlite`, each profile's and `$OPENCLAW_STATE_DIR`'s), without
+  OpenClaw and without a write or a lock ([learn.md](learn.md#what-report-reads)), with the same rules: only classes,
+  counts, tool names and app names from a fixed list, never text. It counts the calls made through tool search's
+  `dispatch_action` as the tool they name. OpenClaw compresses large entries; Python 3.14 or later reads those, and the
+  report says how many it left out with an older one. Checked with sessions OpenClaw 2026.11.7 made in a throwaway home
+  with a stand-in model.
 - **The tools' names** are `metacomputer__<tool>` (no `mcp__` prefix).
 
 ## A benchmark run

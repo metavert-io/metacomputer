@@ -169,7 +169,9 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   "Event spool"). Tests: `python3 tests/test_events.py` (no VM) and
   `tests/test_options.py E` (VM).
 - Lessons (`metacomputer learn`, docs/learn.md; `lib/learn*.py`,
-  `lib/transcripts.py`, which reads Claude Code's, Codex's and Gemini CLI's sessions): proposals come only from structured fields (classes,
+  `lib/transcripts.py`, which reads Claude Code's, Codex's and Gemini CLI's sessions, and `lib/session_dbs.py`, OpenClaw's and
+  Hermes Agent's SQLite databases: read into memory from their files with the write-ahead log's commits applied, or opened
+  `immutable`; never a write, a lock or a file beside them): proposals come only from structured fields (classes,
   counts, tool names, app names from a fixed list); never copy text from a
   transcript or the VM into a proposal, a lesson or the draft summary. Free text
   needs the user's terminal; only a private store is loaded; no guard may read the

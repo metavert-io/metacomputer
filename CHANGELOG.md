@@ -6,6 +6,10 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`metacomputer learn` reads OpenClaw's and Hermes Agent's sessions** ([docs/learn.md](docs/learn.md#what-report-reads)): from their SQLite databases (OpenClaw: `openclaw-agent.sqlite` of every agent in `~/.openclaw`, each `~/.openclaw-<profile>` and `$OPENCLAW_STATE_DIR`; Hermes Agent: `state.db` in its home and each profile), with the same rules as the others (only classes, counts, tool names and app names from a fixed list), counting the calls their tool search makes for the model (`dispatch_action`, `tool_call`) as the tool they name, and their shells (`exec`, `terminal`) as shell commands. A database is read without the agent and without a write or a lock: into memory, as it was at its last commit, with the commits still in its write-ahead log applied (where a running Hermes gateway keeps its newest sessions), or, when it's too large for that, opened in place read-only (`immutable`, through the descriptor it checked) with a note. Only your own files are read, with no link followed below the agent's own folder; SQLite's temporary data stays in memory; each database gets two minutes, inside its queries too, and at most its 2,000 newest sessions. OpenClaw's compressed entries need Python 3.14 or later; with an older Python the report counts them. A layout it doesn't know is a note, never the report's end.
+
 ## [0.5.0] - 2026-11-23
 
 ### Added
