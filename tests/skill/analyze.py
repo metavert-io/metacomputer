@@ -12,7 +12,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "lib"))
 import transcripts  # noqa: E402
+import strictargs  # noqa: E402  (its command line, by metacomputer's rules, before anything is read)
 
+strictargs.expect(sys.argv[1:], ["TRANSCRIPT"], prog="tests/skill/analyze.py", usage=__doc__)
 path = sys.argv[1]
 MCOMP_CMD = transcripts.MCOMP_CMD
 meta_path = path[:-6] + ".meta.json"

@@ -43,6 +43,10 @@ TIMEOUT = 60
 SAFE_PATH = os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(d))
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 def trusted(name):
     """(absolute path, None) of the `claude` or `codex` command to run, or (None, why not). Only absolute PATH entries
     are searched (a `.` on PATH would let a downloaded folder's own `codex` run here), and the file must be yours or
@@ -403,15 +407,14 @@ def session_check(limit=20):
 
 def main(argv):
     if argv[:1] == ["codex-entry"]:            # for install.sh (see codex_entry)
-        if len(argv) != 5 or argv[1] != "--root" or argv[3] != "--link":
-            print("usage: agents.py codex-entry --root CHECKOUT --link ~/.local/bin/metacomputer", file=sys.stderr)
-            return 2
+        p = strictargs.expect(argv, ["codex-entry --root CHECKOUT --link LINK"], prog="agents.py",
+                              usage="usage: agents.py codex-entry --root CHECKOUT --link ~/.local/bin/metacomputer")
         prog, why = trusted("codex")
-        fields = (codex_entry(prog, argv[2], argv[4]) if prog else
+        fields = (codex_entry(prog, p.opts["--root"], p.opts["--link"]) if prog else
                   ["error", why or "Codex's codex command isn't on PATH", "", "", ""])
         print("\x1f".join(str(f).replace("\x1f", " ").replace("\n", " ") for f in fields))
         return 0
-    ap = argparse.ArgumentParser(prog="metacomputer agents", description=__doc__.split("\n\n")[0])
+    ap = strictargs.Parser(prog="metacomputer agents", description=__doc__.split("\n\n")[0])
     ap.add_argument("what", nargs="?", default="status", choices=("status", "check"))
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--quiet", action="store_true", help="check: print only what failed")

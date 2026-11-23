@@ -12,6 +12,14 @@
 # port sshd listens on; out, no metadata, link-local or private ranges), so nothing runs unfiltered; provision.sh
 # makes it permanent. It prints the host's ed25519 public key last, which the Mac pins (read over a connection you
 # already trust). Running it again changes nothing that's already right.
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="bootstrap.sh DIR [OWNER] [SSH_PORT]"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "bootstrap.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in [123]:*) ;; *) echo "bootstrap.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -Eeuo pipefail
 # A failure says where, on the console and in cloud-init's log (a step that fails under set -e says nothing otherwise).
 trap 'echo "bootstrap: failed at line $LINENO: $BASH_COMMAND" >&2' ERR

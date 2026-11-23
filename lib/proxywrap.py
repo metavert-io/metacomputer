@@ -188,6 +188,9 @@ def main(argv):
     if len(argv) < 2 or argv[0] != "--":
         print(usage, file=sys.stderr)
         return 2
+    if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+        print("parse-only: proxywrap.py: taken " + json.dumps({"flags": [], "values": ["--id"], "words": 1, "max_words": None, "passthrough": True}))
+        sys.exit(99)        # parse only: nothing was done (never 0: a check run this way refuses)
     leave_group()
     return run(argv[1:], parent=parent, check=check, want=want)
 

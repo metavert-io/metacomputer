@@ -133,6 +133,9 @@ def render():
 
 
 def main(argv):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    strictargs.expect(argv, ["render", "launch-path NAME"], prog="driver_profiles.py", usage=__doc__)
     if argv[:1] == ["render"]:
         try:
             sys.stdout.write(render())

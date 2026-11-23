@@ -14,6 +14,14 @@
 #   scripts/fetch-artifacts.sh rclone   only rclone, for S3-backed folder volumes (Mac side):
 #     SHA256SUMS signed by rclone's release key (fingerprint pinned; only that key kept),
 #     the zip's SHA-256 pinned and cross-checked, installed to .cache/rclone-vVERSION/rclone
+. "$(dirname "$0")/strictargs.sh"
+mc_u="scripts/fetch-artifacts.sh [rclone | remote arm64|x86_64]"
+SA_DEFER=1
+if ! sa_check fetch-artifacts.sh "$mc_u" 0 2 "" "" "$@"; then
+  sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0     # usage only
+fi
+case "$#:${1:-}:${2:-}" in 0::|1:rclone:|2:remote:arm64|2:remote:x86_64) ;; *) sa_fail fetch-artifacts.sh "$mc_u" "not one of its forms" ;; esac
+sa_parsed fetch-artifacts.sh
 set -Eeuo pipefail
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR

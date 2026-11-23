@@ -7,6 +7,9 @@
 #
 #   scripts/build-vm.sh            refuses if the VM or baseline already exists
 #   scripts/build-vm.sh --replace  deletes and rebuilds the working VM AND baseline
+. "$(dirname "$0")/strictargs.sh"
+# Nothing but --replace: anything else (an option it doesn't have, a word) is a usage error, before anything runs.
+if ! sa_check build-vm.sh "metacomputer build [--replace]" 0 0 "--replace" "" "$@"; then sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0; fi   # usage only
 set -Eeuo pipefail
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR

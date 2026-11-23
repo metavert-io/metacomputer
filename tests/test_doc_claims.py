@@ -782,6 +782,86 @@ CLAIMS = [
      lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("bin/metacomputer")
      and f"exit {m[1]} ;;" in raw("bin/metacomputer")),
     ("docs/codex.md", r"with `tool_timeout_sec = (\d+)`", lambda m: f"CODEX_TOOL_TIMEOUT={m[1]}" in raw("install.sh")),
+    # --help and -h: the usage, before the settings are read or anything runs (tests/test_help.py runs every form)
+    ("docs/commands.md", r"`--help` or `-h` anywhere in a command \(after it, its subcommand or its arguments, before a "
+                         r"`--`\) prints that command's usage and exits 0 without doing anything: no settings are read",
+     lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"') < raw("bin/metacomputer").index('. "$LIB"')
+     and raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
+     < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')
+     and 'case "$a" in --) return 1 ;; -h|--help) return 0 ;; esac' in raw("bin/metacomputer")
+     and "test_help" in raw("scripts/release.sh")),
+    ("docs/commands.md", r"Right after an option that takes a value it isn't a request for usage, and the command refuses it "
+                         r"as that value too \(`sh --file --help` is a usage error; a file named `--help` is `./--help`\); "
+                         r"the usage comes from the command's own program asked with fixed words only, never the rest of "
+                         r"what was typed",
+     lambda m: 'case "$vals" in *" $a "*) skip=1 ;; esac' in raw("bin/metacomputer")
+     and "def value_option_checks():" in raw("tests/test_help.py")
+     and 'margs=("$c" "$@")' not in raw("bin/metacomputer") and 'margs=("$@")' not in raw("bin/metacomputer")
+     and 'mod="$c"; margs=(${subw[@]+"${subw[@]}"} --help)' in raw("bin/metacomputer")),
+    ("docs/commands.md", r"Every command refuses, before it does anything, what it wouldn't use: an option it doesn't have, a "
+                         r"flag given twice, a second value for an option that takes one",
+     lambda m: "mc_strict \"$@\"" in raw("bin/metacomputer") and "mc_help_malformed \"$@\"" in raw("bin/metacomputer")
+     and raw("bin/metacomputer").index('mc_strict "$@"') < raw("bin/metacomputer").index('. "$LIB"')
+     and 'throw usageError("--\\(name) given twice")' in raw("vault/ArgSpecs.swift")
+     and 'self.register("action", "store", _Once)' in raw("lib/strictargs.py")
+     and all("strictargs.Parser(" in raw(f"lib/{m_}.py") and "argparse.ArgumentParser(" not in raw(f"lib/{m_}.py")
+             for m_ in ("events", "handoff", "learn", "agents", "shop", "browser_tools", "traces", "update", "storage",
+                        "netpolicy", "remote"))
+     and 'elif a.startswith("-") and a != "-":' in raw("lib/guest_put.py")      # put: ./-name for such a file
+     and "def strict_forms():" in raw("tests/test_help.py")),
+    ("docs/commands.md", r"and `--vm` or `--on` given twice or with an option for its value \(`--vm --help --vm NAME`\)\. The vault "
+                         r"checks each of its command lines against what that command's form declares",
+     lambda m: raw("bin/metacomputer").index("mc_global --vm") < raw("bin/metacomputer").index('if mc_help_malformed "$@"')
+     and "try checkArgs(cmd, rest)" in raw("vault/Commands.swift")
+     and raw("vault/Commands.swift").index("try checkArgs(cmd, rest)") < raw("vault/Commands.swift").index('case "init": return')
+     and not any(re.search(r"parseArgs\([^\n]*(values|flags):", raw(f"vault/{f}"))        # no declaration but the table's
+                 for f in os.listdir(os.path.join(LAB, "vault")) if f.endswith(".swift"))
+     and "GLOBAL_MISUSE" in raw("tests/test_help.py") and "def spec_walk(" in raw("tests/test_vault_ops.py")),
+    ("SECURITY.md", r"each prints one JSON line with `status`, the first four\s+with `--json`, `fill --request` always",
+     lambda m: '"fill --request": ArgSpec(values: ["request", "vm", "selector", "profile", "browser-pid", "window-id"], flags: ["human"])'
+     in raw("vault/ArgSpecs.swift") and 'printCodeResult(res, json: true, verb: "filled")' in raw("vault/Codes.swift")),
+    ("docs/commands.md", r"The same rules hold for every program in the repository, not only\s+`metacomputer`: scripts/ "
+                         r"\(scripts/strictargs.sh\), lib/ \(lib/strictargs.py\)",
+     lambda m: "sa_check() {" in raw("scripts/strictargs.sh") and "def expect(" in raw("lib/strictargs.py")
+     and "def entry_points():" in raw("tests/entrypoints.py") and "def misuse_rows(" in raw("tests/entrypoints.py")
+     and "def entry_results(" in raw("tests/test_help.py")
+     and '. "$(dirname "$SELF")/../scripts/strictargs.sh"' in raw("bin/metacomputer")
+     and all('. "' in raw(f"scripts/{s}") and "strictargs.sh" in raw(f"scripts/{s}") for s in (
+         "build-tools.sh", "build-vault.sh", "build-vm.sh", "check-public.sh", "fetch-artifacts.sh", "pin-gpg-key.sh",
+         "release.sh", "remote-build.sh", "safe-rmtree.sh"))),
+    ("docs/commands.md", r"launchers \(with nothing set up, `--help` still prints their usage\), the programs the VM runs and the ones the\s+"
+                         r"repository compiles \(`tools/qcow2raw`\); what follows a `--` they pass on stays that program's own\."
+                         r" tests/test_help.py\s+finds each by a scan, checks that each takes the command lines its callers give it",
+     lambda m: all('case "$*" in -h|--help)' in raw(f"{d}/bin/metacomputer") for d in ("plugin", "agent-plugin"))
+     and "func checkArgs(" in raw("tools/qcow2raw/main.go") and '"tools/qcow2raw": P("go"' in raw("tests/entrypoints.py")
+     and '"plugin/bin/metacomputer#uninstalled"' in raw("tests/entrypoints.py")
+     and '["exec", "--vm", "demo", "--", "/usr/bin/true", "--help"]' in raw("tests/entrypoints.py")
+     and 'PARSE_ONLY = os.environ.get("MCOMP_PARSE_ONLY") == "1"' in raw("lib/strictargs.py")
+     and "a valid line (as its callers pass it" in raw("tests/test_help.py")),
+    ("TESTING.md", r"`handoff.py guard --hold-fd N` and `owners.py check` end a parse-only run with 99, never 0, and\s+"
+                   r"bin/metacomputer runs no command with it set",
+     lambda m: "PARSE_ONLY_EXIT = 99" in raw("lib/strictargs.py") and "sys.exit(PARSE_ONLY_EXIT)" in raw("lib/strictargs.py")
+     and "exit 99" in raw("scripts/strictargs.sh") and 'if [ -n "${MCOMP_PARSE_ONLY:-}" ]; then' in raw("bin/metacomputer")
+     and "(99: parse only, never 0)" in raw("tests/test_handoff.py")
+     and "ok = rc == 99 and info is not None" in raw("tests/test_help.py")),
+    ("docs/commands.md", r"a value that starts with `-` where no value can \(a name, a folder, a number\), whether given as\s+"
+                         r"`--out VALUE` or `--out=VALUE`",
+     lambda m: "not an option ('{v[:40]}'" in raw("lib/strictargs.py") and "dashValueOptions" in raw("vault/ArgSpecs.swift")
+     and 'f"an option as {v}\'s value ({v}=--bogus)"' in raw("tests/entrypoints.py")
+     and "an option as --{v}'s value (--{v}=--bogus)" in raw("tests/test_vault_ops.py")),
+    ("docs/codex.md", r"one that only asks for its usage \(`--help` or `-h`\) prints it, since it runs nothing",
+     lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
+     < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')),
+    # metacomputer sh's log: keyed hashes only (an unkeyed SHA-256 of a short output can be reversed by guessing)
+    ("SECURITY.md", r"A keyed hash is an HMAC-SHA256 of the text's SHA-256 under a per-install secret beside the log's "
+                    r"signing key \(`action-log.results-hmac`, 0600",
+     lambda m: 'return hmac.new(mac_key, b"sha256:" + sha_hex.encode("ascii"), hashlib.sha256).hexdigest()' in raw("lib/vm_shell.py")
+     and "return actionlog.result_mac_key(actionlog.settings()[\"key\"])" in raw("lib/vm_shell.py")
+     and '"script_sha256"' not in raw("lib/vm_shell.py") and '"sha256": st["sha256"]' not in raw("lib/vm_shell.py")
+     and '"sha256": hashlib.sha256(remote)' not in raw("lib/vm_shell.py")
+     and 'key + ".results-hmac"' in raw("lib/actionlog.py") and "os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600" in raw("lib/actionlog.py")),
+    ("SECURITY.md", r"an output that\s+came back whole must match its SHA-256, or the answer is refused",
+     lambda m: 'if hashlib.sha256(head).hexdigest() != sha:' in raw("lib/vm_shell.py")),
     ("SECURITY.md", r"\*\*Recognising agent sessions is best-effort defense in depth.\*\*.*?So it is never what an approval that "
                     r"matters rests on: those also\s+need you present, Touch ID \(or macOS's login-password dialog\) in "
                     r"presence mode, or the confirmation typed at the\s+terminal where you unlocked the vault",
@@ -1122,8 +1202,13 @@ CLAIMS = [
      lambda m: (int(m[1]), int(m[2].replace(",", ""))) == (mcp_hub.MAX_LAYOUT_WINDOWS, mcp_hub.MAX_LAYOUT_WINDOWS_TOTAL)),
     ("SECURITY.md", r"More than (\d+) windows open .{0,80}every pixel action is refused \(`too_many_windows`\)",
      lambda m: int(m[1]) == mcp_hub.MAX_LAYOUT_WINDOWS and '"too_many_windows"' in raw("lib/mcp_hub.py")),
-    ("SECURITY.md", r"drained with a (\d+) KB memory tail and at most (\d+) MB per connection",
-     lambda m: (int(m[1]) << 10, int(m[2]) << 20) == (wirelimits.STDERR_KEEP, wirelimits.STDERR_FILE_MAX)),
+    ("SECURITY.md", r"none of its text is kept, by the hub, the direct client \(`lib/mcp_client.py`\) and the hub's input "
+                    r"reset alike: how many lines of which fixed classes, at most (\d+) MB per connection",
+     lambda m: int(m[1]) << 20 == wirelimits.STDERR_FILE_MAX
+     and "self.stderr_counter = wirelimits.StderrCounter(self.proc.stderr, self.stderr_path)" in raw("lib/mcp_client.py")
+     and "StderrTail" not in raw("lib/mcp_client.py")
+     and "errs = wirelimits.StderrCounter(p.stderr) if capture_err else None" in raw("lib/input_reset.py")
+     and "errtext" not in raw("lib/input_reset.py")),
     ("SECURITY.md", r"Past the activity window \((\d+) min, `MCOMP_ACTIVE_S`\)",
      lambda m: int(m[1]) * 60 == owners.ACTIVE_S == mcp_hub.LEASE_MAX_S),
     ("SECURITY.md", r"\(SIGTERM, so the action log's relay can sign its end; (\d+) s later SIGKILL\)",
@@ -1830,7 +1915,7 @@ CLAIMS = [
     ("SECURITY.md", r"each computer's own network security group lets out public IPv4 addresses only",
      lambda m: "egress_security_rules=[]))" in raw("lib/cloud/oci.py") and "for cidr in public_v4()]" in raw("lib/cloud/oci.py")
      and "nsg_ids=[nsg_id] if nsg_id else None" in raw("lib/cloud/oci.py")
-     and raw("lib/cloud/oci.py").index("nsg = api.make_nsg(name, egress)") < raw("lib/cloud/oci.py").index("iid = api.launch(")),
+     and raw("lib/cloud/oci.py").index("nsg = api.make_nsg(name, egress, op=op,") < raw("lib/cloud/oci.py").index("iid = api.launch(")),
     ("SECURITY.md", r"rules that don't\s+load give way to an SSH-only fallback \(nothing out but replies, and nothing of the full rules in it\), and if that\s+doesn't load either, the network stays down",
      lambda m: "render_emergency()" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
      and "set private" not in subprocess.run(["/bin/sh", os.path.join(LAB, "provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall"),
@@ -1868,7 +1953,8 @@ CLAIMS = [
      and 'rows = [i["id"] for i in a.api.instances(name, op=op) if i["id"] not in found]' in py_top_fn("lib/remote.py", "reconcile")
      and 'found.update(owned_all(a, rows, name, op, "listed for"))' in py_top_fn("lib/remote.py", "reconcile")
      and "found, unresolved = reconcile(s, st, a, op)" in py_top_fn("lib/remote.py", "cmd_abort")
-     and "a.api.delete_nsg_by_id(g, name)" in py_top_fn("lib/remote.py", "delete_op_parts")
+     and "delete_group(a, g, name, op)" in py_top_fn("lib/remote.py", "delete_op_parts")
+     and "return a.api.delete_nsg_by_id(gid, name)" in py_top_fn("lib/remote.py", "delete_group")
      and "raise Refused(" in raw("lib/remote.py") and "deleted again" in raw("lib/remote.py")),
     ("SECURITY.md", r"`start` checks\s+that no session or handoff has the computer, and never hard-stops a running instance unless its whole console\s+capture ends with the guest's power-off",
      lambda m: "def powered_off(self, name):" in raw("lib/cloud/oci.py") and "Nothing was stopped" in raw("lib/cloud/oci.py")
@@ -1912,8 +1998,9 @@ CLAIMS = [
     ("SECURITY.md", r"records it as kept, so no later try takes it for a\s+lost launch, then stops it",
      lambda m: py_top_fn("lib/remote.py", "cmd_abort").index("st.update(instance=next(iter(found)), op=op, kept=now()")
      < py_top_fn("lib/remote.py", "cmd_abort").index('a.api.action(iid, "STOP")')),
-    ("SECURITY.md", r"What a build makes of the shared network and its computer's\s+group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact\s+resources and no others; the journal is on the disk \(`F_FULLFSYNC`, or `fsync` where that isn't supported\) before\s+anything billable is launched, and an error making it so refuses the launch",
-     lambda m: 'made("made_network", net["vcn"])' in raw("lib/cloud/oci.py") and 'made("made_nsg", nsg)' in raw("lib/cloud/oci.py")
+    ("SECURITY.md", r"What a build makes of the shared network and its computer's\s+group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact\s+resources and no others;[^;]*; the journal is on the disk \(`F_FULLFSYNC`,\s+or `fsync` where that isn't supported\) before anything billable is launched, and an error making it so refuses the launch",
+     lambda m: 'made("made_network", net["vcn"])' in raw("lib/cloud/oci.py")
+     and 'on_made=lambda gid: made("made_nsg", gid)' in raw("lib/cloud/oci.py")
      and raw("lib/cloud/oci.py").index("with self._network_lock():\n            # What this operation makes")
      < raw("lib/cloud/oci.py").index('made("made_network", net["vcn"])')
      and "a.api.delete_network_by_id(made_net)" in py_top_fn("lib/remote.py", "delete_op_parts")
@@ -2951,6 +3038,47 @@ CLAIMS = [
      and "except Unreadable as e:" in function_src("lib/session_dbs.py", "sessions")
      and "trs, notes = [], [f\"OpenClaw's and Hermes Agent's sessions weren't read ({type(e).__name__})\"]"
      in function_src("lib/learn_mine.py", "mine_sessions")),
+    # Oracle Cloud's security groups: the create's answer, never a lookup by name (lib/cloud/oci.py, lib/remote.py).
+    ("SECURITY.md", r"at Oracle Cloud each build makes a group of its own, tagged with the computer and its\s+operation, never one found by its name",
+     lambda m: "self.nsg(" not in raw("lib/cloud/oci.py") and "def nsg(self" not in raw("lib/cloud/oci.py")
+     and "def delete_nsg(self, name)" not in raw("lib/cloud/oci.py")
+     and "freeform_tags={TAG: name, OP_TAG: op}" in raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0]
+     and raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("on_made(g.id)")
+     < raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("self.nsg_egress(g.id, egress)")
+     and raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("on_made(g.id)")
+     < raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("self.oci.wait_until(")),
+    ("SECURITY.md", r"`net egress` and `vm delete` act only on the OCIDs the computer's record\s+names, each read by its id and still tagged for this computer and one of its recorded operations",
+     lambda m: "a.api.nsg_owner(fw)" in py_top_fn("lib/remote.py", "check_firewall")
+     and hasattr(__import__("cloud").ADAPTERS["oci"], "delete_groups") and __import__("cloud").ADAPTERS["oci"].groups_by_record
+     and hasattr(__import__("cloud.oci").oci.SDK, "nsg_owner") and hasattr(__import__("cloud.oci").oci.SDK, "nsgs_of_op")
+     and "self.api.nsg_egress(self.recorded_group(name), egress)" in raw("lib/cloud/oci.py")
+     and "a.delete_groups(name, st)" in py_top_fn("lib/remote.py", "cmd_delete")
+     and "return a.api.delete_nsg_by_id(gid, name, op)" in py_top_fn("lib/remote.py", "delete_group")
+     and "if comp != name or not (mark == op if mark is not None else legacy):" in raw("lib/cloud/oci.py")),
+    ("SECURITY.md", r"a group an\s+earlier version made, which carries no operation, gets no rule changed",
+     lambda m: "was made by an earlier version of metacomputer" in raw("lib/cloud/oci.py")
+     and "if who[0] == name and who[1] is None:" in raw("lib/cloud/oci.py")
+     and "if comp == name and not mark:" in py_top_fn("lib/remote.py", "check_firewall")),
+    ("docs/remote.md", r"a group no computer's record on this Mac names, another Mac's or one whose record is gone, is never deleted on\s+its name",
+     lambda m: "is never deleted on its name" in py_top_fn("lib/remote.py", "cmd_cloud")
+     and "pending = a.api.nsg_names()" in py_top_fn("lib/remote.py", "cmd_cloud")
+     and "ops=ops))" in py_top_fn("lib/remote.py", "cmd_create")
+     and '"ops": mine.get("ops") or [op]' in py_top_fn("lib/remote.py", "cmd_create")),
+    ("docs/remote.md", r"its\s+first rules, written after it's read again once the create's wait is over",
+     lambda m: (lambda mk: mk.index("self.oci.wait_until(") < mk.index("who = self.nsg_owner(g.id)")
+                < mk.index("if who != (name, op):") < mk.index("self.nsg_egress(g.id, egress)"))(
+         raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0])),
+    ("docs/remote.md", r"one another Mac makes\s+after teardown looked stops the network's deletion too, with nothing deleted",
+     lambda m: (lambda d: d.index("if others:") < d.index("for gid in ours:") < d.index("self._delete_network_parts(n)")
+                and "(g.freeform_tags or {}).get(TAG)" not in d)(
+         raw("lib/cloud/oci.py").split("def _delete_one_network(", 1)[1].split("\n    def ", 1)[0])),
+    # The live view's tunnel log (lib/tunnellog.py): private, and bounded however much ssh prints.
+    ("docs/remote.md", r"what SSH says goes to a private log \(`tunnel/view-tunnel.log` in its log folder: 0600, in a\s+0700 "
+                       r"folder\), at most (\d) MB of it",
+     lambda m: int(m[1]) << 20 == __import__("tunnellog").CAP and "os.O_NOFOLLOW" in raw("lib/tunnellog.py")
+     and "os.fchmod(fd, 0o600)" in raw("lib/tunnellog.py") and "os.mkdir(folder, 0o700)" in raw("lib/tunnellog.py")
+     and 'tlog="$LOG_DIR/tunnel/view-tunnel.log"' in raw("bin/metacomputer")
+     and ">>\"$tlog\"" not in raw("bin/metacomputer")),
 ]
 
 

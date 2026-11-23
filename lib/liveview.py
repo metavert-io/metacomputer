@@ -485,6 +485,11 @@ def forget(port, from_view=False):
 
 
 def main(argv):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    strictargs.expect(argv, ["remember --port PORT [--from-view]", "refresh --port PORT", "remembered --port PORT [--json]",
+                             "forget --port PORT [--from-view]", "gui", "clip [--clear-after SECONDS]"], prog="liveview.py",
+                      usage=__doc__)
     if argv[:1] in (["remember"], ["refresh"], ["remembered"], ["forget"]):
         port, rest = port_arg(argv[1:])
         extra = {"remembered": ["--json"], "remember": ["--from-view"], "forget": ["--from-view"]}

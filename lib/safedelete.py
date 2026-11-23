@@ -493,8 +493,8 @@ def rmtree_own(base, rel, target_vm, own=(), check_only=False, lab=LAB):
 
 
 def _own_main(args):
-    import argparse
-    ap = argparse.ArgumentParser(prog="safedelete.py own")
+    import strictargs
+    ap = strictargs.Parser(prog="safedelete.py own")
     ap.add_argument("--base", required=True)
     ap.add_argument("--rel", required=True)
     ap.add_argument("--target-vm", required=True)
@@ -513,27 +513,27 @@ def _own_main(args):
     return 0
 
 
+# Its command lines (lib/strictargs.py expect()): a word that isn't a path (an option it doesn't have, a request for
+# usage) is refused before anything is deleted; after `--` every word is a path, whatever it looks like.
+FORMS = ["rmtree [--quiet] PATH...", "rmtree [--quiet] -- ~PATH...", "check PATH...", "check -- ~PATH...",
+         "check-runner VMFOLDER...", "check-runner -- ~VMFOLDER...", "prune --older-than SECONDS FOLDER...",
+         "prune --older-than SECONDS -- ~FOLDER...", "own --base DIR --rel A/NAME --target-vm NAME [--own PATH]... [--check]"]
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("rmtree", "check", "prune", "own", "check-runner"):
-        print(__doc__.split("\n\n")[1], file=sys.stderr)
-        return 2
-    cmd, args = argv[0], argv[1:]
-    if cmd == "own":
-        return _own_main(args)
-    quiet = args[:1] == ["--quiet"]
-    if quiet:
-        args = args[1:]
-    if args[:1] == ["--"]:
-        args = args[1:]
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs
+    if argv[:1] == ["own"] and not any(a in strictargs.HELP for a in argv):
+        return _own_main(argv[1:])
+    p = strictargs.expect(argv, FORMS[:-1], prog="safedelete.py", usage=__doc__.split("\n\n")[1])
+    cmd, args, quiet = p.words[0], p.words[1:], bool(p.opts.get("--quiet"))
     older = None
     if cmd == "prune":
-        if len(args) < 2 or args[0] != "--older-than" or not args[1].isdigit():
+        if not p.opts["--older-than"].isdigit():
             print("usage: safedelete.py prune --older-than SECONDS [--] FOLDER...", file=sys.stderr)
             return 2
-        older, args = int(args[1]), args[2:]
-        if args[:1] == ["--"]:
-            args = args[1:]
+        older = int(p.opts["--older-than"])
     try:
         if cmd == "prune":
             import time

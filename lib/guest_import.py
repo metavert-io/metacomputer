@@ -608,6 +608,13 @@ def import_from_command(cmd, dest, max_bytes=None, min_free=0, timeout=600, env=
 
 
 def main(argv):
+    if any(a in ("-h", "--help") for a in (argv[:argv.index("--")] if "--" in argv else argv)):
+        print(__doc__)          # usage only: no DEST is made from it, and nothing is read
+        return 0
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is read or made
+    opts = "[--quiet] [--keep-existing PREFIX] [--only-top FILE] [--timeout SECONDS] [--idle-timeout SECONDS]"
+    strictargs.expect(argv, [f"DEST {opts}", f"DEST {opts} -- ~COMMAND..."], prog="guest_import.py", usage=__doc__)
     cmd = None
     if "--" in argv:
         i = argv.index("--")

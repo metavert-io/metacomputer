@@ -1194,7 +1194,12 @@ def describe(o):
 
 
 def main(argv):
-    cmd = argv[1] if len(argv) > 1 else "who"
+    # Its command line (lib/strictargs.py): anything else (`release --help`, an option it doesn't have, a word) is
+    # refused, or the usage shown, before any claim is read or released.
+    import strictargs
+    strictargs.expect(argv[1:], ["[who] [--json]", "check", "release", "at-terminal [--stderr]"], prog="owners.py",
+                      usage=__doc__)
+    cmd = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else "who"
     if cmd == "who":
         table = ps_table()
         me = claude_of(os.getpid(), table)

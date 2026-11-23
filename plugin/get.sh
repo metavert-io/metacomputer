@@ -702,7 +702,24 @@ main() {
   DIR=""; DIR_FROM=""; REF=""; REF_KIND=""; REF_COMMIT=""; REF_BRANCH=""; REPO="$MC_REPO"; NO_CHROME=0; NO_BUILD=0; NO_CODEX=0; NO_CLAUDE=0; REPLACE_VM=0
   NO_OPENCLAW=0; NO_HERMES=0; NO_GEMINI=0; NO_ANTIGRAVITY=0
   DRY=0; YES=0; CONFIRM=0; HEALTH=""; VM_NEW=0
+  # metacomputer's command-line rules (scripts/strictargs.sh; this file runs on its own, so they're here): exactly -h or
+  # --help prints the usage; each option once; a value never starts with '-'; anything else is refused (exit 2), and
+  # nothing is done.
+  local a o seen=" "
+  # Its options (each case below is one of these; tests/test_help.py makes every misuse from this declaration):
+  local flags="--no-chrome --no-build --no-codex --no-claude --no-openclaw --no-hermes --no-gemini --no-antigravity --replace-vm --confirm --yes --dry-run"
+  local vals="--dir --ref --repo"
+  for a in "$@"; do case "$a" in -h|--help) usage; exit 0 ;; esac; done
   while [ $# -gt 0 ]; do
+    case "$1" in
+      -h?*|--h|--he|--hel|--help=*) echo "get.sh: '$1' isn't a request for usage: -h or --help (see --help)" >&2; exit 2 ;;
+    esac
+    o="${1%%=*}"; [ "$o" = -y ] && o=--yes
+    case " $flags $vals " in *" $o "*) ;; *) echo "get.sh: unknown option: $1 (see --help)" >&2; exit 2 ;; esac
+    case "$seen" in *" $o "*) echo "get.sh: $o given twice (see --help)" >&2; exit 2 ;; esac
+    seen="$seen$o "
+    case "$1" in --dir|--ref|--repo) case "${2:-}" in -*) echo "get.sh: $1 needs a value, not '${2:-}' (see --help)" >&2; exit 2 ;; esac ;;
+                 --dir=-*|--ref=-*|--repo=-*) echo "get.sh: ${1%%=*} needs a value, not '${1#*=}' (see --help)" >&2; exit 2 ;; esac
     case "$1" in
       --dir) [ $# -ge 2 ] && [ -n "$2" ] || { echo "get.sh: --dir needs a folder" >&2; exit 2; }; DIR="$2"; shift ;;
       --dir=*) DIR="${1#--dir=}" ;;
@@ -728,6 +745,12 @@ main() {
     shift
   done
   case "$REF" in -*|*..*|*[[:space:]]*) echo "get.sh: --ref '$REF' isn't a tag or branch name" >&2; exit 2 ;; esac
+  if [ "${MCOMP_PARSE_ONLY:-}" = 1 ]; then         # (tests/test_help.py: taken, nothing done; what it declares)
+    printf 'parse-only: get.sh: taken {"flags": [%s], "values": [%s], "words": 0, "max_words": 0}\n' \
+      "$(printf '"%s", ' $flags | sed 's/, $//')" "$(printf '"%s", ' $vals | sed 's/, $//')"
+    echo "parse only: nothing was done" >&2
+    exit 99                                       # (never 0)
+  fi
   case "$DIR" in '') ;; /*) ;; *) DIR="$PWD/$DIR" ;; esac
   # When piped into bash, stdin is the rest of this script: nothing below may read it.
   [ -t 0 ] || exec </dev/null

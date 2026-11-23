@@ -20,10 +20,14 @@
 #                                             .cache/cua-src (what `metacomputer setup` from the plugin uses)
 set -Eeuo pipefail
 LAB="$(cd "$(dirname "$0")/.." && pwd)"
+. "$LAB/scripts/strictargs.sh"
+if ! sa_check build-tools.sh "scripts/build-tools.sh [--check] [--rebuild] [--fresh-source]" 0 0 \
+       "--check --rebuild --fresh-source" "" "$@"; then
+  sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0
+fi
 CHECK=0 REBUILD=0 FRESH=0
 for a in "$@"; do
-  case "$a" in --check) CHECK=1 ;; --rebuild) REBUILD=1 ;; --fresh-source) FRESH=1 ;;
-    *) echo "build-tools: unknown option $a" >&2; exit 2 ;; esac
+  case "$a" in --check) CHECK=1 ;; --rebuild) REBUILD=1 ;; --fresh-source) FRESH=1 ;; esac
 done
 BIN_DIR="$LAB/vendor/bin"
 netgw_patches() { find "$LAB/patches/netgw" -maxdepth 1 -name '*.patch' -type f 2>/dev/null | LC_ALL=C sort; }

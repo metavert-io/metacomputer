@@ -43,6 +43,10 @@ NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 NO_CLOUD = "this metacomputer has no cloud computers set up; every computer it has is on this Mac (metacomputer list)"
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 class Refused(ValueError):
     pass
 
@@ -210,7 +214,7 @@ def _pairs(specs):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="placement.py")
+    ap = strictargs.Parser(prog="placement.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("resolve")
     p.add_argument("--vm")

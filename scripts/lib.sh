@@ -1,6 +1,10 @@
 #!/bin/bash
 # metacomputer host library: configuration, Lume + mcomp-netgw (cua-netgw)
 # lifecycle, SSH. Sourced by bin/metacomputer and scripts/*. macOS /bin/bash 3.2.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then    # run on its own: it's a library, and does nothing (exit 2; -h: this line)
+  case "$*" in -h|--help) echo "scripts/lib.sh: sourced by bin/metacomputer and scripts/*, never run"; exit 0 ;; esac
+  echo "scripts/lib.sh: a library (bin/metacomputer and scripts/* source it); nothing was run" >&2; exit 2
+fi
 
 # Provider credentials (lib/remote.py PROVIDER_ENV: each driver's own) in this command's environment reach
 # lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported

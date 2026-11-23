@@ -7,6 +7,14 @@
 #  - starts the password-protected VNC view on :5900 (reachable only through
 #    the host gateway's 127.0.0.1 forward; on a VM reached over the internet it
 #    listens on 127.0.0.1 only, /etc/metacomputer/vnc-listen, reached through SSH)
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="session-init (no arguments: run at the desktop's login)"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "session-init: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 0:) ;; *) echo "session-init: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -u
 RUN="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/metacomputer"
 mkdir -p "$RUN" "$HOME/.cache/metacomputer"

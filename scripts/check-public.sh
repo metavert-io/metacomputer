@@ -19,15 +19,20 @@
 # Paths to skip (globs, one per line) come from scripts/check-public.skip or check-public.skip. Lockfiles, certificates
 # and minified/map files are always skipped (their encoded text matches short terms by accident).
 # Exit status 1 when anything is found.
+. "$(dirname "$0")/strictargs.sh"
+if ! sa_check check-public.sh "check-public.sh [-r REPO] [-a] [DENYLIST ...]" 0 n "-a" "-r" "$@"; then
+  sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0     # usage only
+fi
 set -uo pipefail
-repo=. all_refs=
+repo=. all_refs= lists=()
 while [ $# -gt 0 ]; do
   case $1 in
-    -r) repo=${2:?-r needs a folder}; shift 2 ;;
+    -r) repo=$2; shift 2 ;;
     -a) all_refs=1; shift ;;
-    *) break ;;
+    *) lists+=("$1"); shift ;;
   esac
 done
+set -- ${lists[@]+"${lists[@]}"}
 top=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || { echo "not a git repository: $repo" >&2; exit 2; }
 cd "$top" || exit 2
 conf=${OPEN_SOURCE_PREP_DIR:-$HOME/.config/open-source-prep}

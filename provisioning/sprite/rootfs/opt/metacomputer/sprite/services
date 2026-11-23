@@ -6,6 +6,14 @@
 #   services status    the services and their state
 # Services run as the Sprite's `sprite` account, which may use sudo: each runs its fixed root-owned script with
 # `sudo -n`. Running it again replaces a service's definition with the same one.
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="services sshd|desktop|status"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "services: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 1:sshd|1:desktop|1:status) ;; *) echo "services: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -eu
 ENV=/.sprite/bin/sprite-env
 [ -x "$ENV" ] || ENV="$(command -v sprite-env)"

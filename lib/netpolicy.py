@@ -52,6 +52,10 @@ LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 CONFIRM_S = 4.0                    # how long the gateway gets to load a new rules file (it looks every 250 ms)
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 class Refused(Exception):
     """A request this command won't carry out; exit 3 with the message."""
 
@@ -532,7 +536,7 @@ def cmd_expire(a, p):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="metacomputer net", description=__doc__.split("\n\n")[0])
+    ap = strictargs.Parser(prog="metacomputer net", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd")
     s = sub.add_parser("status")
     s.add_argument("--json", action="store_true")

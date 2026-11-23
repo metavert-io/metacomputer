@@ -3,6 +3,10 @@
 # one command, deleting one safely, and the default computer. Sourced by bin/metacomputer (its functions and the
 # settings scripts/lib.sh loaded are in scope); macOS /bin/bash 3.2. Settings: one file per VM, config/vms/NAME.env,
 # and config/default-vm naming the default (scripts/lib.sh, "which VM").
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then    # run on its own: it's sourced, and does nothing (exit 2; -h: this line)
+  case "$*" in -h|--help) echo "scripts/vm-commands.sh: sourced by bin/metacomputer (metacomputer vm ...), never run"; exit 0 ;; esac
+  echo "scripts/vm-commands.sh: sourced by bin/metacomputer (metacomputer vm ...); nothing was run" >&2; exit 2
+fi
 
 # Settings that are the Mac's choices rather than one VM's: `vm create` copies the ones these settings set
 # differently from config/defaults.env into the new VM's file (it doesn't read config/local.env later on).
@@ -14,6 +18,11 @@ SHARE_CLIPBOARD SHARE_AUDIO SHARE_ROSETTA STORAGE_DIR ACTION_LOG ACTION_LOG_TEXT
 SSH_CA_KEY DRIVER_MODE DRIVER_PROFILE DRIVER_ORIGINS DRIVER_MANIFEST DRIVER_EXPIRES DRIVER_IDLE VM_SHELL SHELL_LOG
 MCP_HUB COORD_GUARD VIEW_REMEMBER INTERACTIVE_PROMPTS OCI_PYTHON"
 
+# A value option is given once: a second one is a usage error (nothing a command doesn't use is let through).
+vc_once() { # OPTION: dies when OPTION was given already in this command (VC_SEEN)
+  case " ${VC_SEEN:-} " in *" $1 "*) die "${1%%=*} given twice (one value, please)" ;; esac
+  VC_SEEN="${VC_SEEN:-} $1"
+}
 do_vm() { # list [--on PLACE] [--json] | create NAME ... | delete NAME ...
   local sub="${1:-list}"; [ $# -gt 0 ] && shift
   case "$sub" in
@@ -71,11 +80,12 @@ vm_all_settings() {
 vm_list() { # [--on PLACE] [--json]
   local json=() on=() a tmp rc=0 sel="$VM_NAME" def="" problem="${MC_DEFAULT_PROBLEM:-}"
   local usage="usage: metacomputer list [--on PLACE] [--json]   (or: metacomputer vm list ...)"
+  sa_check metacomputer "${usage#usage: }" 0 0 "--json" "--on=" "$@" || return 0   # (-h/--help: bin/metacomputer's)
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json=(--json) ;;
-      --on) [ $# -ge 2 ] && [ -n "$2" ] || die "--on needs a place: mac (this Mac) or cloud ($usage)"; on=(--on "$2"); shift ;;
-      --on=*) [ -n "${1#--on=}" ] || die "--on needs a place: mac (this Mac) or cloud ($usage)"; on=(--on "${1#--on=}") ;;
+      --on) vc_once --on; [ $# -ge 2 ] && [ -n "$2" ] || die "--on needs a place: mac (this Mac) or cloud ($usage)"; on=(--on "$2"); shift ;;
+      --on=*) vc_once --on; [ -n "${1#--on=}" ] || die "--on needs a place: mac (this Mac) or cloud ($usage)"; on=(--on "${1#--on=}") ;;
       *) die "$usage" ;;
     esac
     shift
@@ -127,6 +137,7 @@ vm_list() { # [--on PLACE] [--json]
 # is started, stopped or changed, and a hub or session already running keeps the VM it started with.
 vm_default() { # [NAME] [--json]
   local name="" json=0 a info kind label usage="usage: metacomputer default [NAME] [--json]"
+  sa_check metacomputer "${usage#usage: }" 0 1 "--json" "" "$@" || return 0
   for a in "$@"; do
     case "$a" in
       --json) json=1 ;;
@@ -269,23 +280,26 @@ vm_port_in_use() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes] | NAME --on PLACE [--host H --user U --port P] [--size S] [--region R] [--egress E]
   local name="" ssh="" vnc="" build=1 a a2 used p f vault rows k v def tmp rc
   local on="${MC_ON_ARG:-}" host="" huser="" hport="" size="" egress="" idle="" org="${SPRITES_ORG:-}" sprite="" region="" rlabel=""
+  # Every option once, a value that's never an option (`--org --help` took the request for usage as the organization).
+  sa_check metacomputer "vm create NAME [--on PLACE] [OPTIONS]   (metacomputer help: vm create)" 1 1 "--no-build --yes -y" \
+    "--on= --host --user --port --size --region --egress --idle-stop --org --sprite --ssh-port= --vnc-port=" "$@" || return 0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --on) [ $# -ge 2 ] || die "--on needs a place: server (your own server), oci (Oracle Cloud), sprites (Fly Sprites), hetzner, digitalocean or vultr"; on="$2"; shift ;;
-      --on=*) on="${1#*=}" ;;
-      --host) [ $# -ge 2 ] || die "--host needs your server's address"; host="$2"; shift ;;
-      --user) [ $# -ge 2 ] || die "--user needs your account on the server"; huser="$2"; shift ;;
-      --port) [ $# -ge 2 ] || die "--port needs your server's SSH port"; hport="$2"; shift ;;
-      --size) [ $# -ge 2 ] || die "--size needs a size"; size="$2"; shift ;;
-      --region) [ $# -ge 2 ] || die "--region needs a region"; region="$2"; shift ;;
-      --egress) [ $# -ge 2 ] || die "--egress needs internet or off"; egress="$2"; shift ;;
-      --idle-stop) [ $# -ge 2 ] || die "--idle-stop needs minutes, or off"; idle="$2"; shift ;;
-      --org) [ $# -ge 2 ] || die "--org needs the Fly organization's name"; org="$2"; shift ;;
-      --sprite) [ $# -ge 2 ] || die "--sprite needs the Sprite's name"; sprite="$2"; shift ;;
-      --ssh-port) [ $# -ge 2 ] || die "--ssh-port needs a port"; ssh="$2"; shift ;;
-      --vnc-port) [ $# -ge 2 ] || die "--vnc-port needs a port"; vnc="$2"; shift ;;
-      --ssh-port=*) ssh="${1#*=}" ;;
-      --vnc-port=*) vnc="${1#*=}" ;;
+      --on) vc_once --on; [ $# -ge 2 ] || die "--on needs a place: server (your own server), oci (Oracle Cloud), sprites (Fly Sprites), hetzner, digitalocean or vultr"; on="$2"; shift ;;
+      --on=*) vc_once --on; on="${1#*=}" ;;
+      --host) vc_once --host; [ $# -ge 2 ] || die "--host needs your server's address"; host="$2"; shift ;;
+      --user) vc_once --user; [ $# -ge 2 ] || die "--user needs your account on the server"; huser="$2"; shift ;;
+      --port) vc_once --port; [ $# -ge 2 ] || die "--port needs your server's SSH port"; hport="$2"; shift ;;
+      --size) vc_once --size; [ $# -ge 2 ] || die "--size needs a size"; size="$2"; shift ;;
+      --region) vc_once --region; [ $# -ge 2 ] || die "--region needs a region"; region="$2"; shift ;;
+      --egress) vc_once --egress; [ $# -ge 2 ] || die "--egress needs internet or off"; egress="$2"; shift ;;
+      --idle-stop) vc_once --idle-stop; [ $# -ge 2 ] || die "--idle-stop needs minutes, or off"; idle="$2"; shift ;;
+      --org) vc_once --org; [ $# -ge 2 ] || die "--org needs the Fly organization's name"; org="$2"; shift ;;
+      --sprite) vc_once --sprite; [ $# -ge 2 ] || die "--sprite needs the Sprite's name"; sprite="$2"; shift ;;
+      --ssh-port) vc_once --ssh-port; [ $# -ge 2 ] || die "--ssh-port needs a port"; ssh="$2"; shift ;;
+      --vnc-port) vc_once --vnc-port; [ $# -ge 2 ] || die "--vnc-port needs a port"; vnc="$2"; shift ;;
+      --ssh-port=*) vc_once --ssh-port; ssh="${1#*=}" ;;
+      --vnc-port=*) vc_once --vnc-port; vnc="${1#*=}" ;;
       --no-build) build=0 ;;
       --yes|-y) ASSUME_YES=1 ;;
       -*) die "unknown option $1 (metacomputer vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]; elsewhere: --on server --host ADDRESS --user ACCOUNT [--port P], --on oci [--size SIZE], --on hetzner|digitalocean|vultr [--size SIZE] [--region REGION], or --on sprites --org ORG [--sprite SPRITE]; all: [--egress internet|off])" ;;
@@ -513,10 +527,12 @@ vm_q() { # KEY VALUE: KEY='VALUE' for a settings file (quoted for bash)
 # are another VM's, it runs itself again with --vm NAME, and the checks below happen there.
 vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]
   local name="" confirm_name="" force=0 del_vault=0 del_vols=0 yes_given=0 remove_from_server=0 checked_provider="" a args=("$@")
+  sa_check metacomputer "vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes] [--remove-from-server] [--checked-provider] [--yes]" \
+    1 1 "--force --delete-vault --delete-volumes --remove-from-server --checked-provider --yes -y" "--confirm=" "$@" || return 0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --confirm) [ $# -ge 2 ] || die "--confirm needs the VM's name"; confirm_name="$2"; shift ;;
-      --confirm=*) confirm_name="${1#*=}" ;;
+      --confirm) vc_once --confirm; [ $# -ge 2 ] || die "--confirm needs the VM's name"; confirm_name="$2"; shift ;;
+      --confirm=*) vc_once --confirm; confirm_name="${1#*=}" ;;
       --force) force=1 ;;
       --delete-vault) del_vault=1 ;;
       --delete-volumes) del_vols=1 ;;

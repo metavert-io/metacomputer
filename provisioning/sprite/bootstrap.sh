@@ -13,6 +13,14 @@
 # rootfs: the service scripts and the SSH listen settings). It prints the host's ed25519 public key last, which the
 # Mac pins (read over Fly's authenticated channel, never from a first connection). Running it again changes nothing
 # that's already right.
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="bootstrap.sh DIR"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "bootstrap.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 1:*) ;; *) echo "bootstrap.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -Eeuo pipefail
 DIR="${1:?usage: bootstrap.sh DIR}"
 GUSER=cua

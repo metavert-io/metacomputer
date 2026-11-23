@@ -778,10 +778,25 @@ def page_action(action, a):
         end_session(k)
 
 
+def _help_shaped(s):
+    """A request for usage, or a word shaped like one (lib/strictargs.py's rule; this runs in the VM, on its own)."""
+    return s in ("-h", "--help", "--h", "--he", "--hel") or s.startswith("--help=") or (s.startswith("-h") and not s.startswith("--"))
+
+
+ACTIONS = ("gpu", "debug", "read", "shots", "page-open", "page-read", "page-fill", "page-select", "page-click",
+           "page-upload", "page-close")
+
+
 def main(argv):
-    if len(argv) != 2:
+    if argv in (["-h"], ["--help"]):
         print(json.dumps({"ok": False, "error": "usage: page_guest.py ACTION JSON"}))
+        return 0
+    if len(argv) != 2 or argv[0] not in ACTIONS or any(_help_shaped(a) for a in argv) or argv[1].startswith("-"):
+        print(json.dumps({"ok": False, "error": "usage: page_guest.py ACTION JSON (ACTION: " + ", ".join(ACTIONS) + ")"}))
         return 2
+    if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+        print("parse-only: page_guest.py: taken " + json.dumps({"flags": [], "values": [], "words": 2, "max_words": 2}))
+        sys.exit(99)        # parse only: nothing was done (never 0: a check run this way refuses)
     try:
         a = json.loads(argv[1])
         if not isinstance(a, dict):

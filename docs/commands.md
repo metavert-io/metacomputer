@@ -11,7 +11,27 @@ short overview, and the [guide](guide.md) shows what each is for, task by task.
 ## Commands
 
 `metacomputer` (installed at `~/.local/bin/metacomputer`; `mcomp` is a short
-alias). `metacomputer help` prints a summary. `metacomputer --vm NAME COMMAND`
+alias). `metacomputer help` prints a summary. `--help` or `-h` anywhere in a command (after it, its
+subcommand or its arguments, before a `--`) prints that command's usage and exits 0 without doing anything: no
+settings are read, and nothing reaches the VM, its runner, SSH, a provider, the vault or the network (`ssh ROLE CMD`
+leaves them to the guest's command). Right after an option that takes a value it isn't a request for usage, and the
+command refuses it as that value too (`sh --file --help` is a usage error; a file named `--help` is `./--help`); the
+usage comes from the command's own program asked with fixed words only, never the rest of what was typed. Every command refuses, before it does anything, what it wouldn't use: an option it
+doesn't have, a flag given twice, a second value for an option that takes one (options that take a list, like
+`--site`, repeat), a value that starts with `-` where no value can (a name, a folder, a number), whether given as
+`--out VALUE` or `--out=VALUE`, a word beyond its
+arguments or one missing, an abbreviated option, and a request for usage that isn't exactly `-h` or `--help` (`--help=x`,
+`-hx`, `--hel`): each is a usage error (a file whose name starts with `-` is given as `./-name`). So is a request for
+usage given as an option's value or a word where nothing reads it, and `--vm` or `--on` given twice or with an option
+for its value (`--vm --help --vm NAME`). The vault checks each of its command lines against what that command's form
+declares (vault/ArgSpecs.swift: its options, those that repeat, its flags and how many words it takes), so an option
+of another of its subcommands is refused too. The same rules hold for every program in the repository, not only
+`metacomputer`: scripts/ (scripts/strictargs.sh), lib/ (lib/strictargs.py), install.sh, get.sh, the plugins'
+launchers (with nothing set up, `--help` still prints their usage), the programs the VM runs and the ones the
+repository compiles (`tools/qcow2raw`); what follows a `--` they pass on stays that program's own. tests/test_help.py
+finds each by a scan, checks that each takes the command lines its callers give it, and runs every misuse its own
+declaration implies after each.
+`metacomputer --vm NAME COMMAND`
 runs any command on the VM `NAME`; without `--vm`, a command acts on your default
 computer ([More than one VM](#more-than-one-vm)).
 

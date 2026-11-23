@@ -31,7 +31,7 @@ NO_VM_SUITES=(test_actionlog test_recording test_vm_shell test_vm_claude test_ss
   test_plugin test_learn test_storage test_install test_events test_doc_claims test_release test_handoff
   test_hidden_text test_multi_vm test_vault_codes test_guest_profiles test_netpolicy test_botcheck
   test_traces test_page_guest test_update test_agents test_cloud_adapters test_session_guard test_remote test_sprites
-  test_agent_setup test_vault_payments)
+  test_agent_setup test_vault_payments test_help)
 REMOTE=origin
 MAIN=main
 CANONICAL_SLUG="metavert-io/metacomputer"   # get.sh's own repository: its dry run needs no --repo for it
@@ -45,6 +45,10 @@ step() { printf '\n%s\n' "${b}$*${o}"; }
 die()  { printf '\n%s\n' "${r}release: $1${o}" >&2; shift; local l; for l in "$@"; do printf '%s\n' "  $l" >&2; done; exit 1; }
 would() { printf '%s\n' "  would run: $*"; }
 
+. "$(dirname "$0")/strictargs.sh"
+SA_DEFER=1
+if ! sa_check release.sh "scripts/release.sh VERSION [--tag [--draft-release]] [--dry-run [--skip-tests]]" 1 1 \
+       "--tag --dry-run --skip-tests --draft-release" "" "$@"; then usage; exit 0; fi
 VERSION="" TAG_STEP=0 DRY=0 SKIP_TESTS=0 DRAFT=0
 for a in "$@"; do
   case "$a" in
@@ -61,6 +65,7 @@ done
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "release: VERSION is MAJOR.MINOR.PATCH, like 0.3.0 (no v)" >&2; exit 2; }
 [ "$SKIP_TESTS" = 0 ] || [ "$DRY" = 1 ] || { echo "release: --skip-tests goes with --dry-run only" >&2; exit 2; }
 [ "$DRAFT" = 0 ] || [ "$TAG_STEP" = 1 ] || { echo "release: --draft-release goes with --tag" >&2; exit 2; }
+sa_parsed release.sh
 
 ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null)" || die "not in a git checkout"
 cd "$ROOT" || die "can't enter $ROOT"

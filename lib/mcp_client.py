@@ -62,7 +62,7 @@ class MCPClient:
         self.server_info = {}
         self.protocol = None
         self.calls = 0
-        self.stderr_tail = None
+        self.stderr_counter = None
 
     # -- transport --------------------------------------------------------
     def start(self, timeout=90):
@@ -77,8 +77,10 @@ class MCPClient:
         self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE if self.stderr_path else subprocess.DEVNULL,
                                      bufsize=0, env=env)
-        if self.stderr_path:       # SSH carries the VM's stderr: a capped log, never an unbounded file
-            self.stderr_tail = wirelimits.StderrTail(self.proc.stderr, self.stderr_path, append=True)
+        if self.stderr_path:
+            # SSH carries the VM's stderr, which can echo what a page showed: none of its text is kept, as in the hub
+            # (wirelimits.StderrCounter): counts, and a fixed class per line in a capped log at stderr_path.
+            self.stderr_counter = wirelimits.StderrCounter(self.proc.stderr, self.stderr_path)
         threading.Thread(target=self._reader, daemon=True).start()
         res = self.request("initialize", {
             "protocolVersion": PROTOCOL,
@@ -179,8 +181,10 @@ class MCPClient:
             except queue.Empty:
                 continue
             if msg.get("__eof__"):
+                said = self.stderr_counter.text(wait=1.0) if self.stderr_counter else ""
                 raise MCPError(f"MCP server closed the connection during {method}"
-                               + (f" ({self.closed_why}; connection dropped)" if self.closed_why else ""))
+                               + (f" ({self.closed_why}; connection dropped)" if self.closed_why else "")
+                               + (f"; {said}" if said else ""))
             if msg.get("id") == rid and ("result" in msg or "error" in msg):
                 if "error" in msg:
                     raise MCPError(f"{method}: {msg['error']}")
@@ -293,21 +297,23 @@ def redact(args):
 
 
 def main(argv):
-    if not argv or argv[0] in ("-h", "--help"):
-        print(__doc__)
-        return 0
-    # Everything here goes through the hub (lib/mcomp_sdk.py), like `metacomputer call`.
-    import mcomp_sdk
-    if argv[0] == "--probe":
+    if not argv:
+        argv = ["--help"]                   # (no words: its usage, as -h)
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    import mcomp_sdk            # (everything here goes through the hub, like `metacomputer call`)
+    forms = ["--probe", "--tools", "--describe TOOL"] + ["--call " + f for f in mcomp_sdk.CALL_FORMS]
+    p = strictargs.expect(argv, forms, prog="mcp_client.py", usage=__doc__, defer=True)
+    if p.form == 3 and argv[0] != "--call":
+        print(f"mcp_client.py: --call comes first: --call {mcomp_sdk.CALL_FORMS[0]} (nothing was run)", file=sys.stderr)
+        return 2
+    if p.form == 3:
+        return mcomp_sdk.call_main(argv[1:], of=forms)  # (its own check of call's words: the same form, parse-only there)
+    strictargs.parsed("mcp_client.py", p.info)
+    if p.form == 0:
         return mcomp_sdk.probe_main()
-    if argv[0] == "--call":
-        return mcomp_sdk.call_main(argv[1:])
-    if argv[0] == "--tools":
+    if p.form == 1:
         return mcomp_sdk.tools_main(["tools"])
-    if argv[0] == "--describe" and len(argv) > 1:
-        return mcomp_sdk.tools_main(["describe", argv[1]])
-    print(__doc__)
-    return 2
+    return mcomp_sdk.tools_main(["describe", p.opts["--describe"]])
 
 
 if __name__ == "__main__":

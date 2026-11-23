@@ -250,6 +250,7 @@ def main(tarball):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit(__doc__)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    strictargs.expect(sys.argv[1:], ["SOURCE"], prog="vendor-driver-skill.py", usage=__doc__)
     main(sys.argv[1])

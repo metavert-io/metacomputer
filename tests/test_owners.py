@@ -24,6 +24,9 @@ import tempfile
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import runports  # noqa: E402  (this run's own port numbers: tests/runports.py)
+SSH_PORT = runports.port()
 FAILS = []
 
 
@@ -91,8 +94,9 @@ def detached_pty(argv, timeout=30):
 
 def main():
     td = tempfile.mkdtemp(prefix="mcomp-owners-")
-    # MCOMP_SSH_PORT=1: no real connection to any VM (a running hub, a test, `web`) counts as a controller here.
-    env = dict(os.environ, MCOMP_RUN_DIR=td, MCOMP_ACTIVE_S="3", MCOMP_SSH_PORT="1",
+    # A port of this run's own: no real connection to any VM (a running hub, a test, `web`), nor another run's
+    # stand-in, counts as a controller here.
+    env = dict(os.environ, MCOMP_RUN_DIR=td, MCOMP_ACTIVE_S="3", MCOMP_SSH_PORT=str(SSH_PORT),
                MCOMP_SESSIONS_DIR=os.path.join(td, "sessions"))   # lib/sessionvm.py's records: never the account's
     odir = os.path.join(td, "owners")
 

@@ -74,6 +74,10 @@ ATSPI_ROLE = {"push button": "button", "toggle button": "button", "link": "link"
               "list item": "listitem", "slider": "slider", "spin button": "spinbutton", "page tab": "tab"}
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 class Fail(Exception):
     pass
 
@@ -925,7 +929,7 @@ def page_text(out):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="metacomputer web", description=__doc__.split("\n\n")[0])
+    ap = strictargs.Parser(prog="metacomputer web", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("compare", "responsive", "a11y", "open-untrusted"):
         p = sub.add_parser(name)

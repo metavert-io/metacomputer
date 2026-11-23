@@ -509,8 +509,7 @@ func cmdPay(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: pay CARD --vm VM --origin https://shop (--total-selector CSS | --human [--window-id N]) [--total-label TEXT]"
         + " [--frame-origin https://pay.example ...] [--profile P] [--browser-pid PID] [--fill PART=CSS ...]"
         + " | pay --purchase KEY --vm VM --field PART [--selector CSS] | pay --purchase KEY --done   (PART: \(cardParts.joined(separator: "|")))"
-    let a = try parseArgs(argv, values: ["vm", "origin", "total-selector", "total-label", "window-id", "frame-origin", "profile", "browser-pid",
-                                         "fill", "purchase", "field", "selector", "request-id", "on-behalf-pid"], flags: ["human", "done", "json"])
+    let a = try parseArgs(argv, command: "pay")
     // Ending a purchase takes its key and nothing else (at most --vm, which must be the purchase's own VM): --done with
     // any other word, or without --purchase, is refused, never read as a new purchase or a fill.
     if a.has("done") {
@@ -619,7 +618,7 @@ func cmdPay(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 /// (Server: opShopComplete). The instrument is the exact object the checkout offered, from a file or stdin.
 func cmdShopComplete(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: shop-complete CHECKOUT --vm VM --shop DOMAIN --instrument FILE|- [--account SHOP]"
-    let a = try parseArgs(argv, values: ["vm", "shop", "instrument", "account", "request-id", "on-behalf-pid"], flags: ["json"])
+    let a = try parseArgs(argv, command: "shop-complete")
     guard a.positional.count == 1, matches(a.positional[0], "^[A-Za-z0-9:/._?=&-]{1,300}$"), let vm = a.last("vm"), validName(vm),
           let shop = a.last("shop"), matches(shop, "^[a-z0-9]([a-z0-9-]{0,62}\\.)+[a-z]{2,24}$"), let src = a.last("instrument") else { throw usageError(usage) }
     if let acct = a.last("account") { guard validName(acct) else { throw usageError(usage) } }
@@ -643,7 +642,7 @@ func cmdShopComplete(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 /// in Shop, read by the unlock process straight from the file the pinned Shop CLI writes (Server: opShopCard).
 func cmdShopCard(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: shop-card NAME --spend-request ID [--wait 90]   (the vault runs the Shop CLI you pinned with `shop-cli set`)"
-    let a = try parseArgs(argv, values: ["spend-request", "wait", "request-id", "on-behalf-pid"], flags: ["json"])
+    let a = try parseArgs(argv, command: "shop-card")
     guard a.positional.count == 1, validName(a.positional[0]), let sr = a.last("spend-request"), matches(sr, "^[A-Za-z0-9_-]{8,80}$") else { throw usageError(usage) }
     let wait = Int(a.last("wait") ?? "90") ?? -1
     guard wait >= 0, wait <= 120 else { throw usageError("--wait: seconds to wait for your approval in Shop (0-120)") }
@@ -960,7 +959,7 @@ func shopAuthFileFromEnvironment() -> String? {
 func cmdShopCLI(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: shop-cli set [--cli PATH] [--runtime PATH] [--auth-file PATH] | shop-cli show   (your own terminal)"
     guard let sub = argv.first, ["set", "show"].contains(sub) else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["cli", "runtime", "auth-file"], flags: [])
+    let a = try parseArgs(Array(argv.dropFirst()), command: "shop-cli")
     try requireTTY("shop-cli \(sub)")
     installPromptSignalHandlers()
     if sub == "show" {
@@ -1021,7 +1020,7 @@ func cmdShopCLI(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 /// pending file go too. `--discard-pending`: remove spend-pending.jsonl after you checked it (nothing in it is imported).
 func cmdSpendResolve(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: spend-resolve [NAME [--extra AMOUNT] | --discard-pending]   (your own terminal)"
-    let a = try parseArgs(argv, values: ["extra"], flags: ["discard-pending"])
+    let a = try parseArgs(argv, command: "spend-resolve")
     guard a.positional.count <= 1, !(a.has("discard-pending") && !a.positional.isEmpty), a.last("extra") == nil || a.positional.count == 1 else {
         throw usageError(usage)
     }

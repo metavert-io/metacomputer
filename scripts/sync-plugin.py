@@ -217,7 +217,9 @@ def differences():
 
 
 def main(argv):
-    check = "--check" in argv
+    sys.path.insert(0, os.path.join(LAB, "lib"))
+    import strictargs           # anything but [--check] (-hx, --bogus, a word) is refused before anything is copied
+    check = bool(strictargs.expect(argv, ["[--check]"], prog="sync-plugin.py", usage=__doc__).opts.get("--check"))
     if not check:
         for _, dst_rel, _ in COPIES:    # an older layout's link in place of a copy: the link itself goes, never a folder
             dst = os.path.join(LAB, dst_rel)

@@ -502,8 +502,9 @@ keeps only checked window geometry (finite numbers), at most 256 windows each an
 32,768 in all; pixels checked against a layout that had more windows than that
 are refused (`too_many_windows`), since a window left out could be the target or
 what covers it. The driver connection's
-stderr (SSH carries the VM's) is drained with a 64 KB memory tail and at most
-1 MB per connection in its log file. The relay (`ACTION_LOG=on`) reads with the
+stderr (SSH carries the VM's) is drained on a thread of its own and none of its text is kept, by the hub, the
+direct client (`lib/mcp_client.py`) and the hub's input reset alike: how many lines of which fixed classes, at most
+1 MB per connection of time and class in its log file. The relay (`ACTION_LOG=on`) reads with the
 same limits. `metacomputer call` escapes control characters, C1 controls and
 bidirectional overrides when it prints to a terminal (`lib/termsafe.py`, shared
 with `metacomputer sh`); `--raw` and `--json` print the result exactly. Other
@@ -1138,11 +1139,16 @@ Settings:
   refuses every run (exit 125).
 - `SHELL_LOG=auto` (the default) records every run in the signed action log
   when `ACTION_LOG=on`, as a `vm_shell` call and result: the script's
-  SHA-256 and size, the folder, the exit code and duration, and each output
-  stream's size and SHA-256. The script, its arguments, the output text and
+  size and keyed hash, the folder, the exit code and duration, and each output
+  stream's size and keyed hash. The script, its arguments, the output text and
   the VM's own diagnostics are kept only with `ACTION_LOG_TEXT=keep`, like
-  typed text; otherwise they're a size and a hash, and the result's message
-  is written by the Mac. In plain text either way: the folder in the VM, the
+  typed text; otherwise they're a size and a keyed hash, and the result's message
+  is written by the Mac. A keyed hash is an HMAC-SHA256 of the text's SHA-256
+  under a per-install secret beside the log's signing key (`action-log.results-hmac`,
+  0600, made with the log's first run, the same one the hub's result fingerprints
+  use), so a short output in the log (a code, a number) can't be found by
+  trying every candidate, as a plain SHA-256 of it would allow; with that key and
+  the text you can still check it. In plain text either way: the folder in the VM, the
   `--file` name, the Mac folder it was run from, and refusal reasons.
   `SHELL_LOG=off` keeps shell runs out of the log; with `ACTION_LOG=off`
   nothing is logged either way. Refused runs and malformed answers are logged
@@ -1162,8 +1168,9 @@ Settings:
 - The log records what was sent and hashes of what came back; it doesn't
   record what the script did inside the VM. Programs it started detached keep
   running after the run is logged.
-- The sizes and hashes in a result are the VM's own report. They let you
-  check a file against what the VM said, but a compromised VM can report
+- The sizes and hashes in a result are the VM's own report (an output that
+  came back whole must match its SHA-256, or the answer is refused). They let
+  you check a file against what the VM said, but a compromised VM can report
   anything that fits the schema, so they don't prove what ran or printed.
 - (Fixed with the hub: tool calls now check and claim under the same owners lock as
   `metacomputer sh`, so a shell run and an acting tool call from two sessions
@@ -1755,8 +1762,11 @@ provider's rules outside it where the provider enforces them, and no more than t
   everything `lib/remote.py` prints passes a last filter for the credentials it was given (each line of an API key's
   PEM too); what Fly's `sprite` command says, whose sign-in it never sees, is scrubbed of anything credential-shaped. What a build makes of the shared network and its computer's
   group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact
-  resources and no others; the journal is on the disk (`F_FULLFSYNC`, or `fsync` where that isn't supported) before
-  anything billable is launched, and an error making it so refuses the launch. `start` checks
+  resources and no others; at Oracle Cloud each build makes a group of its own, tagged with the computer and its
+  operation, never one found by its name, and `net egress` and `vm delete` act only on the OCIDs the computer's record
+  names, each read by its id and still tagged for this computer and one of its recorded operations (a group an
+  earlier version made, which carries no operation, gets no rule changed); the journal is on the disk (`F_FULLFSYNC`,
+  or `fsync` where that isn't supported) before anything billable is launched, and an error making it so refuses the launch. `start` checks
   that no session or handoff has the computer, and never hard-stops a running instance unless its whole console
   capture ends with the guest's power-off; a stop is waited for through OCI's 15-minute shutdown window; `vm delete`
   checks again, under the computer's lock, that no session is using it before anything is stopped; the shared network
@@ -2398,7 +2408,8 @@ none after a new unlock). A page in the VM can't make one: requests come only th
 - **Identity providers always ask** (the list under "Identity providers always ask"): no rule can name one as its
   site or as a link's host, and a code or link for one from a pipe or a relay always needs `approve ID`.
 
-**Exit codes** (`ask`, `give`, `code`, `relay`, `fill --request`; `--json` on each prints one JSON line with `status`):
+**Exit codes** (`ask`, `give`, `code`, `relay`, `fill --request`; each prints one JSON line with `status`, the first four
+with `--json`, `fill --request` always):
 
 | Exit | `status` | Means |
 | --- | --- | --- |
@@ -2997,7 +3008,9 @@ stderr, purchase or not: only how many lines and bytes there were and, for each 
 (driver error, driver warning, VM not running, an SSH problem, a long line); its log and a failed connection's answer give
 those, never a line's text. A line that matches one of metacomputer's own refusals from before any VM is reached (a hub
 pinned to its VM, whose settings changed) is kept only as which refusal it was; the hub says it in its own words, with
-the VM name and port it pinned when it started, never anything from the line. Both the hub and the action log read the open purchases fresh for every result (nothing
+the VM name and port it pinned when it started, never anything from the line. The same holds for the stderr of the
+hub's input reset (its `metacomputer ssh` command, where SSH and the guest's `input-reset` write: a note says how
+many lines of which classes) and of `lib/mcp_client.py`'s direct client (the transport tests). Both the hub and the action log read the open purchases fresh for every result (nothing
 cached), and the vault sends no card part until the hub for that VM has said it has seen the purchase (below). Once
 read, a purchase's masks stay: the hub, and the action-log relay, keep applying them for the rest of their process's
 life (every purchase still in the file, however many, and the newest 64 of those no longer in it; a read of the file

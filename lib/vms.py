@@ -41,6 +41,10 @@ PLACES = {"@runner": "the runner's VM storage"}
 RUNNER = "@runner"
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 class Refused(Exception):
     pass
 
@@ -500,7 +504,7 @@ def render(listing):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="vms.py")
+    ap = strictargs.Parser(prog="vms.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("list")
     p.add_argument("--settings", required=True)
@@ -510,7 +514,7 @@ def main(argv=None):
     p.add_argument("--selected", default="")
     p.add_argument("--default", default="")
     p.add_argument("--default-problem", default="")
-    p.add_argument("--overridden-by", default="")
+    p.add_argument("--overridden-by", default="", action="text")     # what chose the VM: "--vm NAME", "MCOMP_VM=NAME"
     p.add_argument("--on", default="")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("facts")

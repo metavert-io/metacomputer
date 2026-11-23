@@ -3408,8 +3408,12 @@ def hub_pin(td):
                   "refusing" in steps[name] and words in steps[name] and "hub stop" in steps[name], steps[name][-400:])
         check("...and once the settings are as they were, it connects again", "refusing" not in steps["back as started"],
               steps["back as started"])
+        # (said in metacomputer's words from what the hub pinned, as the driver stream's refusals are: nothing of the
+        # command's stderr line, the other VM's name included, is carried; lib/input_reset.py run_guest)
+        ir = d.get("input_reset_other", "")
         check("the hub's other commands (input-reset) are pinned too: refused when the settings name another VM",
-              "now name the VM 'metacomputer', not 'pinned'" in d.get("input_reset_other", ""), d.get("input_reset_other", "")[-300:])
+              "now name another VM, not 'pinned'" in ir and "1 metacomputer refusal" in ir and "'metacomputer'" not in ir,
+              ir[-300:])
     finally:
         b.close()
 

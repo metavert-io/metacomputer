@@ -7,7 +7,7 @@ import Foundation
 func cmdAuditSink(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: audit-sink add NAME --kind webhook|otlp|syslog|ntfy --url URL|ask [--header 'Name: value|{ask}' ...] [--ca FILE] [--required] | list | show NAME [--key] | test NAME | remove NAME"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["kind", "url", "header", "ca"], flags: ["required", "key", "json"])
+    let a = try parseArgs(Array(argv.dropFirst()), command: "audit-sink")
     let name = a.positional.first
     if sub != "list" { guard a.positional.count == 1, let n = name, validName(n) else { throw usageError(usage) } }
     switch sub {
@@ -15,7 +15,10 @@ func cmdAuditSink(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     case "remove": return try sinkRemove(paths, name!)
     case "list": return try sinkList(paths, nil, json: a.has("json"))
     case "show":
-        if a.has("key") { return try sinkShowKey(paths, name!) }
+        if a.has("key") {
+            guard !a.has("json") else { throw usageError("audit-sink show NAME --key prints the key only (no --json)") }
+            return try sinkShowKey(paths, name!)
+        }
         return try sinkList(paths, name!, json: a.has("json"))
     case "test": return try sinkTest(paths, name!)
     default: throw usageError(usage)

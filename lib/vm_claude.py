@@ -152,6 +152,23 @@ def ttl_seconds(v):
     return n
 
 
+def _help_shaped(s):
+    """A request for usage, or a word shaped like one (lib/strictargs.py is_help_word: this file runs alone too)."""
+    return s in ("-h", "--help", "--h", "--he", "--hel") or s.startswith("--help=") or (s.startswith("-h") and not s.startswith("--"))
+
+
+# Each action's options, and those that take a value: parse() reads exactly these (tests/test_help.py makes its rows
+# from them too).
+ACTION_OPTIONS = {"start": {"--token", "--ttl", "--model", "--skip-permissions", "--cwd", "--show", "--no-install"},
+                  "send": {"--file", "--no-enter", "--wait", "--timeout", "--quiet", "--lines"},
+                  "read": {"--lines", "--all"},
+                  "wait": {"--timeout", "--quiet", "--lines"},
+                  "keys": set(), "show": {"--again"}, "status": set(), "renew": {"--ttl"}, "stop": {"--revoke"},
+                  "_keeper": set(), "_probe": set()}
+COMMON_OPTIONS = {"--session", "--json", "--override", "-h", "--help"}
+VALUE_OPTIONS = {"--session", "--token", "--ttl", "--model", "--cwd", "--file", "--timeout", "--quiet", "--lines"}
+
+
 def parse(argv):
     o = {"action": "start", "session": "claude", "json": False, "override": False, "help": False,
          "token": None, "ttl": None, "model": None, "skip": False, "cwd": DEFAULT_WORKDIR, "show": False,
@@ -166,27 +183,36 @@ def parse(argv):
     elif argv and not argv[0].startswith("-"):
         raise Usage(f"unknown action {argv[0]!r} (one of {', '.join(ACTIONS)})")
     act = o["action"]
-    allowed = {"start": {"--token", "--ttl", "--model", "--skip-permissions", "--cwd", "--show", "--no-install"},
-               "send": {"--file", "--no-enter", "--wait", "--timeout", "--quiet", "--lines"},
-               "read": {"--lines", "--all"},
-               "wait": {"--timeout", "--quiet", "--lines"},
-               "keys": set(), "show": {"--again"}, "status": set(), "renew": {"--ttl"}, "stop": {"--revoke"},
-               "_keeper": set(), "_probe": set()}[act]
-    allowed |= {"--session", "--json", "--override", "-h", "--help"}
+    allowed = ACTION_OPTIONS[act] | COMMON_OPTIONS
     positional = []
-    i = 0
+    i, given = 0, set()
     while i < len(argv):
         a = argv[i]
         opt, eq, val = a.partition("=") if a.startswith("--") else (a, "", "")
 
         def value():
             nonlocal i
+            if opt in given:                    # one value per option: a second is refused, never let through
+                raise Usage(f"{opt} given twice (one value, please)")
+            given.add(opt)
             if eq:
-                return val
-            if i + 1 >= len(argv):
-                raise Usage(f"{opt} needs a value")
-            i += 1
-            return argv[i]
+                v = val
+            else:
+                if i + 1 >= len(argv):
+                    raise Usage(f"{opt} needs a value")
+                i += 1
+                v = argv[i]
+            if _help_shaped(v):                 # a request for usage is never a value (`--file --help`)
+                raise Usage(f"{opt} needs a value, not a request for usage")
+            if v.startswith("-"):               # nor an option typed in its place (a file named so is ./-name)
+                raise Usage(f"{opt} needs a value, not an option ({v[:40]!r})")
+            return v
+
+        def flag():
+            if a in given:                      # a flag once: a second is refused, as a second value is
+                raise Usage(f"{a} given twice")
+            given.add(a)
+            return True
 
         if a == "--":
             if act == "start":
@@ -197,6 +223,8 @@ def parse(argv):
                 raise Usage("only start (Claude Code's own arguments) and send (the text) take -- ")
             break
         if a.startswith("-") and a != "-" and not (act == "keys" and not a.startswith("--")):
+            if _help_shaped(a) and a not in ("-h", "--help"):
+                raise Usage(f"{a[:40]!r} isn't a request for usage: -h or --help")
             if opt not in allowed:
                 raise Usage(f"{opt} isn't an option of `claude {act}`")
             if opt in ("-h", "--help"):
@@ -204,8 +232,10 @@ def parse(argv):
             elif opt == "--session":
                 o["session"] = value()
             elif opt == "--json":
+                flag()
                 o["json"] = True
             elif opt == "--override":
+                flag()
                 o["override"] = True
             elif opt == "--token":
                 o["token"] = value()
@@ -214,20 +244,25 @@ def parse(argv):
             elif opt == "--model":
                 o["model"] = value()
             elif opt == "--skip-permissions":
+                flag()
                 o["skip"] = True
             elif opt == "--cwd":
                 o["cwd"] = value()
             elif opt == "--show":
+                flag()
                 o["show"] = True
             elif opt == "--no-install":
+                flag()
                 o["install"] = False
             elif opt == "--file":
                 if o["text_source"]:
                     raise Usage("give the text one way: TEXT, --file F or -")
                 o["text_source"], o["file"] = "file", value()
             elif opt == "--no-enter":
+                flag()
                 o["enter"] = False
             elif opt == "--wait":
+                flag()
                 o["wait"] = True
             elif opt == "--timeout":
                 o["timeout"] = _int("--timeout", value(), 1, 3500)
@@ -236,10 +271,13 @@ def parse(argv):
             elif opt == "--lines":
                 o["lines"] = _int("--lines", value(), 1, 5000)
             elif opt == "--all":
+                flag()
                 o["all"] = True
             elif opt == "--again":
+                flag()
                 o["again"] = True
             elif opt == "--revoke":
+                flag()
                 o["revoke"] = True
         else:
             positional.append(a)
@@ -1166,12 +1204,21 @@ def main(argv):
             print("vm_claude.py: --transport N WORD...", file=sys.stderr)
             return EXIT_USAGE
         transport, argv = argv[2:2 + n], argv[2 + n:]
+        if any(w in ("-h", "--help") for w in transport):     # never a word of the command that reaches the VM
+            print(USAGE)
+            return 0
     want_json = "--json" in argv
     try:
         o = parse(argv)
         if o["help"]:
             print(USAGE)
             return 0
+        if os.environ.get("MCOMP_PARSE_ONLY") == "1":       # tests/test_help.py: taken, and what its form declares
+            import strictargs
+            allowed = ACTION_OPTIONS[o["action"]] | COMMON_OPTIONS
+            strictargs.parsed("metacomputer claude", {
+                "flags": sorted(allowed - VALUE_OPTIONS - {"-h", "--help"}), "values": sorted(allowed & VALUE_OPTIONS),
+                "words": 0, "max_words": None if o["action"] in ("keys", "send") or "--" in argv else 0})
         text = read_text(o) if o["action"] == "send" else ""
     except Usage as e:
         if want_json:

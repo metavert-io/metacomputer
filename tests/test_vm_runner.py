@@ -166,7 +166,8 @@ def install_cases(td):
     shutil.copy(os.path.join(LAB, "install.sh"), root)
     for f in ("defaults.env", "local.env.example"):
         shutil.copy(os.path.join(LAB, "config", f), os.path.join(root, "config"))
-    for f in ("scripts/safe-rmtree.sh", "scripts/lib.sh", "config/defaults.env", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py"):   # every recursive delete goes through it
+    for f in ("scripts/safe-rmtree.sh", "scripts/lib.sh", "config/defaults.env", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py",
+              "scripts/strictargs.sh", "lib/strictargs.py"):   # every recursive delete goes through it; the rules of its command lines
         os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
         shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
     write(os.path.join(root, "scripts", "build-vault.sh"), "#!/bin/sh\necho 'vault: skipped by the test'\n", 0o755)

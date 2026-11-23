@@ -56,13 +56,17 @@ def filter_stream(src, dst, limit=1 << 20):
 
 if __name__ == "__main__":
     # ... | termsafe.py [--max BYTES]   (bin/metacomputer and scripts/lib.sh: the VM's stderr on a terminal)
+    import os
     import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is read
+    _p = strictargs.expect(sys.argv[1:], ["[--max BYTES]"], prog="termsafe.py")
     lim = 1 << 20
-    if len(sys.argv) > 2 and sys.argv[1] == "--max":
-        try:
-            lim = int(sys.argv[2])
-        except ValueError:
-            pass
+    try:
+        lim = int(_p.opts.get("--max", lim))
+    except ValueError:
+        print("termsafe.py: --max takes a number of bytes", file=sys.stderr)
+        sys.exit(2)
     try:
         filter_stream(sys.stdin.buffer, sys.stdout.buffer, lim)
     except (BrokenPipeError, KeyboardInterrupt):

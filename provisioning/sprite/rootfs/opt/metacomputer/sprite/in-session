@@ -3,6 +3,13 @@
 # namespace, where /.sprite is covered, and its PID namespace, where nothing outside is visible. Waits up to 10 s for
 # the session, and checks it's the one svc-session made (unshare's child, in other namespaces than this one, with
 # /.sprite covered and no API socket under its root) before entering; refuses otherwise.
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or no program is
+# refused (exit 2), and nothing is done.
+mc_usage="in-session CMD [ARGS...]"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+case "${1:-}" in ''|-*) echo "in-session: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -eu
 pidf=/run/metacomputer/session.pid
 for _ in $(seq 1 100); do

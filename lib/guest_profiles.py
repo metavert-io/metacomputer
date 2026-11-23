@@ -110,10 +110,23 @@ def in_use(kind, path):
     return False
 
 
+def _help_shaped(s):
+    """A request for usage, or a word shaped like one (lib/strictargs.py's rule; this runs in the VM, on its own)."""
+    return s in ("-h", "--help", "--h", "--he", "--hel") or s.startswith("--help=") or (s.startswith("-h") and not s.startswith("--"))
+
+
 def main(argv):
-    if len(argv) != 3 or argv[0] not in ("new", "check", "delete") or argv[1] not in ROOTS:
+    if argv in (["-h"], ["--help"]):
+        print("usage: guest_profiles.py new|check|delete firefox|chrome NAME")
+        return 0
+    if len(argv) != 3 or argv[0] not in ("new", "check", "delete") or argv[1] not in ROOTS or _help_shaped(argv[2]) \
+            or argv[2].startswith("-"):
         print("usage: guest_profiles.py new|check|delete firefox|chrome NAME", file=sys.stderr)
         return 2
+    import json
+    if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+        print("parse-only: guest_profiles.py: taken " + json.dumps({"flags": [], "values": [], "words": 3, "max_words": 3}))
+        sys.exit(99)        # parse only: nothing was done (never 0: a check run this way refuses)
     action, kind, name = argv
     if not NAME_RE.match(name) or name in (".", ".."):
         print("bad profile name", file=sys.stderr)

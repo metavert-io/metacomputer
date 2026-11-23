@@ -503,7 +503,7 @@ func presenceRank(_ setting: String?) -> Int { setting == "on" ? 2 : (setting ==
 
 /// `presence on|off|auto`: the vault's own setting for presence mode (the passphrase, like `policy`).
 func cmdPresence(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: [])
+    let a = try parseArgs(argv, command: "presence")
     guard a.positional.count == 1, ["on", "off", "auto"].contains(a.positional[0]) else {
         throw usageError("usage: presence on|off|auto  (auto: on where this Mac has Touch ID)")
     }
@@ -548,7 +548,7 @@ func constantTimeEqual(_ a: String, _ b: String) -> Bool {
 func validRequestID(_ s: String) -> Bool { matches(s, "^[0-9a-f]{8}$") }
 
 func cmdRequests(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["json"])
+    let a = try parseArgs(argv, command: "requests")
     guard a.positional.isEmpty else { throw usageError("usage: requests [--json]") }
     let res: [String: Any]
     do { res = try request(paths, ["op": "requests"], timeout: 15) } catch ClientError.locked {
@@ -572,7 +572,7 @@ func cmdRequests(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdApprove(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["scope", "vm"], flags: ["passphrase", "json"])
+    let a = try parseArgs(argv, command: "approve")
     guard a.positional.count == 1, validRequestID(a.positional[0]), a.last("vm").map(validName) ?? true else {
         throw usageError("usage: approve ID [--passphrase] [--scope use|session|unlock] [--vm VM]  (ID: 8 hex digits, from `requests`; --vm: the VM a one-time code request is for)")
     }
@@ -627,7 +627,7 @@ func cmdApprove(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdDeny(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["json"])
+    let a = try parseArgs(argv, command: "deny")
     guard a.positional.count == 1, validRequestID(a.positional[0]) else { throw usageError("usage: deny ID  (ID: 8 hex digits, from `requests`)") }
     let id = a.positional[0]
     let res: [String: Any]
@@ -683,8 +683,7 @@ func cmdRule(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         + " | rule add relay --from-host H --to https://site [--link-host H ...] [--project DIR] [--expires 7d] [--passphrase]"
         + " | rule list [--json] | rule remove ID"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["secret", "site", "session", "project", "for", "from", "from-host", "to",
-                                                            "link-host", "expires"], flags: ["passphrase", "json"])
+    let a = try parseArgs(Array(argv.dropFirst()), command: "rule")
     switch sub {
     case "add":
         if let kind = a.positional.first, kind == "code" || kind == "relay" {
@@ -868,7 +867,7 @@ func cmdCodeRuleAdd(_ paths: Paths, _ kind: String, _ a: Args) throws -> Int32 {
 func cmdPolicy(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: policy NAME [--approval session|each] [--answer-timeout 30m|default]"
         + " | policy CARD [--pay ask|agent] [--label L] [--currency USD] [--max-purchase 50] [--max-per 200/30d] [--merchant-max https://site=100/30d ...] [--no-caps]"
-    let a = try parseArgs(argv, values: Set(["approval", "answer-timeout"]).union(cardValueFlags), flags: cardBoolFlags)
+    let a = try parseArgs(argv, command: "policy")
     let ap = a.last("approval"), at = a.last("answer-timeout")
     let cardGiven = !Set(a.values.keys).intersection(cardValueFlags).isEmpty || !a.flags.intersection(cardBoolFlags).isEmpty
     if cardGiven {

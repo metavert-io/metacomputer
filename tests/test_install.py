@@ -70,9 +70,16 @@ def write(path, text, mode=None):
         os.chmod(path, mode)
 
 
-# Stubs: each logs its argv as one JSON line to $STUB_LOG, then behaves as the variables below say.
-STUB_HEAD = ('#!/bin/bash\nprintf "%s\\n" "$("$STUB_PY" -c \'import json,sys; print(json.dumps(sys.argv[1:]))\' '
-             '"$(basename "$0")" "$@")" >> "$STUB_LOG"\n')
+# Stubs: each logs its argv as one JSON line to $STUB_LOG, then behaves as the variables below say. The line is
+# written by the logger itself in one write() on an O_APPEND descriptor, so stubs running at once never split each
+# other's lines (bash's printf writes a long line in pieces), and a logger that can't run leaves a marker line
+# naming the stub, never a blank line (a record made from a command substitution's output was "\n" when it printed
+# nothing). test_stub_log checks both.
+STUB_LOGGER = ("import json,os,sys\nline=(json.dumps(sys.argv[2:])+'\\n').encode()\n"
+               "fd=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND|os.O_CREAT,0o644)\n"
+               "sys.exit(0 if os.write(fd,line)==len(line) else 1)")
+STUB_HEAD = ('#!/bin/bash\n"$STUB_PY" -c "' + STUB_LOGGER + '" "$STUB_LOG" "${0##*/}" "$@" '
+             '|| printf \'["STUB-LOG-FAILED", "%s"]\\n\' "${0##*/}" >> "$STUB_LOG"\n')
 STUBS = {
     "uname": 'case "$1" in -s) echo "${STUB_OS:-Darwin}" ;; -m) echo "${STUB_ARCH:-arm64}" ;; *) echo Darwin ;; esac\n',
     "sw_vers": 'echo "${STUB_MACOS:-15.1}"\n',
@@ -245,6 +252,39 @@ def run_pty(argv, env, answers, timeout=60):
 
 
 # --- get.sh ------------------------------------------------------------------------------------------
+def test_stub_log():
+    """The stand-ins' own call log, which every check here reads: one whole JSON line per call, with 16 stand-ins
+    logging 9 KB calls at once (a line written in pieces, as bash's printf writes a long one, got split by the others
+    at this size), and a logger that can't run leaves a marker line naming the stand-in, never a blank line (which
+    json.loads can't read: the flake that hid test_quiet_builds' result)."""
+    t = tempfile.mkdtemp(prefix="mcomp-stublog-")
+    try:
+        stub, log = os.path.join(t, "uname"), os.path.join(t, "calls.log")
+        write(stub, STUB_HEAD + STUBS["uname"], 0o755)
+        big = "x" * 9000
+        loop = f'for i in $(seq 1 10); do "{stub}" -s "call $i of $W" "{big}" >/dev/null; done'
+        env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "STUB_LOG": log, "STUB_PY": PY}
+        ps = [subprocess.Popen(["/bin/bash", "-c", loop], env=dict(env, W=str(w))) for w in range(16)]
+        for p in ps:
+            p.wait(timeout=120)
+        rows, bad = [], []
+        for line in open(log):
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                bad.append(line[:60])
+        want = sorted(["uname", "-s", f"call {i} of {w}", big] for w in range(16) for i in range(1, 11))
+        check("16 stand-ins logging 9 KB calls at once: every line whole, one per call", not bad and sorted(rows) == want,
+              (len(bad), len(rows), bad[:2]))
+        os.remove(log)
+        p = subprocess.run([stub, "-m"], env=dict(env, STUB_PY="/usr/bin/false"), capture_output=True, text=True, timeout=30)
+        lines = open(log).read().splitlines(True) if os.path.exists(log) else []
+        check("a logger that can't run: a marker line naming the stand-in (not a blank line), and the stand-in still answers",
+              lines == ['["STUB-LOG-FAILED", "uname"]\n'] and p.stdout == "arm64\n", (lines, p.stdout))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
 def test_get_args():
     b = Box()
     try:
@@ -665,7 +705,7 @@ def build_root(t):
     for d in ("scripts", "config", "lib"):
         os.makedirs(os.path.join(root, d))
     for f in ("scripts/lib.sh", "scripts/build-vm.sh", "config/defaults.env", "lib/vms.py", "lib/termsafe.py",
-              "lib/safedelete.py", "scripts/safe-rmtree.sh"):
+              "lib/safedelete.py", "scripts/safe-rmtree.sh", "scripts/strictargs.sh", "lib/strictargs.py"):
         shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
     write(os.path.join(root, "scripts", "build-tools.sh"), '#!/bin/bash\nsleep "${STUB_TOOLS_SLEEP:-0}"\n', 0o755)
     write(os.path.join(root, "scripts", "fetch-artifacts.sh"), "#!/bin/bash\nexit 0\n", 0o755)
@@ -849,7 +889,7 @@ def test_build_tools_stamps():
         patches = sorted(f"patches/netgw/{n}" for n in os.listdir(os.path.join(LAB, "patches", "netgw")) if n.endswith(".patch"))
         for f in ("scripts/build-tools.sh", "scripts/lib.sh", "config/defaults.env", "tools/qcow2raw/go.mod", "tools/qcow2raw/go.sum",
                   "tools/qcow2raw/main.go", "scripts/safe-rmtree.sh", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py",
-                  *patches):
+                  "scripts/strictargs.sh", "lib/strictargs.py", *patches):
             os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
             shutil.copy(os.path.join(LAB, f), os.path.join(root, f))
         stubs = os.path.join(t, "stubs")
@@ -1142,7 +1182,8 @@ def install_root(b):
     shutil.copy(INSTALL, root)
     for f in ("defaults.env", "local.env.example"):
         shutil.copy(os.path.join(LAB, "config", f), os.path.join(root, "config"))
-    for f in ("scripts/safe-rmtree.sh", "scripts/lib.sh", "config/defaults.env", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py"):   # every recursive delete goes through it
+    for f in ("scripts/safe-rmtree.sh", "scripts/lib.sh", "config/defaults.env", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py",
+              "scripts/strictargs.sh", "lib/strictargs.py"):   # every recursive delete goes through it; the rules of its command lines
         os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
         shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
     write(os.path.join(root, "scripts", "build-vault.sh"), "#!/bin/sh\necho 'vault: skipped by the test'\n", 0o755)
@@ -1705,7 +1746,7 @@ def test_codex_step():
         home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
         os.makedirs(ch)
         write(os.path.join(ch, "config.toml"), '[tui]\n\n[mcp_servers.other]\ncommand = "/bin/echo"\n')
-        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch, MCOMP_LOCK_DIR=os.path.join(home, ".locks"))   # never the account's lock
         for k in ("MCOMP_CONFIG", "MCOMP_VM"):
             env.pop(k, None)
         p = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
@@ -1782,7 +1823,7 @@ def test_codex_skill_links():
     try:
         home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
         os.makedirs(ch)
-        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch, MCOMP_LOCK_DIR=os.path.join(home, ".locks"))   # never the account's lock
         for k in ("MCOMP_CONFIG", "MCOMP_VM"):
             env.pop(k, None)
         sk = os.path.join(home, ".agents", "skills")
@@ -1844,7 +1885,7 @@ def test_codex_config_edits():
         import tomllib
         home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
         os.makedirs(ch)
-        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch, MCOMP_LOCK_DIR=os.path.join(home, ".locks"))   # never the account's lock
         for k in ("MCOMP_CONFIG", "MCOMP_VM"):
             env.pop(k, None)
         cfg_path = os.path.join(ch, "config.toml")
@@ -1932,7 +1973,9 @@ def test_agent_choices():
     try:
         home = os.path.join(t, "home")
         os.makedirs(os.path.join(home, ".codex"))
-        env = dict(os.environ, HOME=home, CODEX_HOME=os.path.join(home, ".codex"))
+        # install.sh's lock of its own: the account's made these runs wait and stop while another install.sh of this
+        # account ran (another suite's, another session's)
+        env = dict(os.environ, HOME=home, CODEX_HOME=os.path.join(home, ".codex"), MCOMP_LOCK_DIR=os.path.join(t, "locks"))
         for k in ("MCOMP_CONFIG", "MCOMP_VM", "CLAUDE_CONFIG_DIR", "CLAUDECODE"):
             env.pop(k, None)
 
@@ -2189,6 +2232,7 @@ def test_no_machine_paths():
     check("installers, defaults and docs/install.md name no one's machine (home folders, personal tools, hosts)", not hits, hits)
 
 
+test_stub_log()
 test_get_args()
 test_get_refusals()
 test_get_space()

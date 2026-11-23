@@ -10,7 +10,9 @@ Every instance, network and volume it makes is in that compartment and carries t
 metacomputer=NAME (its network: metacomputer=network), so `metacomputer cloud status oci` finds them even when this
 Mac lost their settings. The network is one VCN with one public subnet, an internet gateway, and a security list
 that lets in SSH (port 22) and the ICMP message TCP needs to size its packets, and lets nothing out. Each computer has
-a network security group of its own (metacomputer-NAME) on its network card, which lets out only public addresses
+a network security group of its own (metacomputer-NAME-OP12, tagged with its computer and the operation that made it:
+made new by its create, journaled from the create's answer, and afterwards acted on only by that recorded id, read
+again and checked against both tags; never one found by name) on its network card, which lets out only public addresses
 (EGRESS=internet: every IPv4 address but the private, shared and reserved ranges of ubuntu_vm.PRIVATE_V4) or nothing
 (EGRESS=off). That's outside the guest: root in the computer can't change it. OCI applies no security rule to
 169.254.0.0/16, so its metadata service, DNS and NTP there can't be refused from outside; the guest's own firewall
@@ -27,7 +29,9 @@ adapter takes another `api` (tests: a stand-in), so nothing here reaches the net
 import base64
 import contextlib
 import os
+import re
 import time
+import uuid
 
 from .adapter import AdapterError, NotSupported, check_name
 from .ubuntu_vm import BASE, RemoteVM, check_egress, public_v4
@@ -36,6 +40,7 @@ ENV_KEYS = ("OCI_USER", "OCI_TENANCY", "OCI_FINGERPRINT", "OCI_REGION", "OCI_API
 TAG = "metacomputer"
 NETWORK_TAG = "network"
 OP_TAG = "metacomputer-op"      # the build that launched it: a launch whose record was lost is found by this
+OP_RE = re.compile(r"[0-9a-f]{32}")
 VCN_CIDR = "10.77.0.0/16"
 SUBNET_CIDR = "10.77.0.0/24"
 BOOT_GB = 50
@@ -184,6 +189,14 @@ class SDK:
         return {"id": i.id, "state": i.lifecycle_state, "shape": i.shape, "name": (i.freeform_tags or {}).get(TAG),
                 "ad": i.availability_domain, "op": (i.freeform_tags or {}).get(OP_TAG)}
 
+    def instance_nsgs(self, iid):
+        """The security groups on the instance's network cards, as OCI applies them (what doctor reports)."""
+        out = []
+        for att in self._all(self.compute.list_vnic_attachments, self.compartment, instance_id=iid):
+            if att.lifecycle_state == "ATTACHED":
+                out += [g for g in (self.net.get_vnic(att.vnic_id).data.nsg_ids or []) if g not in out]
+        return out
+
     def public_ip(self, iid):
         for att in self._all(self.compute.list_vnic_attachments, self.compartment, instance_id=iid):
             if att.lifecycle_state != "ATTACHED":
@@ -247,30 +260,60 @@ class SDK:
             n["subnet"] = s.id
         return n
 
-    # each computer's own network security group: what it may reach, outside the guest
-    def nsg(self, name):
-        """The id of the computer's network security group, or None."""
-        n = self.network()
-        if not n:
-            return None
-        for g in self._all(self.net.list_network_security_groups, compartment_id=self.compartment, vcn_id=n["vcn"]):
-            if (g.freeform_tags or {}).get(TAG) == name and g.lifecycle_state == "AVAILABLE":
-                return g.id
-        return None
-
-    def make_nsg(self, name, egress):
+    # each computer's own network security group: what it may reach, outside the guest. Every create makes a new one of
+    # its own operation's (never one found by name), tagged with its computer and that operation; everything after acts
+    # only on the id the create's answer gave, read again by that id and checked against both tags (nsg_owner).
+    def make_nsg(self, name, egress, op, on_made=None):
+        """A new group of this operation's, in metacomputer's network: its id goes to on_made the moment the create
+        returns, before it's waited for or given its rules (either could fail, and the id must be in the journal
+        first). Never one found by name: one there already (an earlier try's, another Mac's) is left as it is."""
+        if not isinstance(op, str) or not OP_RE.fullmatch(op):
+            raise AdapterError("a security group is made for one operation: its id is 32 hex digits")
         n = self.network() or self.make_network()
-        gid = self.nsg(name)
-        if gid is None:
-            m = self.oci.core.models
-            g = self.net.create_network_security_group(m.CreateNetworkSecurityGroupDetails(
-                compartment_id=self.compartment, vcn_id=n["vcn"], display_name=f"metacomputer-{name}",
-                freeform_tags={TAG: name})).data
-            self.oci.wait_until(self.net, self.net.get_network_security_group(g.id), "lifecycle_state", "AVAILABLE",
-                                max_wait_seconds=300)
-            gid = g.id
-        self.nsg_egress(gid, egress)
-        return gid
+        m = self.oci.core.models
+        g = self.net.create_network_security_group(m.CreateNetworkSecurityGroupDetails(
+            compartment_id=self.compartment, vcn_id=n["vcn"], display_name=f"metacomputer-{name}-{op[:12]}",
+            freeform_tags={TAG: name, OP_TAG: op})).data
+        if on_made:
+            on_made(g.id)
+        self.oci.wait_until(self.net, self.net.get_network_security_group(g.id), "lifecycle_state", "AVAILABLE",
+                            max_wait_seconds=300)
+        # The wait can be minutes: read it again by its id right before its first rule is written, and write nothing to
+        # a group that isn't still tagged for this computer and this operation (its id stays in the journal).
+        who = self.nsg_owner(g.id)
+        if who != (name, op):
+            raise AdapterError(f"the security group this build made ({g.id}) is no longer tagged for {name}'s operation "
+                               f"{op[:12]} (it shows {str((who or ('gone', ''))[0])[:64]!r}, operation "
+                               f"{str((who or ('', 'none'))[1] or 'none')[:12]}): no rule was written to it")
+        self.nsg_egress(g.id, egress)
+        return g.id
+
+    def nsg_owner(self, gid):
+        """(computer, operation) the group with this id is tagged for now, read by its own id (operation None: a group
+        made by an earlier version, which carries none), or None when it's gone, being deleted, or isn't in the
+        configured compartment (metacomputer leaves that alone)."""
+        try:
+            g = self.net.get_network_security_group(gid).data
+        except self.oci.exceptions.ServiceError as e:
+            if e.status == 404:
+                return None
+            raise
+        if g.lifecycle_state in ("TERMINATED", "TERMINATING") or g.compartment_id != self.compartment:
+            return None
+        tags = g.freeform_tags or {}
+        return tags.get(TAG), tags.get(OP_TAG)
+
+    def nsgs_of_op(self, name, op):
+        """The groups tagged with this computer AND this operation, in metacomputer's networks (one whose create answer
+        was lost is found so). Only candidates: each is read again by its id before anything acts on it."""
+        out = []
+        for v in self.networks():
+            for g in self._all(self.net.list_network_security_groups, compartment_id=self.compartment, vcn_id=v.id):
+                tags = g.freeform_tags or {}
+                if (g.lifecycle_state not in ("TERMINATED", "TERMINATING") and tags.get(TAG) == name
+                        and tags.get(OP_TAG) == op):
+                    out.append(g.id)
+        return out
 
     def nsg_egress(self, gid, egress):
         """Make the group's rules exactly: egress to every public IPv4 block (internet), or none (off); no ingress
@@ -292,12 +335,6 @@ class SDK:
     def nsg_rules(self, gid):
         return [{"direction": r.direction, "protocol": r.protocol, "destination": r.destination, "source": r.source}
                 for r in self._all(self.net.list_network_security_group_security_rules, gid)]
-
-    def delete_nsg(self, name):
-        gid = self.nsg(name)
-        if gid:
-            self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, gid)
-        return bool(gid)
 
     def console_tail(self, iid, lines=40):
         """The last lines of the instance's serial console (captured now): what the guest itself last said."""
@@ -378,34 +415,52 @@ class SDK:
         self._delete_network_parts(n)
         return True
 
-    def delete_nsg_by_id(self, gid, name):
-        """Deletes the security group `gid` if it's still the one of computer `name`; never another one."""
-        try:
-            g = self.net.get_network_security_group(gid).data
-        except self.oci.exceptions.ServiceError as e:
-            if e.status == 404:
-                return False
-            raise
-        if (g.freeform_tags or {}).get(TAG) != name or g.lifecycle_state in ("TERMINATED", "TERMINATING") \
-                or g.compartment_id != self.compartment:
+    def delete_nsg_by_id(self, gid, name, op=None, legacy=False):
+        """Deletes the security group `gid` only if, read by its id now, it's tagged for computer `name` and operation
+        `op`; with legacy, a group of `name`'s that carries no operation (one an earlier version made, whose id this
+        Mac recorded for the computer) too. Never another one, and never without an operation to check (op None)."""
+        who = self.nsg_owner(gid)
+        if who is None:
+            return False
+        comp, mark = who
+        if comp != name or not (mark == op if mark is not None else legacy):
             return False
         self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, gid)
         return True
 
-    def delete_network(self):
-        """Deletes every network of metacomputer's in the compartment (called once no instance is left)."""
+    def delete_network(self, recorded=()):
+        """Deletes every network of metacomputer's in the compartment (called once no instance is left). `recorded`:
+        the groups this Mac's records name, as (id, computer, operations); a group in the network that isn't one of
+        them, read by its id and tagged for that computer and one of those operations, stops it with nothing deleted:
+        another Mac's computer (or one being made) can have a group there that no lock here sees."""
         done = False
-        while self._delete_one_network():
+        while self._delete_one_network(recorded):
             done = True
         return done
 
-    def _delete_one_network(self):
+    def _delete_one_network(self, recorded=()):
         n = self.network()
         if not n:
             return False
+        mine = {gid: (name, set(ops)) for gid, name, ops in recorded}
+        ours, others = [], []
         for g in self._all(self.net.list_network_security_groups, compartment_id=self.compartment, vcn_id=n["vcn"]):
-            if g.lifecycle_state != "TERMINATED" and (g.freeform_tags or {}).get(TAG):
-                self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, g.id)
+            if g.lifecycle_state in ("TERMINATED", "TERMINATING"):
+                continue
+            want = mine.get(g.id)
+            who = self.nsg_owner(g.id) if want else None
+            if want and who and who[0] == want[0] and who[1] in want[1]:
+                ours.append(g.id)
+            else:
+                others.append(g.id)
+        if others:
+            raise AdapterError(f"{len(others)} security group(s) in metacomputer's network at Oracle Cloud that no "
+                               "computer's record on this Mac names (another Mac's computer, or one being made): nothing "
+                               "was deleted. Once you know they're no one's, delete them in Oracle Cloud's console "
+                               "(Networking > Virtual cloud networks > metacomputer > Network security groups), then "
+                               "this again")
+        for gid in ours:
+            self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, gid)
         self._delete_network_parts(n)
         return True
 
@@ -506,6 +561,9 @@ class OCI(RemoteVM):
     STOP_WAIT_S = STOP_WAIT_S
     SOFT_STOP = "api"            # OCI's SOFTSTOP asks the guest to shut down (ACPI)
     takes_key = False            # OCI makes an instance without a key or a root password
+    # Its security groups are acted on only as the computer's record names them: by the ids recorded from their create
+    # answers, and by the marks of the operations recorded for it, each read by its id and checked (lib/remote.py)
+    groups_by_record = True
     thing = "instance"
     size_of = staticmethod(size_of)
 
@@ -545,9 +603,10 @@ class OCI(RemoteVM):
     def create(self, name, region=None, size=None, persist="auto", user_data=None, ads=None, egress="internet",
                op=None, made=None):
         """Launch the instance for `name` (its network and its own security group first). Tries the availability
-        domains in order once each when one has no capacity, then stops. `op` tags the instance with the build that
-        launched it, so a launch whose record was lost can be found (and deleted). Returns {instance, ad, shape,
-        size, image, arch, nsg}."""
+        domains in order once each when one has no capacity, then stops. `op` tags the instance and its security
+        group with the build that made them, so a launch whose record was lost can be found (and deleted). The group
+        is this operation's own, made new (never one found by name) and told to `made` the moment its create returns.
+        Returns {instance, ad, shape, size, image, arch, nsg}."""
         check_name(name)
         from . import capabilities
         if region is not None:
@@ -560,6 +619,10 @@ class OCI(RemoteVM):
         shape, ocpus, mem, arch = SIZES[sz]
         if not user_data:
             raise AdapterError("a new computer needs its user-data (lib/cloud/guest.py; metacomputer vm create makes it)")
+        op = op or uuid.uuid4().hex
+        if not OP_RE.fullmatch(op):
+            raise AdapterError("an operation id is 32 hex digits")
+        made = made or (lambda what, rid: None)
         api = self.api
         if api.instances(name):
             raise AdapterError(f"Oracle Cloud has an instance for {name} already (metacomputer cloud status oci)")
@@ -568,18 +631,16 @@ class OCI(RemoteVM):
             # earlier proves nothing (another create or `cloud setup` could have made it since).
             new_net = api.network() is None
             net = api.make_network()
-            if new_net and made:
+            if new_net:
                 made("made_network", net["vcn"])
-            new_nsg = api.nsg(name) is None
-            nsg = api.make_nsg(name, egress)
-            if new_nsg and made:
-                made("made_nsg", nsg)
+            # The computer's own group: made new by this operation and journaled from its create's answer, before
+            # anything configures it; never one a listing shows (another Mac's, an earlier try's), which stays as it is.
+            nsg = api.make_nsg(name, egress, op=op, on_made=lambda gid: made("made_nsg", gid))
         img = api.image(shape)
         tried = []
         ads = ads or api.availability_domains(shape)
         if not ads:
             raise AdapterError(f"no availability domain in this region offers {shape} to this compartment")
-        made = made or (lambda what, rid: None)
         for ad in ads:
             made("launch_state", "sent")     # from here an instance may exist: the journal says so before the call
             try:
@@ -648,20 +709,69 @@ class OCI(RemoteVM):
         if self.api.instance(st["instance"]) is not None:
             self.api.terminate(st["instance"])
             self.api.wait_state(st["instance"], "TERMINATED", timeout=900)
-        self.api.delete_nsg(name)
+        self.delete_groups(name, st)
+
+    @staticmethod
+    def recorded_ops(st):
+        """Every operation this Mac's record says it started for the computer (lib/remote.py keeps them: `ops`), the
+        current one and an unfinished one included."""
+        ops = [o for o in (st.get("op"), st.get("launching"), *(st.get("ops") or [])) if isinstance(o, str)]
+        return [o for o in dict.fromkeys(ops) if OP_RE.fullmatch(o)]
+
+    def delete_groups(self, name, st):
+        """The computer's security groups, as its record names them, and nothing found by name: the ids it recorded
+        (its group, the one an unfinished build journaled), each read by its id and deleted only while tagged for
+        `name` and one of the operations this Mac recorded for it, then any tagged for `name` and one of those
+        operations (a group whose create answer, or whose clean-up, was lost). A group an earlier version made (no
+        operation tag) goes only by the id recorded as this computer's own. Returns the ids deleted."""
+        ops = self.recorded_ops(st)
+        gone = []
+        for gid in dict.fromkeys(g for g in (st.get("nsg"), st.get("made_nsg")) if isinstance(g, str) and g):
+            who = self.api.nsg_owner(gid)
+            if who is None or who[0] != name:
+                continue
+            if who[1] in ops and self.api.delete_nsg_by_id(gid, name, who[1]):
+                gone.append(gid)
+            elif who[1] is None and gid == st.get("nsg") and self.api.delete_nsg_by_id(gid, name, legacy=True):
+                gone.append(gid)
+        for op in ops:
+            for gid in self.api.nsgs_of_op(name, op):
+                if gid not in gone and self.api.delete_nsg_by_id(gid, name, op):
+                    gone.append(gid)
+        return gone
+
+    def recorded_group(self, name):
+        """The id of the computer's own group as its record names it, read by that id now and tagged for `name` and
+        the computer's recorded operation; AdapterError (nothing changed) for anything else."""
+        st = self._state(name)
+        gid, op = st.get("nsg"), st.get("op")
+        if not gid:
+            raise AdapterError(f"{name}'s record names no security group of its own at Oracle Cloud: no rule was "
+                               "changed (delete it and make it again)")
+        who = self.api.nsg_owner(gid)
+        if who is None:
+            raise AdapterError(f"{name}'s security group {gid} is gone from Oracle Cloud: no rule was changed (delete it "
+                               "and make it again)")
+        if who[0] == name and who[1] is None:
+            raise AdapterError(f"{name}'s security group at Oracle Cloud was made by an earlier version of metacomputer "
+                               "and carries no operation, so nothing here can tell it's still this computer's: no rule "
+                               "was changed (delete it and make it again)")
+        if who[0] != name or not op or who[1] != op:
+            raise AdapterError(f"Oracle Cloud's security group {gid}, recorded for {name}'s operation "
+                               f"{str(op or 'none')[:12]}, is now tagged for {str(who[0])[:64]!r}'s operation "
+                               f"{str(who[1] or 'none')[:12]}: no rule was changed, and the record stays")
+        return gid
 
     def set_egress(self, name, allow):
         raise NotSupported(self.name, "egress allowlist", "Oracle Cloud's computers have no allowlist of names: "
                            "EGRESS=internet (public addresses only, outside the guest too) or off")
 
     def apply_egress(self, name, egress):
-        """EGRESS for its own security group (outside the guest); the guest's firewall is set over SSH."""
-        self._state(name)
-        gid = self.api.nsg(name)
-        if gid is None:
-            raise AdapterError(f"{name} has no security group of its own at Oracle Cloud (made by an earlier version: "
-                               "delete it and make it again)")
-        self.api.nsg_egress(gid, check_egress(egress))
+        """EGRESS for its own security group (outside the guest): the one recorded when it was made, read by its id
+        and tagged for this computer and its operation (recorded_group), never one found by name; the guest's firewall
+        is set over SSH."""
+        egress = check_egress(egress)
+        self.api.nsg_egress(self.recorded_group(name), egress)
         return self.egress(name)
 
     def egress(self, name):
@@ -673,8 +783,9 @@ class OCI(RemoteVM):
                 api = self.api               # Oracle's API, when the credentials are here (else: not known)
             except AdapterError:
                 api = None
-            gid = api.nsg(name) if api else None
-            rules = api.nsg_rules(gid) if gid else None
+            gid = st.get("nsg")      # the recorded one, still tagged for it and its operation; else not known
+            who = api.nsg_owner(gid) if api and gid else None
+            rules = api.nsg_rules(gid) if who and who[0] == name and who[1] and who[1] == st.get("op") else None
             out["outside"] = None if rules is None else egress_of(rules)
         return out
 
@@ -720,11 +831,13 @@ class OCI(RemoteVM):
                      for r in rules)
             out.append({"check": "network lets in SSH only", "ok": ok, "detail": str(rules)})
             for i in api.instances():
-                gid = api.nsg(i["name"])
-                rs = api.nsg_rules(gid) if gid else []
+                # The groups OCI applies to its network card (reported, never changed here).
+                gids = api.instance_nsgs(i["id"])
+                rs = [r for g in gids for r in api.nsg_rules(g)]
                 bad = [r for r in rs if r["direction"] != "EGRESS" or r["destination"] not in public_v4()]
                 out.append({"check": f"{i['name']}: its own security group lets out public addresses only",
-                            "ok": bool(gid) and not bad, "detail": f"{len(rs)} rules" if gid else "no group"})
+                            "ok": len(gids) == 1 and not bad,
+                            "detail": f"{len(rs)} rules" if len(gids) == 1 else f"{len(gids)} groups"})
         out.append({"check": "instances", "ok": True, "detail": str(len(api.instances()))})
         return out
 

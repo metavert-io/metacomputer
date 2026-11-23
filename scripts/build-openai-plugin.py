@@ -52,6 +52,10 @@ MAX_ENTRIES, MAX_BYTES, MAX_DESCRIPTION, MAX_SKILL_NAME, MAX_LABEL = 5000, 100 <
 LINK = re.compile(r"\]\(([^)\s#]+)(?:#[^)]*)?\)")
 
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 def sync_plugin():
     import importlib.util
     spec = importlib.util.spec_from_file_location("sync_plugin", os.path.join(LAB, "scripts", "sync-plugin.py"))
@@ -266,11 +270,13 @@ def problems(zbytes):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="Package metacomputer's skills for OpenAI's plugin directory.")
+    ap = strictargs.Parser(description="Package metacomputer's skills for OpenAI's plugin directory.")
     ap.add_argument("--version", default=None, help="the package's version (default: gemini-extension.json's)")
     ap.add_argument("--out", default=None, help="the ZIP to write (default: results/openai-plugin/metacomputer-VERSION.zip)")
     ap.add_argument("--check", action="store_true", help="build in memory and check it; write nothing")
     a = ap.parse_args(argv)
+    if a.check and a.out:                   # --check writes nothing: an --out would be left unread
+        ap.error("--check writes nothing: --out goes with a build")
     sync = sync_plugin()
     stale = sync.differences()
     for kind, d, _, _ in stale:

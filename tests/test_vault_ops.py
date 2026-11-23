@@ -362,6 +362,130 @@ def main():
     return 0 if all(ts.results) else 1
 
 
+def spec_walk(BIN, env, vdir, calls, audit_recs):
+    """Round 4: every form of every vault command (its declaration, from the test build's _argspecs: options with one
+    value, lists, flags, how many words) given what it doesn't take: an option of no form, another form's option, a word
+    too many, a request for usage as an option's value (--site --help) and as a word (-hx). Each is a usage error (64)
+    before anything runs: the unlocked vault is asked nothing, the VM is reached by nothing, no record is written and
+    no file in the vault's folder changes. Found by review: `rule remove ID --site --help` removed the rule (--site was
+    the add form's, read by nothing), and `revoke --all ID ID` revoked the first id."""
+    specs = json.loads(subprocess.run([BIN, "_argspecs"], env=env, capture_output=True, text=True, timeout=30).stdout or "{}")
+    allopts = {}
+    for form, sp in specs.items():
+        for o in sp["values"] + sp["lists"]:
+            allopts[o] = True
+        for o in sp["flags"]:
+            allopts.setdefault(o, False)
+
+    def base(form, sp):
+        # The form's own words (and the option that picks it), then enough words for its minimum.
+        picks = {"fill --request": ["fill", "--request", "0000abcd"], "pay --purchase": ["pay", "--purchase", "0" * 32],
+                 "pay --done": ["pay", "--purchase", "0" * 32, "--done"], "token renew": ["token", "renew", "--all"],
+                 "rule add code": ["rule", "add", "code"], "rule add relay": ["rule", "add", "relay"]}
+        argv = picks.get(form, form.split())
+        have = {"rule add code": 1, "rule add relay": 1}.get(form, 0)
+        return argv + [f"w{i}" for i in range(have, sp["min"])], have
+
+    def snapshot():
+        out = {}
+        for root, _dirs, files in os.walk(vdir):
+            for f in files:
+                p = os.path.join(root, f)
+                if not f.endswith(".sock") and os.path.isfile(p) and not os.path.islink(p):
+                    out[p] = hashlib.sha256(open(p, "rb").read()).hexdigest()
+        return out
+
+    before, n_calls, n_recs = snapshot(), len(calls()), len(audit_recs())
+    bad, tried = [], 0
+    for form, sp in sorted(specs.items()):
+        argv, have = base(form, sp)
+        mine = set(sp["values"] + sp["lists"] + sp["flags"])
+        cmd = form.split()[0]
+        sibling = sorted(o for f2, s2 in specs.items() if f2 != form and f2.split()[0] == cmd
+                         for o in s2["values"] + s2["lists"] + s2["flags"] if o not in mine)
+        other = sibling[0] if sibling else sorted(o for o in allopts if o not in mine)[0]
+        variants = [("an unknown option", argv + ["--no-such-option"]),
+                    *([(f"a flag twice (--{sp['flags'][0]})", argv + [f"--{sp['flags'][0]}"] * (1 if f"--{sp['flags'][0]}" in argv else 2))]
+                      if sp["flags"] else []),
+                    (f"another form's option (--{other})", argv + [f"--{other}"] + (["x"] if allopts[other] else [])),
+                    ("a request for usage as a word (-hx)", argv + ["-hx"])]
+        if sp["max"] < 1000:
+            variants.append(("a word too many", argv + [f"x{i}" for i in range(sp["max"] - max(sp["min"], have) + 1)]))
+        if sp["values"]:
+            v1 = sp["values"][0]
+            variants.append((f"a value option twice (--{v1})", argv + [f"--{v1}", "x", f"--{v1}", "y"]))
+        if sp["values"] or sp["lists"]:
+            v = (sp["values"] + sp["lists"])[0]
+            variants.append((f"a request for usage as --{v}'s value", argv + [f"--{v}", "--help"]))
+            variants.append((f"a malformed one inline (--{v}=--help=x)", argv + [f"--{v}=--help=x"]))
+        # Round 6: every flag and every value option of the form, not only the first, each after the valid line.
+        for f in sp["flags"][1:]:
+            variants.append((f"a flag twice (--{f})", argv + [f"--{f}"] * (1 if f"--{f}" in argv else 2)))
+        for v in sp["values"][1:]:
+            variants.append((f"a value option twice (--{v})", argv + [f"--{v}", "x", f"--{v}", "y"]))
+        for v in sp["values"] + sp["lists"]:
+            if v in ("tunnel-arg", "tunnel-check-arg"):     # (ssh's own arguments: they may start with '-')
+                continue
+            variants.append((f"an option as --{v}'s value", argv + [f"--{v}", "--bogus"]))
+            variants.append((f"an option as --{v}'s value (--{v}=--bogus)", argv + [f"--{v}=--bogus"]))
+        for what, a in variants:
+            tried += 1
+            r = subprocess.run([BIN, *a], env=env, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+            if r.returncode != 64:
+                bad.append((form, what, a, r.returncode, r.stderr[-160:]))
+        # ...and the form's valid line itself is taken (MCOMP_PARSE_ONLY=1, a test build: it ends there with 99, never 0,
+        # nothing done).
+        r = subprocess.run([BIN, *argv], env=dict(env, MCOMP_PARSE_ONLY="1"), capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
+        tried += 1
+        if r.returncode != 99 or "parse-only:" not in r.stdout:
+            bad.append((form, "its valid line", argv, r.returncode, r.stderr[-160:]))
+    # The vault's other entry, ssh's ProxyCommand for a provider's tunnel (`_tunnel [--sha256 HEX] -- PROGRAM [ARGS...]`):
+    # its own parser, outside the declarations. Its valid lines are taken (the program's own --help is the program's);
+    # every misuse is refused (2) before anything runs.
+    for a, ok in ((["--", "/usr/bin/true"], True), (["--sha256", "0" * 64, "--", "/usr/bin/true", "--help"], True),
+                  (["--help"], False), (["-h"], False), (["--bogus", "--", "/usr/bin/true"], False),
+                  (["--sha256", "--help", "--", "/usr/bin/true"], False),
+                  (["--sha256", "0" * 64, "--sha256", "0" * 64, "--", "/usr/bin/true"], False),
+                  (["--", "relative"], False), ([], False), (["--", "/usr/bin/true", "x"], True)):
+        tried += 1
+        r = subprocess.run([BIN, "_tunnel", *a], env=dict(env, MCOMP_PARSE_ONLY="1"), capture_output=True, text=True,
+                           timeout=30, stdin=subprocess.DEVNULL)
+        if (r.returncode == 99 and "parse-only:" in r.stdout) != ok or (not ok and r.returncode != 2):
+            bad.append(("_tunnel", "valid" if ok else "misuse", a, r.returncode, r.stderr[-160:]))
+    after = snapshot()
+    changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+    check(f"every form of every vault command ({len(specs)} declarations, {tried} command lines): what it doesn't take is "
+          "a usage error (64) before anything runs; nothing asked of the unlocked vault or the VM, no record, no file changed",
+          len(specs) > 60 and not bad and not changed and len(calls()) == n_calls and len(audit_recs()) == n_recs,
+          (bad[:6], changed[:4], len(calls()) - n_calls, len(audit_recs()) - n_recs))
+    # runMain's every command has a declaration (or is ssh's ProxyCommand, or a test build's own): found in its source.
+    src = open(os.path.join(LAB, "vault", "Commands.swift")).read()
+    body = src[src.index("func runMain("):src.index("// MARK: - passphrase helpers")]
+    cases = {c for line in re.findall(r'^\s*case ((?:"[^"]+",?\s*)+):', body, re.M) for c in re.findall(r'"([^"]+)"', line)}
+    subs = {"ap2", "wba", "rule", "session", "audit-sink", "shop-cli"}
+    undeclared = sorted(c for c in cases if c not in specs and c not in subs and c != "_tunnel"
+                        and c not in ("test-legacy-totp-link", "test-agent-kind"))
+    check("runMain's every command has its declaration (vault/ArgSpecs.swift), found in its dispatch, not a list",
+          len(cases) > 40 and not undeclared and all(any(k.startswith(s + " ") for k in specs) for s in subs), undeclared)
+    # The two the review found, and that their right forms still go through (the parser, not the command, refused).
+    rr = subprocess.run([BIN, "rule", "remove", "0000abcd", "--site", "--help"], env=env, capture_output=True, text=True,
+                        timeout=30, stdin=subprocess.DEVNULL)
+    rv = subprocess.run([BIN, "revoke", "--all", "deadbeef", "cafebabe"], env=env, capture_output=True, text=True, timeout=30,
+                        stdin=subprocess.DEVNULL)
+    ok = subprocess.run([BIN, "rule", "list", "--json"], env=env, capture_output=True, text=True, timeout=30,
+                        stdin=subprocess.DEVNULL)
+    # (round 5) `set --header` was declared a list but read once: a second header dropped the first, unread.
+    hd = subprocess.run([BIN, "set", "x", "--kind", "api", "--api-host", "api.example.com", "--header", "INVALID",
+                         "--header", "Authorization: Bearer {value}"], env=env, capture_output=True, text=True, timeout=30,
+                        stdin=subprocess.DEVNULL)
+    check("`set --header` takes one header: a second is a usage error (it once dropped the first unread)",
+          hd.returncode == 64 and "--header given twice" in hd.stderr, (hd.returncode, hd.stderr[-160:]))
+    check("`rule remove ID --site --help` and `revoke --all ID ID` are usage errors; `rule list --json` still answers",
+          rr.returncode == 64 and "--site" in rr.stderr and rv.returncode == 64 and "at most 1 word" in rv.stderr
+          and ok.returncode == 0, (rr.returncode, rr.stderr[-120:], rv.returncode, rv.stderr[-120:], ok.returncode))
+
+
 def run(td, procs):
     BIN = os.environ.get("MCOMP_VAULT_TEST_BIN")
     if not BIN:
@@ -416,6 +540,28 @@ def run(td, procs):
            "MCOMP_VAULT_TEST_SSH": stub}
     sock = os.path.join(vdir, "vault.sock")
     alog = os.path.join(vdir, "audit.jsonl")
+
+    # Strict arguments (round 3): a second value for an option that takes one is a usage error (exit 64), refused before
+    # anything is done; the options a command reads as a list (--site, --fill, ...) still repeat; an option a command
+    # doesn't have, and a word beyond its arguments, are refused as before.
+    n0 = len(calls())
+    strict = []
+    for argv, want in ((["fill", "x", "--vm", "opsvm", "--vm", "other", "--field", "password"], "--vm given twice"),
+                       (["token", "x", "--ttl", "5m", "--ttl", "9m"], "--ttl given twice"),
+                       (["pay", "card", "--origin", "https://a.example", "--origin", "https://b.example",
+                         "--total-selector", "#t"], "--origin given twice"),
+                       (["login", "x", "--vm", "opsvm", "--password-selector", "#p", "--password-selector", "#q"],
+                        "--password-selector given twice"),
+                       (["fill", "x", "--vm", "opsvm", "--field", "password", "--no-such-option"], "unknown option"),
+                       (["delete", "x", "extra-word"], "usage")):
+        r = subprocess.run([BIN, *argv], env=env, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        strict.append((argv[0], r.returncode, want in r.stderr, r.stderr[-160:]))
+    r = subprocess.run([BIN, "session", "load", "x", "--vm", "opsvm", "--site", "a.example", "--site", "b.example"],
+                       env=env, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    check("strict arguments: a second value for an option that takes one, an unknown option or an extra word is a "
+          "usage error (64), refused before the VM is reached; a list option (--site) still repeats",
+          all(rc == 64 and said for _c, rc, said, _e in strict) and "given twice" not in r.stderr
+          and len(calls()) == n0, (strict, r.returncode, r.stderr[-200:]))
 
     def client(*args, extra=None, timeout=120):
         r = subprocess.run([BIN, *args], capture_output=True, text=True, env=dict(env, **(extra or {})),
@@ -767,6 +913,7 @@ def run(td, procs):
     u = start_unlock(["--for", "20m", *allow], T, passphrase=current)
     r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
     check("a fill while four sinks are set", r.returncode == 0, r.stdout + r.stderr)
+    spec_walk(BIN, dict(env, **T), vdir, calls, audit_recs)     # unlocked, with secrets, rules and sinks to change
     check("records the vault writes carry a creation MAC", "mac" in audit_recs()[-1], audit_recs()[-1])
     open(os.path.join(stubdir, "nested-value-next"), "w").close()
     r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")

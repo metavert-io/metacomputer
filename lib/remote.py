@@ -62,6 +62,10 @@ ROLES = ("admin", "ops", "mcp", "view")
 WRAPPER = (sys.executable, os.path.join(LIB, "proxywrap.py"))
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 class Refused(Exception):
     pass
 
@@ -392,8 +396,12 @@ def cmd_create(s, args):
     ud = user_data(s)
     t0 = time.time()
     st = {k: v for k, v in st.items() if k not in JOURNAL_KEYS}
+    # Every operation started for this computer stays named in its record (`ops`, not journal keys: never cleared by a
+    # later try), so what one of them made and couldn't delete (its group, at a provider whose groups go only by the
+    # record: Oracle Cloud) is found by its mark again at vm delete, never by the computer's name.
+    ops = [o for o in (st.get("ops") or []) if isinstance(o, str) and OP_RE.fullmatch(o) and o != op][-(MAX_OPS - 1):] + [op]
     try:
-        write_state(rd, dict(st, provider=a.name, launching=op))   # the journal, durable before anything is billed
+        write_state(rd, dict(st, provider=a.name, launching=op, ops=ops))   # the journal, durable before anything is billed
     except OSError as e:
         raise Refused(f"couldn't make the launch's journal durable ({e.strerror or e}): nothing was launched") from None
 
@@ -420,7 +428,8 @@ def cmd_create(s, args):
     mine = read_state(rd)
     st = {"provider": a.name, "created": now(), "launch_started": t0, "op": op, "made_by_build": True,
           "made_network": mine.get("made_network"), "made_nsg": mine.get("made_nsg"),
-          "made_key": mine.get("made_key"), "launch_state": mine.get("launch_state"), **made}
+          "made_key": mine.get("made_key"), "launch_state": mine.get("launch_state"), "ops": mine.get("ops") or [op],
+          **made}
     try:
         write_state(rd, st)                  # the instance is recorded before anything else can fail
     except OSError as e:
@@ -486,6 +495,7 @@ def create_sprite(s, a, rd, st, op):
 
 # What a launch leaves in the journal (lib/cloud: the `made` callback), cleared when a new operation starts.
 JOURNAL_KEYS = ("made_network", "made_nsg", "made_key", "made_instance", "launch_state", "kept", "unresolved")
+MAX_OPS = 64               # operations a computer's record keeps naming (ops)
 LOST_LAUNCH_LOOKS = 6       # a launch with no answer: the provider's listing is looked at this many times more,
 LOST_LAUNCH_GAP_S = 10      # this far apart (a listing can lag behind what was just made: DigitalOcean's did)
 
@@ -604,11 +614,20 @@ def forget_parts(a, computer, op):
     is gone already)."""
     if hasattr(a.api, "nsgs_of_op"):
         for g in a.api.nsgs_of_op(computer, op):
-            a.api.delete_nsg_by_id(g, computer)
-        for k in a.api.keys_of_op(computer, op):
+            delete_group(a, g, computer, op)
+        for k in (a.api.keys_of_op(computer, op) if hasattr(a.api, "keys_of_op") else ()):
             a.api.delete_key_by_id(k, computer)
     elif not a.api.instances(computer):
         a.api.delete_nsg(computer)
+
+
+def delete_group(a, gid, name, op):
+    """Deletes the security group (firewall) `gid` of computer `name`'s operation `op`. Where the provider's groups are
+    acted on only as the record names them (Oracle Cloud: groups_by_record), it goes only while, read by its id, it's
+    tagged for that computer and that operation."""
+    if getattr(a, "groups_by_record", False):
+        return a.api.delete_nsg_by_id(gid, name, op)
+    return a.api.delete_nsg_by_id(gid, name)
 
 
 def remember_unresolved(s, a, op):
@@ -629,9 +648,10 @@ def delete_op_parts(s, st, a, op, others):
             keys = [made_key] if isinstance(made_key, str) else []
             if hasattr(a.api, "nsgs_of_op"):
                 groups += [g for g in a.api.nsgs_of_op(name, op) if g not in groups]
+            if hasattr(a.api, "keys_of_op"):
                 keys += [k for k in a.api.keys_of_op(name, op) if k not in keys]
             for g in groups:
-                if not others and a.api.delete_nsg_by_id(g, name):
+                if not others and delete_group(a, g, name, op):
                     print(f"deleted the security group (firewall) this build made ({a.manifest['label']})",
                           file=sys.stderr)
             for k in keys:              # its first-boot key: needed only to make the server
@@ -783,6 +803,10 @@ def check_firewall(s, st, a):
         raise NotOwned(f"{name}'s firewall {fw} is gone from {label}: no rule was changed (metacomputer --vm {name} "
                        "status; delete it and make it again)")
     comp, mark = who
+    if comp == name and not mark:
+        raise NotOwned(f"{name}'s firewall {fw} at {label} was made by an earlier version of metacomputer and carries no "
+                       f"operation, so nothing here can tell it's still this computer's: no rule was changed (delete "
+                       f"it and make it again: metacomputer vm delete {name})")
     if comp != name or not mark or not op.startswith(str(mark)):
         raise NotOwned(f"{label}'s firewall {fw}, recorded for {name}'s operation {op[:12]}, is now marked for "
                        f"{said(a, comp)!r}'s operation {said(a, str(mark or 'none')[:12])}: no rule was changed, and the "
@@ -908,7 +932,13 @@ def cmd_delete(s, args):
         a.api.terminate(iid)
         a.api.wait_state(iid, "TERMINATED", timeout=900)
     if unresolved_op is None:
-        a.api.delete_nsg(s["VM_NAME"])
+        if getattr(a, "groups_by_record", False):
+            # Oracle Cloud: only the groups its record names (the ids it recorded, and the marks of the operations
+            # this Mac started for it), each read by its id and tagged for it and that operation: never one found by
+            # its name (another Mac's computer of the same name, or one being made, is left as it is)
+            a.delete_groups(name, st)
+        else:
+            a.api.delete_nsg(s["VM_NAME"])
         if hasattr(a.api, "delete_keys"):
             a.api.delete_keys(s["VM_NAME"])   # its first-boot key (a provider that takes one)
     # else: the firewall and key a server that may exist would be using stay, with the record (cloud teardown)
@@ -1169,7 +1199,12 @@ def cmd_cloud(args):
             if pending:
                 raise Refused(f"a computer is being made in metacomputer's network at {a.manifest['label']} (its "
                               f"security group is there): {', '.join(sorted(pending))}. When its build has ended, or "
-                              "if it was cut off: metacomputer vm delete NAME, then this again")
+                              "if it was cut off: metacomputer vm delete NAME, then this again"
+                              + (". A group no computer's record on this Mac names (another Mac's, or one whose "
+                                 "record is gone) is never deleted on its name: delete it in "
+                                 f"{a.manifest['label']}'s console (Networking > Virtual cloud networks > metacomputer "
+                                 "> Network security groups) once you know it's no one's"
+                                 if getattr(a, "groups_by_record", False) else ""))
             out = {"provider": a.name, "network_deleted": a.api.delete_network(), "unresolved_settled": settled,
                    "unresolved_left": [e["op"] for e in kept]}
             if hasattr(a.api, "keys"):
@@ -1513,7 +1548,7 @@ def main(argv=None):
 
 
 def run(argv=None):
-    ap = argparse.ArgumentParser(prog="remote.py")
+    ap = strictargs.Parser(prog="remote.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("target", "tunnel", "probe"):
         p = sub.add_parser(name)

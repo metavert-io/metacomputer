@@ -133,13 +133,13 @@
 #   shop status | login [--wait 90] | complete CHECKOUT --shop DOMAIN --instrument @FILE|- | card NAME --spend-request ID
 #                                  Shopify stores through your own Shop account and Shopify's shop CLI (docs/payments.md)
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
+#         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
+#                                  mine your own sessions for repeated mistakes; approved lessons reach
+#                                  every new session's instructions as advice (docs/learn.md)
 #   agents [--json] | agents check [--json]
 #                                  the coding agents metacomputer is set up for (Claude Code, Codex, OpenClaw,
 #                                  Hermes Agent, Gemini CLI, Antigravity CLI), and a check of what it relies on in this Mac's Codex
 #                                  (docs/codex.md)
-#         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
-#                                  mine your own sessions for repeated mistakes; approved lessons reach
-#                                  every new session's instructions as advice (docs/learn.md)
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
@@ -147,6 +147,370 @@ set -uo pipefail
 # lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported
 # again into remote_py's one child (scripts/lib.sh). The shell keeps them as unexported variables.
 for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY; do export -n "$mc_k"; done; unset mc_k
+SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+LIB="$(dirname "$SELF")/../scripts/lib.sh"
+# The command-line rules of every metacomputer bash program (sa_check, sa_is_help_shaped): functions only.
+. "$(dirname "$SELF")/../scripts/strictargs.sh"
+# --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same);
+# --on PLACE picks it by where it is (lib/placement.py, below, once the settings are read).
+# Each is given once, and its value is a name or a place, never an option or a request for usage (no VM name or place
+# starts with '-'): `--vm --help --vm NAME reset --yes` is refused here, before anything else reads the command line.
+MCOMP_VM_ARG=""; MC_ON_ARG=""; MC_ON_GIVEN=0; mc_vm_given=0
+mc_global() { # OPTION VALUE GIVEN-BEFORE: the global option's value, refused (exit 2, nothing run) unless it's one
+  local what="a VM name (metacomputer vm list)" u="usage: metacomputer [--vm NAME] [--on mac|cloud] COMMAND ...; nothing was run"
+  [ "$1" = --vm ] || what="a place: mac (this Mac) or cloud"
+  [ "$3" = 0 ] || { printf 'metacomputer: %s given twice (%s)\n' "$1" "$u" >&2; exit 2; }
+  case "$2" in
+    "") printf 'metacomputer: %s needs %s (%s)\n' "$1" "$what" "$u" >&2; exit 2 ;;
+    -*) printf "metacomputer: %s needs %s, not '%s' (%s)\n" "$1" "$what" \
+          "$(printf '%s' "$2" | LC_ALL=C tr -c '[:print:]' '?' | cut -c1-40)" "$u" >&2; exit 2 ;;
+  esac
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --vm)   mc_global --vm "${2:-}" "$mc_vm_given"; MCOMP_VM_ARG="$2"; mc_vm_given=1; shift 2 ;;
+    --vm=*) mc_global --vm "${1#--vm=}" "$mc_vm_given"; MCOMP_VM_ARG="${1#--vm=}"; mc_vm_given=1; shift ;;
+    --on)   mc_global --on "${2:-}" "$MC_ON_GIVEN"; MC_ON_ARG="$2"; MC_ON_GIVEN=1; shift 2 ;;
+    --on=*) mc_global --on "${1#--on=}" "$MC_ON_GIVEN"; MC_ON_ARG="${1#--on=}"; MC_ON_GIVEN=1; shift ;;
+    *) break ;;
+  esac
+done
+unset mc_vm_given
+# --help and -h, wherever a person types them (after the command, its subcommand or its arguments; up to a `--`,
+# after which the words are a script's or another command's), print the command's usage and exit 0 here, before
+# anything else runs: no settings are read (a computer named with --vm isn't even looked up), nothing reaches a VM,
+# the runner, SSH, a provider, the vault or the network, and no file is written (tests/test_help.py). `ssh ROLE CMD...`
+# leaves them to the guest's command. A program with a usage text of its own prints it (Python with -B: no bytecode
+# is written); anything else, or a program that can't, gets this file's usage lines for the command.
+# Options that take a value, by command: the word after one is in that option's place, never a request for usage here;
+# the command's own parser refuses it as a value too (`sh --file --help` and `handoff --say --help` are usage errors,
+# a file named --help is ./--help). tests/test_help.py checks this table against each command's own parser (argparse's, vm_shell's,
+# vm_claude's, mcomp_sdk's, each.py's, guest_put's, the vault's parseArgs, vm-commands.sh's and this file's).
+mc_value_options() { # CMD
+  case "$1" in
+    sh) echo "-c --command --file --cwd --timeout --max-output" ;;
+    claude) echo "--session --token --ttl --model --cwd --file --timeout --quiet --lines" ;;
+    call) echo "--session --timeout" ;;
+    each) echo "--timeout" ;;
+    put) echo "--to" ;;
+    get|shot) echo "--task" ;;
+    inspect) echo "--minutes --top" ;;
+    browser) echo "--new --delete" ;;
+    checkpoint) echo "--delete" ;;
+    vm) echo "\
+      --on --host --user --port --size --region --egress --idle-stop --org --sprite --ssh-port --vnc-port \
+      --confirm" ;;
+    list) echo "--on" ;;
+    cloud) echo "--org --forget" ;;
+    handoff) echo "--why --say --timeout --note" ;;
+    notify) echo "--why --action" ;;
+    events) echo "\
+      --action --data --debounce --field --message --severity --ca --families --header --header-env --kind \
+      --min-severity --url" ;;
+    learn) echo "--since --project --transcripts --logs --min --model --config --tasks --budget --cap --run-id" ;;
+    net) echo "--for" ;;
+    volume) echo "--size --dir --folder --bucket --endpoint --region --prefix" ;;
+    refdisk) echo "--from --dir" ;;
+    shop) echo "--wait --shop --instrument --account --spend-request" ;;
+    trace) echo "--session --out --url" ;;
+    update) echo "--ref" ;;
+    web) echo "\
+      --task --browser --device --wait --widths --threshold --baseline --watch --max-chars --name \
+      --downloads" ;;
+    secrets) echo "\
+      --account --agent --allow-frame --answer-timeout --api-host --api-path-prefix --app --approval \
+      --auth-file --browser --browser-pid --ca --checkout-jwt --cli --confirm --csv --currency --days \
+      --expires --extra --field --file --fill --fill-key --fill-user --for --frame-origin --from \
+      --from-host --from-profile --gateway --header --host --host-key-alias --host-key-line --instrument \
+      --into --kind --label --length --link-host --max-per --max-purchase --merchant-max --name \
+      --on-behalf-pid --ops-key --ops-user --origin --password-selector --pattern --pay --port --profile \
+      --project --proxy-key --proxy-port --proxy-user --purchase --request --request-id --runtime --scope \
+      --secret --selector --session --shop --site --spend-request --tail --timeout --to --to-profile \
+      --total-label --total-selector --ttl --tunnel --tunnel-arg --tunnel-check-arg --tunnel-id --ucp-file \
+      --url --username --username-selector --vm --wait --why --window-id" ;;
+  esac
+}
+# The subcommands a command's own usage text is asked for (`metacomputer volume create --help` prints create's): only
+# these exact words are passed on, never anything else the person typed (tests/test_help.py checks them too).
+mc_help_subcommands() { # CMD
+  case "$1" in
+    volume) echo "create list delete resize keys test sync" ;;
+    refdisk) echo "create list delete" ;;
+    events) echo "status tail emit drain sink sink:add sink:list sink:show sink:test sink:remove" ;;
+    learn) echo "report review list approve reject remove edit add reseal bench" ;;
+    shop) echo "status login complete card" ;;
+    handoff) echo "done cancel wait status" ;;
+    web) echo "compare responsive a11y open-untrusted gpu debug read page" ;;
+    trace) echo "start stop list show delete export" ;;
+  esac
+}
+mc_help_asked() { # CMD ARGS...: 0 when -h or --help is a flag here (not an option's value, not after `--`)
+  local c="${1:-help}" a skip=0 vals; [ $# -gt 0 ] && shift
+  case "$c" in help|-h|--help) return 0 ;; esac
+  case "$c:${1:-}" in vm:help|claude:help|secrets:help) return 0 ;; esac    # their own word for it
+  if [ "$c" = ssh ]; then     # ssh [ROLE] [CMD...]: the role, then the guest's command (ls -h is the guest's)
+    case "${1:-}" in -h|--help) return 0 ;; esac
+    case "${2:-}" in -h|--help) return 0 ;; esac
+    return 1
+  fi
+  vals=" $(mc_value_options "$c") "
+  for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in --) return 1 ;; -h|--help) return 0 ;; esac
+    case "$vals" in *" $a "*) skip=1 ;; esac
+  done
+  return 1
+}
+mc_usage_entries() { # CMD [SUBCOMMAND]: this file's usage entries for CMD (only SUBCOMMAND's, when some name it)
+  awk -v c="$1" -v sub_="${2:-}" -v cmds=" start stop restart status reset who release checkpoint checkpoints restore version update agents " '
+    function firstword(t,  w) { split(t, w, " "); return w[1] }
+    function flush(  i) {
+      if (keep) { m++; txt[m] = ""; for (i = 1; i <= n; i++) txt[m] = txt[m] lines[i] "\n"; hit[m] = subhit }
+      n = 0; keep = 0; subhit = 0
+    }
+    /^set -uo/ { flush(); done = 1; exit }
+    FNR < 5 { next }
+    /^#   [^ -]/ {                                   # an entry (the --vm and --on lines are options, not commands)
+      flush()
+      head = substr($0, 5); sub(/   .*/, "", head)   # up to its description
+      k = split(head, parts, / \| /); top = (k > 1)  # "start ... | stop ... | restart": several commands in one
+      for (i = 1; i <= k; i++) if (index(cmds, " " firstword(parts[i]) " ") == 0) top = 0
+      split(head, w, " "); keep = (w[1] == c)
+      if (!keep && top) for (i = 1; i <= k; i++) if (firstword(parts[i]) == c) keep = 1
+      if (keep && sub_ != "" && w[1] == c) {
+        ns = split(w[2], subs, /\|/)
+        for (i = 1; i <= ns; i++) { s2 = subs[i]; gsub(/[^a-z0-9-]/, "", s2); if (s2 == sub_) subhit = 1 }
+        for (i = 2; i <= k; i++) if (firstword(parts[i]) == sub_) subhit = 1
+      }
+      lines[++n] = substr($0, 3); next
+    }
+    /^#    / { if (n) lines[++n] = substr($0, 3); next }
+    { flush() }
+    END {
+      if (!done) flush()
+      for (i = 1; i <= m; i++) if (hit[i]) any = 1
+      for (i = 1; i <= m; i++) if (!any || hit[i]) printf "%s", txt[i]
+    }
+  ' "$SELF"
+}
+mc_help() { # CMD ARGS...: the usage, on stdout; exit 0
+  local c="${1:-help}" py="" mod="" out; [ $# -gt 0 ] && shift
+  local margs=()
+  case "$c" in help|-h|--help) sed -n '2,/^set -uo/p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+  # The program is asked with fixed words only: exactly --help, after its own prefix and, when the person named one,
+  # a subcommand from mc_help_subcommands (that word, not theirs). Nothing else they typed is passed on: an option's
+  # value or another word there could be taken for an action (`handoff --transport 1 --help cancel`).
+  local w sub2=""
+  for w in $(mc_help_subcommands "$c"); do
+    case "$w" in
+      *:*) [ "${1:-}:${2:-}" = "$w" ] && sub2="$w" ;;
+      *)   [ -z "$sub2" ] && [ "${1:-}" = "$w" ] && sub2="$w" ;;
+    esac
+  done
+  local subw=(); [ -z "$sub2" ] || subw=(${sub2//:/ })
+  case "$c" in
+    sh)              mod=vm_shell; margs=(--help) ;;
+    claude)          mod=vm_claude; margs=(--help) ;;
+    call)            mod=mcomp_sdk; margs=(call --help) ;;
+    volume|refdisk)  mod=storage; margs=("$c" ${subw[@]+"${subw[@]}"} --help) ;;
+    notify)          mod=events; margs=(notify --help) ;;
+    events)          [ "${1:-}" = watcher ] || { mod=events; margs=(${subw[@]+"${subw[@]}"} --help); } ;;
+    version|update)  mod=update; margs=("$c" --help) ;;
+    agents)          mod=agents; margs=(--help) ;;
+    learn|shop|handoff) mod="$c"; margs=(${subw[@]+"${subw[@]}"} --help) ;;
+    web)             mod=browser_tools; margs=(${subw[@]+"${subw[@]}"} --help) ;;
+    trace)           mod=traces; margs=(${subw[@]+"${subw[@]}"} --help) ;;
+  esac
+  if [ -n "$mod" ]; then
+    py="${PY:-}"; [ -n "$py" ] && [ -x "$py" ] || py=/opt/homebrew/bin/python3
+    [ -x "$py" ] || py="$(command -v python3 2>/dev/null)" || py=""
+    case "$py" in /usr/bin/python3) xcode-select -p >/dev/null 2>&1 || py="" ;; esac  # Apple's stand-in asks to install
+    if [ -n "$py" ] && out="$("$py" -B "$(dirname "$SELF")/../lib/$mod.py" "${margs[@]}" </dev/null 2>/dev/null)" \
+       && [ -n "$out" ]; then
+      printf '%s\n' "$out"; exit 0
+    fi
+  fi
+  local sub=""; case "${1:-}" in -*|"") ;; *) sub="$1" ;; esac
+  out="$(mc_usage_entries "$c" "$sub")"
+  if [ -z "$out" ]; then
+    case "$c" in
+      _*) printf '%s\n' "metacomputer $c is metacomputer's own plumbing (it runs it itself); metacomputer help lists the commands" ;;
+      *)  printf '%s\n' "usage: metacomputer help (it lists every command; there's no command '$c')" ;;
+    esac
+    exit 0
+  fi
+  printf '%s\n' "usage: metacomputer [--vm NAME | --on PLACE] $c ..." "$out" \
+    "(metacomputer help lists every command; nothing was run)"
+  exit 0
+}
+# A request for usage that isn't exactly -h or --help (--help=x, -hx, --hel), where one would be: refused here, never
+# passed on to a command that might ignore it and act.
+mc_help_malformed() { # CMD ARGS...: 0 (and the word in MC_BAD) when one is in a flag's place
+  local c="${1:-help}" a skip=0 vals i=0; [ $# -gt 0 ] && shift
+  vals=" $(mc_value_options "$c") "
+  for a in "$@"; do
+    i=$((i + 1))
+    if [ "$c" = ssh ] && [ $i -gt 2 ]; then return 1; fi
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in
+      --) return 1 ;;
+      --help=*|-h?*|--h|--he|--hel) MC_BAD="$a"; return 0 ;;
+    esac
+    case "$vals" in *" $a "*) skip=1 ;; esac
+  done
+  return 1
+}
+mc_usage_error() { printf 'metacomputer: %s\n' "$*" >&2; exit 2; }
+mc_shown() { printf "'%s'" "$(printf '%s' "$1" | LC_ALL=C tr -c '[:print:]' '?' | cut -c1-60)"; }
+if mc_help_malformed "$@"; then
+  mc_usage_error "$(mc_shown "$MC_BAD") isn't a request for usage: -h or --help (nothing was run)"
+fi
+mc_help_asked "$@" && mc_help "$@"
+# bin/metacomputer's own commands refuse, before anything runs (no settings read, nothing called), what they wouldn't
+# use: an option they don't have, a second value for one that takes one, a word beyond their arguments. (Commands
+# that hand their arguments to a program of their own leave it to that program's parser, which refuses them the same
+# way before it acts: lib/strictargs.py, vm_shell's, vm_claude's, mcomp_sdk's, each.py's, guest_put's, the vault's
+# parseArgs, vm-commands.sh's.) tests/test_help.py appends each kind to every command form.
+mc_take() { # USAGE MIN MAX "FLAGS" "VALUE-OPTIONS" ARGS...: each argument a flag of FLAGS, a value option with its value
+  # (each at most once), or one of MIN..MAX words; anything else is a usage error
+  # (a value option written "--x=" in VALUE-OPTIONS also takes the --x=VALUE form, as its program does)
+  local u="$1" min="$2" max="$3" flags=" $4 " vals=" $5 " n=0 seen=" " a o; shift 5
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in --*=*)
+      o="${a%%=*}"
+      case "$vals" in *" $o= "*)
+        case "$seen" in *" $o "*) mc_usage_error "$o given twice; usage: metacomputer $u" ;; esac
+        case "${a#*=}" in -?*) mc_usage_error "$o needs a value, not an option; usage: metacomputer $u" ;; esac
+        seen="$seen$o "; shift; continue ;;
+      esac ;;
+    esac
+    case "$vals" in *" $a "*|*" $a= "*)
+      a="${a%=}"
+      [ $# -ge 2 ] || mc_usage_error "$a needs a value; usage: metacomputer $u"
+      case "$seen" in *" $a "*) mc_usage_error "$a given twice; usage: metacomputer $u" ;; esac
+      case "$2" in -?*) mc_usage_error "$a needs a value, not an option ($(mc_shown "$2")); usage: metacomputer $u" ;; esac
+      seen="$seen$a "; shift 2; continue ;;
+    esac
+    case "$flags" in *" $a "*)
+      case "$seen" in *" $a "*) mc_usage_error "$a given twice; usage: metacomputer $u" ;; esac
+      seen="$seen$a "; shift; continue ;;
+    esac
+    case "$a" in -?*) mc_usage_error "unknown option $(mc_shown "$a"); usage: metacomputer $u" ;; esac
+    n=$((n + 1))
+    [ "$n" -le "$max" ] || mc_usage_error "unexpected word $(mc_shown "$a"); usage: metacomputer $u"
+    shift
+  done
+  [ "$n" -ge "$min" ] || mc_usage_error "usage: metacomputer $u"
+  MC_TAKEN=1 SA_FLAGS="$flags" SA_VALS="$vals" SA_WORDS="$n" SA_MAX="$max"
+}
+mc_strict() { # CMD ARGS...
+  local c="${1:-help}" sub; [ $# -gt 0 ] && shift
+  local g="--yes --discard-unsynced --override"     # parse_flags's, wherever a command reads them
+  case "$c" in
+    start)           mc_take "start [--no-volumes] [--override]" 0 0 "--no-volumes --override" "" "$@" ;;
+    stop)            mc_take "stop [--force] [--override]" 0 0 "--force --override" "" "$@" ;;
+    restart)         mc_take "restart [--no-volumes] [--force] [--override]" 0 0 "--no-volumes --force --override" "" "$@" ;;
+    who)             mc_take "who [--json]" 0 0 "--json" "" "$@" ;;
+    status)          mc_take "status [--json]" 0 0 "--json" "" "$@" ;;
+    where|release|checkpoints|mcp|mcp-lazy|_health|_runinfo|_vnc-install|_vnc-push) mc_take "$c" 0 0 "" "" "$@" ;;
+    reset|baseline)  mc_take "$c [--yes] [--discard-unsynced] [--override]" 0 0 "$g" "" "$@" ;;
+    restore)         mc_take "restore NAME [--yes] [--discard-unsynced] [--override]" 1 1 "$g" "" "$@" ;;
+    desktop-restart) mc_take "desktop-restart [--override]" 0 0 "--override" "" "$@" ;;
+    input-reset)     mc_take "input-reset [--check]" 0 0 "--check" "" "$@" ;;
+    logs)            mc_take "logs [LINES]" 0 1 "" "" "$@" ;;
+    recordings)      mc_take "recordings [--sync] [N]" 0 1 "--sync" "" "$@"
+                     for sub in "$@"; do [ "$sub" = --sync ] || [[ "$sub" =~ ^[0-9]{1,9}$ ]] \
+                       || mc_usage_error "usage: metacomputer recordings [--sync] [N]   (N: how many, a number)"; done ;;
+    get)             mc_take "get GUEST_PATH [HOST_DIR] [--task NAME]" 1 2 "" "--task" "$@" ;;
+    shot)            mc_take "shot [HOST_PATH] [--task NAME]" 0 1 "" "--task" "$@" ;;
+    contact-sheet)   mc_take "contact-sheet MP4 [OUT.png]" 1 2 "" "" "$@" ;;
+    inspect)         mc_take "inspect [system|windows|processes|ports|files|browser|all ...] [--minutes N] [--top N] [--json]" \
+                       0 7 "--json" "--minutes --top" "$@" ;;
+    checkpoint)
+      case " $* " in
+        *" --delete "*) mc_take "checkpoint --delete NAME [--yes] [--override]" 0 0 "$g" "--delete" "$@" ;;
+        *) mc_take "checkpoint NAME [--replace] [--with-volumes] [--override]" 1 1 "--replace --with-volumes $g" "" "$@" ;;
+      esac ;;
+    hub)
+      sub="${1:-status}"; [ $# -gt 0 ] && shift
+      case "$sub" in
+        status) mc_take "hub status [--json|--brief]" 0 0 "--json --brief" "" "$@" ;;
+        start|serve) mc_take "hub $sub" 0 0 "" "" "$@" ;;
+        stop)   mc_take "hub stop [--if-idle]" 0 0 "--if-idle" "" "$@" ;;
+        env)    mc_take "hub env --json" 0 0 "--json" "" "$@" ;;
+        *)      mc_usage_error "usage: metacomputer hub [status [--json|--brief] | start | stop [--if-idle]]" ;;
+      esac ;;
+    record)
+      sub="${1:-status}"; [ $# -gt 0 ] && shift
+      case "$sub" in
+        start)       mc_take "record start [NAME] [FPS]" 0 2 "" "" "$@" ;;
+        stop|status) mc_take "record $sub" 0 0 "" "" "$@" ;;
+        moments)     mc_take "record moments FILE" 1 1 "" "" "$@" ;;
+        *)           mc_usage_error "usage: metacomputer record start [NAME] [FPS] | stop | status | moments FILE" ;;
+      esac ;;
+    task)
+      sub="${1:-}"; [ $# -gt 0 ] && shift
+      case "$sub" in
+        start)  mc_take "task start SLUG [--no-sync]" 0 1 "--no-sync" "" "$@" ;;
+        finish) mc_take "task finish NAME" 1 1 "" "" "$@" ;;
+        *)      mc_usage_error "usage: metacomputer task start SLUG [--no-sync] | finish NAME" ;;
+      esac ;;
+    events)
+      [ "${1:-}" != watcher ] || { shift; mc_take "events watcher [start|stop|status]" 0 1 "" "" "$@"; } ;;
+    browser)
+      sub="${1:-}"; [ $# -gt 0 ] && shift
+      case "$sub" in
+        ""|--json) mc_take "browser [--json]" 0 0 "" "" "$@" ;;
+        default|mode|pacing) mc_take "browser $sub VALUE" 1 1 "" "" "$@" ;;
+        profiles) mc_take "browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" 0 0 "--firefox --yes" \
+                    "--new --delete" "$@"
+                  case " $* " in *" --new "*" --delete "*|*" --delete "*" --new "*|*" --new "*" --firefox "*|*" --new "*" --yes "*|*" --firefox "*" --new "*|*" --yes "*" --new "*)
+                    mc_usage_error "usage: metacomputer browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" ;; esac
+                  case " $* " in *" --new "*|*" --delete "*) ;; "  ") ;; *)
+                    mc_usage_error "usage: metacomputer browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" ;; esac ;;
+        *) mc_usage_error "usage: metacomputer browser [default firefox|chrome | mode human|page|hybrid | pacing human|fast | profiles ... | --json]" ;;
+      esac ;;
+    net)
+      sub="${1:-status}"; [ $# -gt 0 ] && shift
+      case "$sub" in
+        status) mc_take "net status [--json]" 0 0 "--json" "" "$@" ;;
+        # --override: a computer elsewhere's forms check who's using it (owners_check); on this Mac's, the allowlist's
+        # own parser (lib/netpolicy.py) refuses it
+        egress) mc_take "net egress internet|off [--override]" 1 1 "--override" "" "$@" ;;
+        clear)  mc_take "net clear [--override]" 0 0 "--override" "" "$@" ;;
+        allow)  mc_take "net allow NAME... [--for 2h] [--exact] [--override]" 1 99 "--exact --override" "--for=" "$@" ;;
+        remove) mc_take "net remove NAME... [--exact] [--override]" 1 99 "--exact --override" "" "$@" ;;
+        *)      mc_usage_error "usage: metacomputer net [status [--json] | allow NAME... [--for 2h] [--exact] | remove NAME... | clear | egress internet|off]" ;;
+      esac ;;
+    put)             mc_take "put HOST_PATH... [--to GUEST_DIR] [--overwrite]" 1 99999 "--overwrite" "--to" "$@" ;;
+    security)        mc_take "security [apply] [--json]" 0 1 "--json" "" "$@"
+                     [ $# -eq 0 ] || [ "$*" = --json ] || case " $* " in *" apply "*) ;; *)
+                       mc_usage_error "usage: metacomputer security [apply] [--json]" ;; esac ;;
+    test)            mc_take "test [A B C D E F | all] [--run-id ID] [--override]" 0 99 "--override" "--run-id" "$@" ;;
+    cloud)           mc_take "cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG] [--forget OP]" 2 2 "--json" \
+                       "--org= --forget=" "$@" ;;
+    setup)           # install.sh's options (its own loop refuses the rest, but only once a terminal or --yes lets it run)
+                     mc_take "setup [--yes] [install.sh's options: ./install.sh --help]" 0 0 "--yes -y --no-chrome --no-build \
+                       --replace-vm --fresh-sources --no-claude --claude --only-agents --no-plugin --only-claude --uninstall \
+                       --switch --allow-downgrade --codex --no-codex --only-codex --openclaw --no-openclaw --only-openclaw \
+                       --hermes --no-hermes --only-hermes --gemini --no-gemini --only-gemini --antigravity --no-antigravity \
+                       --only-antigravity --lume=mcomp-vm \
+                       --lume=standard --lume=secure" "" "$@" ;;
+    _task-sync)      mc_take "_task-sync NAME" 1 1 "" "" "$@" ;;
+    _record-pipe)    mc_take "_record-pipe NAME FPS QUALITY OUT [AUDIO]" 4 5 "" "" "$@" ;;
+  esac
+  return 0
+}
+mc_strict "$@"
+# MCOMP_PARSE_ONLY (tests/test_help.py's valid forms): a command line this file's grammar took ends here, saying what
+# it declares; every other ends here too. Either way nothing is done and the exit is 99 ("parse only"), never 0, so no
+# command runs with the parsers' and guards' shortcut in its environment (a guard that took it would have let it by).
+if [ -n "${MCOMP_PARSE_ONLY:-}" ]; then
+  if [ "$MCOMP_PARSE_ONLY" = 1 ] && [ "${MC_TAKEN:-0}" = 1 ]; then sa_parsed metacomputer; fi
+  echo "metacomputer: MCOMP_PARSE_ONLY is set (the tests' switch): parse only, nothing was done; unset it" >&2
+  exit 99
+fi
 # Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
 # Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
 # confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it
@@ -160,22 +524,6 @@ if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then
        exit 77 ;;
   esac
 fi
-SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-LIB="$(dirname "$SELF")/../scripts/lib.sh"
-# --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same);
-# --on PLACE picks it by where it is (lib/placement.py, below, once the settings are read).
-MCOMP_VM_ARG=""; MC_ON_ARG=""; MC_ON_GIVEN=0
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --vm) [ $# -ge 2 ] && [ -n "$2" ] || { echo "metacomputer: --vm needs a VM name (metacomputer vm list)" >&2; exit 2; }
-          MCOMP_VM_ARG="$2"; shift 2 ;;
-    --vm=*) MCOMP_VM_ARG="${1#--vm=}"; [ -n "$MCOMP_VM_ARG" ] || { echo "metacomputer: --vm needs a VM name" >&2; exit 2; }; shift ;;
-    --on) [ $# -ge 2 ] && [ -n "$2" ] || { echo "metacomputer: --on needs a place: mac (this Mac) or cloud" >&2; exit 2; }
-          MC_ON_ARG="$2"; MC_ON_GIVEN=1; shift 2 ;;
-    --on=*) MC_ON_ARG="${1#--on=}"; MC_ON_GIVEN=1; [ -n "$MC_ON_ARG" ] || { echo "metacomputer: --on needs a place: mac (this Mac) or cloud" >&2; exit 2; }; shift ;;
-    *) break ;;
-  esac
-done
 MC_VM_SAID="$MCOMP_VM_ARG"; MC_ENV_VM="${MCOMP_VM:-}"; MC_ENV_CONFIG="${MCOMP_CONFIG:-}"; MC_ENV_NODEF="${MCOMP_NO_DEFAULT_VM:-}"
 MC_ENV_SAID="$MC_ENV_VM$MC_ENV_CONFIG"
 # The default computer (config/default-vm) is read by scripts/lib.sh as the VM a command acts on when none is named.
@@ -262,6 +610,7 @@ session_guard() {
   case "$rc" in
     0|2) ;;                     # 2: it couldn't tell, and said so
     3) exit 1 ;;                # refused: it said why
+    99) die "the session check didn't run (MCOMP_PARSE_ONLY, the tests' switch: parse only); nothing was done" ;;
     *) warn "couldn't check which computer this agent session holds (lib/sessionvm.py exit $rc); going on" ;;
   esac
   export MCOMP_GUARD_VM="$VM_NAME:$SSH_PORT"
@@ -662,24 +1011,25 @@ view_tunnel() { # a computer elsewhere: an SSH tunnel from 127.0.0.1:VNC_PORT he
   if lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh; then return 0; fi
   ! lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN >/dev/null 2>&1 || die "something else on this Mac listens on 127.0.0.1:$VNC_PORT (VNC_PORT); nothing was opened"
   ssh_base view
+  # lib/tunnellog.py starts it in the background and keeps what ssh says in a private log (0600, in a 0700 folder), at
+  # most 1 MB of it however long the tunnel lasts (the VM's end can make ssh print without end), drained by a reader
+  # that holds none of this command's descriptors: a program reading this command's output sees it end once the
+  # tunnel is up, not when the tunnel closes. What ssh said until then is shown here, escaped, as before.
+  local mode tlog="$LOG_DIR/tunnel/view-tunnel.log" out trc=0
   if [ "${TRANSPORT:-ssh}" != ssh ]; then
     # A provider's tunnel (Fly Sprites) runs through lib/proxywrap.py, which ends it when the ssh that started it goes:
-    # `ssh -f` forks away from it (and the tunnel would end at once), so ssh runs in the background here instead, in
-    # a session of its own, and the forward is waited for. It ends as `ssh -f`'s would: with the key's forced sleep, or
-    # the viewer.
-    daemonize "$LOG_DIR/view-tunnel.log" ssh -T -o ExitOnForwardFailure=yes -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" "${SSH_ARGS[@]}" view
-    local i
-    for i in $(seq 1 60); do
-      lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh && break
-      sleep 0.25
-    done
-    lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh \
-      || die "couldn't open the live view's SSH tunnel to $VM_NAME (its log: $(mc_tilde "$LOG_DIR")/view-tunnel.log)"
+    # `ssh -f` forks away from it (and the tunnel would end at once), so ssh stays in the foreground of the helper's
+    # own session, and the forward is waited for. It ends as `ssh -f`'s would: with the key's forced sleep, or the
+    # viewer.
+    mode=(--listen "$VNC_PORT" --wait 15 -- ssh -T -o ExitOnForwardFailure=yes)
   else
-  # The command ("view") is only what ssh needs to go to the background: the key's forced command runs instead.
-  ssh -f -T -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" "${SSH_ARGS[@]}" view </dev/null 2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 65536 >&2) \
-    || die "couldn't open the live view's SSH tunnel to $VM_NAME"
+    # The command ("view") is only what ssh needs to go to the background: the key's forced command runs instead.
+    mode=(--fork -- ssh -f -T)
   fi
+  out="$("$PY" "$LAB_ROOT/lib/tunnellog.py" --log "$tlog" "${mode[@]}" -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" \
+         "${SSH_ARGS[@]}" view </dev/null)" || trc=$?
+  if [ -n "$out" ]; then printf '%s\n' "$out" | "$PY" "$LAB_ROOT/lib/termsafe.py" --max 65536 >&2 || true; fi
+  [ "$trc" = 0 ] || die "couldn't open the live view's SSH tunnel to $VM_NAME (its log: $(mc_tilde "$tlog"))"
   ok "live view tunnel: 127.0.0.1:$VNC_PORT -> $VM_NAME's 127.0.0.1:5900, over SSH (connect within 20 s; it closes when the viewer does)"
 }
 
@@ -2604,9 +2954,18 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       else
         warn "no proxy key ($SSH_DIR/proxy): this VM was built before API tokens, so 'metacomputer secrets token' won't work with it until it is rebuilt (fills and sessions do)"
       fi
-      # Fills sign in as the VM's fill account (mcfill), sessions as the desktop user.
-      exec "$VAULT_BIN" bind "$vm" "${where[@]}" --host-key-line "$hk" --fill-key "$SSH_DIR/fill" --fill-user mcfill \
-        --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" ${proxy[@]+"${proxy[@]}"} "$@" ;;
+      # Fills sign in as the VM's fill account (mcfill), sessions as the desktop user. An option you give takes the
+      # place of this default for it: the vault takes each option once (a second value is a usage error there).
+      local defs=("${where[@]}" --host-key-line "$hk" --fill-key "$SSH_DIR/fill" --fill-user mcfill \
+        --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" ${proxy[@]+"${proxy[@]}"}) given=" " keep=() j=0
+      for a in "$@"; do case "$a" in --*) given="$given${a%%=*} " ;; esac; done
+      while [ $j -lt ${#defs[@]} ]; do
+        case "${defs[$j]}" in
+          --*=*) case "$given" in *" ${defs[$j]%%=*} "*) ;; *) keep+=("${defs[$j]}") ;; esac; j=$((j + 1)) ;;
+          *) case "$given" in *" ${defs[$j]} "*) ;; *) keep+=("${defs[$j]}" "${defs[$((j + 1))]}") ;; esac; j=$((j + 2)) ;;
+        esac
+      done
+      exec "$VAULT_BIN" bind "$vm" ${keep[@]+"${keep[@]}"} "$@" ;;
     import-session)
       # The session is for this VM (its approval policy, and where `session load` puts it).
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
@@ -2769,9 +3128,16 @@ if [ "${MC_REMOTE:-0}" = 1 ]; then
     reset|baseline|restore|checkpoint|checkpoints)
               if [ "${PROVIDER:-}" = sprites ]; then do_snap_sprite "$cmd" "$@"; exit $?; fi
               remote_only_mac "$cmd" "$("$PY" "$LAB_ROOT/lib/remote.py" missing --provider "${PROVIDER:-}" --feature "$cmd" 2>/dev/null || echo "it has no snapshots")" ;;
-    net)      case "${1:-status}" in
-                status) remote_net_status; exit $? ;;
-                egress) remote_net_egress "${2:-}"; exit $? ;;
+    net)      # --override (owners_check's, as for start and stop) and nothing else is taken out; what's left is checked
+              # again with net's own grammar (mc_strict), so no other flag is dropped here unread.
+              mc_n=(); for mc_a in "$@"; do case "$mc_a" in --override) OVERRIDE=1 ;; *) mc_n+=("$mc_a") ;; esac; done
+              set -- ${mc_n[@]+"${mc_n[@]}"}; mc_strict net "$@"
+              case "${1:-status}" in
+                status) [ $# -le 1 ] || { [ $# -eq 2 ] && [ "$2" = --json ]; } \
+                          || mc_usage_error "usage: metacomputer net status [--json]   (nothing was run)"
+                        remote_net_status; exit $? ;;
+                egress) [ $# -eq 2 ] || mc_usage_error "usage: metacomputer net egress internet|off   (nothing was run)"
+                        remote_net_egress "${2:-}"; exit $? ;;
                 allow|remove|clear) [ "${PROVIDER:-}" = sprites ] || remote_only_mac "metacomputer net $1" "it has no allowlist of names; metacomputer net egress internet|off sets what it may reach (docs/remote.md)"
                         sprite_net_list "$@"; exit $? ;;
                 *) remote_only_mac "metacomputer net $1" "it has no allowlist of names; metacomputer net egress internet|off sets what it may reach (docs/remote.md)" ;;

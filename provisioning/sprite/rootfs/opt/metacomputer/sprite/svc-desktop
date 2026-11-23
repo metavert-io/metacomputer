@@ -5,6 +5,14 @@
 # environment that carries what /etc/X11/Xsession.d/90metacomputer-env sets on a VM with a display manager
 # (accessibility on, the driver's telemetry off): there's no display manager here. XFCE's autostart runs session-init
 # (session.env for SSH sessions, the live view on 127.0.0.1).
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="svc-desktop (no arguments: a Sprite service)"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "svc-desktop: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 0:) ;; *) echo "svc-desktop: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -eu
 . /etc/metacomputer/sprite.env
 U="${GUEST_USER:-cua}"; UID_="$(id -u "$U")"; D="${DISPLAY_NUM:-0}"

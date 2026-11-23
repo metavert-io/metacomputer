@@ -27,6 +27,8 @@ import threading
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import runports  # noqa: E402  (this run's own port numbers: tests/runports.py)
 FIX = os.path.join(LAB, "tests", "fixtures", "hidden_text")
 TD = tempfile.mkdtemp(prefix="mcomp-hidden-")
 STATE = os.path.join(TD, "driver")
@@ -34,7 +36,7 @@ os.makedirs(STATE)
 os.environ.update(MCOMP_RUN_DIR=os.path.join(TD, "run"), MCOMP_LOG_DIR=os.path.join(TD, "logs"),
                   MCOMP_SESSIONS_DIR=os.path.join(TD, "sessions"),
                   MCOMP_EVENTS_DIR=os.path.join(TD, "events"), MCOMP_EVENTS_SPOOL=os.path.join(TD, "spool"),
-                  MCOMP_VM_NAME="hiddentest", MCOMP_SSH_PORT="59994", MCOMP_ACTION_LOG="off",
+                  MCOMP_VM_NAME="hiddentest", MCOMP_SSH_PORT=str(runports.port()), MCOMP_ACTION_LOG="off",
                   MCOMP_DRIVER_MODE="standard", MCOMP_COORD_GUARD="on", MCOMP_MCP_HUB="on", MCOMP_ACTIVE_S="600",
                   MCOMP_LESSONS="off", MCOMP_HIDDEN_TEXT="on")
 for k in ("MCOMP_CONFIG", "MCOMP_DIRECT_BRIDGE", "MCOMP_HUB_PID"):

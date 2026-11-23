@@ -25,10 +25,12 @@ import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import runports  # noqa: E402  (this run's own port numbers: tests/runports.py)
 TD = tempfile.mkdtemp(prefix="mcsg-", dir="/tmp")          # short: the copy's hub sockets live under it
 SESSIONS = os.path.join(TD, "sessions")
 RUN = os.path.join(TD, "run")
-os.environ.update(MCOMP_SESSIONS_DIR=SESSIONS, MCOMP_RUN_DIR=RUN, MCOMP_VM_NAME="unitvm", MCOMP_SSH_PORT="2999",
+os.environ.update(MCOMP_SESSIONS_DIR=SESSIONS, MCOMP_RUN_DIR=RUN, MCOMP_VM_NAME="unitvm", MCOMP_SSH_PORT=str(runports.port()),
                   MCOMP_LOG_DIR=os.path.join(TD, "logs"), MCOMP_EVENTS_DIR=os.path.join(TD, "events"),
                   MCOMP_EVENTS_SPOOL=os.path.join(TD, "spool"))
 for _k in ("MCOMP_CONFIG", "MCOMP_VM", "MCOMP_NO_DEFAULT_VM", "MCOMP_GUARD_VM", "MCOMP_EXPECT_VM"):

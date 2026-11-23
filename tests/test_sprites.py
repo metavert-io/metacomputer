@@ -572,7 +572,7 @@ def cli(td):
               r.returncode == 0 and all(x in text.splitlines() for x in (
                   "PLACE=sprites", "PROVIDER=sprites", "TRANSPORT=sprite", "SPRITE_ORG=my-org", "SPRITE_NAME=sp1",
                   "EGRESS=internet", "IDLE_STOP=off")), (r.stderr, text))
-        for args, want in ((["--on", "sprites"], "--org ORG"), (["--on", "sprites", "--org", "-x"], "SPRITE_ORG"),
+        for args, want in ((["--on", "sprites"], "--org ORG"), (["--on", "sprites", "--org", "-x"], "--org needs a value, not an option"),
                            (["--on", "sprites", "--org", "o", "--size", "big"], "Fly sizes it"),
                            (["--on", "sprites", "--org", "o", "--sprite", "Bad_Name"], "SPRITE_NAME"),
                            (["--on", "oci", "--sprite", "x"], "--sprite is for --on sprites")):
@@ -670,6 +670,15 @@ def cli(td):
         r = b.run("--vm", "sp1", "net", "egress", "off", "--override", env=env)
         check("net egress off (the same or narrower): goes ahead, read back", r.returncode == 0
               and "EGRESS=off" in r.stdout, r.stdout + r.stderr)
+        # (round 4) A flag net doesn't take, before its subcommand: a usage error, nothing asked of Fly (it once reached
+        # the Sprite's clear: everything but --override was taken out unread).
+        pol0, n0 = standin_state(b.home)["sprites"]["sp1"]["policy"], standin_state(b.home).get("api_n", 0)
+        bad = [b.run("--vm", "sp1", "net", *a, env=env) for a in (["--discard-unsynced", "clear"], ["--yes", "remove", "x.com"],
+                                                                  ["--yes", "egress", "off"])]
+        check("net --discard-unsynced clear (and --yes before remove or egress): a usage error, nothing asked of Fly",
+              all(x.returncode == 2 and "usage" in x.stderr for x in bad)
+              and standin_state(b.home)["sprites"]["sp1"]["policy"] == pol0 and standin_state(b.home).get("api_n", 0) == n0,
+              [(x.returncode, x.stderr[-160:]) for x in bad])
         r = subprocess.run([PY, os.path.join(b.co, "lib", "remote.py"), "egress", "--vm", "sp1", "--set", "internet",
                             "--setup"], env=env, capture_output=True, text=True, timeout=60)
         check("the setup's own exception (egress --setup) opens it while the computer isn't set up",

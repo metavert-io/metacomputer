@@ -318,6 +318,13 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:]:             # it takes no arguments (its request comes on stdin): -h says so; anything else is refused
+        print("usage: vm_shell_guest.py < REQUEST   (no arguments; lib/vm_shell.py sends the request)",
+              file=sys.stdout if sys.argv[1:] in (["-h"], ["--help"]) else sys.stderr)
+        sys.exit(0 if sys.argv[1:] in (["-h"], ["--help"]) else 2)
+    if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+        print("parse-only: vm_shell_guest.py: taken " + json.dumps({"flags": [], "values": [], "words": 0, "max_words": 0}))
+        sys.exit(99)        # parse only: nothing was done (never 0: a check run this way refuses)
     rc = main()
     try:
         sys.stdout.flush()

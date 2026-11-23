@@ -49,6 +49,10 @@ BARE_URL_RE = re.compile(r"^(?P<host>localhost|[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[[
                          r"(?::(?P<port>[0-9]{1,5}))?(?:[/?#][^\s\"'`\\<>]{0,2000})?$")
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 def bare_address(text):
     """(URL, local) for an address typed without a scheme (the browser adds one: http for this machine, else most
     likely https), or None when the text isn't one: IP addresses and ports are checked, not only their shape."""
@@ -484,7 +488,7 @@ def list_traces(run_dir):
 
 
 def cmd(argv):
-    ap = argparse.ArgumentParser(prog="metacomputer trace", description=__doc__.split("\n\n")[0])
+    ap = strictargs.Parser(prog="metacomputer trace", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("start"); s.add_argument("name"); s.add_argument("--session")
     sub.add_parser("stop"); sub.add_parser("list")

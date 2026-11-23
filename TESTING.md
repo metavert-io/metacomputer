@@ -332,6 +332,14 @@ the CLI checks run in a copy of the checkout with its own HOME and a fake runner
   recording stand-in; `start` refusing to stop a RUNNING instance whose console shows no power-off, `stop --force`;
   wake, sleep, delete, status and list; the manifest's outside-egress and billing truth; credentials named but
   never shown.
+- Oracle Cloud's security groups, through the real SDK facade on an in-memory Oracle (`OracleStandIn`: groups and
+  instances by OCID with their tags, rules per group, network cards with their groups): a create makes a group of
+  its own operation's and journals it from the create's answer even when a group of the same name is there (never
+  reused or changed), and when its rules then fail; `net egress` and `apply_egress` refuse a recorded group tagged
+  for another operation, or one an earlier version made (no operation tag), changing no rule; doctor reads the groups
+  on the instance's network card; `vm delete` and `abort --op` delete only the groups the record names (by id, and by
+  the marks of its recorded operations), never a same-named group of another operation; `cloud teardown` says how to
+  remove a group no record here names; the facade's `nsg_owner`, `nsgs_of_op` and `delete_nsg_by_id` checks.
 - The Hetzner Cloud, DigitalOcean and Vultr drivers (`StandInREST`, answering each provider's paths and error shapes
   as read from its API): the computer's firewall and first-boot key made before the server, under the provider's
   lock, each journaled by id; the create call's shape (size, region, image, IPv4 only, no backups, the firewall and
@@ -385,6 +393,15 @@ The live path (a real VM elsewhere) is run by hand: `metacomputer --vm NAME buil
 `tests/test_vault_vm.py` with `MCOMP_CONFIG=config/vms/NAME.env`; for Oracle Cloud, with its credentials in the
 environment. The vault's remote binding (its address, alias and the computer's identity, no gateway) is in
 `tests/test_secrets.py`.
+
+- `view --tunnel`, its output read through pipes by a program, returns once the tunnel is up (a stand-in ssh whose
+  background half keeps its output open); what ssh said is shown escaped and kept in a private log (0600 in a 0700
+  folder; a link or a hard link there is refused, a wider folder of this account's made 0700) that stops at 1 MB when
+  the background half prints 5 MB; a provider's tunnel (ssh without -f) is up once ssh listens on the port.
+- Oracle Cloud's groups, round 2: a group re-tagged for another operation while the create waited for it gets no
+  rule and nothing is launched; `cloud teardown` racing another Mac's new group (its look came first) refuses with
+  the group and the network left, and the network's deletion takes only groups its records name, still tagged for
+  that computer and operation.
 
 ## Places and providers: `tests/test_cloud_adapters.py`
 
@@ -473,6 +490,68 @@ copy's VMs (off) and are stopped at the end.
   shell and the bare command refuses again; an unknown name or a non-name is refused with the tools left where they
   were. A default changed after the session started (`metacomputer default demo`) refuses the command that now means
   `demo`. Without a bridge, a claim on `demo` (as `metacomputer sh` leaves) decides until it's gone.
+
+## `--help` and `-h` everywhere: `tests/test_help.py`
+
+`python3 tests/test_help.py` (about 12,000 checks, a few minutes) needs no VM. Each worker has its own copy of the checkout
+(tests/test_multi_vm.py's Box) with a throwaway HOME and four computers' settings: the main VM, another VM on this
+Mac, your own server and a Fly Sprite. Stand-ins on PATH record every call of the programs that reach a VM, the VM
+runner, SSH, a provider, the vault, the network or this Mac's settings (ssh, the runner, sprite, oci, curl, git,
+osascript, security, launchctl, ...); a `sitecustomize.py` on PYTHONPATH records every socket a Python helper opens and
+every such program it starts by its full path. The table runs every command and subcommand of the dispatch, destructive
+ones first (build, reset, restore, baseline, checkpoint, vm create/delete, cloud teardown, every `secrets` subcommand,
+shop, net), with `--help` and with `-h`, after the command, after its subcommand and after its arguments, with `--vm`
+for the other computers. Each must exit 0 with usage on stdout, call nothing, and leave every file and folder of the
+copy, its HOME, its private folders, the per-VM vaults' folder and its computers' socket folders as they were (each
+computer's run, log and socket folders are made once first, by `where`, as every command makes them). `ssh ops ls -h`
+and `sh -c ... -- --help` are the guest's and the script's own, never metacomputer's usage. Every program in
+`scripts/`, `install.sh`, `get.sh` and every `lib/` program with a `__main__`, run on its own with `-h` and `--help`,
+calls nothing and writes nothing; those a person runs (`scripts/`, the installers, `lib/mcp_client.py`) print their
+usage and exit 0. A command added to the dispatch without rows in the table fails it.
+bin/metacomputer's table of options that take a value (`mc_value_options`) is checked against each command's own
+parser (the argparse parsers its programs build, vm_shell's, vm_claude's, mcomp_sdk's, each.py's, guest_put's, the
+vault's `parseArgs` sets, vm-commands.sh's and bin/metacomputer's own), and so are the subcommands whose usage is asked
+for; after every such option `--help` is that option's value, after the value it asks for usage. And for every
+command and every option that takes a value, `OPT --help WORD` (WORD one that would act: `cancel`, `delete`,
+`teardown`, ...) acts on nothing: no call beyond the runner's lookups, and the vault only asked for its version or
+refusing an option as its command.
+Strict parsers: every form of the table, its flag left out, gets an unknown option, a second value for an option it
+already has, a word beyond its arguments (except where its last arguments take any number of words, or the form left
+out a word the command needs) and three malformed requests for usage (`--help=x`, `-hx`, `--hel`) appended; each must
+end with a usage error that says it is one (not a later refusal that happened to stop it), calling nothing but the
+runner's lookups and writing nothing (`secrets`: refused before the vault, or handed to the vault whole, whose parser
+refuses it: tests/test_vault_ops.py; a command a computer elsewhere doesn't have refuses every form alike). `setup`'s
+list of install.sh's options must be install.sh's own; `lib/guest_put.py` and `lib/actionlog.py`, run directly,
+refuse an unknown option and `verify --all FILE`. And `checkpoint --delete keep --delete --help --yes` (with `-h`,
+`--help=x`, `-hx`, an extra word, an unknown option), on a copy whose runner has the checkpoint, deletes nothing,
+while `checkpoint --delete keep --yes` does. Every form is also run with the options before the command misused
+(`--vm --help --vm NAME`, `--vm -h`, `--vm=--help=x`, `--vm NAME --vm NAME`, `--on mac --on mac`, `--on -hx`): a usage
+error, nothing run; and with its flag given twice.
+
+Every program in the tree: a scan finds them (tracked files that are executable, start with `#!`, or are Python with
+a `__main__`, the suites aside, and the Go programs the repository compiles, `tools/*/main.go`), and each must have an
+entry in tests/entrypoints.py, or the check fails: a new program fails until it has one. An entry is how the program
+is run and its valid command lines, as its callers pass them (one run by the repository must have a caller in it:
+bin/, scripts/, lib/, provisioning/, vault/, the installers, the launchers, bench/); a program whose parser describes
+itself (lib/strictargs.py's argparse or `expect()` forms, with `MCOMP_PARSE_ONLY=describe`) also gets a valid line
+made from its declaration for every subcommand and form. Each valid line runs with `MCOMP_PARSE_ONLY=1`: the program's
+parser takes it and ends the run there, saying what that form declares (its flags, its options that take a value, how
+many words it took and may take), with exit 99 ("parse only: nothing was done"), never 0, so a guard or check run with
+it set refuses; it must be taken (99 and that declaration), with nothing called, connected or written, so a program too strict
+for its own callers fails (finalize.sh with the build's two words, `remote.py exec --vm demo -- /usr/bin/true --help`).
+Every declared form must have a valid line. Then every misuse is made from that declaration and put after the valid
+line (before a `--` whose rest is another program's): `-h` and `--help` (answered or refused), `-hx`, `--help=x`,
+`--hel`, an option it doesn't have, each flag twice, each option that takes a value twice (unless it's meant to
+repeat), `--help` and an option as each such option's value (`--x --bogus` and `--x=--bogus`; a text that may start
+with `-`, like `handoff --say`, takes the second), and a word too many;
+each is refused with exit 2 but the requests for usage, and for every one nothing is called (stand-ins on the PATH),
+connected (a sitecustomize) or written. The VM's programs run with only their command-line guard (the lines between
+"metacomputer's command-line rules" and "end of the command-line rules"), so every action of
+`lib/vm_claude_guest.sh` gets its own trailing misuse (`stop s1 --help`); `tools/qcow2raw` is built (offline, from Go's
+module cache) and run; the plugin's launchers also run with nothing set up (`--help`: their usage, exit 0; anything
+else is not run). The vault's forms are walked by tests/test_vault_ops.py (each form's valid line taken under
+`MCOMP_PARSE_ONLY=1` in a test build, every flag and value option misused, and its `_tunnel` mode), its dispatch
+scanned there too.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
@@ -657,7 +736,8 @@ a folder there, both files populated, a byte-order mark), with a temporary `HOME
 `python3 tests/test_install.py` (218 checks) needs no VM, no network and no
 Homebrew. Every command that looks at the Mac or reaches out (`uname`, `sw_vers`,
 `sysctl`, `df`, `dscl`, `curl`, `xcode-select`, `brew`, `ssh`, `security`, the VM
-runner) is a stub on `PATH` that logs its calls, in a temporary home, with its own
+runner) is a stub on `PATH` that logs its calls (one JSON line each, written whole in one
+append, so stubs running at once never split each other's; checked first), in a temporary home, with its own
 lock folder (`MCOMP_LOCK_DIR`) and account home (so the real `~/.config/lume` is never
 read). git is the real one behind a wrapper that refuses network URLs (with
 `GIT_ALLOW_PROTOCOL=file`), so every repository is a local folder. One check uses the
@@ -945,7 +1025,7 @@ The GUI suite also runs under the `desktop` profile: put
 
 ## The shell channel: `tests/test_vm_shell.py`, `tests/test_options.py F`
 
-`python3 tests/test_vm_shell.py` needs no VM (97 checks). `bash -c` stands in
+`python3 tests/test_vm_shell.py` needs no VM (98 checks). `bash -c` stands in
 for SSH, so the Mac's half (`lib/vm_shell.py`) and the VM's half
 (`lib/vm_shell_guest.py`) both run locally; a fake, hostile VM stands in for
 the rest. It checks:
@@ -966,8 +1046,8 @@ the rest. It checks:
   changes nothing;
 - the hostile VM: endless stdout, endless stderr and one endless line are cut
   off at the wire limit; a VM that stops reading stdin or never answers is
-  given up at the deadline; 28 malformed answers (wrong types, exit code 256,
-  NaN, bad hashes or base64, sizes that don't match, duplicate keys, extra
+  given up at the deadline; 29 malformed answers (wrong types, exit code 256,
+  NaN, bad hashes or base64, a whole stream whose SHA-256 isn't its own, sizes that don't match, duplicate keys, extra
   lines, deep nesting) are rejected with fixed text; end to end they exit 255,
   show nothing and are logged as signed protocol errors;
 - control characters reach a terminal only escaped (checked on a
@@ -992,7 +1072,8 @@ the rest. It checks:
   relay under another client is;
 - the action log: no file with `ACTION_LOG=off` or `SHELL_LOG=off`; with
   logging, a `vm_shell` call signed before anything runs and a result with
-  hashes and sizes, nothing of the script, its output or the VM's diagnostics
+  keyed hashes (HMAC under the per-install results key, 0600; no plain SHA-256
+  of the script or output anywhere in the file) and sizes, nothing of the script, its output or the VM's diagnostics
   unless `ACTION_LOG_TEXT=keep`, refusals and timeouts recorded, a log that
   can't be signed at the start refusing the run, a failed final signature
   failing the command, and `actions verify --all` passing.
@@ -1089,6 +1170,14 @@ outlives its first certificate (each probe makes its own).
 
 Each of these needs no VM and takes seconds.
 
+The suites whose stand-in VM is told apart by its SSH port (`test_handoff`, `test_hub`, `test_hidden_text`,
+`test_owners`, `test_vm_shell`, `test_vm_claude`, `test_session_guard`) take their port numbers from
+`tests/runports.py`: free loopback ports held bound (never listening) while the run lasts, so two runs on one Mac at the
+same time (two suites, two checkouts, two copies of one suite) never see each other's stand-in connections as their own
+VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_vm_shell`'s long sleeps, which it finds
+(and ends) with `pgrep`/`pkill -f`, carry digits of the run's own (`sleep 31.7NNNNN`), and `test_handoff` and
+`test_agent_setup` keep their locks in folders of their own (`MCOMP_LOCK_DIR`), never the account's.
+
 - `python3 tests/test_update.py`: `metacomputer update` and `version` and the step every install ends with
   (`lib/update.py`) against a temporary repository with three releases: `--check` says what's new and changes
   nothing; main moves forward to the latest release (a detached checkout to it) and install.sh runs; local changes,
@@ -1172,18 +1261,22 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (228 checks, about two minutes): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (246 checks, about two minutes): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
-  `c` and Ctrl-C at a terminal, the asking session refused "done" without a terminal,
+  `c` and Ctrl-C at a terminal (Ctrl-C sent once the wait has begun, to a handoff started with SIGINT's default
+  action as a person's shell starts it, even when the suite runs as a background job, which inherits SIGINT
+  ignored), the asking session refused "done" without a terminal,
   one at a time, refused while another session acts (unless `--override` or a person at
   a terminal), `owners.py check` exit 4, `release` leaving it, garbage, links and records
   with a field of the wrong type failing closed for at most 2 hours (from the kernel's change time, so a
   future modification time doesn't stretch it, or from the first failure when nothing about the file can be
   read), `sh` refused with or without `--override` and also when the handoff opens after its admission check
   (nothing runs), `web`'s Firefox cleanup left alone, `secrets fill`, `login`, `session load` and `input-reset`
-  stopped (exit 4) with the vault never asked, `input-reset` at the user's own terminal going ahead during their
+  stopped (exit 4) with the vault never asked (and refused, the vault never asked, with `MCOMP_PARSE_ONLY` set,
+  `1` or `describe`: `handoff.py guard --hold-fd N` and `owners.py check` end a parse-only run with 99, never 0, and
+  bin/metacomputer runs no command with it set), `input-reset` at the user's own terminal going ahead during their
   handoff (a stand-in ssh; an agent with a terminal of its own and a run without one still stopped, `--check`
   recording nothing, exit 3 when it can't be known whether an agent call runs, as with `MCP_HUB=off`), the driver's
   leftover input devices (lib/input_reset.py, a stand-in guest): the guest's answer read with limits (one count; SSH
@@ -2063,6 +2156,10 @@ tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
 `python3 tests/test_vault_ops.py` (215 checks, about 3 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
+- **declarations:** every form of every command, as the test build lists them (`_argspecs`), given an unknown
+  option, another form's option, a word too many, a request for usage as an option's value (`--site --help`,
+  `--site=--help=x`) and as a word (`-hx`): each a usage error (64) with the vault unlocked, nothing asked of it or the
+  VM, no record and no file changed; `rule remove ID --site --help` and `revoke --all ID ID` among them;
 - **keys:** `init` binds to the Secure Enclave (when the Mac has one) and prints a
   recovery key; `--no-enclave`; `rekey` (the old passphrase and recovery key stop
   working); on a Mac whose Enclave can't use the key (a test-build switch), only the

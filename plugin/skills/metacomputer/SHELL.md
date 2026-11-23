@@ -84,4 +84,4 @@ Checked on a default build (Ubuntu 24.04, 2026-11-18). A VM built before 2026-11
 
 ## Logging
 
-When the user has the signed action log on (`ACTION_LOG=on`), each run is recorded (`SHELL_LOG=auto`, the default): the script's hash and size, the folder, the exit code and duration, and each output's size and hash. The script and output text are kept only with `ACTION_LOG_TEXT=keep`. `SHELL_LOG=off` keeps shell runs out of the log. `metacomputer security` shows the settings; they're the user's to change.
+When the user has the signed action log on (`ACTION_LOG=on`), each run is recorded (`SHELL_LOG=auto`, the default): the script's keyed hash and size, the folder, the exit code and duration, and each output's size and keyed hash. The script and output text are kept only with `ACTION_LOG_TEXT=keep`. `SHELL_LOG=off` keeps shell runs out of the log. `metacomputer security` shows the settings; they're the user's to change.

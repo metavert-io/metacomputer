@@ -296,7 +296,7 @@ func originAuthority(_ origin: String) -> String {
 /// `merchant-rules https://shop [--json]` (anyone, no unlock): what a merchant publishes for agents, read now.
 /// `--file PATH` / `--ucp-file PATH` read saved copies instead.
 func cmdMerchantRules(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["file", "ucp-file"], flags: ["json"])
+    let a = try parseArgs(argv, command: "merchant-rules")
     var r = MerchantRules()
     var origin = ""
     if a.last("file") != nil || a.last("ucp-file") != nil {
@@ -383,7 +383,7 @@ func cmdWebBotAuth(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: wba init --agent https://your.site [--replace] | wba on | wba off   (your own terminal)\n"
         + "       wba status | wba directory [--headers] | wba sign https://site   (while unlocked)"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["agent", "days"], flags: ["replace", "json", "headers"])
+    let a = try parseArgs(Array(argv.dropFirst()), command: "wba")
     switch sub {
     case "init", "on", "off":
         guard a.positional.isEmpty else { throw usageError(usage) }
@@ -425,6 +425,8 @@ func cmdWebBotAuth(_ paths: Paths, _ argv: [String]) throws -> Int32 {
             guard a.positional.count == 1, let u = URL(string: a.positional[0]), let s = u.scheme, ["https", "http"].contains(s), let h = u.host,
                   let o = canonicalOrigin("\(s)://\(h)" + (u.port.map { ":\($0)" } ?? "")) else { throw usageError("usage: wba sign https://site/path") }
             req["origin"] = o
+        } else if a.last("days") != nil && !a.has("headers") {
+            throw usageError("--days goes with --headers (how long the directory's signature lasts)")
         } else if a.has("headers") {
             req["headers"] = true
             let days = Int(a.last("days") ?? "30") ?? 0

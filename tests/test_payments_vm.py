@@ -279,7 +279,8 @@ def run(td, procs):
     ok_parts = []
     for part, label in (("number", "Card number"), ("exp", "Expiry")):
         focused = focus(label)
-        pf = secrets("pay", "--purchase", res3.get("purchase_id") or "0" * 32, "--field", part, "--human", "--window-id", str(fwin))
+        # (no --window-id: a purchase's fill types into the focused field; the option was never read, and is refused)
+        pf = secrets("pay", "--purchase", res3.get("purchase_id") or "0" * 32, "--field", part, "--human")
         rcp, resp, textp = answer(pf)
         ok_parts.append(focused and rcp == 0 and resp.get("ok") is True or (part, focused, rcp, resp.get("reason")))
     check("human mode: the number and the expiry go into Firefox's focused fields as keys through the driver", ok_parts == [True, True], ok_parts + [u.text()[-900:]])

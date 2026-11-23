@@ -81,6 +81,10 @@ AGENT_NAMES = {"Claude Code": "Claude", "Codex": "Codex", "OpenClaw": "OpenClaw"
                "Antigravity app": "Antigravity", owners.UNKNOWN_AGENT: "Your agent"}
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 def agent_word(rec):
     """Who asked, for the user's messages: the short name of the agent whose session opened the handoff ("Codex",
     "OpenClaw", "Hermes", "Gemini"), else "Claude"."""
@@ -747,6 +751,9 @@ def cmd_guard(argv):
         if len(argv) != 2 or argv[0] != "--hold-fd" or not argv[1].isdigit() or not 3 <= int(argv[1]) <= 255:
             err("usage: guard [--hold-fd N]")
             return EXIT_USAGE
+    # (MCOMP_PARSE_ONLY, tests/test_help.py: taken; nothing checked or held)
+    strictargs.parsed("handoff.py guard", {"flags": [], "values": ["--hold-fd"], "words": 1, "max_words": 1})
+    if argv:
         fd = int(argv[1])
         try:
             st, want = os.fstat(fd), os.lstat(owners.dispatch_path())
@@ -768,7 +775,66 @@ def cmd_guard(argv):
     return 0
 
 
+def sub_parser(sub):
+    ap = strictargs.Parser(prog=f"metacomputer handoff {sub}")
+    if sub in ("done", "cancel"):
+        ap.add_argument("--note", action="text", help="what Claude should know (at most 500 characters)")
+    if sub in ("wait", "status"):
+        ap.add_argument("--json", action="store_true")
+    return ap
+
+
+def open_parser():
+    ap = strictargs.Parser(
+        prog="metacomputer handoff",
+        description="Hand the virtual computer to the user and wait until they hand it back "
+                    "(docs/guide.md, \"When Claude needs you\"). Also: done [--note], cancel [--note], wait, status.")
+    ap.add_argument("--why", default="other", choices=owners.HANDOFF_WHY)
+    ap.add_argument("--say", action="text", required=True, help="what the user should do, in one line (no secrets or full links)")
+    ap.add_argument("--timeout", default=f"{DEFAULT_TIMEOUT_S // 60}m", help="time limit (default 15m, at most 2h)")
+    ap.add_argument("--json", action="store_true", help="the outcome as one JSON line at the end")
+    ap.add_argument("--override", action="store_true", help="open it while another session is using the computer "
+                                                            "(only after the user agreed)")
+    return ap
+
+
+VALUE_OPTIONS = ("--why", "--say", "--timeout", "--note")     # what open_parser and sub_parser take a value for
+
+
+def asks_help(words):
+    """Whether -h or --help is a flag among words, by the parsers' own rules: an option's value stays a value
+    (`--say --help` is the parser's missing-value error), and `--` ends the options."""
+    skip = False
+    for a in words:
+        if skip:
+            skip = False
+        elif a == "--":
+            return False
+        elif a in ("-h", "--help"):
+            return True
+        elif a in VALUE_OPTIONS:
+            skip = True
+    return False
+
+
 def main(argv):
+    if argv[:1] == ["--transport"]:
+        # bin/metacomputer's SSH command for the VM: a request for usage among its words is a broken command line,
+        # refused (never taken for usage, and never an option's value followed by an action: `--transport 1 --help
+        # cancel` once cancelled the open handoff).
+        try:
+            k = int(argv[1]) if len(argv) > 1 else -1
+        except ValueError:
+            k = -1
+        if k >= 0 and any(a in ("-h", "--help") for a in argv[2:2 + k]):
+            err("--transport N WORD... (bin/metacomputer's): a request for usage isn't a word of it")
+            return EXIT_USAGE
+    rest = argv[2 + int(argv[1]):] if argv[:1] == ["--transport"] and len(argv) > 1 and argv[1].isdigit() else argv
+    if asks_help(rest):
+        # Usage, and nothing else, before anything is done.
+        words = [a for a in rest if a in ("done", "cancel", "wait", "status")]
+        (sub_parser(words[0]) if rest[:1] == words[:1] and words else open_parser()).print_help()
+        return 0
     if argv[:1] == ["--transport"]:
         # bin/metacomputer's SSH command for the VM (lib/input_reset.py), ahead of the user's arguments
         try:
@@ -783,17 +849,13 @@ def main(argv):
             TRANSPORT_PROBLEM[:] = ["couldn't set up SSH to the VM"]
         argv = argv[2 + k:]
     if len(argv) == 2 and argv[0] == "_dialog":
+        strictargs.parsed("handoff.py _dialog", {"flags": [], "values": [], "words": 2, "max_words": 2})
         return run_dialog(argv[1])
     if argv and argv[0] in SUBCOMMANDS:
         sub, rest = argv[0], argv[1:]
         if sub == "guard":
             return cmd_guard(rest)
-        ap = argparse.ArgumentParser(prog=f"metacomputer handoff {sub}")
-        if sub in ("done", "cancel"):
-            ap.add_argument("--note", help="what Claude should know (at most 500 characters)")
-        if sub in ("wait", "status"):
-            ap.add_argument("--json", action="store_true")
-        a = ap.parse_args(rest)
+        a = sub_parser(sub).parse_args(rest)
         try:
             if sub in ("done", "cancel"):
                 return cmd_end(a, sub)
@@ -801,18 +863,7 @@ def main(argv):
         except (OSError, TimeoutError) as e:
             err(str(e))
             return EXIT_ERROR
-    ap = argparse.ArgumentParser(
-        prog="metacomputer handoff",
-        description="Hand the virtual computer to the user and wait until they hand it back "
-                    "(docs/guide.md, \"When Claude needs you\"). Also: done [--note], cancel [--note], wait, status.")
-    ap.add_argument("--why", default="other", choices=owners.HANDOFF_WHY)
-    ap.add_argument("--say", required=True, help="what the user should do, in one line (no secrets or full links)")
-    ap.add_argument("--timeout", default=f"{DEFAULT_TIMEOUT_S // 60}m", help="time limit (default 15m, at most 2h)")
-    ap.add_argument("--json", action="store_true", help="the outcome as one JSON line at the end")
-    ap.add_argument("--override", action="store_true", help="open it while another session is using the computer "
-                                                            "(only after the user agreed)")
-    a = ap.parse_args(argv)
-    return cmd_open(a)
+    return cmd_open(open_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

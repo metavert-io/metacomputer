@@ -284,6 +284,12 @@ class StderrTail:
 # What the hub keeps of a line of the driver's stderr: one of these fixed classes, never the line (it can echo what a page
 # in the VM showed, a card's details among it). The first that matches wins; anything else is "driver output".
 STDERR_CLASSES = (
+    # the guest's own driver gate (driver-mcp): its fixed refusals, by their words
+    ("driver policy: bounded sessions only", re.compile(r"accepts only bounded driver sessions")),
+    ("driver policy: manifest doesn't match its hash", re.compile(r"manifest [0-9a-f]{1,64} doesn't match its hash")),
+    ("driver policy: manifest not uploaded", re.compile(r"manifest [0-9a-f]{1,64} not uploaded")),
+    ("driver policy: bad request", re.compile(r"bad manifest id|unknown driver request")),
+    ("desktop session not up", re.compile(r"the desktop session is not up")),
     ("vm not running", re.compile(r"not running", re.I)),
     ("ssh: permission denied", re.compile(r"permission denied", re.I)),
     ("ssh: connection refused", re.compile(r"connection refused", re.I)),
@@ -423,14 +429,15 @@ class StderrCounter:
         with self.lock:
             return dict(self.counts)
 
-    def text(self, wait=0.0, pin=None):
+    def text(self, wait=0.0, pin=None, who="the driver"):
         """A summary the hub may show: how many lines, of which classes; never a line. A recognised refusal of
-        metacomputer's own is said in the hub's words, from its pinned settings (`pin`, refusal_text)."""
+        metacomputer's own is said in the hub's words, from its pinned settings (`pin`, refusal_text). `who` names
+        the stream's writer (the driver; the input reset's command, lib/input_reset.py)."""
         c = self.classes(wait)
         if not c:
             return ""
         with self.lock:
             n, known = self.lines, list(dict.fromkeys(self.known))
         said = [refusal_text(t, pin) for t in known]
-        return ("; ".join(said) + "; " if said else "") + f"the driver wrote {n} line(s) to stderr: " + ", ".join(
+        return ("; ".join(said) + "; " if said else "") + f"{who} wrote {n} line(s) to stderr: " + ", ".join(
             f"{v} {k}" for k, v in sorted(c.items(), key=lambda kv: -kv[1]))

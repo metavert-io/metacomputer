@@ -1177,6 +1177,10 @@ def status(agent, root, link, env):
 
 
 def main(argv):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    strictargs.expect(argv, ["link-ours PATH --root CHECKOUT", "install|uninstall|status AGENT --root CHECKOUT --link LINK"],
+                      prog="agent_setup.py")
     if argv[:1] == ["link-ours"]:          # install.sh's Codex step: the same ownership rule for its skill links
         if len(argv) != 4 or argv[2] != "--root":
             print("usage: agent_setup.py link-ours PATH --root CHECKOUT", file=sys.stderr)

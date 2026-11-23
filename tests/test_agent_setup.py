@@ -324,7 +324,11 @@ class Box:
         py = os.path.dirname(os.path.realpath(sys.executable))
         self.env = {"HOME": self.home, "PATH": f"{self.bin}:{py}:/usr/bin:/bin", "LANG": "en_US.UTF-8",
                     "MCOMP_BREW_PYTHON": sys.executable, "STUB_LOG": self.log,
-                    "MCOMP_CONFIG": os.path.join(self.t, "none.env"), "TMPDIR": os.environ.get("TMPDIR", "/tmp")}
+                    "MCOMP_CONFIG": os.path.join(self.t, "none.env"), "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+                    # install.sh's lock of its own: the account's (one install at a time, for every checkout and
+                    # session) made these installs wait 10 s and stop, printing nothing, while another install.sh of
+                    # this account ran (another suite's or session's, a real install)
+                    "MCOMP_LOCK_DIR": os.path.join(self.t, "locks")}
         self.link = os.path.join(self.home, ".local", "bin", "metacomputer")
         self.stamp = os.path.join(self.home, ".local", "share", "metacomputer", "installed.json")
 

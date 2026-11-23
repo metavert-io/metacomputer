@@ -96,6 +96,10 @@ DEFAULTS = {"model": "claude-opus-5-5", "skill": os.path.join(LAB, "skills", "me
             "lessons": "off", "agent": "claude", "pass_env": ""}
 
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -1273,7 +1277,7 @@ def cmd_export(a):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = strictargs.Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     ls = sub.add_parser("list")
     ls.add_argument("--set", default="standard", help="standard, lessons or all")

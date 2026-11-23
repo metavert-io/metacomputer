@@ -9,6 +9,14 @@
 #                             uploaded to ~/.config/metacomputer/manifests/SHA256.yaml
 # /etc/metacomputer/driver-policy (root's; set with metacomputer-admin
 # driver-policy) containing "bounded" refuses standard requests.
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="driver-mcp (no arguments: the forced command of the MCP key)"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "driver-mcp: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 0:) ;; *) echo "driver-mcp: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 RUN="/run/user/$(id -u)/metacomputer"
 REQ="${SSH_ORIGINAL_COMMAND:-}"
 POLICY=/etc/metacomputer/driver-policy

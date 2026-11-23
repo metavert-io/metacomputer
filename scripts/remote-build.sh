@@ -27,6 +27,11 @@ set -Eeuo pipefail
 # lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported
 # again into remote_py's one child (scripts/lib.sh). The shell keeps them as unexported variables.
 for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY; do export -n "$mc_k"; done; unset mc_k
+# Its command line, by metacomputer's rules (scripts/strictargs.sh), after the credentials are off the environment.
+. "$(dirname "$0")/strictargs.sh"
+if ! sa_check remote-build.sh "metacomputer --vm NAME build [--keep-on-failure]" 0 0 "--keep-on-failure" "" "$@"; then
+  sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0     # usage only
+fi
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
 [ "${MC_REMOTE:-0}" = 1 ] || die "$VM_NAME is a VM on this Mac: scripts/build-vm.sh builds it"

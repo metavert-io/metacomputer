@@ -582,6 +582,41 @@ def offline_masks(td, cardmask, M):
 
 
 
+# Where an action log's records hold no text of the driver's: the chain's hashes and signature, keyed fingerprints, the
+# signing key's name, times and the file's own name. They're random or made from the clock, so they hold any digits
+# ("4242", "123") now and then: the checks below look for the driver's text in the rest only.
+ACTION_LOG_DIGEST_KEYS = {"prev", "hash", "sig", "head", "signing_key", "hmac", "ts", "file"}
+
+
+def action_log_text(paths):
+    """Every string an action log's records keep (a result's summary, kept as JSON text, read as JSON), but for the
+    digests and names in ACTION_LOG_DIGEST_KEYS, one per line."""
+    out = []
+
+    def walk(v):
+        if isinstance(v, dict):
+            for k, x in v.items():
+                if k not in ACTION_LOG_DIGEST_KEYS:
+                    walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+        elif isinstance(v, str):
+            try:
+                inner = json.loads(v)
+            except ValueError:
+                inner = None
+            if isinstance(inner, (dict, list)):
+                walk(inner)
+            else:
+                out.append(v)
+    for path in paths:
+        for line in open(path):
+            if line.strip():
+                walk(json.loads(line))
+    return "\n".join(out)
+
+
 def n1_log_paths(td, cardmask, M):
     """N1: every path that keeps or answers with what the driver sent masks it first: the action log (its call, result and
     error records), the driver's stderr (kept in memory and written to the hub's log), and the error a failed connection
@@ -596,9 +631,9 @@ def n1_log_paths(td, cardmask, M):
     log.call("c2", "get_window_state", {})
     log.result("c2", "get_window_state", {"result": {"content": [{"type": "text", "text": "value 4242-4242-4242-4242"}]}})
     log.close()
-    body = open(log.path).read()
+    body = action_log_text([log.path])
     check("N1: the action log keeps a call's arguments, a result's text and an error's message only masked (ACTION_LOG_TEXT=keep too)",
-          "4242" not in body.replace("hash", "") and M in body, body[-600:])
+          "4242" not in body and M in body, body[-600:])
     def counter(path_):
         r_, w_ = os.pipe()
         try:
@@ -703,11 +738,13 @@ def n1_log_paths(td, cardmask, M):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-    body_s = "".join(open(os.path.join(dp, f)).read() for dp, _, fs in os.walk(cfg_s["dir"]) for f in fs if f.endswith(".jsonl"))
+    files_s = [os.path.join(dp, f) for dp, _, fs in os.walk(cfg_s["dir"]) for f in fs if f.endswith(".jsonl")]
+    body_s = "".join(open(f).read() for f in files_s)
+    text_s = action_log_text(files_s)
     check("R31: once read, a purchase's masks stay for the hub's and the action log's life: with the clock a week on and the "
           "file's window past, the hub still masks the security code, expiry and postal code, and so does an error's "
           "message in the action log (text mode redact)", not any(x in hub_text for x in ("123", "11/30", "94107"))
-          and "rpc_error" in body_s and not any(x in body_s for x in ("123", "11/30")), (hub_text, body_s[-400:]))
+          and "rpc_error" in body_s and not any(x in text_s for x in ("123", "11/30")), (hub_text, text_s[-400:]))
     # R36: every purchase still in the file keeps its masks, however many (the bound is for those no longer in it), and
     # the hub acknowledges only what it holds.
     mv = os.path.join(td, "many-vault")

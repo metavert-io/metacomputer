@@ -121,7 +121,7 @@ MAX_WINDOW_PIDS = 4096              # window id -> pid
 MAX_LAYOUTS = 512                   # screenshot layouts kept for the coordinate guard
 MAX_LAYOUT_WINDOWS = 256            # windows kept per layout (only their checked geometry)
 MAX_LAYOUT_WINDOWS_TOTAL = 32768    # windows kept in all layouts together
-SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+SESSION_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$")   # never starting with '-' (an option) or '.'
 TOKEN_RE = re.compile(r"^(s[0-9a-f]{8}):[0-9]+$")    # an element token: <snapshot_id>:<row>
 KINDS = ("claude-code", "call", "sdk", "status", "test", "web")
 
@@ -4406,7 +4406,13 @@ def describe_status(st, brief=False):
 
 
 def main(argv):
-    cmd = argv[1] if len(argv) > 1 else "status"
+    # Its command line (lib/strictargs.py): anything else (`stop --help`, `stop --bogus`, a word) is refused, or the
+    # usage shown, before the hub is asked anything.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs
+    strictargs.expect(argv[1:], ["serve", "start", "stop [--quiet]", "stop --if-idle", "[status] [--json]", "status --brief",
+                                 "refresh-cache [--seed]"], prog="mcp_hub.py", usage=__doc__)
+    cmd = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else "status"
     if cmd == "serve":
         if mode() == "off":
             print("metacomputer hub: MCP_HUB=off in this VM's config; clients connect directly", file=sys.stderr)

@@ -24,13 +24,16 @@ import threading
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import runports  # noqa: E402  (this run's own port numbers: tests/runports.py)
+SSH_PORT, OWN_PORT = runports.port(), runports.port()
 TD = tempfile.mkdtemp(prefix="mcomp-hub-")
 RUN = os.path.join(TD, "run")
 STATE = os.path.join(TD, "driver")
 os.makedirs(STATE)
 # Before importing owners/mcp_hub: they read where the owners' claims live from the environment.
 os.environ.update(MCOMP_RUN_DIR=RUN, MCOMP_LOG_DIR=os.path.join(TD, "logs"), MCOMP_EVENTS_DIR=os.path.join(TD, "events"),
-                  MCOMP_EVENTS_SPOOL=os.path.join(TD, "spool"), MCOMP_VM_NAME="hubtest", MCOMP_SSH_PORT="59995",
+                  MCOMP_EVENTS_SPOOL=os.path.join(TD, "spool"), MCOMP_VM_NAME="hubtest", MCOMP_SSH_PORT=str(SSH_PORT),
                   MCOMP_ACTION_LOG="off", MCOMP_DRIVER_MODE="standard", MCOMP_COORD_GUARD="on", MCOMP_MCP_HUB="on",
                   MCOMP_ACTIVE_S="600", MCOMP_LESSONS="on", MCOMP_LESSONS_DIR=os.path.join(TD, "lessons"),
                   MCOMP_SESSIONS_DIR=os.path.join(TD, "sessions"))   # lib/sessionvm.py: its bridges' records
@@ -2839,7 +2842,7 @@ def owners_tree_checks():
     for name in ("mcp_hub.py", "mcp_relay.py", "other_client.py"):
         open(os.path.join(tree, name), "w").write(spawner)
     ssh = ["ssh", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ProxyCommand=sleep 40",
-           "-o", f"IdentityFile={tree}/k/mcp", "-p", "59994", "cua@127.0.0.1", "true"]
+           "-o", f"IdentityFile={tree}/k/mcp", "-p", str(OWN_PORT), "cua@127.0.0.1", "true"]
     procs = [subprocess.Popen([PY, os.path.join(tree, "mcp_hub.py"), *ssh], start_new_session=True, stdin=subprocess.DEVNULL),
              subprocess.Popen([PY, os.path.join(tree, "mcp_hub.py"), PY, os.path.join(tree, "mcp_relay.py"), *ssh],
                               start_new_session=True, stdin=subprocess.DEVNULL),
@@ -2848,7 +2851,7 @@ def owners_tree_checks():
         time.sleep(1.5)
         r = subprocess.run([PY, "-c", "import json, sys; sys.path.insert(0, sys.argv[1]); import owners; "
                                       "print(json.dumps(owners.direct_connections(owners.ps_table())))",
-                            os.path.join(LAB, "lib")], capture_output=True, text=True, env=dict(os.environ, MCOMP_SSH_PORT="59994"))
+                            os.path.join(LAB, "lib")], capture_output=True, text=True, env=dict(os.environ, MCOMP_SSH_PORT=str(OWN_PORT)))
         found = json.loads(r.stdout or "[]")
         chains = [set(d.get("chain") or []) for d in found]
         check("the hub's connection (direct or through the relay) isn't a controller; another client's is",
@@ -3123,6 +3126,29 @@ def transport_checks():
         c.close()
     finally:
         mcp_client.MAX_QUEUED_BYTES = saved
+    # The direct client's stderr (SSH carries the VM's: it can echo what a page showed) is kept as the hub keeps the
+    # driver's: counts and fixed classes, in memory and in its log; never a line of it.
+    talk = ("import sys\n"
+            "sys.stderr.write('Permission denied (publickey).\\n')\n"
+            "sys.stderr.write('metacomputer: this virtual computer accepts only bounded driver sessions (DRIVER_MODE=bounded on the host)\\n')\n"
+            "sys.stderr.write('the page said: card 4242 4242 4242 4242 cvc 123 SECRET-FROM-VM \\x1b]0;t\\x07\\n')\n"
+            "sys.stderr.flush()\n")
+    log = os.path.join(TD, "direct-client-stderr.log")
+    c = mcp_client.MCPClient(cmd=[PY, "-c", talk], stderr_path=log)
+    try:
+        c.start(timeout=20)
+        err = ""
+    except mcp_client.MCPError as e:
+        err = str(e)
+    c.close()
+    kept = open(log).read() if os.path.exists(log) else ""
+    held = repr(vars(c.stderr_counter)) if getattr(c, "stderr_counter", None) else repr(getattr(c, "stderr_tail", None) and
+                                                                                         c.stderr_tail.text(1))
+    check("the direct client's stderr: no text kept (its log has a time and class per line, its error counts and "
+          "classes, nothing of the VM's words)",
+          "3 line(s)" in err and "ssh: permission denied" in err and "driver policy: bounded sessions only" in kept
+          and not any(x in kept + err + held for x in ("4242", "SECRET-FROM-VM", "cvc", "DRIVER_MODE", "\x1b")),
+          (err, kept[-300:], held[-300:]))
 
 
 def web_checks():

@@ -30,12 +30,16 @@ TESTS = {
 
 
 def main(argv):
+    import strictargs           # its command line, by metacomputer's rules (lib/ is on the path), before anything runs
+    strictargs.expect(argv, ["[TEST...] [--run-id ID]"], prog="metacomputer test", usage=__doc__)
     run_id = time.strftime("run-%Y%m%d-%H%M%S")
     sel = []
     i = 0
     while i < len(argv):
         a = argv[i]
         if a == "--run-id":
+            if i + 1 >= len(argv) or "--run-id" in argv[:i]:
+                print("--run-id takes one value, once"); return 2
             run_id = argv[i + 1]; i += 2; continue
         if a.upper() in TESTS:
             sel.append(a.upper())

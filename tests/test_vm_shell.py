@@ -27,6 +27,12 @@ import actionlog  # noqa: E402
 import owners  # noqa: E402
 import vm_shell  # noqa: E402
 import vm_shell_guest  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import runports  # noqa: E402  (this run's own port numbers)
+SSH_PORT, RELAY_PORT = runports.port(), runports.port()
+# The long sleeps the lifecycle checks look for with pgrep (and pkill) carry this run's own digits, so a
+# second run at the same time is never found, nor killed, for this one's (sleep 31.7 -> 31.7NNNNN s).
+T = f"{runports.port():05d}"
 
 SH = os.path.join(LAB, "lib", "vm_shell.py")
 results = []
@@ -198,6 +204,7 @@ def unit_checks():
         "an extra field": reply(note="hi"),
         "metacomputer_sh true": reply(metacomputer_sh=True),
         "sha256 not hex": reply(stdout={**good["stdout"], "sha256": "\x1b[2J" + "0" * 60}),
+        "a whole stream whose sha256 isn't its own": reply(stdout={**good["stdout"], "sha256": "0" * 64}),
         "head not base64": reply(stdout={**good["stdout"], "head": "!!!!!!!!"}),
         "head longer than its size": reply(stdout={**good["stdout"], "bytes": 2}),
         "over the cap, not truncated": reply(stdout={**good["stdout"], "bytes": 70000}),
@@ -233,7 +240,7 @@ def env_for(td, **extra):
     env.update(MCOMP_RUN_DIR=os.path.join(td, "run"), MCOMP_ACTION_LOG_DIR=os.path.join(td, "actions"),
                MCOMP_ACTION_LOG_KEY=os.path.join(td, "keys", "action-log"), MCOMP_VM_NAME="testvm",
                MCOMP_GUEST_USER="cua", XDG_RUNTIME_DIR=os.path.join(td, "xdg"),
-               MCOMP_SSH_PORT="1",   # a port no VM uses: real driver connections on this Mac aren't this "VM"'s
+               MCOMP_SSH_PORT=str(SSH_PORT),   # this run's own: no other run's (or real) connection is this "VM"'s
                MCOMP_SESSIONS_DIR=os.path.join(td, "sessions"))   # lib/sessionvm.py's records: never the account's
     env.pop("DISPLAY", None)
     env.update({k: str(v) for k, v in extra.items()})
@@ -243,7 +250,9 @@ def env_for(td, **extra):
 def cmd(td, args, fake=None):
     work = os.path.join(td, "work")
     transport = ["2", "bash", "-c"] if fake is None else ["3", sys.executable, os.path.join(td, "fake_vm.py"), fake]
-    return [sys.executable, SH, "--transport", *transport, "--cwd", work, *args]
+    # the test's own folder unless a check gives its own (one --cwd: a second is refused)
+    cwd = [] if any(a == "--cwd" or str(a).startswith("--cwd=") for a in args) else ["--cwd", work]
+    return [sys.executable, SH, "--transport", *transport, *cwd, *args]
 
 
 def sh(td, *args, stdin=None, timeout=90, fake=None, **env):
@@ -332,12 +341,12 @@ def run_checks(td):
 
     # programs left running, timeouts, interruptions (the real VM half)
     t = time.monotonic()
-    r = sh(td, "--json", "-c", "sleep 31.7 & echo started")
+    r = sh(td, "--json", "-c", f"sleep 31.7{T} & echo started")
     el = time.monotonic() - t
     check("a program left running with & doesn't hold the result back (the output drain is short)",
           r.returncode == 0 and el < 4 and js(r).get("stdout") == "started\n" and js(r).get("held_open") is True, el)
-    check("... and keeps running after a normal end", bool(pgrep("sleep 31.7")))
-    subprocess.run(["pkill", "-f", "sleep 31.7"])
+    check("... and keeps running after a normal end", bool(pgrep(f"sleep 31.7{T}")))
+    subprocess.run(["pkill", "-f", f"sleep 31.7{T}"])
     ticker = os.path.join(td, "ticker.pid")
     r = sh(td, "-c", f"sh -c 'echo $$ > {ticker}; while :; do echo tick; sleep 0.1; done' & echo started")
     time.sleep(1.5)
@@ -359,10 +368,10 @@ def run_checks(td):
     check("planting a FIFO or a /dev/zero link in the run folder changes nothing", r.returncode == 0 and r.stdout == "swapped\n",
           r.stdout + r.stderr)
     t = time.monotonic()
-    r = sh(td, "--timeout", "1", "-c", "sleep 32.1 & sleep 32.2; echo never")
+    r = sh(td, "--timeout", "1", "-c", f"sleep 32.1{T} & sleep 32.2{T}; echo never")
     el = time.monotonic() - t
     check("--timeout: exit 124, the script's group is ended", r.returncode == 124 and "never" not in r.stdout and el < 8
-          and not pgrep("sleep 32.1") and not pgrep("sleep 32.2"), (r.returncode, el, r.stderr))
+          and not pgrep(f"sleep 32.1{T}") and not pgrep(f"sleep 32.2{T}"), (r.returncode, el, r.stderr))
     t = time.monotonic()
     r = sh(td, "--json", "--timeout", "1", "-c", "yes")
     j, el = js(r), time.monotonic() - t
@@ -373,13 +382,13 @@ def run_checks(td):
                                        "while :; do sleep 0.1; done) & wait")
     check("SIGTERM grace lasts until the whole group is gone, not just bash", r.returncode == 124 and os.path.exists(marker),
           r.stderr[-200:])
-    p = subprocess.Popen(cmd(td, ["-c", "sleep 33.4; echo never"]), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    p = subprocess.Popen(cmd(td, ["-c", f"sleep 33.4{T}; echo never"]), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          env=env_for(td))
     time.sleep(1.5)
     p.send_signal(signal.SIGTERM)
     p.communicate(timeout=20)
     time.sleep(0.5)
-    check("interrupted on the Mac: exit 130, the script is stopped too", p.returncode == 130 and not pgrep("sleep 33.4"),
+    check("interrupted on the Mac: exit 130, the script is stopped too", p.returncode == 130 and not pgrep(f"sleep 33.4{T}"),
           p.returncode)
 
     # settings
@@ -498,10 +507,10 @@ def hostile_checks(td):
     r = fake_reply(err_reply, MCOMP_ACTION_LOG="on", FAKE_STDERR="secret-ssh-diag")
     raw = open(log_files(td)[-1]).read()
     res = next((x for x in map(json.loads, raw.splitlines()) if x["type"] == "result"), {}).get("result") or {}
-    check("ACTION_LOG_TEXT=redact: the VM's diagnostics only as size and hash; the message is the Mac's",
+    check("ACTION_LOG_TEXT=redact: the VM's diagnostics only as size and keyed hash; the message is the Mac's",
           "secret" not in raw and res.get("kind") == "guest" and (res.get("remote") or {}).get("bytes", 0) > 30
-          and len((res.get("remote") or {}).get("sha256", "")) == 64 and res.get("message") == "the virtual computer's side failed",
-          res)
+          and len((res.get("remote") or {}).get("hmac", "")) == 64 and "sha256" not in (res.get("remote") or {})
+          and res.get("message") == "the virtual computer's side failed", res)
     r = fake_reply(err_reply, MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_TEXT="keep", FAKE_STDERR="secret-ssh-diag")
     raw = open(log_files(td)[-1]).read()
     check("ACTION_LOG_TEXT=keep: they're kept", "secret-guest-diag" in raw and "secret-ssh-diag" in raw)
@@ -630,13 +639,23 @@ def log_checks(td):
               kinds == ["start", "call", "checkpoint", "result", "end", "checkpoint"] and call.get("tool") == "vm_shell"
               and recs[-1].get("final") and not recs[2].get("final") and (recs[0].get("session") or {}).get("via") == "shell", kinds)
         a = call.get("args") or {}
-        check("call: script hash and size, cwd; script and its arguments redacted",
-              a.get("script_sha256") == hashlib.sha256(body.encode()).hexdigest() and a.get("script_bytes") == len(body)
+        # Keyed hashes: an unkeyed SHA-256 of a short output (a code, a number) could be found by trying candidates.
+        kpath = os.path.join(td, "keys", "action-log.results-hmac")
+        mk = actionlog.result_mac_key(os.path.join(td, "keys", "action-log"))
+        check("the key results are fingerprinted under: per install, beside the log's signing key, 0600",
+              os.path.isfile(kpath) and oct(os.stat(kpath).st_mode & 0o777) == "0o600" and len(mk) >= 32,
+              oct(os.stat(kpath).st_mode & 0o777) if os.path.exists(kpath) else "missing")
+        check("call: the script's keyed hash (HMAC) and size, cwd; script and its arguments redacted",
+              a.get("script_hmac") == vm_shell.keyed(mk, hashlib.sha256(body.encode()).hexdigest())
+              and "script_sha256" not in a and a.get("script_bytes") == len(body)
               and (a.get("script") or {}).get("redacted") and (a.get("script_args") or {}).get("count") == 1 and a.get("cwd"), a)
-        check("result: exit code, output sizes and hashes",
+        check("result: exit code, output sizes and keyed hashes (HMAC), no unkeyed hash anywhere in the file",
               res.get("exit_code") == 3 and res.get("error") is True
-              and (res.get("stdout") or {}).get("sha256") == hashlib.sha256(b"secret-out-marker\n").hexdigest()
-              and (res.get("stderr") or {}).get("bytes") == len("secret-err-marker\n"), res)
+              and (res.get("stdout") or {}).get("hmac") == vm_shell.keyed(mk, hashlib.sha256(b"secret-out-marker\n").hexdigest())
+              and "sha256" not in (res.get("stdout") or {}) and "sha256" not in (res.get("stderr") or {})
+              and (res.get("stderr") or {}).get("bytes") == len("secret-err-marker\n")
+              and not any(hashlib.sha256(x).hexdigest() in raw
+                          for x in (body.encode(), b"secret-out-marker\n", b"secret-err-marker\n")), res)
         check("no script, argument or output text in the file", "secret" not in raw)
         v = verifies(td, files[-1])
         check("the log verifies", v["ok"] and v["final"] and v["calls"] == 1, v)
@@ -648,7 +667,7 @@ def log_checks(td):
     recs = records(log_files(td)[-1])
     check("a refused run is logged as refused", r.returncode == 125 and any(
         x["type"] == "refused" and x.get("tool") == "vm_shell" for x in recs), [x["type"] for x in recs])
-    sh(td, "-c", "sleep 34.5", "--timeout", "1", MCOMP_ACTION_LOG="on")
+    sh(td, "-c", f"sleep 34.5{T}", "--timeout", "1", MCOMP_ACTION_LOG="on")
     res = next((x for x in records(log_files(td)[-1]) if x["type"] == "result"), {}).get("result") or {}
     check("a timeout is logged as one", res.get("status") == "timeout" and res.get("error") is True, res)
     env = env_for(td)
@@ -665,7 +684,7 @@ FAKE_KEYGEN = """#!/bin/bash
 if [ "$2" = "-Y" ] && [ "$3" = "sign" ]; then
   n=$(cat "$FAKE_SIGN_COUNT" 2>/dev/null || echo 0)
   echo $((n + 1)) > "$FAKE_SIGN_COUNT"
-  if [ "$n" -ge "${FAKE_SIGN_OK:-0}" ]; then exec sleep 61.3; fi
+  if [ "$n" -ge "${FAKE_SIGN_OK:-0}" ]; then exec sleep 61.3SLEEPTAG; fi
 fi
 exec REAL "$@"
 """
@@ -675,10 +694,10 @@ def lifecycle_checks(td):
     """The VM half's lifecycle (round 2): the deadline without open output, cancellation
     that waits for the whole group, and draining while a TERM handler runs."""
     t = time.monotonic()
-    r = sh(td, "--json", "--timeout", "1", "-c", "exec >/dev/null 2>&1; sleep 20.6")
+    r = sh(td, "--json", "--timeout", "1", "-c", f"exec >/dev/null 2>&1; sleep 20.6{T}")
     el = time.monotonic() - t
     check("a script that closes its output still times out (124) on time", r.returncode == 124
-          and js(r).get("status") == "timeout" and el < 6 and not pgrep("sleep 20.6"), (r.returncode, el))
+          and js(r).get("status") == "timeout" and el < 6 and not pgrep(f"sleep 20.6{T}"), (r.returncode, el))
 
     marker = os.path.join(td, "saved-after-term")
     r = sh(td, "--json", "--timeout", "1", "--max-output", "1024", "-c",
@@ -687,14 +706,14 @@ def lifecycle_checks(td):
     check("output is still read during the SIGTERM grace: a handler printing 300 KB finishes",
           r.returncode == 124 and os.path.exists(marker) and j.get("stdout_bytes", 0) >= 300000, (r.returncode, j.get("stdout_bytes")))
 
-    p = subprocess.Popen(cmd(td, ["-c", "(trap '' TERM; sleep 35.1) & wait"]), stdout=subprocess.PIPE,
+    p = subprocess.Popen(cmd(td, ["-c", f"(trap '' TERM; sleep 35.1{T}) & wait"]), stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, env=env_for(td))
     time.sleep(1.5)
     t = time.monotonic()
     p.send_signal(signal.SIGTERM)
     p.communicate(timeout=30)
     el = time.monotonic() - t
-    left = pgrep("sleep 35.1")
+    left = pgrep(f"sleep 35.1{T}")
     check("cancelled: a child that ignores SIGTERM is killed before the VM half exits", p.returncode == 130 and not left
           and el >= 2.5, (p.returncode, left, el))
     for pid in left:
@@ -723,7 +742,7 @@ def signer_checks(td):
     fakebin = os.path.join(td, "fakebin")
     os.makedirs(fakebin)
     keygen = os.path.join(fakebin, "ssh-keygen")
-    open(keygen, "w").write(FAKE_KEYGEN.replace("REAL", _sh.which("ssh-keygen")))
+    open(keygen, "w").write(FAKE_KEYGEN.replace("REAL", _sh.which("ssh-keygen")).replace("SLEEPTAG", T))
     os.chmod(keygen, 0o755)
     path = fakebin + ":" + os.environ["PATH"]
     marker = os.path.join(td, "ran-hung-signer")
@@ -734,7 +753,7 @@ def signer_checks(td):
            MCOMP_ACTION_LOG="on", MCOMP_ACTION_LOG_DIR=logs, MCOMP_ACTION_LOG_KEY=os.path.join(td, "keys3", "k"))
     el = time.monotonic() - t
     check("a signer that hangs at the start: refused (125) within the bound, nothing runs, the signer killed",
-          r.returncode == 125 and not os.path.exists(marker) and el < 8 and not pgrep("sleep 61.3"),
+          r.returncode == 125 and not os.path.exists(marker) and el < 8 and not pgrep(f"sleep 61.3{T}"),
           (r.returncode, el, r.stderr[-200:]))
     os.remove(count)
     open(os.path.join(td, "reply.bin"), "wb").write(reply(out=b"ran\n"))
@@ -744,7 +763,7 @@ def signer_checks(td):
            MCOMP_ACTION_LOG_DIR=logs, MCOMP_ACTION_LOG_KEY=os.path.join(td, "keys3", "k"))
     el = time.monotonic() - t
     check("a signer that hangs at the end: exit 255 (unlogged) within the bound, the signer killed",
-          r.returncode == 255 and js(r).get("kind") == "log" and el < 8 and not pgrep("sleep 61.3"), (r.returncode, el))
+          r.returncode == 255 and js(r).get("kind") == "log" and el < 8 and not pgrep(f"sleep 61.3{T}"), (r.returncode, el))
 
     old_path, old_timeout = os.environ["PATH"], actionlog.SIGN_TIMEOUT_S
     os.environ.update(PATH=path, FAKE_SIGN_COUNT=count, FAKE_SIGN_OK="0")
@@ -815,7 +834,7 @@ def relay_owner_checks(td):
     for name in ("mcp_lazy.py", "mcp_relay.py", "mcp_client.py"):
         open(os.path.join(tree, name), "w").write(spawner)
     ssh = ["ssh", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ProxyCommand=sleep 40",
-           "-o", f"IdentityFile={tree}/k/mcp", "-p", "59997", "cua@127.0.0.1", "true"]
+           "-o", f"IdentityFile={tree}/k/mcp", "-p", str(RELAY_PORT), "cua@127.0.0.1", "true"]
     py = sys.executable
     bridge = subprocess.Popen([py, os.path.join(tree, "mcp_lazy.py"), py, os.path.join(tree, "mcp_relay.py"), *ssh],
                               start_new_session=True, stdin=subprocess.DEVNULL)
@@ -826,7 +845,7 @@ def relay_owner_checks(td):
         r = subprocess.run([py, "-c", "import json, sys; sys.path.insert(0, sys.argv[1]); import owners; "
                                       "print(json.dumps(owners.direct_connections(owners.ps_table())))",
                             os.path.join(LAB, "lib")], capture_output=True, text=True,
-                           env=dict(os.environ, MCOMP_SSH_PORT="59997"))
+                           env=dict(os.environ, MCOMP_SSH_PORT=str(RELAY_PORT)))
         found = json.loads(r.stdout or "[]")
         chains = [set(d.get("chain") or []) for d in found]
         check("who: a bridge's connection through the action-log relay isn't another controller; a relay under a "

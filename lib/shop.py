@@ -35,6 +35,10 @@ SPEND_RE = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$")
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 class ShopError(Exception):
     pass
 
@@ -169,7 +173,7 @@ def cmd_card(a):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="metacomputer shop", description="Shopify stores through your own Shop account")
+    ap = strictargs.Parser(prog="metacomputer shop", description="Shopify stores through your own Shop account")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("status")
     s.add_argument("--json", action="store_true")

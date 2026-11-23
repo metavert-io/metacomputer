@@ -1180,8 +1180,7 @@ func printCodeResult(_ res: [String: Any], json: Bool, verb: String) {
 
 func cmdAsk(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: ask --vm VM --site https://site --kind code|link --why TEXT [--into TAB/FIELD | --human [--window-id N]] [--ttl 10m] [--wait DUR] [--pattern digits|alnum] [--length N|A-B] [--json]"
-    let a = try parseArgs(argv, values: ["vm", "site", "kind", "why", "into", "window-id", "profile", "browser-pid", "ttl", "wait", "pattern",
-                                         "length", "request-id"], flags: ["human", "json"])
+    let a = try parseArgs(argv, command: "ask")
     guard a.positional.isEmpty, let vm = a.last("vm"), validName(vm), let rawSite = a.last("site"), let why = a.last("why") else { throw usageError(usage) }
     guard let site = canonicalOrigin(rawSite) else { throw usageError("--site https://host[:port] (no path)") }
     let kind = a.last("kind") ?? "code"
@@ -1227,7 +1226,7 @@ func cmdAsk(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdGive(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm"], flags: ["json"])
+    let a = try parseArgs(argv, command: "give")
     guard a.positional.count == 1, validRequestID(a.positional[0]), a.last("vm").map(validName) ?? true else {
         throw usageError("usage: give ID --vm VM [--json]  (the value comes from stdin only: typed hidden at a terminal, or one line from a pipe; never on the command line)")
     }
@@ -1264,8 +1263,7 @@ func cmdGive(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 
 func cmdCode(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: code --vm VM --site https://site (--into TAB/FIELD | --human [--window-id N]) [--kind code|link] [--why TEXT] [--pattern digits|alnum] [--length N|A-B] [--json]  < value"
-    let a = try parseArgs(argv, values: ["vm", "site", "kind", "why", "into", "window-id", "profile", "browser-pid", "pattern", "length", "ttl",
-                                         "request-id", "on-behalf-pid"], flags: ["human", "json"])
+    let a = try parseArgs(argv, command: "code")
     guard a.positional.isEmpty else {
         throw usageError("`code` takes the value from stdin only, never from the command line (pipe it in: fetch-code | metacomputer secrets code ...)")
     }
@@ -1298,8 +1296,7 @@ func cmdCode(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 
 func cmdRelay(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: relay --vm VM --from TAB/ELEMENT --to TAB/FIELD --site https://site [--kind code|link] [--pattern digits|alnum] [--length N|A-B] [--from-profile P] [--profile P] [--browser-pid PID] [--json]"
-    let a = try parseArgs(argv, values: ["vm", "from", "to", "site", "kind", "pattern", "length", "profile", "from-profile", "browser-pid", "ttl",
-                                         "request-id", "on-behalf-pid"], flags: ["json", "human"])
+    let a = try parseArgs(argv, command: "relay")
     guard a.positional.isEmpty, let vm = a.last("vm"), validName(vm), let f = a.last("from"), let rawSite = a.last("site"),
           let site = canonicalOrigin(rawSite) else { throw usageError(usage) }
     if a.has("human") { throw usageError("relay into a human-mode browser isn't supported yet; use `secrets code --human` (or a page-mode Chrome tab with --to)") }
@@ -1350,9 +1347,14 @@ func cmdFillRequest(_ paths: Paths, _ a: Args) throws -> Int32 {
         req["vm"] = vm
     }
     if a.has("human") {
+        guard a.last("selector") == nil, a.last("profile") == nil, a.last("browser-pid") == nil else {
+            throw usageError("fill --request ID --human goes to the focused field: no --selector, --profile or --browser-pid")
+        }
         var t: [String: Any] = ["mode": "human"]
         if let w = a.last("window-id") { guard let n = Int(w), n > 0 else { throw usageError("--window-id: a window id") }; t["window_id"] = n }
         req["target"] = t
+    } else if a.last("window-id") != nil {
+        throw usageError("--window-id goes with --human")
     } else if a.last("selector") != nil || a.last("profile") != nil || a.last("browser-pid") != nil {
         var t: [String: Any] = ["mode": "page"]
         if let s = a.last("selector") { guard s.count <= 300 else { throw usageError("--selector: at most 300 characters") }; t["selector"] = s }

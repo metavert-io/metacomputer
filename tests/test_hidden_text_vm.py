@@ -90,6 +90,9 @@ def normalized(res):
     s = json.dumps(res, ensure_ascii=False)
     if sc.get("snapshot_id"):
         s = s.replace(sc["snapshot_id"], "SID")
+    # ...and a snapshot id the hub leaves as the driver's (a driver line quoting one: "rows past it from a larger read
+    # are not in s00000006"), numbered by whichever driver process read it.
+    s = re.sub(r"(?<![A-Za-z0-9_$])s[0-9a-f]{8}(?![A-Za-z0-9_$])", "SID", s)
     s = re.sub(r"walk_ms=\d+", "walk_ms=N", s)
     out = json.loads(s)
     for k in ("invalidated_snapshot_ids", "timeout_ms"):

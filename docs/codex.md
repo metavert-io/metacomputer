@@ -123,7 +123,8 @@ absolute PATH entry, yours or root's and not writable by others. install.sh runs
 Codex runs shell commands in a sandbox that blocks what `metacomputer` needs on your Mac: its state folders, the
 virtual computer's SSH port, and the hub's and the vault's sockets. Inside it, a `metacomputer` command stops at once
 with exit status 77 and a message saying so (Codex marks sandboxed commands with `CODEX_SANDBOX`), instead of failing
-in ways that look like a broken VM. The MCP tools aren't affected: Codex starts its MCP servers outside the sandbox.
+in ways that look like a broken VM; one that only asks for its usage (`--help` or `-h`) prints it, since it runs
+nothing. The MCP tools aren't affected: Codex starts its MCP servers outside the sandbox.
 
 metacomputer's rules let the commands through:
 
