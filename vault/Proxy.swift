@@ -409,6 +409,12 @@ final class ProxyHub: @unchecked Sendable {
             rmdir(dir)
             throw VaultError("the tunnel pinned for VM \(t.vm) can't be run: bind it again", code: Exit.error)
         }
+        // Every tunnel it opens, as every connection GuestRunner.ssh makes: the provider asked first (never the minute's
+        // answer providerStill keeps for requests).
+        if let problem = providerProblem(t.binding) {
+            rmdir(dir)
+            throw VaultError(problem.reason, code: problem.denied ? Exit.denied : Exit.error)
+        }
         let args = sshBaseOptions(key: keyPath, port: t.binding.ssh_port, remote: t.binding.isRemote, proxy: proxy) + pin
             + ["-N", "-T", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
                "-o", "LogLevel=DEBUG1", "-R", "127.0.0.1:\(guestPort):127.0.0.1:\(macPort)", "\(user)@\(t.binding.sshDestination)"]

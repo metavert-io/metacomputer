@@ -24,10 +24,12 @@
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 LAB = os.path.dirname(TESTS)
@@ -68,8 +70,12 @@ if cmd == "api":
     path = argv[1]; rest = argv[argv.index("--") + 1:] if "--" in argv else []
     method = rest[rest.index("-X") + 1] if "-X" in rest else "GET"
     body = json.loads(sys.stdin.read() or "null") if "--data-binary" in rest else None
-    def out(obj, code):
-        sys.stdout.write((obj if isinstance(obj, str) else json.dumps(obj)) + "\n" + str(code)); sys.exit(0)
+    def out(obj, code):     # the status line only when asked for it (-w), as curl does
+        sys.stdout.write((obj if isinstance(obj, str) else json.dumps(obj)) + ("\n" + str(code) if "-w" in rest else ""))
+        sys.exit(0)
+    st["api_n"] = st.get("api_n", 0) + 1; save()
+    if st.get("api_fail_after") is not None and st["api_n"] > st["api_fail_after"]:
+        print("Error: Fly didn't answer", file=sys.stderr); sys.exit(1)     # Fly unreachable from this call on
     sp = st["sprites"]
     m = re.fullmatch(r"/v1/sprites(?:\?prefix=(.*))?", path)
     if m and method == "GET":
@@ -188,6 +194,14 @@ def transport_and_policy():
           "ProxyCommand=/py /lib/proxywrap.py -- /opt/fly/bin/sprite -o my-org -s box-sprite proxy -W :22" in t
           and "HostKeyAlias=mcomp-box" in t and t[-1] == "cua@box-sprite", t)
     check("...the Sprite's name defaults to the computer's", transport.endpoint(dict(s, SPRITE_NAME=""))["host"] == "box")
+    pw = os.path.join(LAB, "lib", "proxywrap.py")
+    for argv in (["--id", "x", "--check", "1", "/bin/echo", "--", "/bin/true"],            # not an id
+                 ["--id", "sprite-1", "--check", "0", "--", "/bin/true"],                  # no check program
+                 ["--id", "sprite-1", "--check", "2", "/bin/echo", "--", "/bin/true"],     # the count runs into the tunnel
+                 ["--id", "sprite-1", "--check", "1", "echo", "--", "/bin/true"],          # not an absolute path
+                 ["--id", "sprite-1", "--", "/bin/true"]):
+        rr = subprocess.run([PY, pw, *argv], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        check(f"proxywrap {' '.join(argv[:4])}...: refused (usage)", rr.returncode == 2 and "usage" in rr.stderr, rr.stderr)
     for k, v, want in (("SPRITE_ORG", "", "SPRITE_ORG"), ("SPRITE_ORG", "-o x", "SPRITE_ORG"),
                        ("SPRITE_NAME", "Box_1", "SPRITE_NAME"), ("SPRITE_NAME", "-s", "SPRITE_NAME"),
                        ("SPRITE_CLI", "sprite", "absolute"), ("SPRITE_CLI", "/a b/sprite", "absolute")):
@@ -585,10 +599,28 @@ def cli(td):
         check("ssh_base ops: through Fly's tunnel (sprite proxy -W :22) run by lib/proxywrap.py, pinned as mcomp-sp1",
               f"-- {standin} -o my-org -s sp1 proxy -W :22" in pc and "proxywrap.py" in pc and o[-1] == "cua@sp1"
               and "HostKeyAlias=mcomp-sp1" in o and "StrictHostKeyChecking=yes" in o and "ForwardAgent=no" in o, (pc, r.stderr))
-        # Found by review: connections went to whichever Sprite had the name. Now each is checked to be its own first.
+        check("...its ProxyCommand asks Fly for the Sprite's id before each connection (proxywrap --id, the id recorded "
+              "when it was made, and how the same command asks: its API record)",
+              f"--id sprite-0001 --check 7 {standin} -o my-org api /v1/sprites/sp1 -- -sS -- {standin}" in pc, pc)
+
+        def connect(pc_):
+            """One connection's ProxyCommand, run as ssh runs it (sh -c, nothing on its input): (exit status, stderr,
+            whether Fly's tunnel was started)."""
+            before = len(standin_log(b.home))
+            rr = subprocess.run(["/bin/sh", "-c", "exec " + pc_[len("ProxyCommand="):]], env=env, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=60)
+            return rr.returncode, rr.stderr, any("proxy" in e["argv"] for e in standin_log(b.home)[before:])
+        rc_, err_, tunneled = connect(pc)
+        check("...the Sprite still the one it was made as: the tunnel starts (sprite proxy)", tunneled, (rc_, err_))
+        # Found by review: connections went to whichever Sprite had the name. Now each is checked to be its own first,
+        # and (found by the re-check) not only when the arguments are made: scripts/lib.sh keeps them for the rest of its
+        # command, and the hub for its life.
         sp_ = standin_state(b.home)["sprites"]
         sp_["sp1"]["info"]["id"] = "sprite-9999"
         set_state(b.home, sprites=sp_)
+        rc_, err_, tunneled = connect(pc)
+        check("kept arguments, and a Sprite of that name made again since (another id): that connection's tunnel never "
+              "starts, said why", rc_ != 0 and not tunneled and "isn't the one this computer was made as" in err_, (rc_, err_))
         r = subprocess.run(["/bin/bash", "-c", script, "_", "sp1", b.co, "ops"], env=env, capture_output=True,
                            text=True, timeout=60)
         check("ssh_base: a Sprite of that name with another id (made again): no connection, said why",
@@ -597,7 +629,11 @@ def cli(td):
         check("...nor any change through Fly's API (net allow)", r.returncode != 0 and "isn't the one" in r.stderr
               and standin_state(b.home)["sprites"]["sp1"]["policy"] == [{"domain": "*", "action": "allow"}], r.stderr)
         sp_["sp1"]["info"]["id"] = "sprite-0001"
-        set_state(b.home, sprites=sp_)
+        set_state(b.home, sprites=sp_, api_fail_after=standin_state(b.home).get("api_n", 0))
+        rc_, err_, tunneled = connect(pc)
+        check("...and when Fly can't be asked: no tunnel either", rc_ != 0 and not tunneled and "couldn't be asked" in err_,
+              (rc_, err_))
+        set_state(b.home, api_fail_after=None)
         r = subprocess.run(["/bin/bash", "-c", 'MCOMP_VM_ARG=sp1; . "$1/scripts/lib.sh"; export_options; echo "$MCOMP_BACKGROUND_INPUT"',
                             "_", b.co], env=env, capture_output=True, text=True, timeout=60)
         check("the hub is told this computer has no background input", r.stdout.strip() == "off", r.stdout + r.stderr)
@@ -662,11 +698,101 @@ def cli(td):
               and r2.stdout.count("ck1\t") == 1 and "ck1\tv3" in r2.stdout, r2.stdout + r.stderr)
         r = b.run("--vm", "sp1", "checkpoint", "baseline", env=env)
         check("checkpoint baseline: refused (that's metacomputer baseline)", r.returncode != 0 and "baseline" in r.stderr)
+        # Found by the re-check: checkpoint --delete asked Fly with neither the ownership check nor the handoff's dispatch
+        # lock, and checkpoint NAME checked ownership but took no lock, so a handoff opened after its check still had the
+        # user's private state saved. Now both, held through Fly's change, as every acting command's.
+        owners_d = os.path.join(rd, "owners")
+        os.makedirs(owners_d, exist_ok=True)
+        t_ = time.time()
+        json.dump({"v": 1, "id": "h-0123456789ab", "status": "open", "why": "login", "opened": t_, "deadline": t_ + 600},
+                  open(os.path.join(owners_d, "handoff.state"), "w"))
+
+        def fly_changes(since):
+            return [e["argv"] for e in standin_log(b.home)[since:]
+                    if "api" in e["argv"] and any(x in e["argv"] for x in ("POST", "DELETE"))]
+        n_ = len(standin_log(b.home))
+        r = b.run("--vm", "sp1", "checkpoint", "--delete", "ck1", "--yes", env=env)
+        check("checkpoint --delete while the user has the computer (a handoff): refused, nothing asked of Fly",
+              r.returncode != 0 and "metacomputer handoff" in r.stderr and not fly_changes(n_)
+              and "ck1\t" in b.run("--vm", "sp1", "checkpoints", env=env).stdout, (r.stderr, fly_changes(n_)))
+        for args_ in (["checkpoint", "ck2"], ["baseline", "--yes"], ["restore", "ck1", "--yes"], ["reset", "--yes"]):
+            n_ = len(standin_log(b.home))
+            r = b.run("--vm", "sp1", *args_, env=env)
+            check(f"{' '.join(args_[:2])} while the user has the computer: refused, nothing asked of Fly",
+                  r.returncode != 0 and "metacomputer handoff" in r.stderr and not fly_changes(n_), (r.stderr, fly_changes(n_)))
+        os.remove(os.path.join(owners_d, "handoff.state"))
+        # A handoff being opened (it holds this VM's dispatch lock while it writes its record): an acting step waits,
+        # then doesn't act. The ownership check before it has passed by then: only the lock, held through Fly's
+        # change, keeps the checkpoint from being taken after the handoff opens.
+        import fcntl
+        lk = os.open(os.path.join(owners_d, ".dispatch"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            for args_ in (["checkpoint", "ck2"], ["checkpoint", "--delete", "ck1", "--yes"]):
+                n_ = len(standin_log(b.home))
+                r = b.run("--vm", "sp1", *args_, env=env)
+                check(f"{' '.join(args_[:2])} while a handoff is being opened: no change at Fly", r.returncode != 0
+                      and "handoff is being opened" in r.stderr and not fly_changes(n_), (r.stderr, fly_changes(n_)))
+        finally:
+            os.close(lk)
+        src_ = open(os.path.join(LAB, "bin", "metacomputer")).read()
+        body_ = src_[src_.index("do_snap_sprite() {"):src_.index("\n}\n", src_.index("do_snap_sprite() {"))]
+        unguarded = []
+        for m_ in re.finditer(r'remote_py checkpoint --vm "\$VM_NAME" (create|delete|restore)\b', body_):
+            branch = re.split(r";;|return 0", body_[:m_.start()])[-1]        # since the previous branch or step ended
+            if not ("owners_check" in branch and "handoff_hold_unless_override" in branch
+                    and branch.rindex("handoff_hold_unless_override") > branch.rindex("owners_check")):
+                unguarded.append(body_[m_.start():m_.end() + 20])
+        check("every checkpoint change at Fly in bin/metacomputer (create, replace, delete, baseline, restore, reset) comes "
+              "after the ownership check and then the dispatch lock, in its own branch", not unguarded, unguarded)
         r = b.run("--vm", "sp1", "checkpoint", "--delete", "ck1", "--yes", env=env)
         check("checkpoint --delete: gone at Fly", r.returncode == 0 and "ck1" not in b.run("--vm", "sp1", "checkpoints", env=env).stdout,
               r.stderr)
         r = b.run("--vm", "sp1", "volume", "list", env=env)
         check("volumes: refused, saying why", r.returncode != 0 and "volumes" in r.stderr)
+        # secrets bind: the tunnel, its arguments, the provider's id and how to ask about it, from one checked call.
+        # Found by the re-check: a lookup that failed after the first was skipped, and the Sprite's name was bound as an
+        # address, straight over SSH, with neither the tunnel nor the id.
+        _, conf_, _ = b.resolve("sp1", SPRITE_CLI=standin)
+        sshd_ = conf_.get("SSH_DIR", "")
+        os.makedirs(sshd_, exist_ok=True)
+        for k_ in ("fill", "ops"):
+            open(os.path.join(sshd_, k_), "w").write("not a key\n")
+        blog = os.path.join(td, "bind-calls.log")
+        bvault = os.path.join(td, "bind-vault")
+        with open(bvault, "w") as fh:
+            fh.write("#!/bin/sh\ncase \"$1\" in version) echo '{\"build\":\"release\"}'; exit 0 ;; esac\n"
+                     f"printf '%s\\n' \"$@\" > {blog}\n")
+        os.chmod(bvault, 0o755)
+        env_b = dict(env, MCOMP_VAULT_BIN=bvault)
+        n0 = standin_state(b.home).get("api_n", 0)
+        r = b.run("--vm", "sp1", "secrets", "bind", env=env_b)
+        got = open(blog).read().splitlines() if os.path.exists(blog) else []
+
+        def after(flag):
+            return got[got.index(flag) + 1] if flag in got[:-1] else None
+        check("secrets bind: the Sprite's tunnel (Fly's command, its arguments), the id it was made with and how the same "
+              "command asks Fly about it, handed to the vault together", r.returncode == 0 and got[:2] == ["bind", "sp1"]
+              and after("--tunnel") == standin and after("--host") == "sp1" and after("--tunnel-id") == "sprite-0001"
+              and [x for x in got if x.startswith("--tunnel-arg=")] == [f"--tunnel-arg={x}" for x in ("-o", "my-org", "-s", "sp1", "proxy", "-W", ":22")]
+              and [x for x in got if x.startswith("--tunnel-check-arg=")]
+              == [f"--tunnel-check-arg={x}" for x in ("-o", "my-org", "api", "/v1/sprites/sp1", "--", "-sS")], (r.stderr, got))
+        asked = standin_state(b.home).get("api_n", 0) - n0
+        if os.path.exists(blog):
+            os.remove(blog)
+        set_state(b.home, api_fail_after=n0 + asked + 1)        # the address's look answers; Fly says nothing after it
+        r = b.run("--vm", "sp1", "secrets", "bind", env=env_b)
+        check("...Fly answering the address's look and not the tunnel's: refused, nothing bound (never the name as an "
+              "address, straight over SSH)", asked == 2 and r.returncode != 0 and "nothing was bound" in r.stderr
+              and not os.path.exists(blog), (asked, r.stderr, open(blog).read() if os.path.exists(blog) else ""))
+        set_state(b.home, api_fail_after=None)
+        sp_ = standin_state(b.home)["sprites"]
+        sp_["sp1"]["info"]["id"] = "sprite-7777"
+        set_state(b.home, sprites=sp_)
+        r = b.run("--vm", "sp1", "secrets", "bind", env=env_b)
+        check("...nor a Sprite of that name made again", r.returncode != 0 and not os.path.exists(blog), r.stderr)
+        sp_["sp1"]["info"]["id"] = "sprite-0001"
+        set_state(b.home, sprites=sp_)
         # stop closes the vault's tunnel too (found by review: its API proxy's tunnel kept the Sprite awake), then checks
         # that no tunnel of this Mac's to the Sprite is left.
         vlog = os.path.join(td, "vault-calls.log")

@@ -759,7 +759,9 @@ notice (`--say` cleaned like every event) and writes a record,
   and the GUI tests' own commands in the VM (setup, `pkill`, clean-up) stop;
 - `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
   unless you add `--override`, and look again right before they change anything,
-  after any question they ask; `release` doesn't end it.
+  after any question they ask; so do a Fly Sprite's `checkpoint NAME` and
+  `checkpoint --delete` (a checkpoint of the running computer would keep what you
+  did in it); `release` doesn't end it.
 
 **Your mouse and keyboard in the live view.** The driver's background input goes through a pair of virtual
 input devices of its own ("CUA v1.…", XInput2 multi-pointer), which it keeps between actions; while one exists,
@@ -1786,10 +1788,16 @@ pinned before the first connection, read over Fly's authenticated channel), with
   and made again under the name (by anyone) is another. Every Sprite is made with its build's operation as a label
   (set atomically when Fly makes it), and its id is recorded. Every operation (the network policy, checkpoints,
   restore, `sprite exec`, each SSH connection, the vault's binding) checks against Fly's API that the Sprite of that
-  name has that id, under the organization and name it was made with, before it acts; the vault pins the id and
-  asks before every connection (and its API proxy at least once a minute, closing the tunnel and ending that
-  computer's tokens otherwise). A build whose answer was lost deletes only a Sprite carrying its operation's label:
-  one without it is left alone, and said (found by review: a name and a time were taken as proof).
+  name has that id, under the organization and name it was made with, before it acts. An SSH connection asks in its
+  own ProxyCommand, right before its tunnel starts (`lib/proxywrap.py --id`), so the arguments a command keeps for
+  its later connections, or the hub for its life, never reach a Sprite made again meanwhile (found by re-check: they
+  were checked only when made). `secrets bind` gets the tunnel, its arguments, the id and how to ask Fly about it
+  from one call whose failure binds nothing (found by re-check: a lookup that failed was skipped, and the name was
+  bound as an address, straight over SSH). The vault pins the id and asks before every connection it makes (each
+  step's, and each tunnel its API proxy opens), and for requests on an open tunnel at least once a minute, closing the
+  tunnel and ending that computer's tokens otherwise. A build whose answer was lost deletes only a Sprite carrying
+  its operation's label: one without it is left alone, and said (found by review: a name and a time were taken as
+  proof).
 - **Fly's sign-in stays Fly's.** The `sprite` command keeps its own token in your login keychain; metacomputer runs it
   with `HOME`, `PATH` and `LANG` only, never reads or prints the token, and runs `sprite exec` with
   `--no-port-forward` (otherwise ports a command opens in the Sprite would be forwarded to your Mac). What it prints

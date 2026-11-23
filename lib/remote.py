@@ -24,8 +24,9 @@ remote half asks `target` here (lib/cloud/transport.py) once per command.
     remote.py checkpoint --vm NAME list|create|restore|delete [LABEL]   a provider's snapshots (Sprites' checkpoints)
     remote.py allow --vm NAME [--exact] [--remove] NAME... | --clear | --show   Fly Sprites: an allowlist of DNS
                                                names as its network policy (--clear: back to EGRESS)
-    remote.py tunnel ... (target's options)    the program that carries SSH (a provider's tunnel), NUL-separated;
-                                               nothing for a computer SSH reaches straight (the vault's binding)
+    remote.py tunnel ... (target's options)    the vault's binding of a computer behind a provider's tunnel, one
+                                               argument a line: the tunnel, its arguments, the provider's id and how
+                                               to ask about it, all or a refusal; nothing for one SSH reaches straight
 
 The computer's settings are its settings file (config/vms/NAME.env, read through lib/labconfig.py, as every
 helper reads them); what its provider made (the instance, its address) is RUN_DIR/remote.json, written only here,
@@ -35,6 +36,7 @@ import contextlib
 import datetime
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -751,11 +753,25 @@ def cmd_target(args):
     """scripts/lib.sh ssh_base: the transport's options and destination, NUL-separated, from the values bash loaded
     (no second reading of the settings) and the provider's record (the address it gave)."""
     ep = target_endpoint(args)
+    wrapper = WRAPPER
     if ep["transport"] == "sprite":
-        check_sprite(args, ep)              # every connection goes to the computer's own Sprite, or none
-    out = transport.ssh_target(ep, args.user, wrapper=WRAPPER)
+        # Every connection goes to the computer's own Sprite, or none: checked now, and again by the ProxyCommand right
+        # before each connection's tunnel starts (lib/proxywrap.py --id), so arguments a caller keeps (scripts/lib.sh
+        # keeps them for the rest of its command, the hub for its life) never reach a Sprite made again under the name.
+        st = check_sprite(args, ep)
+        chk = sprite_check_argv(args, ep)
+        wrapper = (*WRAPPER, "--id", st["instance"], "--check", str(len(chk)), *chk)
+    out = transport.ssh_target(ep, args.user, wrapper=wrapper)
     sys.stdout.write("\0".join(out) + "\0")
     return 0
+
+
+def sprite_check_argv(args, ep):
+    """How Fly's command (the tunnel's own program) is asked about the Sprite: its record from the API, whose "id" must
+    be the one recorded when it was made (lib/proxywrap.py --check, and the vault's binding)."""
+    from cloud import sprites as cloud_sprites
+    org = cloud_sprites.org_of({"SPRITE_ORG": args.sprite_org})
+    return [ep["proxy"][0], "-o", org, "api", f"/v1/sprites/{ep['host']}", "--", "-sS"]
 
 
 def check_sprite(args, ep, state=None):
@@ -790,26 +806,28 @@ def target_endpoint(args):
 
 
 def cmd_tunnel(args):
-    """What the vault's binding pins for a computer behind a provider's tunnel, NUL-separated: --part proxy, the program
-    and arguments that carry its SSH (lib/cloud/transport.py endpoint's proxy); --part check, the same program's
-    arguments that ask the provider about it (an answer in JSON whose "id" must be --part id's); --part id, the
-    provider's own id for it, recorded when it was made. Nothing for a computer reached straight over SSH. The Sprite is
-    checked to be the computer's own first (check_sprite)."""
+    """What the vault's binding pins for a computer behind a provider's tunnel, as `metacomputer secrets bind` hands it
+    to the vault, one argument a line: --tunnel PROGRAM and --tunnel-arg=ARG for each of its arguments (the program
+    that carries its SSH: lib/cloud/transport.py endpoint's proxy), --tunnel-id ID (the provider's own id for it,
+    recorded when it was made) and --tunnel-check-arg=ARG for each argument with which the same program asks the
+    provider about it (an answer in JSON whose "id" must be that one). All of them together, from one look at the
+    computer's own Sprite (check_sprite), each checked to be a word the vault takes, or nothing and a refusal: never a
+    binding of the name as an address. Nothing for a computer reached straight over SSH."""
     ep = target_endpoint(args)
     if not ep["proxy"]:
         return 0
-    out = ep["proxy"]
-    if ep["transport"] == "sprite":
-        st = check_sprite(args, ep)
-        from cloud import sprites as cloud_sprites
-        org = cloud_sprites.org_of({"SPRITE_ORG": args.sprite_org})
-        if args.part == "check":
-            out = [ep["proxy"][0], "-o", org, "api", f"/v1/sprites/{ep['host']}", "--", "-sS"]
-        elif args.part == "id":
-            out = [st["instance"]]
-    elif args.part != "proxy":
-        return 0
-    sys.stdout.write("\0".join(out) + "\0")
+    if ep["transport"] != "sprite":
+        raise Refused(f"the {ep['transport']} transport gives the vault no provider id to check: nothing to bind")
+    st = check_sprite(args, ep)
+    proxy, chk, tid = ep["proxy"], sprite_check_argv(args, ep), st.get("instance")
+    word = re.compile(r"[A-Za-z0-9._:/@=+_-]{1,200}")       # vault/Store.swift validTunnelArg
+    if not (proxy and proxy[0].startswith("/") and all(word.fullmatch(x) for x in proxy)
+            and len(chk) > 1 and chk[0] == proxy[0] and all(word.fullmatch(x) for x in chk)
+            and isinstance(tid, str) and re.fullmatch(r"[A-Za-z0-9_-]{4,80}", tid)):
+        raise Refused(f"{args.vm}'s tunnel, or the provider's id for it, isn't one the vault can pin: nothing to bind")
+    out = ["--tunnel", proxy[0], *[f"--tunnel-arg={x}" for x in proxy[1:]], "--tunnel-id", tid,
+           *[f"--tunnel-check-arg={x}" for x in chk[1:]]]
+    sys.stdout.write("\n".join(out) + "\n")
     return 0
 
 
@@ -1061,8 +1079,6 @@ def main(argv=None):
         p.add_argument("--sprite-org", default="")
         p.add_argument("--sprite-name", default="")
         p.add_argument("--sprite-cli", default="")
-        if name == "tunnel":
-            p.add_argument("--part", choices=("proxy", "check", "id"), default="proxy")
         if name == "probe":
             p.add_argument("--timeout", type=float, default=4.0)
     p = sub.add_parser("exec")

@@ -535,7 +535,9 @@ do_snap_sprite() { # reset|baseline|restore|checkpoint|checkpoints ARGS...
       vm_change_lock "metacomputer checkpoint"
       if [ "${1:-}" = --delete ]; then
         ckpt_name "${2:-}"; [ "$2" != baseline ] || die "the baseline goes with metacomputer baseline (it replaces it)"
+        owners_check
         confirm "Delete checkpoint '$2' of $VM_NAME at Fly?"
+        handoff_hold_unless_override     # held through Fly's change, as every acting command's
         remote_py checkpoint --vm "$VM_NAME" delete "$2" >/dev/null || die "checkpoint '$2' wasn't deleted (above)"
         emit_event lifecycle checkpoint info "Checkpoint '$2' of $VM_NAME deleted" "" "name=$2" "change=deleted"
         ok "checkpoint '$2' deleted"; return 0
@@ -547,6 +549,9 @@ do_snap_sprite() { # reset|baseline|restore|checkpoint|checkpoints ARGS...
         [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"
       fi
       owners_check
+      # A checkpoint of the running computer keeps what is on its disk: never once the user has it (a handoff), so the
+      # dispatch lock is held from the last look for one until Fly has made it.
+      handoff_hold_unless_override
       out="$(remote_py checkpoint --vm "$VM_NAME" create "$name" $([ $replace = 1 ] && echo --replace))" || die "the checkpoint wasn't made (above)"
       emit_event lifecycle checkpoint info "Checkpoint '$name' of $VM_NAME saved" "" "name=$name" "change=saved"
       ok "checkpoint '$name' saved while it runs, in $(printf '%s' "$out" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["seconds"])') s (restore with: metacomputer --vm $VM_NAME restore $name)"
@@ -2496,32 +2501,27 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       local where=(--port "$SSH_PORT" --gateway "$NETGW_BIN")
       if [ "${MC_REMOTE:-0}" = 1 ]; then
         mc_remote_target "$GUEST_USER" || die "can't tell how to reach $VM_NAME: $MC_REFUSAL"
-        local i rhost="" rport="" tun=() x
+        local i rhost="" rport="" x
         for ((i = 0; i < ${#MC_T_ARGS[@]}; i++)); do [ "${MC_T_ARGS[$i]}" != -p ] || rport="${MC_T_ARGS[$((i + 1))]}"; done
         rhost="${MC_T_ARGS[${#MC_T_ARGS[@]}-1]#*@}"
         [ -n "$rhost" ] && [ -n "$rport" ] || die "can't tell $VM_NAME's address"
         where=(--port "$rport" --host "$rhost" --host-key-alias "$(mc_hostkey_name)")
         # A provider's tunnel (Fly Sprites: sprite proxy -W :22): the vault pins its program (path and contents) and
-        # arguments, and runs it as ssh's ProxyCommand through itself, ending it when ssh goes.
-        while IFS= read -r -d '' x; do tun+=("$x"); done < <("$PY" "$LAB_ROOT/lib/remote.py" tunnel --vm "$VM_NAME" \
-          --run-dir "$RUN_DIR" "${MC_T_WHERE[@]}" 2>/dev/null)
-        if [ ${#tun[@]} -gt 0 ]; then
-          where+=(--tunnel "${tun[0]}")
-          for x in "${tun[@]:1}"; do where+=("--tunnel-arg=$x"); done
-          # The provider's own id for the computer (recorded when it was made, checked against the provider now), and how
-          # the same program asks the provider about it: the vault asks before every connection.
-          local tid=() tchk=()
-          while IFS= read -r -d '' x; do tid+=("$x"); done < <("$PY" "$LAB_ROOT/lib/remote.py" tunnel --part id --vm "$VM_NAME" \
-            --run-dir "$RUN_DIR" "${MC_T_WHERE[@]}" 2>/dev/null)
-          while IFS= read -r -d '' x; do tchk+=("$x"); done < <("$PY" "$LAB_ROOT/lib/remote.py" tunnel --part check --vm "$VM_NAME" \
-            --run-dir "$RUN_DIR" "${MC_T_WHERE[@]}" 2>/dev/null)
-          if [ ${#tid[@]} -gt 0 ]; then
-            [ ${#tchk[@]} -gt 1 ] && [ "${tchk[0]}" = "${tun[0]}" ] || die "can't tell how to ask $(remote_where) about $VM_NAME"
-            where+=(--tunnel-id "${tid[0]}")
-            for x in "${tchk[@]:1}"; do where+=("--tunnel-check-arg=$x"); done
-          elif [ "${PROVIDER:-}" = sprites ]; then
-            die "$VM_NAME's Sprite isn't the one it was made as, or Fly can't be asked now (metacomputer --vm $VM_NAME status): nothing was bound"
-          fi
+        # arguments, and runs it as ssh's ProxyCommand through itself, ending it when ssh goes; and the provider's own id
+        # for the computer (recorded when it was made, checked against the provider now), with how the same program asks
+        # the provider about it: the vault asks before every connection. All of it from one call, whose exit status is
+        # checked; less than all of it, and nothing is bound (never the name bound as an address, straight over SSH).
+        if [ "${TRANSPORT:-ssh}" != ssh ]; then
+          local tb tw=() has_id=0 has_chk=0
+          tb="$("$PY" "$LAB_ROOT/lib/remote.py" tunnel --vm "$VM_NAME" --run-dir "$RUN_DIR" "${MC_T_WHERE[@]}")" \
+            || die "can't tell the vault how to reach $VM_NAME through $(remote_where) (above): nothing was bound"
+          while IFS= read -r x; do
+            case "$x" in "") continue ;; --tunnel-id) has_id=1 ;; --tunnel-check-arg=?*) has_chk=1 ;; esac
+            tw+=("$x")
+          done <<< "$tb"
+          [ ${#tw[@]} -ge 4 ] && [ "${tw[0]}" = --tunnel ] && [ -n "${tw[1]}" ] && [ $has_id = 1 ] && [ $has_chk = 1 ] \
+            || die "$VM_NAME's tunnel, or the provider's id for it, couldn't be told: nothing was bound"
+          where+=("${tw[@]}")
         fi
       fi
       [ -f "$SSH_DIR/fill" ] || die "no fill key ($SSH_DIR/fill): VMs built before secrets support have no fill account. Rebuild the VM to use secrets (metacomputer build --replace, or a new VM_NAME)"

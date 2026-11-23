@@ -645,7 +645,10 @@ def run(td, procs):
     tunnel_prog = os.path.join(td, "sprite-standin")
     provider_answer = os.path.join(td, "provider-answer.json")       # what the provider says about the computer now
     open(provider_answer, "w").write('{"id": "sprite-0042", "name": "spritevm"}\n')
-    open(tunnel_prog, "w").write(f"#!/bin/sh\nif [ \"$1\" = check ]; then cat {provider_answer}; fi\nexit 0\n")
+    answers = os.path.join(td, "provider-answers")                  # or, while it has lines: one answer per question
+    open(tunnel_prog, "w").write(f"#!/bin/sh\nif [ \"$1\" = check ]; then\n  if [ -s {answers} ]; then head -n 1 {answers}; "
+                                 f"tail -n +2 {answers} > {answers}.t && mv {answers}.t {answers}\n"
+                                 f"  else cat {provider_answer}; fi\nfi\nexit 0\n")
     os.chmod(tunnel_prog, 0o755)
     targs = ["-o", "some-org", "-s", "spritevm", "proxy", "-W", ":22"]
     rc, out = tty([BIN, "bind", "spritevm", "--port", "22", "--host", "spritevm", "--host-key-alias", "mcomp-spritevm",
@@ -820,6 +823,17 @@ def run(td, procs):
     check("...the provider's computer of that name has another id: refused, nothing sent, bind again",
           r.returncode == 2 and "isn't the one bound" in js(r).get("reason", "") and len(calls()) == n, r.stdout)
     open(provider_answer, "w").write('{"id": "sprite-0042", "name": "spritevm"}\n')
+    # Found by the re-check: the provider was asked once before a step, and not for the connection(s) after it. Now
+    # before every connection: here the computer of that name changes between the step's look and its connection.
+    n = len(calls())
+    open(answers, "w").write('{"id": "sprite-0042", "name": "spritevm"}\n{"id": "sprite-0099", "name": "spritevm"}\n')
+    r = client("fill", "web-login", "--vm", "spritevm", "--field", "password")
+    check("...asked again right before each connection: another id by the time the fill connects: refused, nothing sent",
+          r.returncode != 0 and "isn't the one bound" in js(r).get("reason", "") and len(calls()) == n
+          and open(answers).read() == "", (r.stdout, open(answers).read()))
+    n = len(calls())
+    r = client("fill", "web-login", "--vm", "spritevm", "--field", "password")
+    check("...and the same computer at each look: filled", r.returncode == 0 and len(calls()) == n + 1, r.stdout)
     n = len(calls())
     open(tunnel_prog, "a").write("# changed\n")          # the tunnel program isn't the one pinned at bind any more
     r = client("fill", "web-login", "--vm", "spritevm", "--field", "password")

@@ -2,7 +2,7 @@
 """ssh's ProxyCommand for a provider's tunnel (lib/cloud/transport.py): run the tunnel program on ssh's standard
 input and output, and end it, and everything it started, when ssh goes.
 
-    proxywrap.py -- PROGRAM [ARGS...]
+    proxywrap.py [--id ID --check N CHECK-PROGRAM [CHECK-ARGS...]] -- PROGRAM [ARGS...]
 
 A tunnel program can outlive the ssh that started it: ssh sends its ProxyCommand SIGHUP on exit, and a program that
 ignores SIGHUP (Fly's `sprite proxy -W` can) is left running with its connection open, which keeps a cloud computer
@@ -19,9 +19,18 @@ may SIGKILL that whole group at once (the hub does, after a grace period), and a
 it could end the tunnel, which isn't in that group. Out of it, this process outlives ssh by the half second it takes
 to notice, then ends the tunnel (found live: `hub stop` left `sprite proxy` running, and the Sprite awake).
 
+With --id, the provider is asked first, on every connection: the N words after --check are a program and its
+arguments whose answer (JSON, at most a megabyte, within 30 s; run with HOME, PATH and LANG only and nothing on its
+standard input) must name the computer by the provider's own id for it, the one recorded when it was made ("id", or
+"data"."id"). Any other answer, or none, and the tunnel never starts (lib/remote.py target gives these for a Fly
+Sprite: one deleted and made again under its name is another computer, whatever arguments a caller kept).
+
 `ssh -f` doesn't fit: it forks after signing in and the process that started this one exits, so the tunnel would end
 at once. A caller that wants ssh in the background runs it there itself (bin/metacomputer view_tunnel)."""
+import json
 import os
+import re
+import selectors
 import signal
 import subprocess
 import sys
@@ -29,6 +38,9 @@ import time
 
 GRACE_S = 3.0
 POLL_S = 0.5
+CHECK_S = 30.0
+CHECK_MAX = 1 << 20
+ID = re.compile(r"[A-Za-z0-9_-]{4,80}")
 
 
 def group_alive(pgid):
@@ -69,7 +81,67 @@ def leave_group():
         return False
 
 
-def run(argv, parent=None):
+def provider_says(check, want, stop=(), timeout=CHECK_S):
+    """None when the provider's answer to `check` (a program and its arguments) names the computer by the id `want`;
+    else why not. The answer is read as it comes, capped, and the check ended (its whole group) past the cap, the
+    timeout, or a stop."""
+    env = {"HOME": os.environ.get("HOME") or os.path.expanduser("~"), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+           "LANG": "C.UTF-8"}
+    try:
+        p = subprocess.Popen(check, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             env=env, close_fds=True, start_new_session=True)
+    except OSError:
+        return "the provider couldn't be asked whether this is still the computer it was made as"
+    out, over = bytearray(), None
+    deadline = time.monotonic() + timeout
+    with selectors.DefaultSelector() as sel:
+        sel.register(p.stdout, selectors.EVENT_READ)
+        while over is None:
+            if stop:
+                over = "stopped"
+                break
+            left = deadline - time.monotonic()
+            if left <= 0:
+                over = "no answer in time"
+                break
+            if not sel.select(min(left, 0.2)):
+                continue
+            chunk = os.read(p.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            out += chunk
+            if len(out) > CHECK_MAX:
+                over = "too long an answer"
+    if over is not None:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    p.stdout.close()
+    try:
+        rc = p.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        rc = p.wait()
+    if over is not None or rc != 0:
+        return "the provider couldn't be asked whether this is still the computer it was made as"
+    try:
+        obj = json.loads(bytes(out).decode())
+    except ValueError:
+        return "the provider couldn't be asked whether this is still the computer it was made as"
+    have = obj.get("id") if isinstance(obj, dict) else None
+    if have is None and isinstance(obj, dict) and isinstance(obj.get("data"), dict):
+        have = obj["data"].get("id")
+    if have != want:
+        return ("the provider's computer of that name isn't the one this computer was made as (another id: deleted and "
+                "made again?)")
+    return None
+
+
+def run(argv, parent=None, check=None, want=None):
     parent = os.getppid() if parent is None else parent
     stop = []
 
@@ -81,6 +153,13 @@ def run(argv, parent=None):
     # was orphaned before it could look: its parent is launchd now) never gets a tunnel.
     if parent <= 1 or os.getppid() != parent or stop:
         return 1
+    if check is not None:
+        why = provider_says(check, want, stop)
+        if why is not None:
+            print(f"metacomputer: {why}: no connection was made", file=sys.stderr, flush=True)
+            return 1
+        if os.getppid() != parent or stop:
+            return 1
     child = subprocess.Popen(argv, stdin=0, stdout=1, stderr=2, close_fds=True, start_new_session=True)
     pgid = child.pid                          # its own session and group, which only it and its children are in
     try:
@@ -96,12 +175,21 @@ def run(argv, parent=None):
 
 
 def main(argv):
-    if len(argv) < 2 or argv[0] != "--":
-        print("usage: proxywrap.py -- PROGRAM [ARGS...]", file=sys.stderr)
-        return 2
     parent = os.getppid()        # first: ssh, before anything else can happen (an orphan sees launchd here: refused)
+    usage = "usage: proxywrap.py [--id ID --check N CHECK-PROGRAM [ARGS...]] -- PROGRAM [ARGS...]"
+    check = want = None
+    if argv[:1] == ["--id"]:
+        n = argv[3] if len(argv) > 4 and argv[2] == "--check" else ""
+        if not ID.fullmatch(argv[1]) or not n.isdigit() or not 1 <= int(n) <= 64 or len(argv) < 4 + int(n) \
+                or not argv[4].startswith("/"):
+            print(usage, file=sys.stderr)
+            return 2
+        want, check, argv = argv[1], argv[4:4 + int(n)], argv[4 + int(n):]
+    if len(argv) < 2 or argv[0] != "--":
+        print(usage, file=sys.stderr)
+        return 2
     leave_group()
-    return run(argv[1:], parent=parent)
+    return run(argv[1:], parent=parent, check=check, want=want)
 
 
 if __name__ == "__main__":

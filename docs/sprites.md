@@ -67,7 +67,9 @@ Everything works as on any computer: `metacomputer --vm work status`, the MCP to
   `sprite proxy` when ssh goes: a tunnel left open would keep the Sprite awake, and billing.
 - **Checkpoints.** `metacomputer --vm work checkpoint NAME [--replace]`, `checkpoints`, `restore NAME`,
   `checkpoint --delete NAME`, `baseline` (the current state becomes the baseline) and `reset` (back to the baseline)
-  use Fly's checkpoints, taken while it runs in a fraction of a second. **A restore restarts the Sprite's programs**:
+  use Fly's checkpoints, taken while it runs in a fraction of a second. Each change waits, like `reset` on any
+  computer, while the user has the computer (`metacomputer handoff`) or another session is using it (`--override`
+  goes ahead). **A restore restarts the Sprite's programs**:
   the desktop comes back as its services (about half a minute), but apps that were open are closed and every
   connection is cut, so launch them again afterwards. Files come back exactly as they were.
 - **Input is foreground only.** A Sprite's kernel has no `/dev/uinput`, so the driver has no virtual devices for
@@ -125,11 +127,11 @@ unanswered). There's no firewall in the guest: this is the one layer, and the ma
 - **The vault over the tunnel.** `secrets bind` pins Fly's `sprite` command (its path and contents), the tunnel's
   arguments and the Sprite's own id, as it pins the gateway on your Mac; fills and API tokens go through the vault's
   own copy of the command (checked again right before it runs), run by the vault itself (`mcomp-vault _tunnel`, which
-  ends it when ssh goes), after Fly's API says the Sprite of that name still has that id. After the command changes
-  (an update), bind again.
+  ends it when ssh goes), each connection after Fly's API says the Sprite of that name still has that id. When Fly
+  can't be asked at bind, nothing is bound. After the command changes (an update), bind again.
 - **Its own Sprite, and nothing else.** Every operation (the policy, checkpoints, restore, `sprite exec`, each SSH
-  connection) checks with Fly's API that the Sprite of that name has the id recorded when it was made; one deleted
-  and made again under the name is another, and nothing is done to it. A build whose answer was lost deletes only a
+  connection, right before its tunnel starts) checks with Fly's API that the Sprite of that name has the id recorded
+  when it was made; one deleted and made again under the name is another, and nothing is done to it. A build whose answer was lost deletes only a
   Sprite carrying its operation's label, set when Fly made it.
 - **Fly holds what's in the VM.** Its screen, disk and whatever is typed into it are on Fly's machines. Use a VM on
   your Mac for work you wouldn't put there. No file, secret or key of your Mac's goes to it.

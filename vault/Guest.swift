@@ -249,6 +249,11 @@ final class GuestRunner {
         guard let proxy = proxyCommand(b) else {
             throw VaultError("the tunnel pinned for VM \(t.vm) can't be run: bind it again", code: Exit.error)
         }
+        // A computer behind its provider's tunnel: the provider is asked right before every connection, not only before
+        // a step's first (a check and its fill are two connections, and the computer of that name can change between).
+        if let problem = providerProblem(b) {
+            throw VaultError(problem.reason, code: problem.denied ? Exit.denied : Exit.error)
+        }
         let args = sshBaseOptions(key: key, port: b.ssh_port, remote: b.isRemote, proxy: proxy) + pin
             + ["-T", "-o", "ClearAllForwardings=yes", "-o", "LogLevel=ERROR", "\(user)@\(b.sshDestination)", remote]
         return runProcess(sshPath, args, env: helperEnv(), stdin: input, timeout: max(1, timeout), maxStdout: maxStdout)

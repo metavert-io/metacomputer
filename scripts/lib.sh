@@ -663,7 +663,10 @@ mc_sprite_cli() { # SPRITE_CLI, else sprite on PATH, else ~/.local/bin/sprite (l
 # The transport's settings as bash loaded them, for lib/remote.py target, tunnel and probe (no second reading).
 MC_T_WHERE=(--transport "${TRANSPORT:-ssh}" --host "${SSH_HOST:-}" --port "${SSH_HOST_PORT:-22}"
             --sprite-org "${SPRITE_ORG:-}" --sprite-name "${SPRITE_NAME:-}" --sprite-cli "${SPRITE_CLI:-}")
-mc_remote_target() { # USER -> MC_T_ARGS: the transport's options and destination (lib/remote.py target), once per user
+# USER -> MC_T_ARGS: the transport's options and destination (lib/remote.py target), once per user and command. Kept
+# arguments are safe to reuse: a Fly Sprite's ProxyCommand asks Fly for the Sprite's id again on every connection, before
+# its tunnel starts (lib/proxywrap.py --id), so a Sprite made again under the name meanwhile gets no connection.
+mc_remote_target() {
   local x
   [ "${MC_T_USER:-}" = "$1" ] && [ ${#MC_T_ARGS[@]} -gt 0 ] && return 0
   MC_T_ARGS=(); MC_T_USER="$1"

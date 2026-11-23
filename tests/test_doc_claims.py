@@ -2250,9 +2250,27 @@ CLAIMS = [
      and 'env=self.env(), start_new_session=True)' in raw("lib/spritecli.py") and '"exec", "--no-port-forward", "--"' in raw("lib/spritecli.py")
      and "exec --no-port-forward" not in raw("scripts/remote-build.sh")),
     ("SECURITY.md", r"Every tunnel runs through a wrapper that ends it when ssh goes, and leaves ssh's process group first",
-     lambda m: "    leave_group()\n    return run(argv[1:], parent=parent)" in raw("lib/proxywrap.py") and "os.setsid()" in raw("lib/proxywrap.py")
+     lambda m: "    leave_group()\n    return run(argv[1:], parent=parent, check=check, want=want)" in raw("lib/proxywrap.py") and "os.setsid()" in raw("lib/proxywrap.py")
      and "if parent <= 1 or os.getppid() != parent or stop:" in raw("lib/proxywrap.py")
      and "_ = setsid()" in raw("vault/Guest.swift") and "WRAPPER = (sys.executable, os.path.join(LIB, \"proxywrap.py\"))" in raw("lib/remote.py")),
+    ("SECURITY.md", r"An SSH connection asks in its\s+own ProxyCommand, right before its tunnel starts \(`lib/proxywrap.py --id`\)",
+     lambda m: 'wrapper = (*WRAPPER, "--id", st["instance"], "--check", str(len(chk)), *chk)' in raw("lib/remote.py")
+     and raw("lib/proxywrap.py").index("why = provider_says(check, want, stop)") < raw("lib/proxywrap.py").index("child = subprocess.Popen(argv")
+     and "if have != want:" in raw("lib/proxywrap.py")),
+    ("SECURITY.md", r"`secrets bind` gets the tunnel, its arguments, the id and how to ask Fly about it\s+from one call whose failure binds nothing",
+     lambda m: 'tb="$("$PY" "$LAB_ROOT/lib/remote.py" tunnel --vm "$VM_NAME"' in raw("bin/metacomputer")
+     and '|| die "can\'t tell the vault how to reach $VM_NAME' in raw("bin/metacomputer")
+     and '< <("$PY" "$LAB_ROOT/lib/remote.py" tunnel' not in raw("bin/metacomputer")
+     and 'raise Refused(f"the {ep[\'transport\']} transport gives the vault no provider id to check: nothing to bind")' in raw("lib/remote.py")),
+    ("SECURITY.md", r"The vault pins the id and asks before every connection it makes \(each\s+step's, and each tunnel its API proxy opens\)",
+     lambda m: "if let problem = providerProblem(b) {" in raw("vault/Guest.swift").split("func ssh(", 1)[1].split("runProcess(sshPath", 1)[0]
+     and "if let problem = providerProblem(t.binding) {" in raw("vault/Proxy.swift").split("func startTunnel(", 1)[1].split("posix_spawn(", 1)[0]),
+    ("SECURITY.md", r"so do a Fly Sprite's `checkpoint NAME` and\s+`checkpoint --delete`",
+     lambda m: all(
+         g in raw("bin/metacomputer").split("do_snap_sprite() {", 1)[1].split(call, 1)[0].rsplit(start, 1)[1]
+         for call, start in (('remote_py checkpoint --vm "$VM_NAME" delete "$2"', "    checkpoint)\n"),
+                             ('remote_py checkpoint --vm "$VM_NAME" create "$name"', 'ckpt_name "$name"'))
+         for g in ("owners_check", "handoff_hold_unless_override"))),
     ("SECURITY.md", r"The vault pins\s+Fly's `sprite` command \(path and contents\) and the tunnel's arguments at `secrets bind`, runs its own copy of it",
      lambda m: "guard let have = fileSHA256(prog), have == want else" in raw("vault/Guest.swift")
      and "if let why = tunnelProblem(t.binding) { return (why, true) }" in raw("vault/Guest.swift")
