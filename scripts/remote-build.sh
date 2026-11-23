@@ -22,6 +22,7 @@
 # then, and there's no other account): delete it and make a new one, as for a VM on the Mac.
 #
 #   scripts/remote-build.sh [--keep-on-failure]
+for mc_a in "$@"; do case "$mc_a" in -h|--help) sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;; esac; done  # usage only
 set -Eeuo pipefail
 # Provider credentials (lib/remote.py PROVIDER_ENV: each driver's own) in this command's environment reach
 # lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported

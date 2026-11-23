@@ -11,7 +11,10 @@ short overview, and the [guide](guide.md) shows what each is for, task by task.
 ## Commands
 
 `metacomputer` (installed at `~/.local/bin/metacomputer`; `mcomp` is a short
-alias). `metacomputer help` prints a summary. `metacomputer --vm NAME COMMAND`
+alias). `metacomputer help` prints a summary. `--help` or `-h` anywhere in a command (after it, its
+subcommand or its arguments, before a `--`) prints that command's usage and exits 0 without doing anything: no
+settings are read, and nothing reaches the VM, its runner, SSH, a provider, the vault or the network (`ssh ROLE CMD`
+leaves them to the guest's command). `metacomputer --vm NAME COMMAND`
 runs any command on the VM `NAME`; without `--vm`, a command acts on your default
 computer ([More than one VM](#more-than-one-vm)).
 

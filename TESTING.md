@@ -474,6 +474,24 @@ copy's VMs (off) and are stopped at the end.
   were. A default changed after the session started (`metacomputer default demo`) refuses the command that now means
   `demo`. Without a bridge, a claim on `demo` (as `metacomputer sh` leaves) decides until it's gone.
 
+## `--help` and `-h` everywhere: `tests/test_help.py`
+
+`python3 tests/test_help.py` (about 2,500 checks, under 20 s) needs no VM. Each worker has its own copy of the checkout
+(tests/test_multi_vm.py's Box) with a throwaway HOME and four computers' settings: the main VM, another VM on this
+Mac, your own server and a Fly Sprite. Stand-ins on PATH record every call of the programs that reach a VM, the VM
+runner, SSH, a provider, the vault, the network or this Mac's settings (ssh, the runner, sprite, oci, curl, git,
+osascript, security, launchctl, ...); a `sitecustomize.py` on PYTHONPATH records every socket a Python helper opens and
+every such program it starts by its full path. The table runs every command and subcommand of the dispatch, destructive
+ones first (build, reset, restore, baseline, checkpoint, vm create/delete, cloud teardown, every `secrets` subcommand,
+shop, net), with `--help` and with `-h`, after the command, after its subcommand and after its arguments, with `--vm`
+for the other computers. Each must exit 0 with usage on stdout, call nothing, and leave every file and folder of the
+copy, its HOME, its private folders, the per-VM vaults' folder and its computers' socket folders as they were (each
+computer's run, log and socket folders are made once first, by `where`, as every command makes them). `ssh ops ls -h`
+and `sh -c ... -- --help` are the guest's and the script's own, never metacomputer's usage. Every program in
+`scripts/`, `install.sh`, `get.sh` and every `lib/` program with a `__main__`, run on its own with `-h` and `--help`,
+calls nothing and writes nothing; those a person runs (`scripts/`, the installers, `lib/mcp_client.py`) print their
+usage and exit 0. A command added to the dispatch without rows in the table fails it.
+
 ## The Claude Code plugin: `tests/test_plugin.py`
 
 `python3 tests/test_plugin.py` (301 checks) needs no VM. `install.sh` runs against a

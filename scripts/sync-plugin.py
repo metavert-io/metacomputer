@@ -217,6 +217,9 @@ def differences():
 
 
 def main(argv):
+    if "-h" in argv or "--help" in argv:
+        print(__doc__)
+        return 0
     check = "--check" in argv
     if not check:
         for _, dst_rel, _ in COPIES:    # an older layout's link in place of a copy: the link itself goes, never a folder

@@ -23,6 +23,7 @@ LAB="$(cd "$(dirname "$0")/.." && pwd)"
 CHECK=0 REBUILD=0 FRESH=0
 for a in "$@"; do
   case "$a" in --check) CHECK=1 ;; --rebuild) REBUILD=1 ;; --fresh-source) FRESH=1 ;;
+    -h|--help) sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "build-tools: unknown option $a" >&2; exit 2 ;; esac
 done
 BIN_DIR="$LAB/vendor/bin"

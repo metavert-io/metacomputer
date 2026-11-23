@@ -133,13 +133,13 @@
 #   shop status | login [--wait 90] | complete CHECKOUT --shop DOMAIN --instrument @FILE|- | card NAME --spend-request ID
 #                                  Shopify stores through your own Shop account and Shopify's shop CLI (docs/payments.md)
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
+#         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
+#                                  mine your own sessions for repeated mistakes; approved lessons reach
+#                                  every new session's instructions as advice (docs/learn.md)
 #   agents [--json] | agents check [--json]
 #                                  the coding agents metacomputer is set up for (Claude Code, Codex, OpenClaw,
 #                                  Hermes Agent, Gemini CLI, Antigravity CLI), and a check of what it relies on in this Mac's Codex
 #                                  (docs/codex.md)
-#         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
-#                                  mine your own sessions for repeated mistakes; approved lessons reach
-#                                  every new session's instructions as advice (docs/learn.md)
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
@@ -147,19 +147,6 @@ set -uo pipefail
 # lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported
 # again into remote_py's one child (scripts/lib.sh). The shell keeps them as unexported variables.
 for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY; do export -n "$mc_k"; done; unset mc_k
-# Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
-# Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
-# confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it
-# (docs/codex.md). The MCP tools aren't affected: Codex starts its MCP servers outside the sandbox. A Codex setup that
-# grants all of that anyway can set MCOMP_CODEX_SANDBOX=allow.
-if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then
-  case "${1:-help}" in
-    help|-h|--help) ;;
-    *) printf '%s\n' "metacomputer: this command is running inside Codex's sandbox ($CODEX_SANDBOX), which blocks what metacomputer needs on this Mac (its state folders, the VM's SSH port, the hub's and the vault's sockets). Nothing was run." \
-         "Run it outside the sandbox: ask for escalated permissions for this command, or add metacomputer's Codex rules (install.sh does it; docs/codex.md) so everyday metacomputer commands run outside it. The metacomputer MCP tools aren't affected." >&2
-       exit 77 ;;
-  esac
-fi
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
 # --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same);
@@ -176,6 +163,110 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+# --help and -h, wherever a person types them (after the command, its subcommand or its arguments; up to a `--`,
+# after which the words are a script's or another command's), print the command's usage and exit 0 here, before
+# anything else runs: no settings are read (a computer named with --vm isn't even looked up), nothing reaches a VM,
+# the runner, SSH, a provider, the vault or the network, and no file is written (tests/test_help.py). `ssh ROLE CMD...`
+# leaves them to the guest's command. A program with a usage text of its own prints it (Python with -B: no bytecode
+# is written); anything else, or a program that can't, gets this file's usage lines for the command.
+mc_help_asked() { # CMD ARGS...
+  local c="${1:-help}" a; [ $# -gt 0 ] && shift
+  case "$c" in help|-h|--help) return 0 ;; esac
+  case "$c:${1:-}" in vm:help|claude:help|secrets:help) return 0 ;; esac    # their own word for it
+  if [ "$c" = ssh ]; then     # ssh [ROLE] [CMD...]: the role, then the guest's command (ls -h is the guest's)
+    case "${1:-}" in -h|--help) return 0 ;; esac
+    case "${2:-}" in -h|--help) return 0 ;; esac
+    return 1
+  fi
+  for a in "$@"; do
+    case "$a" in --) return 1 ;; -h|--help) return 0 ;; esac
+  done
+  return 1
+}
+mc_usage_entries() { # CMD [SUBCOMMAND]: this file's usage entries for CMD (only SUBCOMMAND's, when some name it)
+  awk -v c="$1" -v sub_="${2:-}" -v cmds=" start stop restart status reset who release checkpoint checkpoints restore version update agents " '
+    function firstword(t,  w) { split(t, w, " "); return w[1] }
+    function flush(  i) {
+      if (keep) { m++; txt[m] = ""; for (i = 1; i <= n; i++) txt[m] = txt[m] lines[i] "\n"; hit[m] = subhit }
+      n = 0; keep = 0; subhit = 0
+    }
+    /^set -uo/ { flush(); done = 1; exit }
+    FNR < 5 { next }
+    /^#   [^ -]/ {                                   # an entry (the --vm and --on lines are options, not commands)
+      flush()
+      head = substr($0, 5); sub(/   .*/, "", head)   # up to its description
+      k = split(head, parts, / \| /); top = (k > 1)  # "start ... | stop ... | restart": several commands in one
+      for (i = 1; i <= k; i++) if (index(cmds, " " firstword(parts[i]) " ") == 0) top = 0
+      split(head, w, " "); keep = (w[1] == c)
+      if (!keep && top) for (i = 1; i <= k; i++) if (firstword(parts[i]) == c) keep = 1
+      if (keep && sub_ != "" && w[1] == c) {
+        ns = split(w[2], subs, /\|/)
+        for (i = 1; i <= ns; i++) { s2 = subs[i]; gsub(/[^a-z0-9-]/, "", s2); if (s2 == sub_) subhit = 1 }
+        for (i = 2; i <= k; i++) if (firstword(parts[i]) == sub_) subhit = 1
+      }
+      lines[++n] = substr($0, 3); next
+    }
+    /^#    / { if (n) lines[++n] = substr($0, 3); next }
+    { flush() }
+    END {
+      if (!done) flush()
+      for (i = 1; i <= m; i++) if (hit[i]) any = 1
+      for (i = 1; i <= m; i++) if (!any || hit[i]) printf "%s", txt[i]
+    }
+  ' "$SELF"
+}
+mc_help() { # CMD ARGS...: the usage, on stdout; exit 0
+  local c="${1:-help}" py="" mod="" out; [ $# -gt 0 ] && shift
+  local margs=()
+  case "$c" in help|-h|--help) sed -n '2,/^set -uo/p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+  case "$c" in
+    sh)              mod=vm_shell; margs=(--help) ;;
+    claude)          mod=vm_claude; margs=(--help) ;;
+    call)            mod=mcomp_sdk; margs=(call --help) ;;
+    volume|refdisk)  mod=storage; margs=("$c" "$@") ;;
+    notify)          mod=events; margs=(notify "$@") ;;
+    events)          [ "${1:-}" = watcher ] || { mod=events; margs=("$@"); } ;;
+    version|update)  mod=update; margs=("$c" "$@") ;;
+    learn|agents|shop|handoff) mod="$c"; margs=("$@") ;;
+    web)             mod=browser_tools; margs=("$@") ;;
+    trace)           mod=traces; margs=("$@") ;;
+  esac
+  if [ -n "$mod" ]; then
+    py="${PY:-}"; [ -n "$py" ] && [ -x "$py" ] || py=/opt/homebrew/bin/python3
+    [ -x "$py" ] || py="$(command -v python3 2>/dev/null)" || py=""
+    case "$py" in /usr/bin/python3) xcode-select -p >/dev/null 2>&1 || py="" ;; esac  # Apple's stand-in asks to install
+    if [ -n "$py" ] && out="$("$py" -B "$(dirname "$SELF")/../lib/$mod.py" "${margs[@]}" </dev/null 2>/dev/null)" \
+       && [ -n "$out" ]; then
+      printf '%s\n' "$out"; exit 0
+    fi
+  fi
+  local sub=""; case "${1:-}" in -*|"") ;; *) sub="$1" ;; esac
+  out="$(mc_usage_entries "$c" "$sub")"
+  if [ -z "$out" ]; then
+    case "$c" in
+      _*) printf '%s\n' "metacomputer $c is metacomputer's own plumbing (it runs it itself); metacomputer help lists the commands" ;;
+      *)  printf '%s\n' "usage: metacomputer help (it lists every command; there's no command '$c')" ;;
+    esac
+    exit 0
+  fi
+  printf '%s\n' "usage: metacomputer [--vm NAME | --on PLACE] $c ..." "$out" \
+    "(metacomputer help lists every command; nothing was run)"
+  exit 0
+}
+mc_help_asked "$@" && mc_help "$@"
+# Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
+# Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
+# confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it
+# (docs/codex.md). The MCP tools aren't affected: Codex starts its MCP servers outside the sandbox. A Codex setup that
+# grants all of that anyway can set MCOMP_CODEX_SANDBOX=allow.
+if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then
+  case "${1:-help}" in
+    help|-h|--help) ;;
+    *) printf '%s\n' "metacomputer: this command is running inside Codex's sandbox ($CODEX_SANDBOX), which blocks what metacomputer needs on this Mac (its state folders, the VM's SSH port, the hub's and the vault's sockets). Nothing was run." \
+         "Run it outside the sandbox: ask for escalated permissions for this command, or add metacomputer's Codex rules (install.sh does it; docs/codex.md) so everyday metacomputer commands run outside it. The metacomputer MCP tools aren't affected." >&2
+       exit 77 ;;
+  esac
+fi
 MC_VM_SAID="$MCOMP_VM_ARG"; MC_ENV_VM="${MCOMP_VM:-}"; MC_ENV_CONFIG="${MCOMP_CONFIG:-}"; MC_ENV_NODEF="${MCOMP_NO_DEFAULT_VM:-}"
 MC_ENV_SAID="$MC_ENV_VM$MC_ENV_CONFIG"
 # The default computer (config/default-vm) is read by scripts/lib.sh as the VM a command acts on when none is named.

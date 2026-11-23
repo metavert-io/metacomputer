@@ -296,6 +296,9 @@ def main(cmd):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] in (["-h"], ["--help"]):
+        print(__doc__)          # usage only: no log key is made, nothing is started
+        sys.exit(0)
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         sys.exit(2)

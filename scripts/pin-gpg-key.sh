@@ -11,6 +11,7 @@
 # installing the whole file would let an appended key sign packages. GnuPG drops
 # subkeys without a valid binding signature from the primary key when it imports,
 # so a subkey grafted onto the pinned key is left out too.
+for mc_a in "$@"; do case "$mc_a" in -h|--help) sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;; esac; done  # usage only
 set -Eeuo pipefail
 [ $# -eq 3 ] || { echo "usage: $0 BUNDLE FPR OUT" >&2; exit 2; }
 src="$1" fpr="$(printf '%s' "$2" | tr 'a-f' 'A-F')" out="$3"

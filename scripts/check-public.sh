@@ -19,6 +19,7 @@
 # Paths to skip (globs, one per line) come from scripts/check-public.skip or check-public.skip. Lockfiles, certificates
 # and minified/map files are always skipped (their encoded text matches short terms by accident).
 # Exit status 1 when anything is found.
+for mc_a in "$@"; do case "$mc_a" in -h|--help) sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;; esac; done  # usage only
 set -uo pipefail
 repo=. all_refs=
 while [ $# -gt 0 ]; do

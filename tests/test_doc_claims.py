@@ -782,6 +782,17 @@ CLAIMS = [
      lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("bin/metacomputer")
      and f"exit {m[1]} ;;" in raw("bin/metacomputer")),
     ("docs/codex.md", r"with `tool_timeout_sec = (\d+)`", lambda m: f"CODEX_TOOL_TIMEOUT={m[1]}" in raw("install.sh")),
+    # --help and -h: the usage, before the settings are read or anything runs (tests/test_help.py runs every form)
+    ("docs/commands.md", r"`--help` or `-h` anywhere in a command \(after it, its subcommand or its arguments, before a "
+                         r"`--`\) prints that command's usage and exits 0 without doing anything: no settings are read",
+     lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"') < raw("bin/metacomputer").index('. "$LIB"')
+     and raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
+     < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')
+     and 'case "$a" in --) return 1 ;; -h|--help) return 0 ;; esac' in raw("bin/metacomputer")
+     and "test_help" in raw("scripts/release.sh")),
+    ("docs/codex.md", r"one that only asks for its usage \(`--help` or `-h`\) prints it, since it runs nothing",
+     lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
+     < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')),
     ("SECURITY.md", r"\*\*Recognising agent sessions is best-effort defense in depth.\*\*.*?So it is never what an approval that "
                     r"matters rests on: those also\s+need you present, Touch ID \(or macOS's login-password dialog\) in "
                     r"presence mode, or the confirmation typed at the\s+terminal where you unlocked the vault",

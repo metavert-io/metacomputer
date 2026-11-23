@@ -14,6 +14,7 @@
 #   scripts/fetch-artifacts.sh rclone   only rclone, for S3-backed folder volumes (Mac side):
 #     SHA256SUMS signed by rclone's release key (fingerprint pinned; only that key kept),
 #     the zip's SHA-256 pinned and cross-checked, installed to .cache/rclone-vVERSION/rclone
+for mc_a in "$@"; do case "$mc_a" in -h|--help) sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;; esac; done  # usage only
 set -Eeuo pipefail
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR

@@ -608,6 +608,9 @@ def import_from_command(cmd, dest, max_bytes=None, min_free=0, timeout=600, env=
 
 
 def main(argv):
+    if any(a in ("-h", "--help") for a in (argv[:argv.index("--")] if "--" in argv else argv)):
+        print(__doc__)          # usage only: no DEST is made from it, and nothing is read
+        return 0
     cmd = None
     if "--" in argv:
         i = argv.index("--")
