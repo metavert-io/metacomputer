@@ -1952,7 +1952,7 @@ def test_codex_openai():
     try:
         lab = os.path.join(t, "lab")
         for rel in ("scripts/build-openai-plugin.py", "scripts/sync-plugin.py", "get.sh", "LICENSE",
-                    "THIRD_PARTY_NOTICES.md", "gemini-extension.json"):
+                    "THIRD_PARTY_NOTICES.md", "gemini-extension.json", "lib/strictargs.py"):   # (their command lines' rules)
             os.makedirs(os.path.dirname(os.path.join(lab, rel)), exist_ok=True)
             shutil.copy2(os.path.join(LAB, rel), os.path.join(lab, rel))
         for rel in ("plugin", "agent-plugin", ".agents", "skills/metacomputer", ".claude/skills/cua-driver"):

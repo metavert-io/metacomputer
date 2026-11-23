@@ -860,6 +860,7 @@ ENTRY = {
     "scripts/remote-build.sh": E("bash", [], "--keep-on-failure"),
     "scripts/safe-rmtree.sh": E("bash", [BOX + "/victim"], "--quiet", extra=False),
     "scripts/sync-plugin.py": E("py", [], "--check"),
+    "scripts/build-openai-plugin.py": E("py", [], None, ("--out", "x.zip")),
     "scripts/vendor-driver-skill.py": E("py", ["src"]),
     "scripts/verify-audit.py": E("py", ["f.jsonl"], "--quiet", ("--expect-start", "1"), extra=False),
     "scripts/vm-commands.sh": E("bash", []),
