@@ -2165,8 +2165,8 @@ CLAIMS = [
      and not os.path.exists(os.path.join(LAB, "plugin", "hooks"))),
     ("plugin/README.md", r"It changes no Claude Code permission settings",
      lambda m: not re.search(r"permission|(?<!\.gemini/)settings\.json|allowedTools", raw("install.sh"), re.I)
-     and raw("install.sh").count(".gemini/settings.json") == 1                # read only, by agent_config_mentions
-     and ".gemini/settings.json" in sh_function("install.sh", "agent_config_mentions")),
+     and raw("install.sh").count(".gemini/settings.json")                     # read only, by agent_config_mentions
+     == sh_function("install.sh", "agent_config_mentions").count(".gemini/settings.json") >= 1),
     ("plugin/README.md", r"metacomputer's MCP server for every project \(user scope, named `metacomputer`, running `~/\.local/bin/metacomputer mcp-lazy`",
      lambda m: 'claude mcp add -s user metacomputer "$CMD_LINK" mcp-lazy' in raw("install.sh")
      and 'CMD_LINK="$HOME/.local/bin/metacomputer"' in raw("install.sh")),

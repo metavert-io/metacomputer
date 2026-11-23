@@ -153,8 +153,8 @@ else:
 path = os.path.join(home, "stub-config.json")
 def load():
     return json.load(open(path)) if os.path.exists(path) else {}
-def save(d):
-    os.makedirs(home, exist_ok=True); json.dump(d, open(path, "w"))
+def save(d):                    # and as config.yaml (JSON is YAML), the file an uninstall without the CLI looks through
+    os.makedirs(home, exist_ok=True); json.dump(d, open(path, "w")); json.dump(d, open(os.path.join(home, "config.yaml"), "w"))
 def get(d, key):
     for k in key.split("."):
         if not isinstance(d, dict) or k not in d:
@@ -200,7 +200,8 @@ print("stub hermes: unhandled " + " ".join(a), file=sys.stderr); sys.exit(2)
 # there's none), `mcp add NAME --command C --arg A --timeout S --no-probe` (refuses a name that's there), `mcp unset NAME`,
 # `skills info NAME --json` (from ~/.agents/skills).
 OPENCLAW = COMMON + r'''
-path = os.path.join(os.environ["HOME"], ".openclaw", "openclaw.json")
+path = os.environ.get("OPENCLAW_CONFIG_PATH") or os.path.join(
+    os.environ.get("OPENCLAW_STATE_DIR") or os.path.join(os.environ["HOME"], ".openclaw"), "openclaw.json")
 def load():
     return json.load(open(path)) if os.path.exists(path) else {}
 def save(d):
@@ -726,6 +727,38 @@ def no_cli_cases():
         b.close()
 
 
+def other_profile_cases():
+    """Codex's last check: metacomputer set up in one profile (Hermes Agent's `work`, OpenClaw's ~/.openclaw-work), then
+    another selected (Hermes's unconfigured default, OpenClaw's own ~/.openclaw): --uninstall acts on the selected one,
+    and must still see the other, which runs the command, so the command links stay. With the agent's CLI there, without
+    it, and without Python."""
+    print("uninstall: metacomputer in another profile")
+    py = os.path.dirname(os.path.realpath(sys.executable))
+    for name in ("hermes", "openclaw"):
+        for how, extra in (("with its CLI", {}), ("without its CLI", {"PATH": f"{py}:/usr/bin:/bin"}),
+                           ("without Python", {"PATH": "/usr/bin:/bin", "MCOMP_BREW_PYTHON": "/nonexistent"})):
+            b = Box(agents=(name,))
+            try:
+                if name == "hermes":
+                    write(os.path.join(b.home, ".hermes", "active_profile"), "work")
+                    p = b.install("--only-hermes")
+                    other = os.path.join(b.home, ".hermes", "profiles", "work", "config.yaml")
+                    write(os.path.join(b.home, ".hermes", "active_profile"), "default")     # an unconfigured default
+                else:
+                    p = b.install("--only-openclaw", OPENCLAW_STATE_DIR=os.path.join(b.home, ".openclaw-work"))
+                    other = os.path.join(b.home, ".openclaw-work", "openclaw.json")
+                set_up = p.returncode == 0 and os.path.islink(b.link) and b.link in open(other).read()
+                before = open(other).read()
+                p = b.install("--uninstall", **extra)
+                check(f"{LABEL[name]}, {how}: metacomputer set up in another profile than the one selected; the "
+                      "uninstall keeps the command links that profile runs, says so, exit 1, and leaves that profile "
+                      "as it was", set_up and p.returncode != 0 and os.path.islink(b.link)
+                      and f"kept {b.link}" in p.stdout and open(other).read() == before,
+                      (set_up, p.returncode, p.stdout[-600:]))
+            finally:
+                b.close()
+
+
 def uninstall_error_cases():
     """Every unexpected error in an agent's uninstall step keeps the command links (its configuration wasn't checked),
     and says so: a lock file that is a link, a lock folder that can't be written."""
@@ -954,6 +987,7 @@ def main():
     profile_cases()
     no_cli_cases()
     uninstall_error_cases()
+    other_profile_cases()
     choice_cases()
     gemini_home_cases()
     package_cases()

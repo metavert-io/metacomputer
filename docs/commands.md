@@ -473,6 +473,9 @@ fixed, gives the line that fixes it, and says that `metacomputer update` tries a
 command (`~/.local/bin/metacomputer` and `mcomp`) while any MCP server that stays,
 any agent's (Claude Code's, Codex's, OpenClaw's, Hermes Agent's or Gemini CLI's), metacomputer's or not, runs it, or
 may: an agent's configuration that can't be read (its CLI missing, or no Python to read it) keeps them too, and says so.
+Every profile and configuration location of each agent is checked, not just the one its CLI has selected (Hermes
+Agent's profiles, OpenClaw's `~/.openclaw` and every `~/.openclaw-NAME`, Gemini CLI's settings with and without
+`GEMINI_CLI_HOME`): metacomputer set up in another profile keeps the command until it's removed there too.
 
 **Tool names.** `mcp__metacomputer__*`, the same as in Codex. Through v0.4.4 the plugin
 brought the server itself and the tools were `mcp__plugin_metacomputer_metacomputer__*`:

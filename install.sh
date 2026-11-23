@@ -831,13 +831,15 @@ agent_config_mentions() { # NAME: 0 when a file of the agent's configuration may
   # metacomputer or mcomp, can't be read or looked at, or includes other files: $include, !include): read without
   # Python, for an uninstall that can't run agent_setup.py
   local f g d
-  # Every profile folder (*/: those it can't look into too, which a glob for the file inside would leave out)
+  # Every profile and location (profile folders by */: those it can't look into too, which a glob for the file inside
+  # would leave out), whichever one the agent's CLI uses
   case "$1" in
-    gemini) set -- "${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json" ;;
+    gemini) set -- "${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json" "$HOME/.gemini/settings.json" ;;
     hermes) set -- "${HERMES_HOME:-$HOME/.hermes}/config.yaml" "$HOME/.hermes/config.yaml"
             for d in "$HOME"/.hermes/profiles/*/; do set -- "$@" "${d}config.yaml"; done ;;
-    openclaw) set -- "${OPENCLAW_CONFIG_PATH:-${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/openclaw.json}"
-              for d in "$HOME"/.openclaw-*/; do set -- "$@" "${d}openclaw.json"; done ;;
+    openclaw) set -- "${OPENCLAW_CONFIG_PATH:-${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME}/.openclaw}/openclaw.json}" \
+                     "${OPENCLAW_HOME:-$HOME}/.openclaw/openclaw.json" "$HOME/.openclaw/openclaw.json"
+              for d in "${OPENCLAW_HOME:-$HOME}"/.openclaw-*/ "$HOME"/.openclaw-*/; do set -- "$@" "${d}openclaw.json"; done ;;
   esac
   for f in "$@"; do
     if ! [ -e "$f" ] && ! [ -L "$f" ]; then

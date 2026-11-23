@@ -33,7 +33,9 @@ resolved once (`hermes config path`) and every command and the skills folder use
 ~/.local/bin/metacomputer and mcomp whenever an agent's configuration can't be inspected in full and may still run them
 (its CLI missing or refused: Gemini CLI's settings.json is read directly, all of it or it counts as maybe; the others'
 files are looked through for the names, and a file that includes others, is past the read, can't be read, or sits
-behind a folder that can't be searched or listed counts as maybe too), and on any unexpected error. The step's output, one line each, for install.sh: "ok TEXT", "warn TEXT", "say TEXT", and for --uninstall
+behind a folder that can't be searched or listed counts as maybe too), and on any unexpected error. With the CLI
+there, the profile it selects is acted on and every other profile and location is looked through the same way
+(_mentioned_elsewhere): metacomputer set up in another one keeps them. The step's output, one line each, for install.sh: "ok TEXT", "warn TEXT", "say TEXT", and for --uninstall
 "keep" when an entry that stays runs ~/.local/bin/metacomputer (or mcomp), so those stay too. Exit status: 0 finished,
 1 unfinished (install.sh records that in installed.json's "incomplete", so `metacomputer update` runs the step again),
 2 usage. Nothing printed holds a value from the agent's configuration but metacomputer's own command.
@@ -133,7 +135,8 @@ class Agent:
         return env, None
 
     def config_files(self, env):
-        """The files that may hold its MCP servers, for an uninstall that can't run its CLI."""
+        """Every file that may hold its MCP servers, the one its CLI acts on first (the profile in use), then every other
+        profile and configuration location: what an uninstall checks before the command may go."""
         return []
 
     def config_dirs(self, env):
@@ -190,7 +193,7 @@ class Gemini(Agent):
         return os.path.join(self.base(env), ".agents", "skills")
 
     def config_files(self, env):
-        return [self.settings(env)]
+        return _distinct([self.settings(env), os.path.join(home(env), ".gemini", "settings.json")])
 
     def read(self, prog, env):
         path = self.settings(env)
@@ -267,8 +270,9 @@ class Hermes(Agent):
 
     def config_files(self, env):
         root = os.path.join(home(env), ".hermes")
-        return ([os.path.join(env["HERMES_HOME"], "config.yaml")] if env.get("HERMES_HOME") else []) + \
-            [os.path.join(root, "config.yaml")] + [os.path.join(d, "config.yaml") for d in entries(os.path.join(root, "profiles"))]
+        return _distinct(([os.path.join(env["HERMES_HOME"], "config.yaml")] if env.get("HERMES_HOME") else []) +
+                         [os.path.join(root, "config.yaml")] +
+                         [os.path.join(d, "config.yaml") for d in entries(os.path.join(root, "profiles"))])
 
     def config_dirs(self, env):
         return [os.path.join(home(env), ".hermes", "profiles")]
@@ -315,15 +319,22 @@ class OpenClaw(Agent):
     def env(self, env):
         return dict(env, OPENCLAW_NO_AUTO_UPDATE="1")        # no update check for a quick command
 
+    def homes(self, env):
+        """The homes OpenClaw keeps its folders in: OPENCLAW_HOME (when set) and yours."""
+        return _distinct([env.get("OPENCLAW_HOME") or home(env), home(env)])
+
     def config_files(self, env):
-        if env.get("OPENCLAW_CONFIG_PATH"):
-            return [env["OPENCLAW_CONFIG_PATH"]]
-        state = env.get("OPENCLAW_STATE_DIR") or os.path.join(home(env), ".openclaw")
-        return [os.path.join(state, "openclaw.json")] + [os.path.join(d, "openclaw.json")
-                                                          for d in entries(home(env), ".openclaw-")]
+        # The one its CLI uses: OPENCLAW_CONFIG_PATH, else OPENCLAW_STATE_DIR's, else a named OPENCLAW_PROFILE's
+        # (~/.openclaw-PROFILE), else ~/.openclaw's; then every other one: ~/.openclaw and every ~/.openclaw-NAME.
+        base, prof = self.homes(env)[0], env.get("OPENCLAW_PROFILE") or ""
+        state = env.get("OPENCLAW_STATE_DIR") or os.path.join(
+            base, f".openclaw-{prof}" if prof and prof != "default" else ".openclaw")
+        return _distinct([env.get("OPENCLAW_CONFIG_PATH") or os.path.join(state, "openclaw.json")] +
+                         [f for h in self.homes(env) for f in [os.path.join(h, ".openclaw", "openclaw.json")] +
+                          [os.path.join(d, "openclaw.json") for d in entries(h, ".openclaw-")]])
 
     def config_dirs(self, env):
-        return [] if env.get("OPENCLAW_CONFIG_PATH") else [home(env)]
+        return self.homes(env)
 
     def read(self, prog, env):
         rc, out, err = self.run([prog, "mcp", "show", NAME, "--json"], env)
@@ -481,6 +492,16 @@ def agent_lock(name, env):
         yield
     finally:
         os.close(fd)
+
+
+def _distinct(paths):
+    seen, out = set(), []
+    for p in paths:
+        k = os.path.normpath(p)
+        if k not in seen:
+            seen.add(k)
+            out.append(p)
+    return out
 
 
 def entries(folder, prefix=""):
@@ -683,10 +704,21 @@ def _unregister(agent, prog, root, link, env, out):
     return False
 
 
+def _mentioned_elsewhere(agent, env):
+    """The agent's other configuration (every profile and location but the one its CLI just acted on) that may run
+    metacomputer's command (mentions) or hides what it holds (unlisted): [(path, why)]."""
+    files = agent.config_files(env)
+    active = os.path.normpath(files[0]) if files else None
+    found = [(f, mentions(f)) for f in files if os.path.normpath(f) != active]
+    found += [(d, unlisted(d)) for d in agent.config_dirs(env)]
+    return [(f, why) for f, why in found if why]
+
+
 def uninstall(agent, root, link, env, out):
     """Remove what this checkout set up for one agent: its MCP server when it's metacomputer's own and runs this
     checkout (read again right before, and checked after), and the skill links metacomputer made. An entry that can't be
-    read keeps the command links (keep). True when it finished."""
+    read keeps the command links (keep), and so does any other profile or configuration location of the agent's that
+    may run the command or can't be read, whether or not its CLI is there. True when it finished."""
     prog, _ = agents.trusted(agent.prog)
     if prog:
         env, why = agent.pin(prog, env)
@@ -707,6 +739,16 @@ def uninstall(agent, root, link, env, out):
                 except OSError:
                     out("warn", f"couldn't remove the {name} skill link in {tilde(sdir, env)}")
                     finished = False
+            # Whatever profile the CLI acted on, every other one is checked too (without the CLI, _unregister looked
+            # through them all): one that may still run the command keeps it.
+            elsewhere = _mentioned_elsewhere(agent, env) if (prog is not None or agent.reads_files) else []
+            if elsewhere:
+                out("warn", f"{agent.label}'s other configuration may run metacomputer's command "
+                            f"({'; '.join(tilde(f, env) + ' ' + why for f, why in elsewhere)}), so it stays; remove "
+                            "metacomputer's MCP server there too (that profile selected), then run ./install.sh "
+                            "--uninstall again")
+                out("keep", f"{agent.label}'s")
+                finished = False
     except Busy:
         out("warn", f"another metacomputer install is changing {agent.label}'s setup right now, so it was left as it "
                     "is; run ./install.sh --uninstall again")

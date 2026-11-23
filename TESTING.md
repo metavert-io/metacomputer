@@ -1263,7 +1263,10 @@ Each of these needs no VM and takes seconds.
   does a configuration it can't read in full (OpenClaw's `$include` of another file, a file past the 16 MB read,
   OpenClaw's folder that can't be searched and Hermes Agent's profiles folder that can't be listed, and one profile
   folder among others that can't be looked into (a Hermes profile, an OpenClaw ~/.openclaw-NAME), with Python and
-  without; Gemini CLI's settings.json past the 4 MB its reader takes); and an unexpected error in an agent's uninstall step (its lock file a link, its lock folder not
+  without; Gemini CLI's settings.json past the 4 MB its reader takes); metacomputer set up in another profile than
+  the one selected (Hermes Agent's `work` with its unconfigured default selected, OpenClaw's ~/.openclaw-work) keeping
+  the command, that profile left as it was, with the agent's CLI there, without it, and without Python; and an
+  unexpected error in an agent's uninstall step (its lock file a link, its lock folder not
   writable) keeping the command too, said, until a run that works removes it. The
   recognition of their sessions is test_session_guard's (stand-in processes as `ps` shows each agent, a titled Hermes,
   a path with spaces, the shared cases in tests/fixtures/agent_argv.json, and an interpreter whose arguments can't be
