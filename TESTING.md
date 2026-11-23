@@ -1028,8 +1028,9 @@ Each of these needs no VM and takes seconds.
   messages and errors) and `record moments`; `web --json` stays exact. With a fake
   `ssh` writing escape sequences on stdout and stderr: `record start`, `record status`,
   `status` (the guest's report and the probes), `inspect --json`
-  (written again as ASCII-only JSON) and `input-reset` on a terminal show them
-  escaped, SSH's stderr included, and `input-reset` in a pipe stays exact; `record
+  (written again as ASCII-only JSON) on a terminal show them
+  escaped, SSH's stderr included; `input-reset` takes only a count from the VM (an answer
+  with escapes is refused, on a terminal and in a pipe, and none of it shown); `record
   start` passes the recorder's words on as they come (not held until it ends) and
   still fails when the recorder does; `status` shows a load average or memory figure
   that isn't numbers as `?`, never its keys raw, and a 401-digit one as `?` rather
@@ -1042,7 +1043,7 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (176 checks, about two minutes): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (226 checks, about two minutes): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
@@ -1053,7 +1054,18 @@ Each of these needs no VM and takes seconds.
   future modification time doesn't stretch it, or from the first failure when nothing about the file can be
   read), `sh` refused with or without `--override` and also when the handoff opens after its admission check
   (nothing runs), `web`'s Firefox cleanup left alone, `secrets fill`, `login`, `session load` and `input-reset`
-  stopped (exit 4) with the vault never asked, `secrets approve` of a waiting one-time code request stopped too
+  stopped (exit 4) with the vault never asked, `input-reset` at the user's own terminal going ahead during their
+  handoff (a stand-in ssh; an agent with a terminal of its own and a run without one still stopped, `--check`
+  recording nothing, exit 3 when it can't be known whether an agent call runs, as with `MCP_HUB=off`), the driver's
+  leftover input devices (lib/input_reset.py, a stand-in guest): the guest's answer read with limits (one count; SSH
+  failing, too long, too slow), every reset recorded before the guest is asked (a lost answer stays recorded, a
+  confirmed 0 puts the earlier record back, no record no reset), in-flight unknown with `MCP_HUB=off` and with a
+  driver connection no shared hub owns (a stand-in ssh with the MCP key), opening a
+  handoff resetting them once with the record written, the dispatch lock held exclusively and the reset recorded, and
+  saying so, a failed reset still opening it with what to run, waiting for acting calls in flight and, when one is
+  still running or that can't be known, removing nothing and saying the reset is pending, and `view --open`'s rules
+  (the lock held exclusively; never with an agent call in flight or `MCP_HUB=off`; no other active controller or open
+  handoff unless at the user's own terminal; before Screen Sharing opens), `secrets approve` of a waiting one-time code request stopped too
   (`--json` before or after the id, `--scope`, a list that can't be read, an id it doesn't show) while an approval
   the list shows as another kind goes on, `give`, `fill --request` and a code `approve` passing this VM to the vault
   (and `approve` naming another VM refused), a fill naming another VM refused, a handoff that can't open
@@ -1100,13 +1112,16 @@ Each of these needs no VM and takes seconds.
   run directly shows nothing when the setting is off or unset, over SSH, outside the
   screen session, for another id or for a handoff the record says was opened at a
   terminal, and shows it when the rules allow.
-- `MCOMP_CONFIG=TEST_ENV python3 tests/test_handoff_vm.py` (18 checks, a test VM only; it starts the VM if
-  it's off and stops it again): Claude's handoff opens without a terminal and waits; meanwhile an acting call
+- `MCOMP_CONFIG=TEST_ENV python3 tests/test_handoff_vm.py` (23 checks, a test VM only; it starts the VM if
+  it's off and stops it again): a background scroll in Mousepad leaves the driver's "CUA v1.…" pair; a handoff opened
+  while slow background typing still runs removes nothing (the typing finishes) and says the reset is pending; Claude's
+  handoff opens without a terminal, removes it and says so, and waits; meanwhile an acting call
   through the hub is refused ("Paused: the user has the computer"), reads work, `sh` is refused with or
   without `--override` (`--read-only` runs), `secrets fill`, a fill naming another VM, `input-reset` (not
-  `--check`) and `stop` are refused, `release` leaves it and
+  `--check`) and `stop` are refused, the user's own `input-reset` runs, `release` leaves it and
   the asking session can't say done; then the user's done at a pseudo-terminal ends it, the waiting command
-  returns 0 with the note, the same acting call goes through, and the events are there without the note.
+  returns 0 with the note, the same acting call goes through, the same driver session's next background input
+  works at once and makes a new pair (the hub reconnected the driver), and the events are there without the note.
   Events go to a temporary folder, never your sinks.
 - `python3 tests/test_owners.py` (22 checks): a `metacomputer sh` claim made outside
   Claude Code outlives its short-lived shell for the activity window, counts as the same
@@ -1347,7 +1362,7 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (285 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (349 checks, about 2 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
@@ -1408,6 +1423,31 @@ insides can be checked) or as their own process, in a temporary RUN_DIR. It chec
   graceful close of a client marked inactive before its detach still waits, and the
   close's own fallback ends the connection only under the dispatch lock (a handoff open
   by then keeps it);
+- after an input reset (lib/input_reset.py): which calls may use the driver's own devices (each step by its
+  effective mode, `BACKGROUND` under a foreground batch included); the reset's record written whole (a link there
+  replaced); a fresh driver connection before the next such call once the connection has used them, never for reads
+  or all-foreground input, once per reset, and not for a reset recorded before the connection began using them; no
+  request tears it down (`metacomputer/renew` from a status client or any other); a token from before the reconnect
+  refused (`element_token_stale`), not sent, and a fresh read's token working; a token kept from before a completed
+  renewal refused though the new driver reused its snapshot id (a Chrome-targeted call too, before the Chrome guard);
+  clients seeing only the hub's ids and the driver getting its own back (run_steps steps, `since`, run_script), and ids
+  the hub never handed out refused in named fields; in run_script only whole issued ids translated (`return
+  "sdeadbeef"` works); a script's `{data: await app.getState()}` translated in both the structured and the text copy;
+  the envelope (a response id `request-s00000001`) and other strings never touched; an answer naming 200,000 snapshots
+  refused whole (`snapshot_ids_too_many`) with the map unchanged; reads never renewing or claiming (a read's token
+  refused after the first renewing input, a fresh read's working; no claim for an observer even when a renewal would
+  be refused); a call whose session was released while it waited in a guard, with another controller active by
+  then, refused at dispatch with no restart and nothing sent; a recording started in one session and stopped in
+  another holding nothing; with the translation map full, every token of an answer naming the oldest mappings and new
+  ones translating back; a session the hub ends itself releasing its browser; a call
+  still running after the wait:
+  no reconnect, the input refused (`input_reset_busy`) and the running call finishing; a reset made while a call
+  waits at the dispatch lock seen there; a recording that starts during the wait seen (nothing torn down); with a
+  driver recording running, such input refused (`input_reset_recording`, nothing sent) and foreground input going on,
+  then the reconnect after `stop_recording`; the same while a browser `browser_prepare` launched is open, until its
+  session ends, and not for one it only attached to; the hub's own reset under the dispatch lock held exclusively,
+  recorded first (a lost answer stays recorded), and not while a call runs or with `MCP_HUB=off`; the status's count
+  of acting calls;
 - the Chrome guard for every kind of client: `set_value` and `run_script`
   aimed at Chrome refused before the driver, input sent in the foreground;
 - human pacing (`BROWSER_PACING`, `lib/pacing.py`): `type_text` into Firefox and Chrome gets a pause between
@@ -1676,8 +1716,8 @@ update the row with the doc's new wording. What it pins:
   is marked concealed and transient; `view --tailnet` runs nothing through Tailscale but
   `status --json`;
 - handoffs: the hub's refusal and its code (`user_has_computer`), `sh` refusing before
-  `--override` is looked at, the fills and `input-reset` holding the dispatch lock with the
-  guard (and `--vm` checked), the places that look again under `owners.acting()`, opening's
+  `--override` is looked at, the fills holding the dispatch lock with the guard (and `--vm`
+  checked), every input reset made under it held exclusively, recorded first and never with a call in flight, the places that look again under `owners.acting()`, opening's
   exclusive lock and its 40 s wait, the 15-minute default and 2-hour longest time limit,
   and the 2 hours an unreadable record counts, from its change time;
 - the gateway: each refusal docs/guide.md, architecture.md and the README name is a

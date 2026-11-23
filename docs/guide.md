@@ -811,7 +811,7 @@ the computer", and so do `metacomputer sh` (but `--read-only`), `metacomputer
 claude`'s `start`, `send`, `keys`, `show` and `stop` (an inner Claude that's
 working carries on with what it was given; its keeper stops renewing its hold on
 the computer), fills and
-session loads from the vault, `input-reset`, and `stop`, `reset` and the other
+session loads from the vault, `input-reset` (but at your own terminal), and `stop`, `reset` and the other
 commands that check for other controllers (`--override` still goes ahead on
 those, as it does for another session). The hub's own cleanup waits too, and it
 keeps its connection to the VM (no idle exit, no restart), so the browser you're
@@ -823,7 +823,19 @@ run) finishes ([SECURITY.md](../SECURITY.md#handing-the-computer-to-you-metacomp
 
 Opening a handoff waits for anything already on its way to the VM: a call being
 sent, a shell run starting, or a fill from the vault, which counts from its start
-until it ends, approval included. After 40 seconds it gives up and says why;
+until it ends, approval included.
+
+Opening it also gives the live view's mouse and keyboard back: Claude's background
+clicks and typing go through virtual input devices of the driver's own, which it
+keeps, and while they exist Chrome ignores your keyboard (and Firefox has been seen
+ignoring your mouse and keyboard). The handoff removes them and says so. If one
+of Claude's actions is still running in the VM, it leaves them (removing them could
+cut that action off) and says the reset is pending; if it can't remove them, it
+says to end the handoff and run `metacomputer input-reset`. Either way, that
+command also runs in your own terminal while the handoff is open, once nothing of
+Claude's is still running. `metacomputer view --open` removes them too when no
+Claude action is running. Claude's next action after the handoff makes new ones;
+nothing to do on your side. After 40 seconds it gives up and says why;
 Claude then waits for that to finish and hands over again. If a fill ended
 without the vault confirming that it stopped, the handoff first runs
 `metacomputer secrets settle`, and refuses until that confirms.
@@ -1297,7 +1309,7 @@ Problems during the install are in [install.md](install.md#troubleshooting).
 | Screen Sharing rejects the password | It wants the live-view password, not your Mac's. `metacomputer view --open` brings the password Screen Sharing remembers up to date; `view --open --no-remember` puts it on the clipboard for 45 s instead (paste with Cmd+V). |
 | `view --open` says it needs the Mac's own screen | You're in over SSH. Run it in Terminal on the Mac's screen (in person, or through Screen Sharing or another remote-desktop app), or use the SSH tunnel `metacomputer view` prints, or `view --tailnet`. |
 | A site's "Verify you are human" check keeps failing or looping | The site is refusing the VM's automated browser (page-mode Chrome is driven through DevTools). Do that step on your own computer; Claude won't try to get around it ([Known limitations](#known-limitations)). |
-| Chrome ignores typing | `metacomputer input-reset`. |
+| Chrome ignores typing, or the live view ignores your mouse or keyboard | `metacomputer input-reset` (in your own terminal it also runs while a handoff is open). |
 | An app stops answering (`atspi_app_unresponsive`) | It has to be closed (`kill_app`). `metacomputer desktop-restart` logs the desktop out and in, which closes every app. |
 | A call is refused as "outside the capability manifest" | Bounded mode is on. Choose another `DRIVER_PROFILE`, or allow it in your own `DRIVER_MANIFEST`. |
 | "Cua Driver's bounded session has ended" | Reconnect the MCP server with `/mcp` (`DRIVER_EXPIRES`, `DRIVER_IDLE`). |

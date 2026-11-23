@@ -64,7 +64,7 @@ _CS_DARWIN_USER_TEMP_DIR = 65537
 EXEMPT = {"help", "-h", "--help", "where", "setup", "update", "version", "vm", "list", "default", "events", "notify",
           "learn", "actions", "agents", "each", "mcp", "mcp-lazy", "volume", "refdisk", "contact-sheet",
           "checkpoints"}                                    # checkpoints: the runner's list on the Mac
-READS = {"who", "status", "inspect", "logs", "get", "shot", "view"}     # whatever their arguments
+READS = {"who", "status", "inspect", "logs", "get", "shot"}     # whatever their arguments
 ACTS = {"start", "stop", "restart", "reset", "restore", "baseline", "checkpoint", "build", "desktop-restart", "test",
         "call", "web", "put", "rename", "sh", "ssh", "task", "release"}
 HELP = ("-h", "--help", "help")
@@ -88,6 +88,14 @@ def _recordings(a):     # do_recordings: --sync anywhere copies (and then may re
 
 def _input_reset(a):    # do_input_reset: only the first argument counts; --check there checks and removes nothing
     return "read" if _first(a) == "--check" else "act"
+
+
+def _view(a):           # do_view, any order: --open (and plain view, which opens at a terminal on the Mac's screen)
+    if "--open" in a:   # first removes the agent's leftover input devices in the VM (lib/input_reset.py for_view)
+        return "act"
+    if "--print" in a or "--tailnet" in a:
+        return "read"
+    return "exempt" if "--forget" in a or "--remember" in a else "act"   # those two only touch the Mac's keychain
 
 
 def _record(a):         # do_record: the first argument, status when there's none; moments reads a file on the Mac
@@ -132,7 +140,7 @@ def _secrets(a):        # do_secrets: the vault's subcommand first, status when 
     return "act"
 
 
-FORMS = {"security": _security, "recordings": _recordings, "input-reset": _input_reset, "record": _record,
+FORMS = {"security": _security, "recordings": _recordings, "input-reset": _input_reset, "view": _view, "record": _record,
          "browser": _browser, "hub": _hub, "claude": _claude, "handoff": _handoff, "net": _net, "trace": _trace,
          "secrets": _secrets}
 

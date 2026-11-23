@@ -1392,11 +1392,15 @@ do_rename() { # GUEST_PATH NEW_NAME: rename a file in the VM (e.g. a download sa
   echo "$dst"
 }
 
-do_input_reset() { # [--check]: remove the driver's leftover virtual input devices (Chrome's keyboard)
+do_input_reset() { # [--check]: remove the driver's leftover virtual input devices (lib/input_reset.py for_cli)
   need_running
-  [ "${1:-}" = --check ] || handoff_hold   # removing them acts on the desktop: not while the user has it
-  local n; n="$(gssh ops "/opt/metacomputer/bin/input-reset ${1:-}")" || die "input reset failed (xinput missing? rebuild the VM)"
-  printf '%s\n' "$n" | term_safe
+  case "${1:-}" in ""|--check) [ $# -le 1 ] || die "usage: metacomputer input-reset [--check]" ;;
+    *) die "usage: metacomputer input-reset [--check]" ;; esac
+  # Made as every reset is: under the dispatch lock held exclusively, never while an agent call is still running in the
+  # driver, recorded first; during a handoff only from the user's own terminal (their mouse and keyboard; exit 4 else).
+  ssh_base ops
+  export_options
+  exec "$PY" "$LAB_ROOT/lib/input_reset.py" reset ${1:+"$1"} --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}"
 }
 
 do_desktop_restart() { # [--override]: log the desktop session out and back in (closes every app)
@@ -1980,6 +1984,16 @@ EOF
   else
     warn "the password isn't on the clipboard; when Screen Sharing asks, read it with: $(vnc_password_hint)"
   fi
+  # The driver's leftover virtual input devices go first, when that can't disturb an agent (lib/input_reset.py
+  # for_view: under the dispatch lock held exclusively, nothing in flight, one controller at a time unless you run it
+  # yourself).
+  if ( ssh_base ops ) >/dev/null 2>&1; then
+    ssh_base ops
+    ( export_options
+      "$PY" "$LAB_ROOT/lib/input_reset.py" view --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" ) || true
+  else
+    warn "couldn't set up SSH to the VM, so the agent's leftover virtual input devices were left as they are (metacomputer input-reset)"
+  fi
   open "vnc://127.0.0.1:$VNC_PORT" || die "couldn't open Screen Sharing (vnc://127.0.0.1:$VNC_PORT)"
   echo "Opening the live view in Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
   return $failed
@@ -2292,9 +2306,14 @@ case "$cmd" in
   who)        do_who "$@" ;;
   notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
   handoff)    export_options
-              case "${1:-}" in done|cancel|wait|status|guard|-h|--help) ;;
-                *) MCOMP_VM_STATE="$(vm_running "$VM_NAME" && echo running || echo off)"; export MCOMP_VM_STATE ;; esac
-              exec "$PY" "$LAB_ROOT/lib/handoff.py" "$@" ;;
+              case "${1:-}" in done|cancel|wait|status|guard|-h|--help) exec "$PY" "$LAB_ROOT/lib/handoff.py" "$@" ;; esac
+              MCOMP_VM_STATE="$(vm_running "$VM_NAME" && echo running || echo off)"; export MCOMP_VM_STATE
+              # Opening one removes the driver's leftover input devices over this SSH command (lib/input_reset.py);
+              # when it can't be set up (SSH_AUTH=cert without its CA), the handoff opens anyway: --transport 0.
+              if ( ssh_base ops ) >/dev/null 2>&1; then ssh_base ops
+                exec "$PY" "$LAB_ROOT/lib/handoff.py" --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
+              fi
+              exec "$PY" "$LAB_ROOT/lib/handoff.py" --transport 0 "$@" ;;
   events)     export_options
               if [ "${1:-}" = watcher ]; then do_events_watcher "${2:-status}"; exit $?; fi
               "$PY" "$LAB_ROOT/lib/events.py" "$@"; rc=$?

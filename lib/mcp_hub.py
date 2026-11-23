@@ -49,6 +49,7 @@ import json
 import math
 import os
 import re
+import secrets
 import select
 import signal
 import socket
@@ -68,6 +69,7 @@ import botcheck  # noqa: E402
 import traces  # noqa: E402
 import hub_notes  # noqa: E402
 import labconfig  # noqa: E402
+import input_reset  # noqa: E402
 import owners  # noqa: E402
 import pacing  # noqa: E402
 import wirelimits  # noqa: E402
@@ -236,6 +238,99 @@ TARGET_CONFLICT = (
     "tokens with its own pid and window_id.")
 UNKNOWN_TARGET = {"token": (TOKEN_UNKNOWN, TOKEN_CODE), "window": (WINDOW_UNKNOWN, "window_unknown"),
                   "conflict": (TARGET_CONFLICT, "target_conflict")}
+
+# --- after an input reset (lib/input_reset.py) -----------------------------------------
+# A reset (opening a handoff, view --open, `metacomputer input-reset`, the Chrome guard's) removes the driver's
+# "CUA v1.…" pairs, under the dispatch lock held exclusively and recorded before it starts (owners.mark_input_reset).
+# Cua Driver 0.53.0 keeps each session's pair id in its process, and the next pointer action of a session whose pair
+# is gone ends the driver (Xlib's XI_BadDevice on XIWarpPointer), with the call left waiting. A new driver process
+# makes a new pair, so before a call that may go through the driver's own devices is sent, under the dispatch lock
+# and the hub's send gate, in the same critical section as the send (Hub.before_send): when a reset was recorded after
+# this connection began using its devices (stale_after_reset), the hub reconnects first (renew_after_reset), only
+# once nothing is running in the driver and nothing would end with it (a driver recording, a browser browser_prepare
+# started); otherwise the call is refused. A call whose element tokens were checked against another driver runtime is
+# refused (read again), never sent. Nothing else tears the connection down for a reset: there's no request for it.
+DEVICE_TOOLS = INPUT_TOOLS | {"set_value", "run_steps", "run_script"}
+ALWAYS_DEVICES = {"run_script", "mouse_button_down", "mouse_drag", "mouse_button_up", "parallel_mouse_drag"}
+RENEW_WAIT_S = 5.0          # calls still running on the old connection get this long to end; then nothing is torn down
+RESET_RECORDING = (
+    "Refused by the metacomputer bridge: the virtual computer's input devices were reset (a handoff or `metacomputer "
+    "input-reset`) while the driver holds something that ends when it restarts (a driver recording, or the browser "
+    "browser_prepare started). It has to restart before its next background pointer or keyboard input. Send this with "
+    "delivery_mode \"foreground\" (it goes through the desktop's own pointer and keyboard), or stop_recording first "
+    "when it's a recording.")
+RESET_BUSY = (
+    "Refused by the metacomputer bridge: the virtual computer's input devices were reset (a handoff or `metacomputer "
+    "input-reset`), so the driver has to restart before its next background pointer or keyboard input, but a call is "
+    "still running in it, and restarting would cut that call off. Nothing was sent. Send this again once that call has "
+    "ended, or with delivery_mode \"foreground\".")
+TOKEN_STALE = (
+    "Refused by the metacomputer bridge: an element token or snapshot id in this call isn't one the current driver "
+    "handed out (the driver restarted since it was read, after an input reset or a reconnect, or it was never read "
+    "through this hub). Nothing was sent. Read the window again (get_window_state) and use a token from that read.")
+TOKEN_STALE_SC = {"code": "element_token_stale", "effect": "refused", "hint": "get_window_state, then use its tokens"}
+
+# --- element tokens and snapshot ids, per driver runtime ------------------------------------------------------------
+# Cua Driver 0.53.0 numbers its snapshots from s00000001 in every process, so after the hub reconnects, the token a
+# client kept ("s00000001:12") would name a row of whatever the new driver read first. The hub therefore hands out its
+# own snapshot ids, one per (runtime, driver snapshot id): same shape ("s" and 8 hex digits, so the tools' schemas
+# still hold), numbered from a random base far above the driver's counter and never reused while the hub runs. A token
+# is <snapshot id>:<row>, so only the snapshot id is translated. On the way out (tag_ids) only named fields are
+# rewritten (snapshot_id, since, element_token, anywhere in the structured result, `data` included) and, in the text,
+# only the exact lines the driver writes (TEXT_FORMS); never the JSON-RPC envelope or any other string. An answer that
+# names more than TAG_MAX_IDS snapshots is refused whole rather than passed on half translated. Ids anywhere else (a
+# driver line quoted inside another string, a list of invalidated snapshots) stay the driver's: unknown to the hub, so
+# refused if a client sends one back. On the way in
+# (untag_ids) the same fields are translated back, and one from another runtime, or one the hub never handed out, is
+# refused (element_token_stale) before any guard looks at the call; in run_script's script only whole ids the hub
+# issued for the current runtime are translated, and every other string is left as it is (an id that isn't the
+# driver's is simply unknown to it). Clients only see the hub's ids; the guards, traces and the driver only the driver's.
+SID_FULL = re.compile(r"s[0-9a-f]{8}")
+TOKEN_FULL = re.compile(r"(s[0-9a-f]{8}):([0-9]{1,9})")
+SID_WORD = re.compile(r"(?<![A-Za-z0-9_$])s[0-9a-f]{8}(?![A-Za-z0-9_$])")
+SID_FIELDS = ("snapshot_id", "since")                 # fields that hold a snapshot id; element_token holds a token
+TEXT_FORMS = (                                        # the driver's own lines, and the JSON copy of its fields
+    # a line of the driver's own ("window_id=… snapshot_id=s…"): from a real line start, no quote or backslash before
+    # it, so the same words inside a JSON copy (an escaped string) are left as they are, as in the structured copy
+    re.compile(r"^([^\n\"\\]*?(?<![A-Za-z0-9_])snapshot_id=)(s[0-9a-f]{8})(?![0-9a-f])", re.M),
+    re.compile(r"^(element_token for row \[N\] = )(s[0-9a-f]{8})(:N \(row \[[0-9]{1,9}\] is \")(s[0-9a-f]{8})(:[0-9]{1,9}\"\))",
+               re.M),
+    re.compile(r'("(?:snapshot_id|since)"\s*:\s*")(s[0-9a-f]{8})(")'),
+    re.compile(r'("element_token"\s*:\s*")(s[0-9a-f]{8})(:[0-9]{1,9}")'),
+)
+TAG_MAX_IDS = 4096           # distinct snapshot ids one answer may name (a read names one; a batch a few)
+SID_MAP_MAX = 20000          # the hub's ids it remembers (the oldest go: a token that old is refused, read again)
+TAG_TOO_MANY = (
+    "The metacomputer bridge couldn't pass this answer on: it names more than %d snapshots, and the hub hands out its "
+    "own snapshot ids (one per driver runtime), so it would have to translate them all. The call itself ran. Read what "
+    "you need with a narrower read (a query, or one window).")
+
+
+def _foreground(v):
+    """A delivery_mode the driver takes as foreground (its own normalisation: case and spaces don't matter)."""
+    return isinstance(v, str) and v.strip().lower() == "foreground"
+
+
+def may_use_devices(name, args):
+    """Whether a call may go through the driver's own virtual pointer or keyboard: any input that isn't all in the
+    foreground, each run_steps step by its effective mode (its own, else the batch's), read as the driver reads it
+    (set_value has a foreground mode too; run_script and the raw mouse tools always may)."""
+    if name not in DEVICE_TOOLS:
+        return False
+    if name in ALWAYS_DEVICES:
+        return True
+    if name != "run_steps":
+        return not _foreground(args.get("delivery_mode"))
+    top = _foreground(args.get("delivery_mode"))
+    for t, a in steps_of(args):
+        if t in ALWAYS_DEVICES:
+            return True
+        if t in DEVICE_TOOLS:
+            m = a.get("delivery_mode") if isinstance(a, dict) else None
+            if (m is None and not top) or (m is not None and not _foreground(m)):
+                return True
+    return False
+
 
 # --- coordinate guard ----------------------------------------------------------------
 # Pixel input is aimed from a screenshot. Cua Driver (0.52.1, 0.53.0) maps window-local x,y
@@ -727,6 +822,16 @@ class Hub:
         self.window_pid = collections.OrderedDict()  # window id -> guest pid
         self.snapshots = collections.OrderedDict()   # snapshot id -> (pid, window id, app name): whose tokens
         self.mpx_dirty = None       # None = unknown since connecting; True = a virtual-device route was used
+        self.input_used = False     # a call that may use the driver's own input devices was sent on this connection
+        self.reset_seen = 0.0       # owners.input_reset_at() when it began to (later resets make it stale)
+        self.driver_browsers = {}   # driver session label -> when browser_prepare launched a browser this runtime owns
+        self.send_gate = threading.RLock()   # every send to the driver, and a renewal's whole decision and teardown
+        self.sid_lock = threading.Lock()
+        self.sid_base = 0x10000000 + secrets.randbelow(0xc0000000)   # this hub's snapshot ids start here
+        self.sid_next = 0
+        self.sid_out = collections.OrderedDict()   # (generation, driver snapshot id) -> the hub's id
+        self.sid_in = collections.OrderedDict()    # the hub's id -> (generation, driver snapshot id)
+        self.settle_lock = threading.Lock()  # a call's completion and its bookkeeping (recordings, browsers) as one step
         self.refusals = {}          # tool -> times the driver refused it (bounded mode)
         self.layouts = collections.OrderedDict()     # (session, "w", wid) | (session, "desktop") -> layout at the last screenshot
         self.layout_pending = {}    # upstream id of a screenshot read -> its layout record
@@ -1017,6 +1122,17 @@ class Hub:
             if start:
                 self.deferred_thread.start()
 
+    def _session_ended(self, session, gen):
+        """The answer to an end_session the hub sent itself (a client that's gone): on success, what the session held
+        ends with it, as for an end_session a client sends (observe): its browser and its recording."""
+        def done(m):
+            res = m.get("result") if isinstance(m, dict) else None
+            if isinstance(res, dict) and not res.get("isError") and gen == self.up_gen:
+                with self.settle_lock:
+                    self.driver_browsers.pop(session, None)
+                    self.recordings.pop(session, None)
+        return done
+
     def flush_deferred(self):
         """Send the waiting end_session calls unless a handoff is open. True when nothing is left waiting."""
         with self.deferred_lock:
@@ -1028,7 +1144,7 @@ class Hub:
                 for session, gen, _t in items:
                     if gen == self.up_gen and self.connected():
                         self.ask_up_async("tools/call", {"name": "end_session", "arguments": {"session": session}},
-                                          lambda _m: None)
+                                          self._session_ended(session, gen))
             return True
         except (owners.HandoffOpen, OSError, TimeoutError):
             limit = time.monotonic() - owners.HANDOFF_MAX_S - 60      # none waits longer than the longest handoff
@@ -1400,6 +1516,9 @@ class Hub:
         self.window_pid.clear()
         self.snapshots.clear()          # a new driver runtime: earlier element tokens mean nothing
         self.mpx_dirty = None
+        self.input_used = False
+        self.reset_seen = 0.0
+        self.driver_browsers.clear()
         self.layouts.clear()
         self.layout_pending.clear()
         self.zooms.clear()
@@ -1740,20 +1859,24 @@ class Hub:
                     except Exception as e:
                         self.note(f"internal callback failed: {e!r}"[:300], kind="internal callback failed")
                 return True
-            with self.lease_lock:                    # removed, leased and finished under one lock (_pend_finished)
-                pend = self.pending.pop(key, None)
-            if not pend:
-                return True
-            self._pend_finished(key, pend)
-            added = self.reserve_names(msg)          # first: nothing from the VM may speak in the hub's name
-            try:
-                self.observe(pend, msg, key)
-            except Exception as e:  # never let bookkeeping break the relay
-                self.note(f"observe failed: {e!r}")
+            # A call's end and its bookkeeping (a recording started, a browser launched) are one step for a renewal
+            # deciding whether anything would end with the connection (renew_after_reset).
+            with self.settle_lock:
+                with self.lease_lock:                # removed, leased and finished under one lock (_pend_finished)
+                    pend = self.pending.pop(key, None)
+                if not pend:
+                    return True
+                self._pend_finished(key, pend)
+                added = self.reserve_names(msg)      # first: nothing from the VM may speak in the hub's name
+                try:
+                    self.observe(pend, msg, key)
+                except Exception as e:  # never let bookkeeping break the relay
+                    self.note(f"observe failed: {e!r}")
             if pend.get("orphan"):
                 return True
             out = dict(msg)
             out["id"] = pend["id"]
+            self.tag_ids(out, pend.get("gen"))   # the hub's runtime-specific ids, never the driver's (same length)
             pend["client"].send(self.fit_answer(out, None if size is None else size + added))
             return True
         if method is not None and mid is not None:     # the driver asks its client something: the hub answers
@@ -1884,6 +2007,10 @@ class Hub:
                 self.forward(client, msg)
 
     def forward(self, client, msg, pend_extra=None, pre=None):
+        with self.send_gate:                     # never in the middle of a renewal (before_send)
+            return self._forward(client, msg, pend_extra, pre)
+
+    def _forward(self, client, msg, pend_extra=None, pre=None):
         key = f"c{client.cid}.{next(self.ids)}"
         pend = {"client": client, "id": msg["id"], "method": msg.get("method"), "gen": self.up_gen, "t0": time.time()}
         pend.update(pend_extra or {})
@@ -1951,35 +2078,14 @@ class Hub:
         if err:
             self.tool_error(client, msg, err)
             return
+        gen0 = self.up_gen                       # the driver runtime the guards below check this call against
+        # The hub's element tokens and snapshot ids back to the driver's, for this runtime only: before any guard.
+        ok, uses_ids = self.untag_ids(name, args)
+        if not ok:
+            self.refuse(client, msg, TOKEN_STALE, TOKEN_STALE_SC)
+            return
         if acting:
-            busy = self.check_and_claim(client, name)
-            if busy is None:
-                self.refuse(client, msg, "The metacomputer bridge couldn't record that this session is using the "
-                                         "virtual computer, so it didn't pass the call on. Check "
-                                         f"`{CLI} who`, then call again.")
-                return
-            handoff = next((o for o in busy or () if o["kind"] == "handoff"), None)
-            if handoff:
-                # The user has the computer (metacomputer handoff): every client waits, this session included.
-                self.handoff_seen = time.time()
-                self.refuse(client, msg, owners.handoff_refusal(handoff), HANDOFF_REFUSED)
-                return
-            if busy:
-                lines = "\n".join("  - " + owners.describe(o) for o in busy)
-                self.event(client, "needs_you", "in_use",
-                           f"{client.agent or 'A client'} in {owners.short(client.cwd)} wants the virtual computer, but another "
-                           f"controller is using it: {owners.describe(busy[0])}",
-                           action="Let the other session finish, or run `metacomputer release` if it's done; "
-                                  "then tell your agent to carry on",
-                           data={"tool": name, "others": [{"kind": o.get("kind"), "project": o.get("cwd"),
-                                                            "idle_s": o.get("idle_s"), "last_tool": o.get("last_tool")}
-                                                           for o in busy[:5]]},
-                           debounce=f"bridge{client.peer_pid}")
-                self.refuse(client, msg, (
-                    "The virtual computer is in use by another controller:\n" + lines +
-                    "\nOnly one session should control it at a time. Ask the user before taking over; if they "
-                    f"agree, run `{CLI} release` and call again. Read-only tools still work. Don't reach it "
-                    f"another way (`{CLI} call`, a script or the shell): every way in has the same rule."))
+            if self.refuse_unless_owner(client, msg, name, self.check_and_claim(client, name)):
                 return
         elif client.has_claim:
             self.claim(client, name)
@@ -2032,12 +2138,25 @@ class Hub:
         ht = self.hidden_text_prepare(name, args) if self.hidden_on else None
         extra = {"tool": name, "args": args, "session": sess, "note": note, "acting": acting, "hidden_text": ht}
         if not acting:
-            self.forward(client, msg, extra, pre=pre)
+            with self.send_gate:
+                if self.up_gen != gen0 and uses_ids:
+                    self.refuse(client, msg, TOKEN_STALE, TOKEN_STALE_SC)
+                    return
+                self.forward(client, msg, extra, pre=pre)
             return
         # The guards above can wait on the VM (window lists, an input reset), and a handoff can open meanwhile: look
-        # once more right before the call leaves, under the dispatch lock, held across the send (owners.acting).
+        # once more right before the call leaves, under the dispatch lock, held across the send (owners.acting); what
+        # an input reset means for this call is decided there too, in the same critical section (before_send).
         try:
-            with owners.acting():
+            with owners.acting(), self.send_gate:
+                # Ownership again, in the same critical section as what follows (a renewal, the send): the guards
+                # above can wait, and meanwhile the user can release this session and another one take the computer.
+                if self.refuse_unless_owner(client, msg, name, self.check_and_claim(client, name)):
+                    return
+                refusal = self.before_send(name, args, gen0, uses_ids)
+                if refusal:
+                    self.refuse(client, msg, *refusal)
+                    return
                 self.forward(client, msg, extra, pre=pre)
         except owners.HandoffOpen as e:
             self.handoff_seen = time.time()
@@ -2102,6 +2221,39 @@ class Hub:
                          "client_pid": l["client_pid"], "claude_pid": l["claude"], "agent": l.get("agent"), "cwd": l["cwd"],
                          "last_tool": l["tool"], "idle_s": int(time.monotonic() - l["t0"])})
         return busy
+
+    def refuse_unless_owner(self, client, msg, name, busy):
+        """What check_and_claim said, as the caller's answer: True (and the call refused) unless this client holds the
+        computer: the claim couldn't be written, the user has it (a handoff), or another controller is using it."""
+        if busy is None:
+            self.refuse(client, msg, "The metacomputer bridge couldn't record that this session is using the "
+                                     "virtual computer, so it didn't pass the call on. Check "
+                                     f"`{CLI} who`, then call again.")
+            return True
+        handoff = next((o for o in busy or () if o["kind"] == "handoff"), None)
+        if handoff:
+            # The user has the computer (metacomputer handoff): every client waits, this session included.
+            self.handoff_seen = time.time()
+            self.refuse(client, msg, owners.handoff_refusal(handoff), HANDOFF_REFUSED)
+            return True
+        if busy:
+            lines = "\n".join("  - " + owners.describe(o) for o in busy)
+            self.event(client, "needs_you", "in_use",
+                       f"{client.agent or 'A client'} in {owners.short(client.cwd)} wants the virtual computer, but another "
+                       f"controller is using it: {owners.describe(busy[0])}",
+                       action="Let the other session finish, or run `metacomputer release` if it's done; "
+                              "then tell your agent to carry on",
+                       data={"tool": name, "others": [{"kind": o.get("kind"), "project": o.get("cwd"),
+                                                        "idle_s": o.get("idle_s"), "last_tool": o.get("last_tool")}
+                                                       for o in busy[:5]]},
+                       debounce=f"bridge{client.peer_pid}")
+            self.refuse(client, msg, (
+                "The virtual computer is in use by another controller:\n" + lines +
+                "\nOnly one session should control it at a time. Ask the user before taking over; if they "
+                f"agree, run `{CLI} release` and call again. Read-only tools still work. Don't reach it "
+                f"another way (`{CLI} call`, a script or the shell): every way in has the same rule."))
+            return True
+        return False
 
     def check_and_claim(self, client, tool):
         """[] after claiming the computer for this client; the other controllers when it's in use; None when the
@@ -2350,31 +2502,255 @@ class Hub:
         return bool(self.chrome_target(args))
 
     def input_reset(self):
-        """Remove leftover virtual device pairs in the guest. Returns a note or None. It acts on the desktop, so
-        not while the user has the computer: the call it was for is refused at its dispatch then."""
+        """The Chrome guard's reset: the driver's leftover virtual device pairs removed in the guest (lib/input_reset.py),
+        the way every reset is made. Under the dispatch lock held exclusively (no client of any hub sends meanwhile) and
+        this hub's send gate; not while the user has the computer (the call it was for is refused at its dispatch then);
+        never while a call is still running in the driver (or, with MCP_HUB=off, when other bridges' calls can't be
+        seen); recorded before it starts, so the next call that may use the devices gets a fresh driver first
+        (before_send). Returns a note or None."""
+        later = f"if Chrome ignores typing, run `{CLI} input-reset` once nothing else is running"
+        if self.local or input_reset.outside_connections(self.pid) is not False:
+            return ("left the driver's leftover virtual input devices as they are: another connection to the driver (a "
+                    "bridge with MCP_HUB=off, a script with a hub of its own) may be running a call, which removing "
+                    f"them could cut off; {later}.")
         try:
-            with owners.acting():
-                out = subprocess.run([MCOMP_CLI, "input-reset"], capture_output=True, text=True, timeout=30,
-                                     env=self.cli_env(MCOMP_HUB_PID=str(self.pid)))
-        except owners.HandoffOpen:
-            return None
-        except (OSError, TimeoutError, subprocess.TimeoutExpired) as e:
-            return f"could not check for leftover virtual input devices ({e})"
-        if out.returncode != 0:
-            return ("could not check for leftover virtual input devices "
-                    f"({(out.stderr or out.stdout).strip()[:160]}); if Chrome ignores typing, run "
-                    f"`{CLI} input-reset`.")
-        try:
-            removed = int((out.stdout.strip().split() or ["0"])[-1] or 0)
-        except ValueError:
-            removed = 0
+            with owners.dispatch(shared=False, timeout=owners.DISPATCH_WAIT_S):
+                if owners.open_handoff():
+                    return None
+                with self.send_gate:
+                    if any(p.get("acting") for p in list(self.pending.values())):
+                        return ("left the driver's leftover virtual input devices as they are: a call is still "
+                                f"running in it, which removing them could cut off; {later}.")
+                    n, why = input_reset.reset_now([MCOMP_CLI, "ssh", "ops"],
+                                                   env=self.cli_env(MCOMP_HUB_PID=str(self.pid)), capture_err=True)
+        except (OSError, TimeoutError) as e:
+            return f"could not check for leftover virtual input devices ({e}); {later}."
+        if n is None:
+            return f"could not remove leftover virtual input devices ({why}); {later}."
         self.mpx_dirty = False
-        if removed:
-            self.note(f"input-reset removed {removed} pair(s)")
-            return (f"removed {removed} leftover virtual input device pair(s) so Chrome accepts "
-                    "the keyboard. Background typing without an element token into other apps fails on this "
-                    "connection from now on; use delivery_mode \"foreground\" there.")
+        if n:
+            self.note(f"input-reset removed {n} pair(s)")
+            return (f"removed {n} leftover virtual input device pair(s) so Chrome accepts "
+                    "the keyboard. The driver connection starts again before its next background input to another "
+                    "app (its old pair is gone); read that window again then, since element tokens from before are stale.")
         return None
+
+    def stale_after_reset(self):
+        """True when a reset was recorded (owners.input_reset_at) after this connection began to use the driver's own
+        devices: its next pointer action through them would end the driver. Read under the dispatch lock (resets hold
+        it exclusively while they run and record)."""
+        return self.up is not None and self.input_used and owners.input_reset_at() > self.reset_seen
+
+    # --- the hub's own snapshot ids (see SID_FULL above) ------------------------------------------------------------
+    def _hub_sid(self, gen, dsid, pinned=()):
+        """The hub's id for the driver's snapshot dsid of runtime gen (made on first sight), or None when there's no room
+        for a new one without forgetting one in pinned (the hub ids the answer being built uses). Under sid_lock. The
+        two maps hold the same pairs and lose their oldest together, so an id the hub hands out always translates back."""
+        key = (gen, dsid)
+        hsid = self.sid_out.get(key)
+        if hsid is not None:
+            return hsid
+        while len(self.sid_in) >= SID_MAP_MAX:
+            old = next(iter(self.sid_in))
+            if old in pinned:
+                return None
+            okey = self.sid_in.pop(old)          # the oldest goes: a token that old is refused (read again)
+            self.sid_out.pop(okey, None)
+        self.sid_next += 1
+        hsid = "s%08x" % ((self.sid_base + self.sid_next) & 0xffffffff)
+        self.sid_out[key], self.sid_in[hsid] = hsid, key
+        return hsid
+
+    def tag_ids(self, out, gen):
+        """An answer from the driver of runtime gen: its snapshot ids as the hub's own, in place, only where the driver
+        puts them: the named fields (SID_FIELDS, element_token) anywhere in structuredContent, `data` included unless
+        it's bytes, and the driver's exact text lines (TEXT_FORMS) in its text items. The envelope (id, method), errors
+        and every other string are never touched. Every id is translated, or, past TAG_MAX_IDS, the answer is replaced
+        by a clean refusal; never a mixture."""
+        res = out.get("result") if isinstance(out, dict) else None
+        if not isinstance(res, dict) or gen is None:
+            return out
+        ids, over = set(), [False]
+
+        def note(dsid):
+            if dsid not in ids:
+                if len(ids) >= TAG_MAX_IDS:
+                    over[0] = True
+                else:
+                    ids.add(dsid)
+
+        def fields(v, fn, depth=0):
+            """fn(dsid) -> replacement, for each named field (depth bounded by the wire limits already)."""
+            if depth > wirelimits.MAX_JSON_DEPTH or over[0]:
+                return v
+            if isinstance(v, dict):
+                for k, x in v.items():
+                    if k in SID_FIELDS and isinstance(x, str) and SID_FULL.fullmatch(x):
+                        v[k] = fn(x)
+                    elif k == "element_token" and isinstance(x, str) and TOKEN_FULL.fullmatch(x):
+                        m = TOKEN_FULL.fullmatch(x)
+                        v[k] = f"{fn(m.group(1))}:{m.group(2)}"
+                    elif isinstance(x, (dict, list)):
+                        fields(x, fn, depth + 1)
+            elif isinstance(v, list):
+                for x in v:
+                    if isinstance(x, (dict, list)):
+                        fields(x, fn, depth + 1)
+            return v
+
+        texts = [c for c in (res.get("content") if isinstance(res.get("content"), list) else [])
+                 if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str)]
+
+        def lines(text, fn):
+            for rx in TEXT_FORMS:
+                text = rx.sub(lambda m: "".join(fn(g) if SID_FULL.fullmatch(g or "") else (g or "")
+                                                for g in m.groups()), text)
+            return text
+        sc = res.get("structuredContent")
+        if isinstance(sc, (dict, list)):
+            fields(sc, lambda d: note(d) or d)
+        for c in texts:
+            if over[0]:
+                break
+            lines(c["text"], lambda d: note(d) or d)
+        if over[0]:
+            out["result"] = {"content": [{"type": "text", "text": TAG_TOO_MANY % TAG_MAX_IDS}], "isError": True,
+                             "structuredContent": {hub_notes.NOTE_KEY: TAG_TOO_MANY % TAG_MAX_IDS,
+                                                   "code": "snapshot_ids_too_many", "effect": "ran"}}
+            self.note(f"an answer named more than {TAG_MAX_IDS} snapshots; replaced by a refusal",
+                      kind="too many snapshot ids")
+            return out
+        if not ids:
+            return out
+        with self.sid_lock:
+            # Every mapping this answer uses is pinned while the others are made: the ones it already has move to the
+            # newest end, so making room never forgets one of them; when it can't, the answer is refused whole.
+            table, pinned = {}, set()
+            for d in ids:
+                h = self.sid_out.get((gen, d))
+                if h is not None:
+                    self.sid_in.move_to_end(h)
+                    self.sid_out.move_to_end((gen, d))
+                    table[d] = h
+                    pinned.add(h)
+            for d in ids:
+                if d not in table:
+                    h = self._hub_sid(gen, d, pinned)
+                    if h is None:
+                        over[0] = True
+                        break
+                    table[d], _ = h, pinned.add(h)
+        if over[0]:
+            out["result"] = {"content": [{"type": "text", "text": TAG_TOO_MANY % TAG_MAX_IDS}], "isError": True,
+                             "structuredContent": {hub_notes.NOTE_KEY: TAG_TOO_MANY % TAG_MAX_IDS,
+                                                   "code": "snapshot_ids_too_many", "effect": "ran"}}
+            self.note("an answer's snapshot ids couldn't all be translated; replaced by a refusal",
+                      kind="too many snapshot ids")
+            return out
+        if isinstance(sc, (dict, list)):
+            fields(sc, table.__getitem__)
+        for c in texts:
+            c["text"] = lines(c["text"], lambda d: table.get(d, d))
+        return out
+
+    def untag_ids(self, name, args):
+        """A call's element tokens and snapshot ids, the hub's, back to the current runtime's own, in place: the named
+        fields anywhere in the arguments (element_token in nested targets and run_steps steps, snapshot_id, since).
+        One that isn't the current runtime's, or that the hub never handed out, makes the call refused
+        (element_token_stale). In run_script's script only whole ids the hub issued for the current runtime are
+        translated; every other string is left alone. Returns (ok, uses_ids)."""
+        state = {"ok": True, "used": False}
+        gen = self.up_gen
+
+        def back(hsid):
+            with self.sid_lock:
+                e = self.sid_in.get(hsid)
+            if not e or e[0] != gen:
+                state["ok"] = False
+                return hsid
+            state["used"] = True
+            return e[1]
+
+        def issued(m):
+            with self.sid_lock:
+                e = self.sid_in.get(m.group(0))
+            if e and e[0] == gen:
+                state["used"] = True
+                return e[1]
+            return m.group(0)
+
+        def walk(v, depth=0):
+            if depth > wirelimits.MAX_JSON_DEPTH:
+                state["ok"] = False
+                return v
+            if isinstance(v, dict):
+                for k, x in list(v.items()):
+                    if k == "element_token" and isinstance(x, str) and x:
+                        m = TOKEN_FULL.fullmatch(x)
+                        if not m:
+                            state["ok"] = False
+                        else:
+                            v[k] = f"{back(m.group(1))}:{m.group(2)}"
+                    elif k in SID_FIELDS and isinstance(x, str) and SID_FULL.fullmatch(x):
+                        v[k] = back(x)
+                    elif k == "script" and name == "run_script" and isinstance(x, str):
+                        v[k] = SID_WORD.sub(issued, x)
+                    elif isinstance(x, (dict, list)):
+                        walk(x, depth + 1)
+            elif isinstance(v, list):
+                for x in v:
+                    if isinstance(x, (dict, list)):
+                        walk(x, depth + 1)
+            return v
+        walk(args)
+        return state["ok"], state["used"]
+
+    def before_send(self, name, args, gen0, uses_ids=False):
+        """Right before an acting call is sent, under the dispatch lock and the send gate (the same critical section as
+        the send): what an input reset means for it. None to send it; else (text, structured) to refuse it. A call that
+        may use the driver's own devices after a reset gets a fresh driver first (renew_after_reset), or is refused
+        when that can't be done safely; and a call whose element tokens were checked against another runtime (a
+        reconnect since its guards ran) is refused."""
+        if may_use_devices(name, args):
+            if self.stale_after_reset():
+                refusal = self.renew_after_reset()
+                if refusal:
+                    return refusal
+            if not self.input_used:
+                self.input_used, self.reset_seen = True, owners.input_reset_at()
+        if self.up_gen != gen0 and uses_ids:
+            return TOKEN_STALE, TOKEN_STALE_SC
+        return None
+
+    def renew_after_reset(self):
+        """A fresh driver connection after an input reset. Called by before_send (an acting call that passed the one-
+        controller and handoff checks, under the dispatch lock and the send gate, so nothing is sent meanwhile). It
+        never cuts off a call: everything sent on this connection gets RENEW_WAIT_S to end, else nothing is torn down;
+        then, with every completion's bookkeeping published (settle_lock), nothing that would end with the runtime
+        may be there (a driver recording, a browser browser_prepare launched). None when the new connection is up;
+        else (text, structured) for the call."""
+        proc, gen = self.up, self.up_gen
+        end = time.monotonic() + RENEW_WAIT_S
+        while any(p.get("gen") == gen for p in list(self.pending.values())):
+            if time.monotonic() >= end:
+                return RESET_BUSY, {"code": "input_reset_busy", "effect": "refused",
+                                    "hint": "send it again once the running call has ended, or in the foreground"}
+            time.sleep(0.05)
+        with self.settle_lock:
+            if any(p.get("gen") == gen for p in list(self.pending.values())):
+                return RESET_BUSY, {"code": "input_reset_busy", "effect": "refused",
+                                    "hint": "send it again once the running call has ended, or in the foreground"}
+            if self.recordings or self.driver_browsers:
+                return RESET_RECORDING, {"code": "input_reset_recording", "effect": "refused",
+                                         "hint": "delivery_mode foreground, or stop_recording"}
+        with self.connect_lock:
+            if self.up is proc and proc is not None:
+                self.up, self.ready = None, False
+                self._kill_leader(proc)          # its reader ends the rest of it (_upstream_closed)
+        self.note("the driver's virtual input devices were removed after this connection used them; reconnecting "
+                  "so its next pointer or keyboard input makes new ones")
+        err = self.connect()
+        return (err, None) if err else None
 
     def chrome_guard(self, name, args):
         """Adjust or refuse a call aimed at Chrome. Returns (error, note)."""
@@ -2784,10 +3160,21 @@ class Hub:
         args = pend.get("args") or {}
         if tool == "start_recording" and not res.get("isError"):
             self.recordings[sess or ""] = time.time()
+        elif tool == "browser_prepare" and not res.get("isError"):
+            # A browser the driver launched ends with this runtime; one it only attached to doesn't (the result's
+            # side_effects say which; when they can't be read, it counts as launched).
+            se = sc.get("side_effects") if isinstance(sc.get("side_effects"), dict) else None
+            if se is None or se.get("launched_browser") is not False:
+                self.driver_browsers[sess or ""] = time.time()
         elif tool == "stop_recording":
-            self.recordings.pop(sess or "", None)
+            if res.get("isError"):
+                self.recordings.pop(sess or "", None)
+            else:
+                self.recordings.clear()          # the driver's stop_recording stops the recording, whoever started it
         elif tool == "end_session" and isinstance(args.get("session"), str):
             self.recordings.pop(args["session"], None)
+            if not res.get("isError"):
+                self.driver_browsers.pop(args["session"], None)   # its browser ended with it
         if self.coord_on:
             self.note_layout(tool, res, sc, sess, args, rec)
         if self.hidden_on and not pend.get("orphan"):
@@ -3023,6 +3410,7 @@ class Hub:
                 "clients": [c.describe() for c in self.active_clients()],
                 "driver": {"connected": self.connected(), "since": self.up_since if self.connected() else None,
                            "pending": len(self.pending),
+                           "acting": sum(1 for p in list(self.pending.values()) if p.get("acting")),
                            "left_running": sum(len(lease["keys"]) for lease in list(self.leases.values()))},
                 "recordings": len(self.recordings), "coord_guard": "on" if self.coord_on else "off",
                 "browser_pacing": self.settings["browser_pacing"],

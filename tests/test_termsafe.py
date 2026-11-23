@@ -219,10 +219,10 @@ def cli_checks():
               rc == 0 and "\x1b" not in out and "‮" not in out and "\\u001b]52" in out and "\\u202e" in out
               and "\\x1b]52" in out, (rc, out[-300:]))
         rc, out = on_pty([cli, "input-reset"], env)
-        check("input-reset prints the VM's answer escaped on a terminal", "\x1b[2J" not in out and "\\x1b[2J" in out,
-              out[-200:])
-        r = subprocess.run([cli, "input-reset"], env=env, capture_output=True, text=True, timeout=60)
-        check("…and exactly in a pipe (the hub reads it)", r.stdout == "0\x1b[2J\n", repr(r.stdout))
+        check("input-reset takes only a count from the VM: an answer with escapes is refused, and none of it reaches "
+              "the terminal", rc == 1 and "\x1b" not in out and "wasn't a count" in out, (rc, out[-200:]))
+        r = subprocess.run([cli, "input-reset", "--check"], env=env, capture_output=True, text=True, timeout=60)
+        check("…nor a pipe (--check too)", r.returncode == 1 and "\x1b" not in r.stdout + r.stderr, repr(r.stdout + r.stderr))
         rc, out = on_pty([cli, "record", "start", "clip1"], dict(env, RECORD_DIR=os.path.join(td, "rec")))
         check("record start on a terminal: the recorder's answer is escaped", "\x1b]52" not in out and "\x1b[2J" not in out
               and "\\x1b]52" in out and "recording the guest desktop" in out, (rc, out[-300:]))

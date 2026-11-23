@@ -63,7 +63,7 @@ computer ([More than one VM](#more-than-one-vm)).
 | `net clear` | Lift the list before it ends (your own terminal only); it also ends by itself when its time is up |
 | `browser [default firefox\|chrome] [mode human\|page\|hybrid] [pacing human\|fast] [profiles [--new NAME \| --delete NAME [--firefox]]]` | The skill's defaults and human pacing; kept Firefox profiles (`--new`: made in the VM, with the `launch_app` call that opens one) and named Chrome profiles |
 | `view [--open \| --print \| --tailnet \| --forget] [--remember \| --no-remember]` | Watch or take over the desktop (VNC on loopback). `--open` (and plain `view` in Terminal on the Mac's screen): Screen Sharing on this Mac. The first time, at a terminal, it offers to save the live-view password in your login keychain, where Screen Sharing finds it (`VIEW_REMEMBER`); once saved, Screen Sharing connects without asking, and each `--open` keeps it up to date. Otherwise the password goes on the clipboard for 45 s (`VIEW_CLIPBOARD_S`); `--no-remember` does that this once. Over SSH, or with no terminal, plain `view` prints how to connect, as `--print` does. `--remember`: save it now; `--forget`: remove it (both only in your own terminal; `--remember` refuses while `VIEW_REMEMBER=off`). `--tailnet`: the `tailscale serve` command that would publish it to your tailnet, and its undo (printed, never run) |
-| `input-reset [--check]` | Remove the driver's leftover virtual input devices (when Chrome ignores typing) |
+| `input-reset [--check]` | Remove the driver's leftover virtual input devices (when Chrome ignores typing, or the live view ignores your mouse or keyboard). Opening a handoff and `view --open` do it too. Not while an agent call is still running (exit 3); during a handoff only in your own terminal |
 | `desktop-restart` | Log the desktop out and in again (closes every app) |
 | `security [apply] [--json]` | The optional hardening and the shell channel, as configured and as the VM has them |
 | `actions list\|show\|verify` | The signed action log (`ACTION_LOG=on`) |
@@ -255,7 +255,7 @@ metacomputer: this Codex session's MCP tools act on demo, but this command would
   `secrets list|status|audit|tokens|requests|selftest|settle|version`, `secrets rule list` and `secrets audit-sink
   list|show`); what a command
   that passed starts for the same computer; anything run outside an agent session.
-- **Forms that only read the VM, or who controls it** (`who`, `status`, `inspect`, `logs`, `get`, `shot`, `view`, `hub`
+- **Forms that only read the VM, or who controls it** (`who`, `status`, `inspect`, `logs`, `get`, `shot`, `view --print|--tailnet`, `hub`
   and `hub status`, `claude read|wait|status`, `handoff status|wait`, `security` without `apply`, `record` and `record
   status`, `browser profiles`, `input-reset --check`) go ahead, with a note on stderr naming both computers. A form is
   read from the arguments as the command itself parses them, in whatever order they come (`security --json apply`
