@@ -154,7 +154,7 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   "Event spool"). Tests: `python3 tests/test_events.py` (no VM) and
   `tests/test_options.py E` (VM).
 - Lessons (`metacomputer learn`, docs/learn.md; `lib/learn*.py`,
-  `lib/transcripts.py`): proposals come only from structured fields (classes,
+  `lib/transcripts.py`, which reads Claude Code's, Codex's and Gemini CLI's sessions): proposals come only from structured fields (classes,
   counts, tool names, app names from a fixed list); never copy text from a
   transcript or the VM into a proposal, a lesson or the draft summary. Free text
   needs the user's terminal; only a private store is loaded; no guard may read the
@@ -196,6 +196,11 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   install.sh's build) leaves it out too. Places and providers: `lib/placement.py` (`--on`, `list`) and `lib/cloud/` (the adapter interface,
   manifests, `PERSIST`, the feature map; `local-lume` hands actions to the existing commands, never reroutes
   them); every registered adapter passes `tests/test_cloud_adapters.py`, which uses no VM and no network.
+  Which processes are agent sessions is `lib/owners.py` `agent_kind`/`agent_of` (Claude Code, Codex, OpenClaw, Hermes
+  Agent, Gemini CLI; an interpreter's, node's or python's, by the program its command line names, read only through
+  ps_table's `ProcTable`) and, for the vault, `vault/Util.swift` `agentKind` (and `sharedAgentProcess`: Codex's app server,
+  OpenClaw's and Hermes Agent's gateways get no session answers): keep the two the same (test_session_guard's stand-ins,
+  test_vault_ops).
   An agent session's computer (`lib/sessionvm.py`; docs/commands.md "An agent session's computer"): the MCP bridge and
   every claim in an agent session's name leave a record in a private per-account folder (`MCOMP_SESSIONS_DIR` in
   tests, always), and `session_guard` in bin/metacomputer refuses a command that names no VM when it would act on
@@ -301,14 +306,25 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `install_incomplete` likewise), so `metacomputer update` runs the install again. Codex's MCP server follows the same
   ownership rule (`lib/agents.py codex_entry`: exactly the checkout's launcher, a legacy path under its `bin/`, or
   `~/.local/bin/metacomputer`, with exactly `mcp-lazy`; the whole entry read again before a change; never a path prefix);
-  anything else is left, said value-free, and the Codex step is unfinished. `--no-plugin` keeps the server and swaps the
+  anything else is left, said value-free, and the Codex step is unfinished. OpenClaw's, Hermes Agent's and Gemini CLI's
+  MCP servers follow the same rule (`lib/agent_setup.py`: `~/.local/bin/metacomputer mcp-lazy`, registered with each
+  agent's own CLI, `openclaw mcp add --no-probe`, `hermes config set`, `gemini mcp add -s user --trust`; read through it,
+  or Gemini CLI's settings.json as it reads it, again right before any change and back after; their adds that replace
+  a same-named entry run only when it's still missing), each step recorded by `agent_step`'s `agent_record` (names
+  `openclaw`, `hermes`, `gemini`), and `--uninstall` removes only metacomputer's own (`agent_uninstall`, before the
+  command links). Its output is lines of kinds (`ok`, `warn`, `say`, `keep`), never a configured value. `--no-plugin` keeps the server and swaps the
   plugin for a skill link; `--uninstall` reads and removes metacomputer's servers before the command links, and keeps
   the links while any entry that stays (Claude Code's or Codex's, owned or not) runs them. The plugin's launcher tells a checkout whose
   install.sh lacks the `CLAUDE_MCP=user` line (it left the server to the plugin) to run `metacomputer update`. Keep
   `mcpServers` and `hooks` out of plugin.json (test_plugin fails on them). Its contents: copies of `skills/metacomputer`,
   `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and `THIRD_PARTY_NOTICES.md`, laid out like the repository so the
   driver pack's `../../../skills/metacomputer/` links resolve in both. Edit the repository's files, then run
-  `python3 scripts/sync-plugin.py` (test_plugin fails while a copy differs). Its own files: `README.md` (the directory
+  `python3 scripts/sync-plugin.py` (test_plugin fails while a copy differs). The same script makes `agent-plugin/`, the
+  Agent Plugins 1.0.0 package Hermes Agent and OpenClaw install (its plugin.json and mcp.json, the skills one level under
+  `skills/` with the driver pack's links pointed at `../metacomputer/`; its own files are README.md, GEMINI.md and the
+  launcher `bin/metacomputer`, which runs only an installed checkout's command); `gemini-extension.json` at the root runs
+  that launcher, and `scripts/release.sh` sets its version. Skill frontmatter descriptions stay one double-quoted YAML
+  line (strict readers, Hermes Agent's, refuse a plain one with `: ` in it); tests/test_agent_setup.py checks both. Its own files: `README.md` (the directory
   listing's text, which must say everything the plugin runs, sends or fetches: keep it and PRIVACY.md current),
   `icon.png` (rendered from `icon.svg`), `commands/learn.md` and `bin/metacomputer`, a short launcher, not a copy of
   the command (the `metacomputer` command on Claude Code's PATH while the plugin is on): it hands over to the
@@ -351,7 +367,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and

@@ -40,6 +40,9 @@ CLI = os.path.join(LAB, "bin", "metacomputer")
 STAMP = os.path.expanduser("~/.local/share/metacomputer/installed.json")
 CHECK_CACHE = os.path.expanduser("~/.cache/metacomputer/update-check.json")
 CHECK_EVERY_S = 24 * 3600
+# install.sh's agent steps, as installed.json's "incomplete" names them, and how messages say them
+AGENT_STEPS = {"claude": "Claude Code", "codex": "Codex", "openclaw": "OpenClaw", "hermes": "Hermes Agent",
+               "gemini": "Gemini CLI"}
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 GUEST_KEYS = ("CUA_DRIVER_VERSION", "CUA_DRIVER_SHA256", "UBUNTU_IMAGE", "UBUNTU_RELEASE", "BROWSERS", "EXTRA_PACKAGES",
               "BROWSER_EXTENSIONS", "VIRTUAL_AUDIO", "GUEST_USER", "ADMIN_USER", "SECRETS_PROXY_PORT", "NET_GATEWAY_IP")
@@ -398,7 +401,7 @@ def after_install(restart="ask", quiet=False):
                  "checkout": LAB, "gateway": now_gw, "installed_at": time.time(), "bind_pending": pending}
     # install.sh says which agent steps didn't finish (MCOMP_INSTALL_INCOMPLETE=claude): recorded, so the next
     # `metacomputer update` runs install.sh again even when the checkout is already at the release
-    incomplete = [x for x in (os.environ.get("MCOMP_INSTALL_INCOMPLETE") or "").split(",") if x in ("claude", "codex")]
+    incomplete = [x for x in (os.environ.get("MCOMP_INSTALL_INCOMPLETE") or "").split(",") if x in AGENT_STEPS]
     if incomplete:
         new_stamp["incomplete"] = incomplete
     try:
@@ -451,7 +454,7 @@ def cmd_version(a):
     if stamp and stamp.get("commit") != st["commit"]:
         print(f"installed     {stamp.get('version')}: this checkout changed since; run ./install.sh (or metacomputer update)")
     elif stamp.get("incomplete"):
-        print(f"installed     {stamp.get('version')}, but its {' and '.join('Claude Code' if x == 'claude' else 'Codex' for x in stamp['incomplete'])} "
+        print(f"installed     {stamp.get('version')}, but its {' and '.join(AGENT_STEPS.get(x, 'an agent') for x in stamp['incomplete'])} "
               "setup didn't finish: metacomputer update runs the install again")
     for v in out["vms"]:
         print(f"vm {v['vm']:<12} {v['state'] or '?':<8} built by {v['built_by'] or 'an earlier version'}"

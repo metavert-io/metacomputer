@@ -1,5 +1,5 @@
-"""Claude Code transcripts (and Codex sessions) that used the metacomputer tools: find them, read them, and turn
-them into an ordered list of tool calls with their results and times.
+"""Claude Code transcripts (and Codex's and Gemini CLI's sessions) that used the metacomputer tools: find them, read
+them, and turn them into an ordered list of tool calls with their results and times.
 
 Two Claude Code formats carry the same messages:
 - a headless session's stream-json output (`claude -p --output-format stream-json`), as kept by
@@ -10,6 +10,14 @@ Codex keeps its sessions as $CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl (els
 session_meta line (id, cwd), then events; each finished MCP call is an item_completed event holding an McpToolCall
 (server, tool, arguments, result, status, start and end in ms), and each shell command a CommandExecution, which
 this module reads as a Bash call so the same counts apply.
+Gemini CLI keeps its sessions as ~/.gemini/tmp/<project>/chats/session-*.jsonl (GEMINI_CLI_HOME moves ~/.gemini; checked
+with Gemini CLI 0.70.0): a first line with sessionId and projectHash, then one line per message ({"id", "timestamp",
+"type": "user" | "gemini" | ..., "toolCalls": [{"id", "name", "args", "status", "result", ...}]}), a message written again
+with the same id as its tool calls move on (the last copy counts) and {"$set": ...} lines for the first one. Its MCP tools
+are named mcp_<server>_<tool> (mcp_metacomputer_click); run_shell_command is read as a Bash call. The project folder comes
+from ~/.gemini/projects.json, which names each project's folder under tmp/.
+OpenClaw and Hermes Agent keep theirs in SQLite databases, and route MCP calls through a tool-search bridge by default;
+`learn` doesn't read them yet (docs/learn.md): their calls reach it through the hub's action log (ACTION_LOG=on).
 
 Everything a tool result says came from the VM or from the hub, and the VM's part (window titles,
 page and document text) is untrusted. This module only parses; callers decide what to keep, and
@@ -33,10 +41,13 @@ import wirelimits  # noqa: E402  (JSON depth and size limits, shared with the hu
 # The metacomputer tools: mcp__metacomputer__* (user-scope or --mcp-config server), or the names an older copy of the
 # plugin gave them (it brought its own server), in sessions recorded with it.
 MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__")
-# A tool_use of a metacomputer tool, as both Claude Code formats write it (compact JSON; a space allowed), or a
-# Codex call of the metacomputer server.
+# A tool_use of a metacomputer tool, as both Claude Code formats write it (compact JSON; a space allowed), a Codex call
+# of the metacomputer server, or a Gemini CLI tool call (mcp_metacomputer_<tool>).
 USE_MARKER = re.compile(rb'"name":\s?"mcp__(?:plugin_metacomputer_)?metacomputer__[a-z_]'
-                        rb'|"server":\s?"metacomputer",\s?"tool":\s?"[a-z_]')
+                        rb'|"server":\s?"metacomputer",\s?"tool":\s?"[a-z_]'
+                        rb'|"name":\s?"mcp_metacomputer_[a-z_]')
+GEMINI_PREFIX = "mcp_metacomputer_"         # Gemini CLI's name for the metacomputer server's tools
+GEMINI_DONE = ("success", "error")          # a tool call that ran (scheduled, executing, cancelled ... didn't, or not yet)
 # a `metacomputer` command: bare, or ~/.local/bin/metacomputer / <checkout>/bin/metacomputer (or mcomp)
 MCOMP_CMD = re.compile(r"(^|[/\s])metacomputer(\s|$)")
 CLI_SUB = re.compile(r"(?:^|[\s/;&|(])(?:metacomputer|mcomp)\s+([a-z][a-z-]*)")
@@ -95,6 +106,52 @@ def mcp_tool(name):
     return None
 
 
+def _gemini_text(result):
+    """A Gemini CLI tool call's result parts as text (the output its functionResponse carries, without the
+    <untrusted_context> wrapper Gemini CLI puts around an MCP result), and how many images they hold."""
+    texts, imgs = [], 0
+    for part in result if isinstance(result, list) else []:
+        if not isinstance(part, dict):
+            continue
+        if isinstance(part.get("inlineData"), dict):
+            imgs += 1
+        fr = part.get("functionResponse")
+        resp = fr.get("response") if isinstance(fr, dict) else None
+        if isinstance(resp, dict):
+            v = resp.get("output") if isinstance(resp.get("output"), str) else resp.get("error")
+            if isinstance(v, str):
+                texts.append(v[:TEXT_KEEP_WINDOWS])
+            parts = fr.get("parts")
+            for x in parts if isinstance(parts, list) else []:
+                if isinstance(x, dict) and isinstance(x.get("inlineData"), dict):
+                    imgs += 1
+    t = "\n".join(texts)
+    if t.startswith("<untrusted_context>"):
+        t = t[len("<untrusted_context>"):].removesuffix("</untrusted_context>").strip("\n")
+    return t, imgs
+
+
+def _gemini_call(tc, t, last_t, slim):
+    """A finished Gemini CLI tool call as a call (or None): an MCP tool of the metacomputer server, run_shell_command
+    as a Bash call, or another tool by its name."""
+    if not isinstance(tc, dict) or tc.get("status") not in GEMINI_DONE:
+        return None
+    raw = _str(tc.get("name"), 200) or ""
+    args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+    t_use = _ts({"timestamp": tc.get("timestamp")}) or t
+    if raw == "run_shell_command":
+        name, inp = "Bash", {"command": _str(args.get("command"), 2000 if slim else 4096) or ""}
+    else:
+        name = "mcp__metacomputer__" + raw[len(GEMINI_PREFIX):] if raw.startswith(GEMINI_PREFIX) else raw
+        inp = (bounded(args) if mcp_tool(name) else {}) if slim else args
+    drv = mcp_tool(name)
+    text, imgs = _gemini_text(tc.get("result"))
+    keep = TEXT_KEEP_WINDOWS if drv in ("list_windows", "launch_app") else TEXT_KEEP
+    return {"id": _str(tc.get("id"), 200) or f"gemini-{raw}", "name": name, "tool": drv, "input": inp, "ctx": "",
+            "t_use": t_use, "t_prev": last_t, "error": tc.get("status") == "error",
+            "text": "" if slim and name == "Bash" else text[:keep], "images": imgs, "t_result": t}
+
+
 def claude_projects_dir(env=None):
     env = os.environ if env is None else env
     base = env.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
@@ -105,6 +162,32 @@ def codex_sessions_dir(env=None):
     env = os.environ if env is None else env
     base = env.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
     return os.path.join(base, "sessions")
+
+
+def gemini_sessions_dir(env=None):
+    """Gemini CLI's per-project folders, each with its chats/: ~/.gemini/tmp ($GEMINI_CLI_HOME/.gemini/tmp)."""
+    env = os.environ if env is None else env
+    base = env.get("GEMINI_CLI_HOME") or env.get("HOME") or os.path.expanduser("~")
+    return os.path.join(base, ".gemini", "tmp")
+
+
+def gemini_project(path):
+    """The project folder of a Gemini CLI session file, from projects.json beside tmp/ ({"projects": {folder: name}},
+    the name being the folder under tmp/ that holds chats/); None when it can't be told."""
+    parts = os.path.abspath(path).split(os.sep)
+    if "tmp" not in parts:
+        return None
+    i = len(parts) - 1 - parts[::-1].index("tmp")
+    if i + 1 >= len(parts):
+        return None
+    try:
+        with open_regular(os.sep.join(parts[:i] + ["projects.json"])) as f:
+            d = json.loads(f.read(1 << 20))
+    except (OSError, ValueError):
+        return None
+    projects = d.get("projects") if isinstance(d, dict) else None
+    hits = [k for k, v in (projects or {}).items() if v == parts[i + 1] and isinstance(k, str)] if isinstance(projects, dict) else []
+    return hits[0][:4096] if len(hits) == 1 else None
 
 
 def open_regular(path):
@@ -241,7 +324,7 @@ class Transcript:
       id, name, tool (the driver tool, or None for other tools), input, ctx (the subagent's
       parent tool_use id, or ""), t_use, t_prev (the latest event before it), and, once its result
       came, error (bool), text (at most TEXT_KEEP characters), images, t_result;
-    plus session_id, cwd, kind ("stream", "project" or "codex"), first/last (event times), final (the
+    plus session_id, cwd, kind ("stream", "project", "codex" or "gemini"), first/last (event times), final (the
     stream's result event) and init (its init event). Results are cut to TEXT_KEEP characters
     (TEXT_KEEP_WINDOWS for list_windows and launch_app)."""
 
@@ -331,6 +414,29 @@ def parse(path, events=None, slim=False):
         if typ == "result":
             tr.final = ev
             tr.kind = "stream"
+            continue
+        if tr.kind == "gemini" or (typ is None and "projectHash" in ev and isinstance(ev.get("sessionId"), str)):
+            if tr.kind != "gemini":                                               # a Gemini CLI session's first line
+                tr.kind = "gemini"
+                tr.session_id = _str(ev.get("sessionId"), 200)
+                tr.cwd = gemini_project(path) if path else None
+                tr.gemini_seen = set()
+                continue
+            if typ == "user" and t is not None:
+                last_t = t
+            elif typ == "gemini" and isinstance(ev.get("toolCalls"), list):
+                for tc in ev["toolCalls"]:
+                    key = _str(tc.get("id"), 200) if isinstance(tc, dict) else None
+                    if not key or key in tr.gemini_seen:
+                        continue
+                    if len(tr.calls) >= MAX_CALLS:
+                        tr.info["truncated"] = "calls"
+                        break
+                    call = _gemini_call(tc, t, last_t, slim)
+                    if call is not None:
+                        tr.gemini_seen.add(key)              # the message is written again as its calls move on
+                        tr.calls.append(call)
+                        last_t = call["t_result"] or last_t
             continue
         if typ == "session_meta" and isinstance(ev.get("payload"), dict):        # a Codex session
             pl = ev["payload"]

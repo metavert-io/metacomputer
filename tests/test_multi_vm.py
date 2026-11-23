@@ -2901,11 +2901,12 @@ DELETE_WALK_EXCEPTIONS = {
     ("lib/update.py", "record_build"): ("build-vm.sh: hashes the guest files; writes only RUN_DIR/vm-build.json",
                                         ['write_json(os.path.join(run_dir, "vm-build.json")']),
     # A developer's tool in the checkout, never run by an installed metacomputer:
-    ("scripts/sync-plugin.py", "main"): ("copies the repository's plugin files into the checkout's plugin/ (the fixed "
-                                         "COPIES pairs, under LAB); removes only a link that stands where a copy goes, "
-                                         "never a folder or a file a listing found (those are reported for git rm)",
+    ("scripts/sync-plugin.py", "main"): ("copies the repository's plugin files into the checkout's plugin/ and "
+                                         "agent-plugin/ (the fixed COPIES pairs and WRITTEN files, under LAB); removes "
+                                         "only a link that stands where a copy goes, never a folder or a file a listing "
+                                         "found (those are reported for git rm)",
                                          ["dst = os.path.join(LAB, dst_rel)", "if os.path.islink(dst):",
-                                          'if kind == "extra":', "shutil.copyfile(s, d)"]),
+                                          'if kind == "extra":', "f.write(want)"]),
     # Consuming or rewriting what a listing found, behind a guard:
     ("lib/events.py", "drain_spool"): ("the event spool, consumed only after lib/safedelete.py check_spool passed (it "
                                        "may not be, hold or reach another protected folder); a file that can't be "

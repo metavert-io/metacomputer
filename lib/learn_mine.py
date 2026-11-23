@@ -457,12 +457,13 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
     if projects:
         roots.append((transcripts.claude_projects_dir(env), "project"))
         roots.append((transcripts.codex_sessions_dir(env), "project"))     # Codex's sessions (rollout-*.jsonl)
+        roots.append((transcripts.gemini_sessions_dir(env), "project"))    # Gemini CLI's (tmp/<project>/chats/*.jsonl)
     roots += [(os.path.abspath(os.path.expanduser(d)), "stream") for d in extra_dirs]
     for root, source in roots:
         if not os.path.isdir(root):
             continue
         for d, dirs, files in os.walk(root):
-            dirs[:] = [x for x in dirs if x not in ("tool-results", "node_modules", ".git")]
+            dirs[:] = [x for x in dirs if x not in ("tool-results", "tool-outputs", "checkpoints", "node_modules", ".git")]
             for f in files:
                 if not (f.endswith(".jsonl") or f.endswith(".jsonl.gz")):
                     continue
@@ -545,7 +546,8 @@ def _mine_one(path, source, cutoff, project):
         shift = end - (tr.last or 0.0)
         tr.first, tr.last = (tr.first or 0.0) + shift, (tr.last or 0.0) + shift
     else:
-        src = "headless" if tr.kind == "stream" else "codex" if tr.kind == "codex" else "claude-code"
+        src = ("headless" if tr.kind == "stream" else "codex" if tr.kind == "codex" else "gemini" if tr.kind == "gemini"
+               else "claude-code")
     if project and src != "bench" and not _under(tr.cwd, project):
         return None
     if tr.last is not None and tr.last < cutoff:
@@ -681,6 +683,7 @@ def aggregate(mined, stats, action, events, since_label, cutoff, project):
         "window": {"from": time.strftime("%Y-%m-%d", time.localtime(min(starts))) if starts else None,
                    "to": time.strftime("%Y-%m-%d", time.localtime(max(ends))) if ends else None},
         "sources": {"claude_code_sessions": src["claude-code"], "codex_sessions": src["codex"],
+                    "gemini_sessions": src["gemini"],
                     "headless_transcripts": src["headless"],
                     "benchmark_sessions": src["bench"], **stats},
         "sessions": n, "driver_calls": driver, "failed_calls": failed,

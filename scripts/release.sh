@@ -6,7 +6,8 @@
 #       1. Prepare. Refuses unless: you're on main, up to date with origin/main, with a clean tree; the CHANGELOG
 #          has an [Unreleased] section with entries; scripts/check-public.sh -a passes; and every no-VM test suite
 #          passes (NO_VM_SUITES below, the list in CLAUDE.md). Then it moves [Unreleased] to [VERSION] - DATE
-#          (a new, empty [Unreleased] above it), commits that on a branch release-vVERSION, pushes the branch,
+#          (a new, empty [Unreleased] above it), sets gemini-extension.json's version to VERSION, commits that on a
+#          branch release-vVERSION, pushes the branch,
 #          opens a pull request against main (gh) and switches back to main. Merging the PR is up to you.
 #
 #   scripts/release.sh VERSION --tag [--draft-release] [--dry-run]
@@ -29,7 +30,8 @@ NO_VM_SUITES=(test_actionlog test_recording test_vm_shell test_vm_claude test_ss
   test_build_refusals test_owners test_bench_workdir test_bench_checks test_vm_runner test_vm_stop test_reset_sync
   test_plugin test_learn test_storage test_install test_events test_doc_claims test_release test_handoff
   test_hidden_text test_multi_vm test_vault_codes test_guest_profiles test_netpolicy test_botcheck
-  test_traces test_page_guest test_update test_agents test_cloud_adapters test_session_guard test_remote test_sprites)
+  test_traces test_page_guest test_update test_agents test_cloud_adapters test_session_guard test_remote test_sprites
+  test_agent_setup)
 REMOTE=origin
 MAIN=main
 CANONICAL_SLUG="metavert-io/metacomputer"   # get.sh's own repository: its dry run needs no --repo for it
@@ -253,6 +255,22 @@ if n != 1:
 new = re.sub(r"(## \[" + re.escape(version) + r"\] - [0-9-]+\n)\n*", r"\1\n", new, count=1)
 open(path, "w", encoding="utf-8").write(new)
 PY
+# gemini-extension.json's version (Gemini CLI shows it, and its extensions gallery lists it) is the release's too: set in
+# the same commit. Its one top-level "version" line changes, and the file must still read as that version.
+EXT=gemini-extension.json
+FILES=(CHANGELOG.md)
+if [ -f "$EXT" ]; then
+  python3 - "$EXT" "$VERSION" > "$TMP/ext.new" <<'PY' || die "couldn't set the version in $EXT"
+import json, re, sys
+path, version = sys.argv[1:3]
+text = open(path, encoding="utf-8").read()
+new, n = re.subn(r'^(  "version": ")[^"\n]*(",?)$', lambda m: m.group(1) + version + m.group(2), text, count=1, flags=re.M)
+if n != 1 or json.loads(new).get("version") != version:
+    sys.exit(1)
+sys.stdout.write(new)
+PY
+  FILES+=("$EXT")
+fi
 section_of "$TMP/CHANGELOG.new" "$VERSION" > "$TMP/notes.md"
 {
   printf 'Release %s: moves the CHANGELOG'"'"'s [Unreleased] entries to [%s] - %s.\n\n' "$VERSION" "$VERSION" "$DATE"
@@ -266,8 +284,9 @@ if [ "$DRY" = 1 ]; then
   step "What it would do"
   say "  the CHANGELOG change:"
   diff -u CHANGELOG.md "$TMP/CHANGELOG.new" | sed 's/^/    /'
+  [ ! -f "$TMP/ext.new" ] || diff -u "$EXT" "$TMP/ext.new" | sed 's/^/    /'
   would git switch -c "$BRANCH"
-  would git commit -m "\"Release $VERSION: CHANGELOG\"" CHANGELOG.md
+  would git commit -m "\"Release $VERSION: CHANGELOG\"" ${FILES[@]+"${FILES[@]}"}
   would scripts/check-public.sh -a
   would git push -u "$REMOTE" "HEAD:refs/heads/$BRANCH"
   would gh pr create --base "$MAIN" --head "$BRANCH" --title "\"Release $VERSION\"" --body-file PR.md
@@ -279,9 +298,10 @@ fi
 command -v gh >/dev/null 2>&1 || die "gh (GitHub's CLI) not found: it opens the pull request"
 git switch -q -c "$BRANCH" || die "couldn't make the branch $BRANCH"
 cp "$TMP/CHANGELOG.new" CHANGELOG.md
+[ ! -f "$TMP/ext.new" ] || cp "$TMP/ext.new" "$EXT"
 back() { git switch -q "$MAIN" 2>/dev/null || warn "couldn't switch back to $MAIN"; }
-if ! git commit -q -m "Release $VERSION: CHANGELOG" -- CHANGELOG.md; then
-  git checkout -q -- CHANGELOG.md; back; git branch -q -D "$BRANCH"
+if ! git commit -q -m "Release $VERSION: CHANGELOG" -- ${FILES[@]+"${FILES[@]}"}; then
+  git checkout -q -- ${FILES[@]+"${FILES[@]}"}; back; git branch -q -D "$BRANCH"
   die "couldn't commit the CHANGELOG (nothing was pushed)"
 fi
 ok "committed the CHANGELOG on $BRANCH ($(git rev-parse --short=12 HEAD))"

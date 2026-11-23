@@ -2182,10 +2182,18 @@ CLAIMS = [
      and '{ [ "$CLAUDE_TRIED" = 0 ] && stamp_incomplete claude; }' in sh_function("install.sh", "install_incomplete")
      and '{ [ "$CODEX_TRIED" = 0 ] && stamp_incomplete codex; }' in sh_function("install.sh", "install_incomplete")
      and 'incomplete="$(install_incomplete)"' in raw("install.sh")
-     and len(re.findall(r"^\s*agent_record ", raw("install.sh"), re.M)) == 2),
-    ("docs/commands.md", r"`--uninstall` removes metacomputer's server before the command it runs, and keeps the command \(`~/\.local/bin/metacomputer` and `mcomp`\) while any MCP server that stays, Claude Code's or Codex's, metacomputer's or not, runs it",
+     and re.search(r'\n  agent_record "\$1" "\$\(agent_var "\$\{up\}_TRIED"\)" "\$\(agent_var "\$\{up\}_FAILED"\)"\n}\n',
+                   sh_function("install.sh", "agent_step")) is not None
+     and 'eval "${up}_TRIED=1"' in sh_function("install.sh", "agent_step")
+     and '[ "$(agent_var "${up}_TRIED")" = 0 ] && stamp_incomplete "$a"; }' in sh_function("install.sh", "install_incomplete")
+     and len(re.findall(r"^\s*agent_record ", raw("install.sh"), re.M)) == 3),
+    ("docs/commands.md", r"`--uninstall` removes metacomputer's server before the command it runs, and keeps the command \(`~/\.local/bin/metacomputer` and `mcomp`\) while any MCP server that stays, any agent's \(Claude Code's, Codex's, OpenClaw's, Hermes Agent's or Gemini CLI's\), metacomputer's or not, runs it",
      lambda m: raw("install.sh").index('if [ "$srv_ours" = 1 ] && ! entry_unchanged metacomputer "$srv_sum"; then')
-     < raw("install.sh").index("  codex_server_remove\n") < raw("install.sh").index('  for l in "$CMD_LINK" "$ALIAS_LINK"; do')
+     < raw("install.sh").index("  codex_server_remove\n") < raw("install.sh").index('  for a in $MORE_AGENTS; do agent_uninstall "$a"; done\n')
+     < raw("install.sh").index('  for l in "$CMD_LINK" "$ALIAS_LINK"; do')
+     and 'keep) keep_cmd_for "$text" ;;' in sh_function("install.sh", "agent_lines")
+     and 'out("keep", f"{agent.label}\'s")' in function_src("lib/agent_setup.py", "uninstall")
+     and "if claude_mcp.linked(res, link):" in function_src("lib/agent_setup.py", "uninstall")
      and raw("install.sh").count('UNINSTALL_FAILED=1; keep_cmd_for "Claude Code\'s"') == 2
      and '[ "$srv_linked" != link ] || { keep_cmd_for "Claude Code\'s"; }' in raw("install.sh")
      and '[ "$lnk" != link ] || { keep_cmd_for "Codex\'s"; }' in raw("install.sh")

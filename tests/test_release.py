@@ -46,6 +46,13 @@ def write(path, text, mode=0o644):
 
 SUITES = re.findall(r"\b(test_[a-z0-9_]+)", re.search(r"NO_VM_SUITES=\((.*?)\)",
                                                        open(os.path.join(LAB, "scripts", "release.sh")).read(), re.S)[1])
+EXTENSION = """{
+  "name": "metacomputer",
+  "version": "0.2.0",
+  "description": "a stand-in",
+  "mcpServers": {"metacomputer": {"command": "x", "args": ["mcp-lazy"], "version": "not this one"}}
+}
+"""
 CHANGELOG = """# Changelog
 
 All notable changes are recorded here.
@@ -131,6 +138,7 @@ class World:
         self.git("clone", "-q", self.origin, self.work)
         self.git("-C", self.work, "checkout", "-q", "-b", "main")
         write(os.path.join(self.work, "CHANGELOG.md"), CHANGELOG)
+        write(os.path.join(self.work, "gemini-extension.json"), EXTENSION)
         write(os.path.join(self.work, "scripts", "release.sh"),
               open(os.path.join(LAB, "scripts", "release.sh")).read(), 0o755)
         write(os.path.join(self.work, "scripts", "check-public.sh"), CHECK_PUBLIC, 0o755)
@@ -266,8 +274,10 @@ def prepare(w):
     check("…with [Unreleased] moved to [0.3.0] - DATE under a new, empty [Unreleased]", new == want, new)
     msg = w.git("-C", w.work, "log", "-1", "--format=%s", "origin/release-v0.3.0")
     files = w.git("-C", w.work, "diff", "--name-only", "origin/main", "origin/release-v0.3.0")
-    check("…in one commit that changes only the CHANGELOG", msg == "Release 0.3.0: CHANGELOG" and files == "CHANGELOG.md",
-          (msg, files))
+    check("…in one commit that changes only the CHANGELOG and gemini-extension.json", msg == "Release 0.3.0: CHANGELOG"
+          and files.split() == ["CHANGELOG.md", "gemini-extension.json"], (msg, files))
+    ext = w.git("-C", w.work, "show", "origin/release-v0.3.0:gemini-extension.json") + "\n"
+    check("…whose version line alone becomes 0.3.0", ext == EXTENSION.replace('"version": "0.2.0"', '"version": "0.3.0"'), ext)
     check("…check-public ran again before the push", w.log("check") == ["check-public -a", "check-public -a"], w.log("check"))
     gh = [json.loads(x) for x in w.log("gh")]
     pr = next((a for a in gh if a[:2] == ["pr", "create"]), [])

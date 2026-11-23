@@ -269,9 +269,12 @@ if your settings set it); when a build fails, the end of its log is shown.
 | `--only-claude` | Only the Claude Code step |
 | `--codex` | Set Codex up even after an earlier `--no-codex`: [codex.md](codex.md) |
 | `--no-codex` | Leave Codex alone, in this run and later ones (`--codex` undoes it) |
-| `--only-agents` | Only the Claude Code and Codex steps, for whichever is installed (after installing one) |
+| `--only-agents` | Only the agents' steps (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI), for whichever are installed (after installing one) |
 | `--only-codex` | Only the Codex step: its MCP server, the skills in `~/.agents/skills` and metacomputer's rules for its sandbox |
-| `--uninstall` | Remove the command, Claude Code's plugin and MCP server, Codex's setup and the vault program (the VM stays) |
+| `--openclaw`, `--hermes`, `--gemini` | Set that agent up even after an earlier `--no-...`: [openclaw.md](openclaw.md), [hermes.md](hermes.md), [gemini.md](gemini.md) |
+| `--no-openclaw`, `--no-hermes`, `--no-gemini` | Leave that agent alone, in this run and later ones (`--openclaw` and so on undo it) |
+| `--only-openclaw`, `--only-hermes`, `--only-gemini` | Only that agent's step: its MCP server, registered with its own CLI, and the skills where it reads them |
+| `--uninstall` | Remove the command, Claude Code's plugin and MCP server, the other agents' setup and the vault program (the VM stays) |
 
 `MCOMP_CONFIG=FILE ./install.sh` writes and reads that settings file instead of
 `config/local.env`, as every other command does. For a second VM beside the

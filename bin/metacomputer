@@ -124,8 +124,9 @@
 #                                  use it from a session, without seeing values
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
 #   agents [--json] | agents check [--json]
-#                                  the coding agents metacomputer is set up for (Claude Code, Codex), and a check of
-#                                  what it relies on in this Mac's Codex (docs/codex.md)
+#                                  the coding agents metacomputer is set up for (Claude Code, Codex, OpenClaw,
+#                                  Hermes Agent, Gemini CLI), and a check of what it relies on in this Mac's Codex
+#                                  (docs/codex.md)
 #         | approve ID... | reject ID... | remove ID... | edit ID | add | bench --config TEST_ENV
 #                                  mine your own sessions for repeated mistakes; approved lessons reach
 #                                  every new session's instructions as advice (docs/learn.md)
@@ -236,7 +237,7 @@ fi
 # Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
 # for commands that act on no VM. Commands that change a VM, and the vault's, say which VM (and vault) first.
 case "$cmd" in help|-h|--help|where|setup|vm|list|default|events|notify|learn|actions|version|agents|cloud) ;; *) vm_target_check ;; esac
-# The session guard (lib/sessionvm.py): run from an agent session (Claude Code, Codex) that holds a computer, through
+# The session guard (lib/sessionvm.py): run from an agent session (Claude Code, Codex, ...) that holds a computer, through
 # its MCP tools or a claim, a command that names no computer and would act on another one refuses, saying which and how
 # to go on; one that only reads goes ahead with a note. A computer named with --vm, MCOMP_VM or MCOMP_CONFIG, or pinned
 # by the caller (MCOMP_EXPECT_VM), is the one meant. What passed is passed on (MCOMP_GUARD_VM), so what this command

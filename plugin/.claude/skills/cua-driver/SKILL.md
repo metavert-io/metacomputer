@@ -1,32 +1,8 @@
 ---
 name: cua-driver
-description: Detailed Cua Driver 0.53.0 guidance for operating the virtual computer (the metacomputer project, an Ubuntu 24.04 XFCE VM) through the metacomputer MCP tools (mcp__metacomputer__*, or mcp__plugin_metacomputer_metacomputer__* from an older copy of the plugin), i.e. Cua Driver running inside the VM: snapshot accessibility trees, act through element tokens, menu paths or pixel coordinates, batch known steps with run_steps, record, and verify from fresh state. Use for GUI work in that VM; the metacomputer skill decides when the VM is the right tool. Never install or run cua-driver on the Mac, and never use these tools for the user's own computer.
+description: "Detailed Cua Driver 0.53.0 guidance for operating the virtual computer (the metacomputer project, an Ubuntu 24.04 XFCE VM) through the metacomputer MCP tools (mcp__metacomputer__*, or mcp__plugin_metacomputer_metacomputer__* from an older copy of the plugin), i.e. Cua Driver running inside the VM: snapshot accessibility trees, act through element tokens, menu paths or pixel coordinates, batch known steps with run_steps, record, and verify from fresh state. Use for GUI work in that VM; the metacomputer skill decides when the VM is the right tool. Never install or run cua-driver on the Mac, and never use these tools for the user's own computer."
 metadata:
   version: 0.53.0 # x-release-please-version
-  openclaw:
-    requires:
-      bins:
-        - cua-driver
-    envVars:
-      - name: CUA_DRIVER_EMBEDDED
-        required: false
-        description: Set to 1 when a macOS host app launches the driver in embedded mode.
-      - name: CUA_DRIVER_HOST_BUNDLE_ID
-        required: false
-        description: Bundle identifier of the macOS host app in embedded mode.
-      - name: CUA_DRIVER_PATH
-        required: false
-        description: Optional path to a cua-driver binary used by an embedding host.
-      - name: CUA_DRIVER_RS_ENABLE_WAYLAND
-        required: false
-        description: Set to 1 to enable the native Wayland backend.
-      - name: CUA_DRIVER_RS_MCP_HTTP_PORT
-        required: false
-        description: Optional port for the local MCP HTTP endpoint.
-      - name: CUA_DRIVER_RS_MCP_HTTP_TOKEN
-        required: false
-        description: Required host-generated bearer token when the local MCP HTTP endpoint is enabled.
-    homepage: https://cua.ai/docs/cua-driver
 ---
 
 # cua-driver

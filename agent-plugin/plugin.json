@@ -1,0 +1,30 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "metacomputer",
+  "description": "Gives your agent a disposable computer of its own: an isolated Ubuntu 24.04 desktop VM on your Mac that it operates like a person, through Cua Driver's MCP tools, with skills for when and how to use it. Needs macOS on Apple silicon and metacomputer installed (its install script builds the VM).",
+  "author": {
+    "name": "Metavert",
+    "url": "https://github.com/metavert-io"
+  },
+  "homepage": "https://github.com/metavert-io/metacomputer",
+  "repository": "https://github.com/metavert-io/metacomputer",
+  "license": "MIT",
+  "keywords": [
+    "computer-use",
+    "virtual-machine",
+    "desktop",
+    "linux",
+    "mcp",
+    "cua-driver",
+    "sandbox"
+  ],
+  "extensions": {
+    "com.nousresearch.hermes": {
+      "servers": {
+        "metacomputer": {
+          "timeout": 600
+        }
+      }
+    }
+  }
+}

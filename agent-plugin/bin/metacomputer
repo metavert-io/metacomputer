@@ -1,0 +1,21 @@
+#!/bin/bash
+# metacomputer: the launcher in metacomputer's agent packages, the Agent Plugins package in agent-plugin/ (what Hermes
+# Agent installs) and the Gemini CLI extension (gemini-extension.json at the repository's root runs this file). They
+# carry no settings, VM keys or tools of their own: this runs the metacomputer that install.sh (or get.sh) set up on this
+# Mac, with the same arguments: $MCOMP_HOME/bin/metacomputer, or else ~/.local/bin/metacomputer, and only a checkout's
+# own command (a folder with install.sh beside bin/), never another package's launcher.
+#
+# With none set up, it says how to set metacomputer up and exits 1. It never downloads or runs anything else.
+set -uo pipefail
+mc_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+for mc_to in ${MCOMP_HOME:+"$MCOMP_HOME/bin/metacomputer"} "$HOME/.local/bin/metacomputer"; do
+  mc_to="$(readlink -f "$mc_to" 2>/dev/null)" || continue
+  [ -f "$mc_to" ] && [ -x "$mc_to" ] && [ "$mc_to" != "$mc_self" ] || continue
+  [ -f "$(dirname "$(dirname "$mc_to")")/install.sh" ] || continue
+  exec "$mc_to" "$@"
+done
+printf '%s\n' "metacomputer isn't set up on this Mac yet (no ~/.local/bin/metacomputer). Set it up in Terminal (macOS on" \
+  "Apple silicon; it says what it will do, asks first, and builds the VM):" \
+  "  curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash" \
+  "or point MCOMP_HOME at an existing checkout. Then start a new session to load metacomputer's tools." >&2
+exit 1

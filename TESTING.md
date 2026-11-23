@@ -403,6 +403,12 @@ copy's VMs (off) and are stopped at the end.
   are classified the same in every order; nested and default forms (`record`, `record moments`, `browser profiles`,
   `input-reset --check`, `secrets rule list`, `secrets audit-sink list`); the shell's list of commands it skips is
   Python's.
+- The other agents: stand-ins built with `cc` (`userterm.fake_interpreter`) for each as `ps` shows it (Gemini CLI's
+  node running its gemini script, Hermes Agent's python running `hermes_cli`'s gateway, OpenClaw's processes named
+  `openclaw-gateway` and `openclaw`) are each the agent session above a command, hold a computer through a bridge
+  under them, refuse a command that names no computer on another computer (naming the agent), and make `at-terminal`
+  refuse; look-alikes (OpenClaw's relay and anchor helpers, other node and python programs) aren't agents, and a
+  plain process table never reads a command line.
 - Records (process start times stood in for). A claim kept from before start times were kept never counts, and renewing
   it doesn't give it the current process's; a lease refreshed after its session ended (owners' and the hub's own) keeps
   that session's start time, so the process that has its pid now holds nothing; every write checks the folder again (one
@@ -1226,6 +1232,19 @@ Each of these needs no VM and takes seconds.
   real codex: set up, `--no-codex` remembered across runs, `--codex` again, `--no-claude` keeping Claude Code's old
   skill link, a run with both agents left alone still asking before it moves the command from another checkout, and
   neither agent on PATH.
+- `python3 tests/test_agent_setup.py`: install.sh's steps for OpenClaw, Hermes Agent and Gemini CLI against stand-in
+  `openclaw`, `hermes` and `gemini` commands (each answering the parts of its CLI the step uses, as the real one does)
+  in a temporary HOME: the MCP server registered with the agent's own command and read back, the skills linked, the
+  choice remembered and an earlier unfinished step cleared, a second run changing nothing; an entry that isn't
+  metacomputer's (another program, `~/.local/bin/metacomputer` with other arguments) left byte for byte and named by its
+  program only, a lookup that fails, an entry that appears between the read and the add, and an add that doesn't take,
+  each ending with exit 1 and the step recorded as unfinished; `--uninstall` removing only metacomputer's own and
+  keeping the command links an entry that stays runs; `--no-NAME` remembered until `--NAME`; nothing printed holding a
+  configured value; `agents --json` for each; Gemini CLI's settings read as it reads them (comments, no trailing
+  commas) and `GEMINI_CLI_HOME`; and the packages: agent-plugin/'s manifests, skills (names, quoted descriptions, links
+  inside the package) and launcher (it runs only an installed checkout's command), and gemini-extension.json. The
+  recognition of their sessions is test_session_guard's (stand-in processes as `ps` shows each agent) and
+  test_vault_ops's (Gemini CLI a session; OpenClaw's and Hermes Agent's gateways none).
 - Tests of commands only the user runs type at a pty in a process launchd has adopted
   (`tests/userterm.py`), so an agent running the suite isn't above it; `userterm.fake_agent`
   builds a small program named `codex` to stand for one. The vault suites use the TEST

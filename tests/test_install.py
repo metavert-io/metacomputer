@@ -1926,8 +1926,8 @@ def test_agent_choices():
         check("--codex sets it up again and remembers that", p.returncode == 0 and codex_set_up()
               and choice().get("codex") == "on", (p.stdout[-400:], choice()))
         p = go(path="/usr/bin:/bin")
-        check("with neither agent on PATH: the command is linked, and it says how to add one later",
-              p.returncode == 0 and "neither Claude Code nor Codex is installed" in p.stdout
+        check("with no agent on PATH: the command is linked, and it says how to add one later",
+              p.returncode == 0 and "no coding agent is installed" in p.stdout
               and os.path.islink(os.path.join(home, ".local", "bin", "metacomputer")), p.stdout[-400:])
     finally:
         shutil.rmtree(t, ignore_errors=True)
