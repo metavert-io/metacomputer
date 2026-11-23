@@ -43,6 +43,10 @@ TIMEOUT = 60
 SAFE_PATH = os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(d))
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 def trusted(name):
     """(absolute path, None) of the `claude` or `codex` command to run, or (None, why not). Only absolute PATH entries
     are searched (a `.` on PATH would let a downloaded folder's own `codex` run here), and the file must be yours or
@@ -411,7 +415,7 @@ def main(argv):
                   ["error", why or "Codex's codex command isn't on PATH", "", "", ""])
         print("\x1f".join(str(f).replace("\x1f", " ").replace("\n", " ") for f in fields))
         return 0
-    ap = argparse.ArgumentParser(prog="metacomputer agents", description=__doc__.split("\n\n")[0])
+    ap = strictargs.Parser(prog="metacomputer agents", description=__doc__.split("\n\n")[0])
     ap.add_argument("what", nargs="?", default="status", choices=("status", "check"))
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--quiet", action="store_true", help="check: print only what failed")

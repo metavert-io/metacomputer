@@ -392,9 +392,11 @@ struct Args {
     func has(_ k: String) -> Bool { flags.contains(k) }
 }
 
-/// --name VALUE / --name=VALUE for valueFlags, --name for boolFlags. A later value wins
-/// (all() keeps every one), so a wrapper can put defaults first.
-func parseArgs(_ argv: [String], values valueFlags: Set<String>, flags boolFlags: Set<String> = []) throws -> Args {
+/// --name VALUE / --name=VALUE for valueFlags, --name for boolFlags. A value option is given once: a second one is a
+/// usage error, unless it's in `repeatable` (the options a command reads as a list, with all()), so nothing a command
+/// doesn't use is ever let through (a later value silently winning over an earlier one, say).
+func parseArgs(_ argv: [String], values valueFlags: Set<String>, flags boolFlags: Set<String> = [],
+               repeatable: Set<String> = []) throws -> Args {
     var a = Args()
     var i = 0
     while i < argv.count {
@@ -407,6 +409,9 @@ func parseArgs(_ argv: [String], values valueFlags: Set<String>, flags boolFlags
                 name = String(name[..<eq])
             }
             if valueFlags.contains(name) {
+                if a.values[name] != nil && !repeatable.contains(name) {
+                    throw usageError("--\(name) given twice")
+                }
                 if let v = inline {
                     a.values[name, default: []].append(v)
                 } else {

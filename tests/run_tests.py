@@ -36,6 +36,8 @@ def main(argv):
     while i < len(argv):
         a = argv[i]
         if a == "--run-id":
+            if i + 1 >= len(argv) or "--run-id" in argv[:i]:
+                print("--run-id takes one value, once"); return 2
             run_id = argv[i + 1]; i += 2; continue
         if a.upper() in TESTS:
             sel.append(a.upper())

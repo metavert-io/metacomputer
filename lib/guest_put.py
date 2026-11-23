@@ -243,11 +243,15 @@ def main(argv):
         return 2
     n = int(argv[1])
     ssh, rest = argv[2:2 + n], argv[2 + n:]
-    to, overwrite, files = "~/Inbox", False, []
+    to, overwrite, files, to_given = "~/Inbox", False, [], False
     i = 0
     while i < len(rest):
         a = rest[i]
         if a == "--to":
+            if to_given:                        # one folder: a second --to is refused, never let through
+                print("metacomputer: --to given twice (one folder, please)", file=sys.stderr)
+                return 2
+            to_given = True
             if i + 1 >= len(rest):
                 print("metacomputer: --to needs a folder in the VM", file=sys.stderr)
                 return 2
@@ -259,6 +263,10 @@ def main(argv):
         elif a in ("-h", "--help"):        # usage only, never a file to copy
             print(__doc__)
             return 0
+        elif a.startswith("-") and a != "-":    # an option it doesn't have, never a file to copy (./-name is one)
+            print(f"metacomputer: unknown option {a[:60]!r}; usage: metacomputer put HOST_PATH... [--to GUEST_DIR] "
+                  "[--overwrite]", file=sys.stderr)
+            return 2
         else:
             files.append(a)
         i += 1

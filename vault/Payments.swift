@@ -510,7 +510,8 @@ func cmdPay(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         + " [--frame-origin https://pay.example ...] [--profile P] [--browser-pid PID] [--fill PART=CSS ...]"
         + " | pay --purchase KEY --vm VM --field PART [--selector CSS] | pay --purchase KEY --done   (PART: \(cardParts.joined(separator: "|")))"
     let a = try parseArgs(argv, values: ["vm", "origin", "total-selector", "total-label", "window-id", "frame-origin", "profile", "browser-pid",
-                                         "fill", "purchase", "field", "selector", "request-id", "on-behalf-pid"], flags: ["human", "done", "json"])
+                                         "fill", "purchase", "field", "selector", "request-id", "on-behalf-pid"], flags: ["human", "done", "json"],
+                          repeatable: ["frame-origin", "fill"])
     // Ending a purchase takes its key and nothing else (at most --vm, which must be the purchase's own VM): --done with
     // any other word, or without --purchase, is refused, never read as a new purchase or a fill.
     if a.has("done") {

@@ -75,6 +75,10 @@ NETWORK_FS = ("smbfs", "nfs", "afpfs", "webdav", "cifs", "ftp", "cddafs", "osxfu
 MNT_LOCAL = 0x00001000
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 class StorageError(Exception):
     """A refusal, with the message for the person."""
 
@@ -4538,7 +4542,7 @@ def cmd_status(a):
 
 # --- the command line ------------------------------------------------------------------------
 def main(argv):
-    ap = argparse.ArgumentParser(prog="metacomputer", add_help=True)
+    ap = strictargs.Parser(prog="metacomputer", add_help=True)
     sub = ap.add_subparsers(dest="cmd", required=True)
     vol = sub.add_parser("volume").add_subparsers(dest="op", required=True)
     p = vol.add_parser("create")

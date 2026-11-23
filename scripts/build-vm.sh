@@ -8,6 +8,8 @@
 #   scripts/build-vm.sh            refuses if the VM or baseline already exists
 #   scripts/build-vm.sh --replace  deletes and rebuilds the working VM AND baseline
 for mc_a in "$@"; do case "$mc_a" in -h|--help) sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;; esac; done  # usage only
+# Nothing but --replace: anything else (an option it doesn't have, a word) is a usage error, before anything runs.
+case "$#:${1:-}" in 0:|1:--replace) ;; *) echo "metacomputer: usage: metacomputer build [--replace]   (nothing was run)" >&2; exit 2 ;; esac
 set -Eeuo pipefail
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR

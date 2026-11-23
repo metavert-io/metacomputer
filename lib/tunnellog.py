@@ -29,6 +29,7 @@ import time
 
 CAP = 1 << 20                 # what the log keeps of one tunnel's output
 SHOWN = 64 << 10              # what the caller is given to show
+INITIAL_DRAIN_S = 0.5         # how long what ssh wrote before it went to the background is read before the caller is told
 CUT = b"\n[metacomputer: the rest of ssh's output was left out of this log (over its size limit)]\n"
 
 
@@ -81,15 +82,17 @@ class Log:
         self.fd, self.cap, self.n, self.cut = fd, cap, 0, False
 
     def write(self, data):
+        """At most cap bytes in the file, the line saying the rest was left out included (its room is kept)."""
         if self.cut or not data:
             return
-        room = self.cap - self.n
+        room = self.cap - len(CUT) - self.n
         part = data[:max(room, 0)]
         if part:
             os.write(self.fd, part)
             self.n += len(part)
         if len(data) > room:
             os.write(self.fd, CUT)
+            self.n += len(CUT)
             self.cut = True
 
 
@@ -135,7 +138,10 @@ def reader(cmd, logfd, cap, mode, port, wait, r, w, sw):
             time.sleep(0.2)
         rc = p.poll()
         if rc is not None:
-            while open_ and select.select([r], [], [], 0)[0]:    # what it wrote before it exited
+            # What it wrote before it exited, read for a moment at most (its background half can keep the pipe
+            # readable without end): then the caller is told, and the rest is drained after.
+            end = time.monotonic() + INITIAL_DRAIN_S
+            while open_ and len(said) < SHOWN and time.monotonic() < end and select.select([r], [], [], 0)[0]:
                 open_ = take(0)
             tell(rc if (mode == "fork" or rc != 0) else 1)
         elif mode == "listen" and listening(port, p.pid):

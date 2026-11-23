@@ -81,6 +81,10 @@ AGENT_NAMES = {"Claude Code": "Claude", "Codex": "Codex", "OpenClaw": "OpenClaw"
                "Antigravity app": "Antigravity", owners.UNKNOWN_AGENT: "Your agent"}
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 def agent_word(rec):
     """Who asked, for the user's messages: the short name of the agent whose session opened the handoff ("Codex",
     "OpenClaw", "Hermes", "Gemini"), else "Claude"."""
@@ -769,7 +773,7 @@ def cmd_guard(argv):
 
 
 def sub_parser(sub):
-    ap = argparse.ArgumentParser(prog=f"metacomputer handoff {sub}")
+    ap = strictargs.Parser(prog=f"metacomputer handoff {sub}")
     if sub in ("done", "cancel"):
         ap.add_argument("--note", help="what Claude should know (at most 500 characters)")
     if sub in ("wait", "status"):
@@ -778,7 +782,7 @@ def sub_parser(sub):
 
 
 def open_parser():
-    ap = argparse.ArgumentParser(
+    ap = strictargs.Parser(
         prog="metacomputer handoff",
         description="Hand the virtual computer to the user and wait until they hand it back "
                     "(docs/guide.md, \"When Claude needs you\"). Also: done [--note], cancel [--note], wait, status.")
@@ -791,12 +795,42 @@ def open_parser():
     return ap
 
 
+VALUE_OPTIONS = ("--why", "--say", "--timeout", "--note")     # what open_parser and sub_parser take a value for
+
+
+def asks_help(words):
+    """Whether -h or --help is a flag among words, by the parsers' own rules: an option's value stays a value
+    (`--say --help` is the parser's missing-value error), and `--` ends the options."""
+    skip = False
+    for a in words:
+        if skip:
+            skip = False
+        elif a == "--":
+            return False
+        elif a in ("-h", "--help"):
+            return True
+        elif a in VALUE_OPTIONS:
+            skip = True
+    return False
+
+
 def main(argv):
-    if any(a in ("-h", "--help") for a in argv):
-        # Usage, and nothing else, wherever it's asked for: never an option's value (bin/metacomputer's --transport
-        # words, a --note) followed by an action (`--transport 1 --help cancel` once cancelled the open handoff).
-        words = [a for a in argv if a in ("done", "cancel", "wait", "status")]
-        (sub_parser(words[0]) if words else open_parser()).print_help()
+    if argv[:1] == ["--transport"]:
+        # bin/metacomputer's SSH command for the VM: a request for usage among its words is a broken command line,
+        # refused (never taken for usage, and never an option's value followed by an action: `--transport 1 --help
+        # cancel` once cancelled the open handoff).
+        try:
+            k = int(argv[1]) if len(argv) > 1 else -1
+        except ValueError:
+            k = -1
+        if k >= 0 and any(a in ("-h", "--help") for a in argv[2:2 + k]):
+            err("--transport N WORD... (bin/metacomputer's): a request for usage isn't a word of it")
+            return EXIT_USAGE
+    rest = argv[2 + int(argv[1]):] if argv[:1] == ["--transport"] and len(argv) > 1 and argv[1].isdigit() else argv
+    if asks_help(rest):
+        # Usage, and nothing else, before anything is done.
+        words = [a for a in rest if a in ("done", "cancel", "wait", "status")]
+        (sub_parser(words[0]) if rest[:1] == words[:1] and words else open_parser()).print_help()
         return 0
     if argv[:1] == ["--transport"]:
         # bin/metacomputer's SSH command for the VM (lib/input_reset.py), ahead of the user's arguments

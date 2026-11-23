@@ -49,6 +49,11 @@ RECORDER = """#!/bin/sh
 printf '%s\\n' "standin $(basename "$0") $*" >> "${MCOMP_HELP_CALLS:-/dev/null}"
 exit 97
 """
+# The vault: every call recorded; it says it's a release build when asked (bin/metacomputer asks before anything).
+VAULT_RECORDER = """#!/bin/sh
+printf '%s\\n' "standin $(basename "$0") $*" >> "${MCOMP_HELP_CALLS:-/dev/null}"
+case "$1 ${2:-}" in "version --json") echo '{"build":"release"}' ;; *) exit 64 ;; esac   # 64: the vault's usage error
+"""
 # The VM runner: every call recorded; it answers where it keeps VMs and that it has none (what loading a computer's
 # settings asks of it, scripts/lib.sh's identity check), so the copy's plain commands run (warm).
 RUNNER = """#!/bin/sh
@@ -329,7 +334,7 @@ class Lab:
             write(os.path.join(self.standins, n), RECORDER, 0o755)
         write(os.path.join(self.box.home, ".local", "bin", "mcomp-vm"), RUNNER, 0o755)          # the VM runner
         write(os.path.join(self.box.home, ".local", "share", "metacomputer", "bin", "mcomp-vault"), RECORDER, 0o755)
-        write(self.box.vault, RECORDER, 0o755)                                                    # MCOMP_VAULT_BIN
+        write(self.box.vault, VAULT_RECORDER, 0o755)                                              # MCOMP_VAULT_BIN
         self.site = os.path.join(td, "site-" + tag)
         write(os.path.join(self.site, "sitecustomize.py"), SITECUSTOMIZE)
         for path, text in VMS.items():
@@ -438,6 +443,9 @@ def run_forms(td, items, tag):
                 continue
             if item[0] == "shape":
                 out.append((item, None, lab.run(list(item[1]), item[2], list(item[3]))))
+                continue
+            if item[0] == "strict":
+                out.append((item, None, lab.run(list(item[2]), item[3], list(item[4]))))
                 continue
             vm, cmd, args = item
             out.append(((tuple(vm), cmd, tuple(args)), None, lab.run(vm, cmd, args)))
@@ -584,8 +592,8 @@ def real_value_options():
         "each": set(re.findall(r'argv\[0\]\.startswith\("(--[a-z-]+)"\)', open(os.path.join(LAB, "lib", "each.py")).read())),
         "secrets": vault_values(),
         # bin/metacomputer's and scripts/vm-commands.sh's own parsers: an option whose branch reads the next word ($2)
-        "vm": set(re.findall(r'^\s*(--[a-z-]+)\) \[ \$# -ge 2 \][^\n]*"\$2"', open(os.path.join(LAB, "scripts",
-                                                                                               "vm-commands.sh")).read(), re.M)),
+        "vm": set(re.findall(r'^\s*(--[a-z-]+)\) (?:vc_once [^;]*; )?\[ \$# -ge 2 \][^\n]*"\$2"',
+                             open(os.path.join(LAB, "scripts", "vm-commands.sh")).read(), re.M)),
         "list": set(re.findall(r'^\s*(--[a-z-]+)\)[^\n]*"\$2"', bash_fn("scripts/vm-commands.sh", "vm_list"), re.M)),
         "inspect": {o for g in re.findall(r'^\s*((?:--[a-z-]+\|?)+)\)[^\n]*"\$\{?2', bash_fn("bin/metacomputer", "do_inspect"),
                                           re.M) for o in g.split("|")},
@@ -676,6 +684,123 @@ def acting(called):
     return out
 
 
+
+# --- strict parsers (round 3) ---------------------------------------------------------------------------------------
+# Every command refuses, before anything is done, what it wouldn't use: an option it doesn't have, a second value for
+# an option that takes one, a word beyond its arguments, and a request for usage that isn't exactly -h or --help
+# (`checkpoint --delete keep --delete --help --yes` once deleted keep: the second --delete and what followed it were
+# never looked at). For every form of FORMS (its flag left out), each of those appended must end with a usage error
+# and call nothing but the runner's lookups.
+JUNK_OPTION = "--no-such-option"
+# How a usage error says so: "usage:" itself, or a command's own words for one (vm_claude's, vm-commands.sh's).
+USAGE_WORDS = ("usage", "given twice", "unknown option", "unexpected word", "unrecognized arguments",
+               "isn't a request for usage", "isn't an option of", "takes no arguments", "unknown action", "takes one",
+               "one vm name, please", "one vm at a time")
+# A command that isn't there for a computer elsewhere refuses every form of it alike, before anything is called.
+UNAVAILABLE = "isn't available for"
+MALFORMED_HELP = ("--help=x", "-hx", "--hel")
+# Forms whose last arguments take any number of words: an extra word is one more of them, not left over; and forms
+# of FORMS that leave out a word the command needs, where an extra word is that word (`vm create NAME`).
+VARIADIC = {("put",), ("test",), ("net", "allow"), ("net", "remove"), ("learn", "approve"), ("learn", "reject"),
+            ("learn", "remove"), ("claude", "keys"), ("secrets", "rule"), ("ssh",), ("notify",)}   # notify TEXT...
+FILLS_A_WORD = {("vm", ("create",)), ("vm", ("delete",)), ("notify", ()), ("call", ()), ("shot", ()),
+                ("record", ("start",)), ("default", ()), ("restore", ()), ("checkpoint", ()), ("get", ()),
+                ("contact-sheet", ()), ("rename", ()), ("task", ("start",)), ("actions", ("show",)),
+                ("actions", ("verify",)), ("call", ("list_windows",)), ("default", ("--json",)), ("get", ("x",)),
+                ("web", ("gpu",)), ("web", ("debug",)), ("cloud", ("teardown",))}
+
+
+def strict_forms():
+    vals, _subs, _fns = bash_tables()
+    real, _ = real_value_options()
+    out, seen = [], set()
+    for vm, cmd, args in FORMS:
+        base = [a for a in args if a != H]
+        if cmd in ("help", "-h", "--help", "ssh") or (tuple(vm), cmd, tuple(base)) in seen:
+            continue
+        seen.add((tuple(vm), cmd, tuple(base)))
+        out.append(("an unknown option", tuple(vm), cmd, tuple(base + [JUNK_OPTION])))
+        for bad in MALFORMED_HELP:
+            out.append((f"a malformed request for usage ({bad})", tuple(vm), cmd, tuple(base + [bad])))
+        words = [a for a in base if not a.startswith("-")]
+        if ((cmd,) not in VARIADIC and (cmd, words[0] if words else "") not in VARIADIC
+                and (cmd, tuple(base)) not in FILLS_A_WORD):
+            out.append(("an extra word", tuple(vm), cmd, tuple(base + ["extra-word"])))
+        dup = [a for a in base if a in vals.get(cmd, set()) | real.get(cmd, set())]
+        if dup:
+            i = base.index(dup[0])
+            out.append(("a second value for " + dup[0], tuple(vm), cmd,
+                        tuple(base + [dup[0], base[i + 1] if i + 1 < len(base) else "x"])))
+    return out
+
+
+def lookups_only(called):
+    """The calls a command may make before its arguments are refused: the runner's read-only lookups."""
+    return [c for c in called if not (c.split()[:2] == ["standin", "mcomp-vm"]
+                                      and (c.split()[2:3] in (["get"], ["ls"]) or c.split()[2:4] == ["config", "get"]))
+            and c.split()[:4] not in (["standin", "vault-stand-in", "version", "--json"],     # do_secrets: a release build?
+                                      ["standin", "vault-stand-in", "requests", "--json"])]  # approve: which request it is
+
+
+def checkpoint_p1_checks(td):
+    """codex re-check 2, P1: `checkpoint --delete keep --delete --help --yes` (and -h, and --help=x) deleted the
+    checkpoint keep: --help was the second --delete's value to the help scanner, and do_checkpoint used only the first
+    --delete and never looked at the rest. On a copy whose runner (tests/test_multi_vm.py's, which logs every delete)
+    has the checkpoint, each is refused and nothing is deleted; the plain form still deletes it."""
+    from test_multi_vm import vm as runner_vm
+    b = Box(td, "ckpt-p1")
+    try:
+        b.settings("config/local.env", 'VM_NAME=helpvm\nBASELINE_NAME=helpvm-baseline\nBROWSERS="firefox"\n')
+        for args in (["--delete", "keep", "--delete", "--help", "--yes"], ["--delete", "keep", "--delete", "-h", "--yes"],
+                     ["--delete", "keep", "--help=x", "--yes"], ["--delete", "keep", "-hx", "--yes"],
+                     ["--delete", "keep", "--yes", "extra-word"], ["--delete", "keep", "--yes", "--no-such-option"]):
+            b.set_vms([runner_vm("helpvm"), runner_vm("helpvm-ckpt-keep")])     # (its delete log emptied too)
+            r = b.run("checkpoint", *args)
+            check(f"checkpoint {' '.join(args)}: refused (usage error), the checkpoint kept", r.returncode == 2
+                  and not b.deletes() and "helpvm-ckpt-keep" in b.vms(), (r.returncode, b.deletes(), r.stderr[-300:]))
+        b.set_vms([runner_vm("helpvm"), runner_vm("helpvm-ckpt-keep")])
+        r = b.run("checkpoint", "--delete", "keep", "--yes")
+        check("...and `checkpoint --delete keep --yes` deletes it (the copy's runner can)", r.returncode == 0
+              and b.deletes() == ["helpvm-ckpt-keep"], (r.returncode, b.deletes(), r.stderr[-300:]))
+    finally:
+        b.close()
+
+def setup_options_check():
+    """`metacomputer setup` refuses what install.sh wouldn't take before it asks for a terminal (mc_strict), so its list
+    of install.sh's options must be install.sh's: every option of install.sh's loop, and nothing else."""
+    inst = open(os.path.join(LAB, "install.sh")).read()
+    loop = re.search(r'^for a in "\$@"; do\n(.*?)^done$', inst, re.S | re.M).group(1)
+    theirs = set(re.findall(r"(?<![\w-])(--?[a-z][a-z=-]*)(?=[|)])", loop.split("-h|--help")[0]))   # its case labels
+    src = open(os.path.join(LAB, "bin", "metacomputer")).read()
+    m = re.search(r'^    setup\)\s.*?mc_take "setup [^"]*" 0 0 "([^"]*)"', src, re.S | re.M)
+    ours = set(m.group(1).replace("\\\n", " ").split()) if m else set()
+    check("setup's options in bin/metacomputer's strict parser are install.sh's (none missing, none extra)",
+          ours and ours == theirs, (sorted(theirs - ours), sorted(ours - theirs)))
+
+
+def own_parser_checks(td):
+    """Programs bin/metacomputer hands its arguments to refuse them themselves too (run here directly, past bin's own
+    grammar): guest_put took an unknown option for a file to copy; actionlog's verify --all left the named files unread."""
+    marker, real = os.path.join(td, "transport-ran"), os.path.join(td, "a-file.txt")
+    with open(real, "w") as f:
+        f.write("x\n")
+    r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "guest_put.py"), "--transport", "3", "/usr/bin/touch",
+                        marker, marker, real, "--bogus"], capture_output=True, text=True, timeout=60)
+    check("lib/guest_put.py: an unknown option is a usage error, never a file to copy; nothing is run",
+          r.returncode == 2 and "unknown option" in r.stderr and not os.path.exists(marker), (r.returncode, r.stderr))
+    home = os.path.join(td, "own-parsers-home")
+    os.makedirs(home, exist_ok=True)
+    r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "actionlog.py"), "verify", "--all", "some.jsonl"],
+                       capture_output=True, text=True, timeout=60, env=dict(os.environ, HOME=home))
+    check("lib/actionlog.py: verify --all with a file named is a usage error (one or the other)",
+          r.returncode == 2 and "not both" in r.stderr, (r.returncode, r.stderr[-300:]))
+    r = subprocess.run([sys.executable, os.path.join(LAB, "lib", "actionlog.py"), "--no-such-option"],
+                       capture_output=True, text=True, timeout=60, env=dict(os.environ, HOME=home))
+    check("lib/actionlog.py: an unknown command or option says it's one, with the usage, on stderr (exit 2)",
+          r.returncode == 2 and "unknown command" in r.stderr and "usage:" in r.stderr and not r.stdout,
+          (r.returncode, r.stdout[-200:], r.stderr[-200:]))
+
+
 def main():
     td = tempfile.mkdtemp(prefix="mchelp-", dir="/tmp")
     try:
@@ -685,9 +810,13 @@ def main():
         check("every command of bin/metacomputer's dispatch has --help rows here", not missing, missing)
 
         value_option_checks()
+        setup_options_check()
+        own_parser_checks(td)
+        checkpoint_p1_checks(td)
 
         todo = (forms() + [("direct", rel, f) for rel in direct_targets() for f in FLAGS]
-                + [("shape", tuple(vm), cmd, tuple(a)) for vm, cmd, a in shape_forms()])
+                + [("shape", tuple(vm), cmd, tuple(a)) for vm, cmd, a in shape_forms()]
+                + [("strict", what, vm, cmd, a) for what, vm, cmd, a in strict_forms()])
         workers = max(2, min(8, (os.cpu_count() or 4)))
         parts = [todo[i::workers] for i in range(workers)]
         results = []
@@ -698,6 +827,29 @@ def main():
         for key, problem, res in results:
             if problem:
                 check("the copy runs a plain command first (nothing called)", False, problem)
+                continue
+            if key[0] == "strict":
+                _, what, vm, cmd, args = key
+                rc, out, err, called, changed = res
+                words = " ".join(["metacomputer", *vm, cmd, *args])
+                if cmd == "secrets":
+                    # The vault parses its own arguments (its parseArgs refuses each of these: tests/test_vault_ops.py
+                    # with a test build): bin/metacomputer hands them on whole and calls nothing else first.
+                    vault = [c for c in lookups_only(called) if c.split()[1:2] == ["vault-stand-in"]]
+                    whole = len(vault) == 1 and vault[0].split()[2:2 + len(args)] == list(args)
+                    check(f"{words}: {what} is refused before the vault, or goes whole to the vault's own parser; nothing "
+                          "else is called", rc not in (0, "timeout") and (not lookups_only(called) or (
+                              whole and lookups_only(called) == vault)), (rc, called[:4], (err or out)[-300:]))
+                    continue
+                # A usage error, said as one (not some later refusal that happened to stop it), nothing called or written
+                # (Python's own bytecode caches aside).
+                said = (err + out).lower()
+                written = [p for p in changed if "__pycache__" not in p
+                           and not os.path.isdir(os.path.join(p, "__pycache__"))]
+                check(f"{words}: {what} is refused with a usage error, and nothing is called or written",
+                      rc not in (0, "timeout") and not lookups_only(called) and not written
+                      and (any(w in said for w in USAGE_WORDS) or (vm and UNAVAILABLE in said)),
+                      (rc, called[:4], written[:4], (err or out)[-300:]))
                 continue
             if key[0] == "shape":
                 _, vm, cmd, args = key

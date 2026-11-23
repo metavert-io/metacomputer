@@ -189,20 +189,24 @@ def basic_checks():
     r = run("guard")
     check("guard: exit 4 with the refusal", r.returncode == 4 and "Paused: the user has the computer" in r.stderr,
           (r.returncode, r.stderr))
-    # --help is usage and nothing else, wherever it comes: never an option's value followed by an action. Through
-    # bin/metacomputer's help shortcut (which passes on fixed words only) and handoff.py itself.
+    # --help is usage and nothing else where it's a flag, and never an option's value followed by an action. Through
+    # bin/metacomputer's help shortcut (which passes on fixed words only) it's the usage; handoff.py itself refuses a
+    # request for usage among bin/metacomputer's --transport words (a broken command line), and keeps an option's value
+    # a value (`--say --help`, `--note --help`: the parser's own missing-value error), all with the handoff still open.
     mc = os.path.join(LAB, "bin", "metacomputer")
-    for argv, via_mc in ((["--transport", "1", "--help", "cancel"], True),
-                         (["--transport", "1", "-h", "done", "--note", "x"], True),
-                         (["--transport", "2", "ssh", "--help", "cancel"], True),
-                         (["cancel", "--note", "--help"], False)):     # a value there: bin/metacomputer runs handoff
+    for argv, via_mc, direct_rc in ((["--transport", "1", "--help", "cancel"], True, 2),
+                                    (["--transport", "1", "-h", "done", "--note", "x"], True, 2),
+                                    (["--transport", "2", "ssh", "--help", "cancel"], True, 2),
+                                    (["cancel", "--note", "--help"], False, 2),
+                                    (["--say", "--help", "--why", "login"], False, 2),
+                                    (["status", "--", "--help"], False, 2)):
         r = subprocess.run([mc, "handoff", *argv], env=env(), capture_output=True, text=True, timeout=60,
                            stdin=subprocess.DEVNULL) if via_mc else None
         r2 = run(*argv, claude=None)
-        check(f"handoff {' '.join(argv)}: usage only ({'bin/metacomputer and ' if via_mc else ''}handoff.py), the "
-              "handoff still open", (not via_mc or (r.returncode == 0 and "usage:" in r.stdout))
-              and r2.returncode == 0 and "usage:" in r2.stdout and (owners.open_handoff() or {}).get("say") == SAY,
-              (r and (r.returncode, r.stdout[-200:], r.stderr[-300:]), r2.returncode, r2.stderr[-200:]))
+        check(f"handoff {' '.join(argv)}: {'usage through bin/metacomputer; ' if via_mc else ''}handoff.py refuses it "
+              "(usage error), the handoff still open", (not via_mc or (r.returncode == 0 and "usage:" in r.stdout))
+              and r2.returncode == direct_rc and "usage:" not in r2.stdout and (owners.open_handoff() or {}).get("say") == SAY,
+              (r and (r.returncode, r.stdout[-200:], r.stderr[-300:]), r2.returncode, r2.stdout[-120:], r2.stderr[-200:]))
     r = run("status", "--json")
     st = json.loads(r.stdout or "{}")
     check("status --json: open, with the instructions", st.get("open") and st["handoff"]["say"] == SAY, r.stdout)

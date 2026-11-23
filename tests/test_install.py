@@ -1745,7 +1745,7 @@ def test_codex_step():
         home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
         os.makedirs(ch)
         write(os.path.join(ch, "config.toml"), '[tui]\n\n[mcp_servers.other]\ncommand = "/bin/echo"\n')
-        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch, MCOMP_LOCK_DIR=os.path.join(home, ".locks"))   # never the account's lock
         for k in ("MCOMP_CONFIG", "MCOMP_VM"):
             env.pop(k, None)
         p = subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=120,
@@ -1822,7 +1822,7 @@ def test_codex_skill_links():
     try:
         home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
         os.makedirs(ch)
-        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch, MCOMP_LOCK_DIR=os.path.join(home, ".locks"))   # never the account's lock
         for k in ("MCOMP_CONFIG", "MCOMP_VM"):
             env.pop(k, None)
         sk = os.path.join(home, ".agents", "skills")
@@ -1884,7 +1884,7 @@ def test_codex_config_edits():
         import tomllib
         home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
         os.makedirs(ch)
-        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch, MCOMP_LOCK_DIR=os.path.join(home, ".locks"))   # never the account's lock
         for k in ("MCOMP_CONFIG", "MCOMP_VM"):
             env.pop(k, None)
         cfg_path = os.path.join(ch, "config.toml")
@@ -1972,7 +1972,9 @@ def test_agent_choices():
     try:
         home = os.path.join(t, "home")
         os.makedirs(os.path.join(home, ".codex"))
-        env = dict(os.environ, HOME=home, CODEX_HOME=os.path.join(home, ".codex"))
+        # install.sh's lock of its own: the account's made these runs wait and stop while another install.sh of this
+        # account ran (another suite's, another session's)
+        env = dict(os.environ, HOME=home, CODEX_HOME=os.path.join(home, ".codex"), MCOMP_LOCK_DIR=os.path.join(t, "locks"))
         for k in ("MCOMP_CONFIG", "MCOMP_VM", "CLAUDE_CONFIG_DIR", "CLAUDECODE"):
             env.pop(k, None)
 

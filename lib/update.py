@@ -53,6 +53,10 @@ SELECTION = ("MCOMP_VM", "MCOMP_CONFIG")  # a VM picked by the caller: every chi
 HOOK_CODE = ("lib",)                 # the hub and the watcher run this checkout's lib/
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 class Refused(Exception):
     pass
 
@@ -665,7 +669,7 @@ def main(argv):
         except Exception as e:                     # never fail an install over its last report
             print(f"  • couldn't finish the after-install check ({type(e).__name__}: {str(e)[:200]})")
         return 0
-    ap = argparse.ArgumentParser(prog="metacomputer", description=__doc__.split("\n\n")[0])
+    ap = strictargs.Parser(prog="metacomputer", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     v = sub.add_parser("version")
     v.add_argument("--json", action="store_true")

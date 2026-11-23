@@ -684,7 +684,8 @@ func cmdRule(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         + " | rule list [--json] | rule remove ID"
     guard let sub = argv.first else { throw usageError(usage) }
     let a = try parseArgs(Array(argv.dropFirst()), values: ["secret", "site", "session", "project", "for", "from", "from-host", "to",
-                                                            "link-host", "expires"], flags: ["passphrase", "json"])
+                                                            "link-host", "expires"], flags: ["passphrase", "json"],
+                          repeatable: ["link-host"])
     switch sub {
     case "add":
         if let kind = a.positional.first, kind == "code" || kind == "relay" {
@@ -868,7 +869,8 @@ func cmdCodeRuleAdd(_ paths: Paths, _ kind: String, _ a: Args) throws -> Int32 {
 func cmdPolicy(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: policy NAME [--approval session|each] [--answer-timeout 30m|default]"
         + " | policy CARD [--pay ask|agent] [--label L] [--currency USD] [--max-purchase 50] [--max-per 200/30d] [--merchant-max https://site=100/30d ...] [--no-caps]"
-    let a = try parseArgs(argv, values: Set(["approval", "answer-timeout"]).union(cardValueFlags), flags: cardBoolFlags)
+    let a = try parseArgs(argv, values: Set(["approval", "answer-timeout"]).union(cardValueFlags), flags: cardBoolFlags,
+                          repeatable: ["allow-frame", "merchant-max"])
     let ap = a.last("approval"), at = a.last("answer-timeout")
     let cardGiven = !Set(a.values.keys).intersection(cardValueFlags).isEmpty || !a.flags.intersection(cardBoolFlags).isEmpty
     if cardGiven {

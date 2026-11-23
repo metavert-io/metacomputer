@@ -515,6 +515,16 @@ for; after every such option `--help` is that option's value, after the value it
 command and every option that takes a value, `OPT --help WORD` (WORD one that would act: `cancel`, `delete`,
 `teardown`, ...) acts on nothing: no call beyond the runner's lookups, and the vault only asked for its version or
 refusing an option as its command.
+Strict parsers: every form of the table, its flag left out, gets an unknown option, a second value for an option it
+already has, a word beyond its arguments (except where its last arguments take any number of words, or the form left
+out a word the command needs) and three malformed requests for usage (`--help=x`, `-hx`, `--hel`) appended; each must
+end with a usage error that says it is one (not a later refusal that happened to stop it), calling nothing but the
+runner's lookups and writing nothing (`secrets`: refused before the vault, or handed to the vault whole, whose parser
+refuses it: tests/test_vault_ops.py; a command a computer elsewhere doesn't have refuses every form alike). `setup`'s
+list of install.sh's options must be install.sh's own; `lib/guest_put.py` and `lib/actionlog.py`, run directly,
+refuse an unknown option and `verify --all FILE`. And `checkpoint --delete keep --delete --help --yes` (with `-h`,
+`--help=x`, `-hx`, an extra word, an unknown option), on a copy whose runner has the checkpoint, deletes nothing,
+while `checkpoint --delete keep --yes` does.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 

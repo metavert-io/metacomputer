@@ -797,6 +797,17 @@ CLAIMS = [
      and "def value_option_checks():" in raw("tests/test_help.py")
      and 'margs=("$c" "$@")' not in raw("bin/metacomputer") and 'margs=("$@")' not in raw("bin/metacomputer")
      and 'mod="$c"; margs=(${subw[@]+"${subw[@]}"} --help)' in raw("bin/metacomputer")),
+    ("docs/commands.md", r"Every command refuses, before it does anything, what it wouldn't use: an option it doesn't have, a "
+                         r"second value for an option that takes one",
+     lambda m: "mc_strict \"$@\"" in raw("bin/metacomputer") and "mc_help_malformed \"$@\"" in raw("bin/metacomputer")
+     and raw("bin/metacomputer").index('mc_strict "$@"') < raw("bin/metacomputer").index('. "$LIB"')
+     and 'throw usageError("--\\(name) given twice")' in raw("vault/Util.swift")
+     and 'self.register("action", "store", _Once)' in raw("lib/strictargs.py")
+     and all("strictargs.Parser(" in raw(f"lib/{m_}.py") and "argparse.ArgumentParser(" not in raw(f"lib/{m_}.py")
+             for m_ in ("events", "handoff", "learn", "agents", "shop", "browser_tools", "traces", "update", "storage",
+                        "netpolicy", "remote"))
+     and 'elif a.startswith("-") and a != "-":' in raw("lib/guest_put.py")      # put: ./-name for such a file
+     and "def strict_forms():" in raw("tests/test_help.py")),
     ("docs/codex.md", r"one that only asks for its usage \(`--help` or `-h`\) prints it, since it runs nothing",
      lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
      < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')),

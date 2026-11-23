@@ -186,13 +186,16 @@ def parse(argv):
             raise Usage("give the script one way: -c, --file or -")
         o["source"] = kind
 
-    i = 0
+    i, given = 0, set()
     while i < len(argv):
         a = argv[i]
         opt, eq, val = a.partition("=") if a.startswith("--") else (a, "", "")
 
         def value():
             nonlocal i
+            if opt in given:                    # one value per option: a second is refused, never let through
+                raise Usage(f"{opt} given twice (one value, please)")
+            given.add(opt)
             if eq:
                 return val
             if i + 1 >= len(argv):

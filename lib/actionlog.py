@@ -442,11 +442,32 @@ def _fmt_args(a):
     return s if len(s) <= 110 else s[:107] + "..."
 
 
+def strict_args(cmd, rest):
+    """`metacomputer actions list|show|verify`: anything a form wouldn't use (an option it doesn't have, a second
+    value, a word beyond its arguments) is a usage error before anything is read (lib/strictargs.py)."""
+    import strictargs
+    ap = strictargs.Parser(prog=f"metacomputer actions {cmd}")
+    if cmd == "list":
+        ap.add_argument("--days", type=int)
+    elif cmd == "show":
+        ap.add_argument("target", nargs="?")
+        ap.add_argument("--json", action="store_true")
+    else:
+        ap.add_argument("targets", nargs="*")
+        ap.add_argument("--all", action="store_true")
+        ap.add_argument("--key")
+    a = ap.parse_args(rest)
+    if cmd == "verify" and a.all and a.targets:      # --all checked every file and left the named ones unread
+        ap.error("--all or FILE..., not both")
+
+
 def main(argv):
     cfg = settings()
     base = cfg["dir"]
     cmd = argv[0] if argv else "list"
     rest = argv[1:]
+    if cmd in ("list", "show", "verify"):
+        strict_args(cmd, rest)
     if cmd == "list":
         days = int(rest[rest.index("--days") + 1]) if "--days" in rest else 7
         fs = files(base, days)
@@ -550,7 +571,9 @@ def main(argv):
             data = {}
         record_event(kind, data, cfg)
         return 0
-    print(__doc__)
+    print(f"metacomputer actions: unknown command {cmd[:40]!r}; usage: metacomputer actions list [--days N] | "
+          "show [FILE|latest] [--json] | verify [FILE...|--all] [--key PUB]   (metacomputer actions --help)",
+          file=sys.stderr)
     return 2
 
 

@@ -250,7 +250,9 @@ def env_for(td, **extra):
 def cmd(td, args, fake=None):
     work = os.path.join(td, "work")
     transport = ["2", "bash", "-c"] if fake is None else ["3", sys.executable, os.path.join(td, "fake_vm.py"), fake]
-    return [sys.executable, SH, "--transport", *transport, "--cwd", work, *args]
+    # the test's own folder unless a check gives its own (one --cwd: a second is refused)
+    cwd = [] if any(a == "--cwd" or str(a).startswith("--cwd=") for a in args) else ["--cwd", work]
+    return [sys.executable, SH, "--transport", *transport, *cwd, *args]
 
 
 def sh(td, *args, stdin=None, timeout=90, fake=None, **env):

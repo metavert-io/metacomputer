@@ -3598,7 +3598,25 @@ def review_default(c):
 def review_egress(c):
     """Review item 10: net egress changes nothing unless it can be applied and read back"""
     b, td, real, tmv = c["b"], c["td"], c["real"], c["tmv"]
-    r = b.run("--vm", "own1", "net", "egress", "off", "--override")
+    # Another session using it: refused unless --override, which it now reads (its owners check), as start's does.
+    # Found by the strict parsers (round 3): --override was accepted here and never read.
+    holder = subprocess.Popen(["sleep", "120"])
+    od = os.path.join(b.co, ".run-vms", "own1", "owners")
+    os.makedirs(od, exist_ok=True)
+    claim = os.path.join(od, f"{holder.pid}.json")
+    try:
+        json.dump({"bridge_pid": holder.pid, "claude_pid": holder.pid, "cwd": "/", "started": time.time(),
+                   "last_call": time.time(), "last_tool": "click"}, open(claim, "w"))
+        r0 = b.run("--vm", "own1", "net", "egress", "off")
+        r = b.run("--vm", "own1", "net", "egress", "off", "--override")
+    finally:
+        holder.kill()
+        holder.wait()
+        if os.path.exists(claim):
+            os.remove(claim)
+    check("net egress while another session uses the computer: refused without --override, past that check with it",
+          r0.returncode != 0 and "another session is using" in r0.stderr and "another session is using" not in r.stderr,
+          (r0.stderr[-200:], r.stderr[-200:]))
     text = open(os.path.join(b.co, "config", "vms", "own1.env")).read()
     check("net egress off on a computer that doesn't answer: refused, the setting left as it was",
           r.returncode != 0 and "doesn't answer" in r.stderr and "nothing was" in r.stderr
@@ -4149,6 +4167,7 @@ printf "Warning: the tunnel \033[31msays\033[0m this\n" >&2
 if [ "${SSH_FAILS:-0}" = 1 ]; then echo "Permission denied (publickey)." >&2; exit 255; fi
 case " $* " in
   *" -f "*) if [ "${FLOOD:-0}" = 1 ]; then ( head -c 5000000 /dev/zero | tr '\0' 'x'; echo; echo FLOOD-END; sleep 2 ) &
+            elif [ "${ENDLESS:-0}" = 1 ]; then ( cat /dev/zero & c=$!; sleep 20; kill $c ) &
             else ( sleep 15 ) & fi
             exit 0 ;;
   *) exec "$PY" -c 'import socket, sys, time
@@ -4220,9 +4239,49 @@ def view_tunnel_pipes():
         _time.sleep(1.5)                     # the background half goes on printing; nothing more may reach the log
         size = os.path.getsize(log) if os.path.exists(log) else -1
         check("...the VM's end making ssh print 5 MB after it went to the background: the command still returns at "
-              "once, and its log stops at its cap (1 MB), saying the rest was left out",
-              rc == 0 and secs < 6 and 0 < size <= cap + 200 and cut in open(log, "rb").read()
+              "once, and its log stops at its cap (1 MB, the line saying the rest was left out included)",
+              rc == 0 and secs < 6 and 0 < size <= cap and cut in open(log, "rb").read()
               and b"FLOOD-END" not in open(log, "rb").read(), (res[:4], size))
+        # (round 3) The background half printing without pause as ssh goes to the background: what it wrote before is
+        # read for a moment at most, then the command returns; the reader goes on draining after.
+        rc, out, err, secs, calls = res = run("endless", ENDLESS="1")
+        check("...ssh's background half printing without pause: the command still returns at once (what came before "
+              "is read for a moment at most)", rc == 0 and secs < 6, res[:4])
+        # The same where the pipe never once runs dry (a pipe that's always readable, fed without end: the race the
+        # stand-in above can lose): the reader still says the tunnel is up within moments, then drains on.
+        import threading as _threading
+        sys.path.insert(0, os.path.join(LAB, "lib"))
+        import tunnellog as _tl
+        r, w = os.pipe()
+        sr, sw = os.pipe()
+        feed_fd, stop = os.dup(w), _threading.Event()
+
+        def feed():
+            while not stop.is_set():
+                try:
+                    os.write(feed_fd, b"z" * 65536)
+                except OSError:
+                    return
+        logfd = os.open(os.path.join(td, "always-readable.log"), os.O_WRONLY | os.O_CREAT, 0o600)
+        real_select = _tl.select.select
+        _tl.select.select = lambda rl, wl, xl, timeout=None: (list(rl), [], [])
+        feeder = _threading.Thread(target=feed, daemon=True)
+        feeder.start()
+        reader = _threading.Thread(target=_tl.reader, args=(["/usr/bin/true"], logfd, 1 << 20, "fork", 0, 15, r, w, sw),
+                                   daemon=True)
+        t0 = _time.monotonic()
+        reader.start()
+        told = real_select([sr], [], [], 5)[0]
+        secs = round(_time.monotonic() - t0, 1)
+        status = os.read(sr, 16).split(b"\n")[0] if told else b""
+        stop.set()
+        os.close(feed_fd)
+        reader.join(10)
+        _tl.select.select = real_select
+        for fd in (sr, logfd):
+            os.close(fd)
+        check("...a pipe that never runs dry: the reader still says the tunnel is up within moments, then drains on",
+              told and status == b"0" and secs < 3, (secs, status))
         # A log that's a link, or shared with another file (a hard link): refused, nothing written through it.
         if os.path.lexists(log):
             os.remove(log)

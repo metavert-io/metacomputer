@@ -128,6 +128,10 @@ OTLP_SEV = {"info": (9, "INFO"), "warn": (13, "WARN"), "error": (17, "ERROR")}
 USER_AGENT = "metacomputer-events/1"
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 class EventsError(Exception):
     pass
 
@@ -2977,7 +2981,7 @@ def _emit_parser(sub, name):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog="metacomputer events", description="Optional event stream (docs/events.md).")
+    ap = strictargs.Parser(prog="metacomputer events", description="Optional event stream (docs/events.md).")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sk = sub.add_parser("sink").add_subparsers(dest="sub", required=True)
     p = sk.add_parser("add", help="needs your own terminal")

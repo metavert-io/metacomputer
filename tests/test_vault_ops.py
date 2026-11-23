@@ -417,6 +417,28 @@ def run(td, procs):
     sock = os.path.join(vdir, "vault.sock")
     alog = os.path.join(vdir, "audit.jsonl")
 
+    # Strict arguments (round 3): a second value for an option that takes one is a usage error (exit 64), refused before
+    # anything is done; the options a command reads as a list (--site, --fill, ...) still repeat; an option a command
+    # doesn't have, and a word beyond its arguments, are refused as before.
+    n0 = len(calls())
+    strict = []
+    for argv, want in ((["fill", "x", "--vm", "opsvm", "--vm", "other", "--field", "password"], "--vm given twice"),
+                       (["token", "x", "--ttl", "5m", "--ttl", "9m"], "--ttl given twice"),
+                       (["pay", "card", "--origin", "https://a.example", "--origin", "https://b.example",
+                         "--total-selector", "#t"], "--origin given twice"),
+                       (["login", "x", "--vm", "opsvm", "--password-selector", "#p", "--password-selector", "#q"],
+                        "--password-selector given twice"),
+                       (["fill", "x", "--vm", "opsvm", "--field", "password", "--no-such-option"], "unknown option"),
+                       (["delete", "x", "extra-word"], "usage")):
+        r = subprocess.run([BIN, *argv], env=env, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        strict.append((argv[0], r.returncode, want in r.stderr, r.stderr[-160:]))
+    r = subprocess.run([BIN, "session", "load", "x", "--vm", "opsvm", "--site", "a.example", "--site", "b.example"],
+                       env=env, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    check("strict arguments: a second value for an option that takes one, an unknown option or an extra word is a "
+          "usage error (64), refused before the VM is reached; a list option (--site) still repeats",
+          all(rc == 64 and said for _c, rc, said, _e in strict) and "given twice" not in r.stderr
+          and len(calls()) == n0, (strict, r.returncode, r.stderr[-200:]))
+
     def client(*args, extra=None, timeout=120):
         r = subprocess.run([BIN, *args], capture_output=True, text=True, env=dict(env, **(extra or {})),
                            stdin=subprocess.DEVNULL, timeout=timeout)

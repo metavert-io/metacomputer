@@ -62,6 +62,10 @@ ROLES = ("admin", "ops", "mcp", "view")
 WRAPPER = (sys.executable, os.path.join(LIB, "proxywrap.py"))
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 class Refused(Exception):
     pass
 
@@ -1544,7 +1548,7 @@ def main(argv=None):
 
 
 def run(argv=None):
-    ap = argparse.ArgumentParser(prog="remote.py")
+    ap = strictargs.Parser(prog="remote.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("target", "tunnel", "probe"):
         p = sub.add_parser(name)

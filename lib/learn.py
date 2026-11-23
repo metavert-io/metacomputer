@@ -75,6 +75,10 @@ DRAFT_DENY = re.compile(r"passphrase|password|secret|token|api[ _-]?key|credenti
                         r"\bsudo\b|\brm -", re.I)
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 def esc(s):
     return termsafe.escape_for_terminal(str(s))
 
@@ -1117,7 +1121,7 @@ def print_bench_comparison(report, runs, path):
 
 # --- main ------------------------------------------------------------------------------------------
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="metacomputer learn", description=__doc__,
+    ap = strictargs.Parser(prog="metacomputer learn", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("report", help="mine your sessions and propose lessons")

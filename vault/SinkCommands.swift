@@ -7,7 +7,8 @@ import Foundation
 func cmdAuditSink(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: audit-sink add NAME --kind webhook|otlp|syslog|ntfy --url URL|ask [--header 'Name: value|{ask}' ...] [--ca FILE] [--required] | list | show NAME [--key] | test NAME | remove NAME"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["kind", "url", "header", "ca"], flags: ["required", "key", "json"])
+    let a = try parseArgs(Array(argv.dropFirst()), values: ["kind", "url", "header", "ca"], flags: ["required", "key", "json"],
+                          repeatable: ["header"])
     let name = a.positional.first
     if sub != "list" { guard a.positional.count == 1, let n = name, validName(n) else { throw usageError(usage) } }
     switch sub {

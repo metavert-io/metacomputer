@@ -16,7 +16,10 @@ subcommand or its arguments, before a `--`) prints that command's usage and exit
 settings are read, and nothing reaches the VM, its runner, SSH, a provider, the vault or the network (`ssh ROLE CMD`
 leaves them to the guest's command). Right after an option that takes a value it's that value, as before (`sh --file
 --help` runs the file named `--help`); the usage comes from the command's own program asked with fixed words only,
-never the rest of what was typed. `metacomputer --vm NAME COMMAND`
+never the rest of what was typed. Every command refuses, before it does anything, what it wouldn't use: an option it
+doesn't have, a second value for an option that takes one (options that take a list, like `--site`, repeat), a word
+beyond its arguments, an abbreviated option, and a request for usage that isn't exactly `-h` or `--help` (`--help=x`,
+`-hx`, `--hel`): each is a usage error (a file whose name starts with `-` is given as `./-name`). `metacomputer --vm NAME COMMAND`
 runs any command on the VM `NAME`; without `--vm`, a command acts on your default
 computer ([More than one VM](#more-than-one-vm)).
 

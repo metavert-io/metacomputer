@@ -330,7 +330,151 @@ mc_help() { # CMD ARGS...: the usage, on stdout; exit 0
     "(metacomputer help lists every command; nothing was run)"
   exit 0
 }
+# A request for usage that isn't exactly -h or --help (--help=x, -hx, --hel), where one would be: refused here, never
+# passed on to a command that might ignore it and act.
+mc_help_malformed() { # CMD ARGS...: 0 (and the word in MC_BAD) when one is in a flag's place
+  local c="${1:-help}" a skip=0 vals i=0; [ $# -gt 0 ] && shift
+  vals=" $(mc_value_options "$c") "
+  for a in "$@"; do
+    i=$((i + 1))
+    if [ "$c" = ssh ] && [ $i -gt 2 ]; then return 1; fi
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in
+      --) return 1 ;;
+      --help=*|-h?*|--h|--he|--hel) MC_BAD="$a"; return 0 ;;
+    esac
+    case "$vals" in *" $a "*) skip=1 ;; esac
+  done
+  return 1
+}
+mc_usage_error() { printf 'metacomputer: %s\n' "$*" >&2; exit 2; }
+mc_shown() { printf "'%s'" "$(printf '%s' "$1" | LC_ALL=C tr -c '[:print:]' '?' | cut -c1-60)"; }
+if mc_help_malformed "$@"; then
+  mc_usage_error "$(mc_shown "$MC_BAD") isn't a request for usage: -h or --help (nothing was run)"
+fi
 mc_help_asked "$@" && mc_help "$@"
+# bin/metacomputer's own commands refuse, before anything runs (no settings read, nothing called), what they wouldn't
+# use: an option they don't have, a second value for one that takes one, a word beyond their arguments. (Commands
+# that hand their arguments to a program of their own leave it to that program's parser, which refuses them the same
+# way before it acts: lib/strictargs.py, vm_shell's, vm_claude's, mcomp_sdk's, each.py's, guest_put's, the vault's
+# parseArgs, vm-commands.sh's.) tests/test_help.py appends each kind to every command form.
+mc_take() { # USAGE MIN MAX "FLAGS" "VALUE-OPTIONS" ARGS...: each argument a flag of FLAGS, a value option with its value
+  # (each at most once), or one of MIN..MAX words; anything else is a usage error
+  # (a value option written "--x=" in VALUE-OPTIONS also takes the --x=VALUE form, as its program does)
+  local u="$1" min="$2" max="$3" flags=" $4 " vals=" $5 " n=0 seen=" " a o; shift 5
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in --*=*)
+      o="${a%%=*}"
+      case "$vals" in *" $o= "*)
+        case "$seen" in *" $o "*) mc_usage_error "$o given twice; usage: metacomputer $u" ;; esac
+        seen="$seen$o "; shift; continue ;;
+      esac ;;
+    esac
+    case "$vals" in *" $a "*|*" $a= "*)
+      a="${a%=}"
+      [ $# -ge 2 ] || mc_usage_error "$a needs a value; usage: metacomputer $u"
+      case "$seen" in *" $a "*) mc_usage_error "$a given twice; usage: metacomputer $u" ;; esac
+      seen="$seen$a "; shift 2; continue ;;
+    esac
+    case "$flags" in *" $a "*) shift; continue ;; esac
+    case "$a" in -?*) mc_usage_error "unknown option $(mc_shown "$a"); usage: metacomputer $u" ;; esac
+    n=$((n + 1))
+    [ "$n" -le "$max" ] || mc_usage_error "unexpected word $(mc_shown "$a"); usage: metacomputer $u"
+    shift
+  done
+  [ "$n" -ge "$min" ] || mc_usage_error "usage: metacomputer $u"
+}
+mc_strict() { # CMD ARGS...
+  local c="${1:-help}" sub; [ $# -gt 0 ] && shift
+  local g="--yes --discard-unsynced --override"     # parse_flags's, wherever a command reads them
+  case "$c" in
+    start)           mc_take "start [--no-volumes] [--override]" 0 0 "--no-volumes --override" "" "$@" ;;
+    stop)            mc_take "stop [--force] [--override]" 0 0 "--force --override" "" "$@" ;;
+    restart)         mc_take "restart [--no-volumes] [--force] [--override]" 0 0 "--no-volumes --force --override" "" "$@" ;;
+    who)             mc_take "who [--json]" 0 0 "--json" "" "$@" ;;
+    status)          mc_take "status [--json]" 0 0 "--json" "" "$@" ;;
+    where|release|checkpoints|mcp|mcp-lazy|_health|_runinfo|_vnc-install|_vnc-push) mc_take "$c" 0 0 "" "" "$@" ;;
+    reset|baseline)  mc_take "$c [--yes] [--discard-unsynced] [--override]" 0 0 "$g" "" "$@" ;;
+    restore)         mc_take "restore NAME [--yes] [--discard-unsynced] [--override]" 1 1 "$g" "" "$@" ;;
+    desktop-restart) mc_take "desktop-restart [--override]" 0 0 "--override" "" "$@" ;;
+    input-reset)     mc_take "input-reset [--check]" 0 0 "--check" "" "$@" ;;
+    logs)            mc_take "logs [LINES]" 0 1 "" "" "$@" ;;
+    recordings)      mc_take "recordings [--sync] [N]" 0 1 "--sync" "" "$@"
+                     for sub in "$@"; do [ "$sub" = --sync ] || [[ "$sub" =~ ^[0-9]{1,9}$ ]] \
+                       || mc_usage_error "usage: metacomputer recordings [--sync] [N]   (N: how many, a number)"; done ;;
+    get)             mc_take "get GUEST_PATH [HOST_DIR] [--task NAME]" 1 2 "" "--task" "$@" ;;
+    shot)            mc_take "shot [HOST_PATH] [--task NAME]" 0 1 "" "--task" "$@" ;;
+    contact-sheet)   mc_take "contact-sheet MP4 [OUT.png]" 1 2 "" "" "$@" ;;
+    inspect)         mc_take "inspect [system|windows|processes|ports|files|browser|all ...] [--minutes N] [--top N] [--json]" \
+                       0 7 "--json" "--minutes --top" "$@" ;;
+    checkpoint)
+      case " $* " in
+        *" --delete "*) mc_take "checkpoint --delete NAME [--yes] [--override]" 0 0 "$g" "--delete" "$@" ;;
+        *) mc_take "checkpoint NAME [--replace] [--with-volumes] [--override]" 1 1 "--replace --with-volumes $g" "" "$@" ;;
+      esac ;;
+    hub)
+      sub="${1:-status}"; [ $# -gt 0 ] && shift
+      case "$sub" in
+        status) mc_take "hub status [--json|--brief]" 0 0 "--json --brief" "" "$@" ;;
+        start|serve) mc_take "hub $sub" 0 0 "" "" "$@" ;;
+        stop)   mc_take "hub stop [--if-idle]" 0 0 "--if-idle" "" "$@" ;;
+        env)    mc_take "hub env --json" 0 0 "--json" "" "$@" ;;
+      esac ;;
+    record)
+      sub="${1:-status}"; [ $# -gt 0 ] && shift
+      case "$sub" in
+        start)       mc_take "record start [NAME] [FPS]" 0 2 "" "" "$@" ;;
+        stop|status) mc_take "record $sub" 0 0 "" "" "$@" ;;
+        moments)     mc_take "record moments FILE" 1 1 "" "" "$@" ;;
+      esac ;;
+    task)
+      sub="${1:-}"; [ $# -gt 0 ] && shift
+      case "$sub" in
+        start)  mc_take "task start SLUG [--no-sync]" 0 1 "--no-sync" "" "$@" ;;
+        finish) mc_take "task finish NAME" 1 1 "" "" "$@" ;;
+      esac ;;
+    events)
+      [ "${1:-}" != watcher ] || { shift; mc_take "events watcher [start|stop|status]" 0 1 "" "" "$@"; } ;;
+    browser)
+      sub="${1:-}"; [ $# -gt 0 ] && shift
+      case "$sub" in
+        ""|--json) mc_take "browser [--json]" 0 0 "" "" "$@" ;;
+        default|mode|pacing) mc_take "browser $sub VALUE" 1 1 "" "" "$@" ;;
+        profiles) mc_take "browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" 0 0 "--firefox --yes" \
+                    "--new --delete" "$@"
+                  case " $* " in *" --new "*" --delete "*|*" --delete "*" --new "*|*" --new "*" --firefox "*|*" --new "*" --yes "*|*" --firefox "*" --new "*|*" --yes "*" --new "*)
+                    mc_usage_error "usage: metacomputer browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" ;; esac
+                  case " $* " in *" --new "*|*" --delete "*) ;; "  ") ;; *)
+                    mc_usage_error "usage: metacomputer browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" ;; esac ;;
+      esac ;;
+    net)
+      sub="${1:-status}"; [ $# -gt 0 ] && shift
+      case "$sub" in
+        status) mc_take "net status [--json]" 0 0 "--json" "" "$@" ;;
+        # --override: a computer elsewhere's forms check who's using it (owners_check); on this Mac's, the allowlist's
+        # own parser (lib/netpolicy.py) refuses it
+        egress) mc_take "net egress internet|off [--override]" 1 1 "--override" "" "$@" ;;
+        clear)  mc_take "net clear [--override]" 0 0 "--override" "" "$@" ;;
+        allow)  mc_take "net allow NAME... [--for 2h] [--exact] [--override]" 1 99 "--exact --override" "--for=" "$@" ;;
+        remove) mc_take "net remove NAME... [--exact] [--override]" 1 99 "--exact --override" "" "$@" ;;
+      esac ;;
+    put)             mc_take "put HOST_PATH... [--to GUEST_DIR] [--overwrite]" 1 99999 "--overwrite" "--to" "$@" ;;
+    test)            mc_take "test [A B C D E F | all] [--run-id ID] [--override]" 0 99 "--override" "--run-id" "$@" ;;
+    cloud)           mc_take "cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG] [--forget OP]" 2 2 "--json" \
+                       "--org= --forget=" "$@" ;;
+    setup)           # install.sh's options (its own loop refuses the rest, but only once a terminal or --yes lets it run)
+                     mc_take "setup [--yes] [install.sh's options: ./install.sh --help]" 0 0 "--yes -y --no-chrome --no-build \
+                       --replace-vm --fresh-sources --no-claude --claude --only-agents --no-plugin --only-claude --uninstall \
+                       --switch --allow-downgrade --codex --no-codex --only-codex --openclaw --no-openclaw --only-openclaw \
+                       --hermes --no-hermes --only-hermes --gemini --no-gemini --only-gemini --lume=mcomp-vm \
+                       --lume=standard --lume=secure" "" "$@" ;;
+    _task-sync)      mc_take "_task-sync NAME" 1 1 "" "" "$@" ;;
+    _record-pipe)    mc_take "_record-pipe NAME FPS QUALITY OUT [AUDIO]" 4 5 "" "" "$@" ;;
+  esac
+  return 0
+}
+mc_strict "$@"
 # Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
 # Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
 # confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it
@@ -2773,9 +2917,18 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       else
         warn "no proxy key ($SSH_DIR/proxy): this VM was built before API tokens, so 'metacomputer secrets token' won't work with it until it is rebuilt (fills and sessions do)"
       fi
-      # Fills sign in as the VM's fill account (mcfill), sessions as the desktop user.
-      exec "$VAULT_BIN" bind "$vm" "${where[@]}" --host-key-line "$hk" --fill-key "$SSH_DIR/fill" --fill-user mcfill \
-        --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" ${proxy[@]+"${proxy[@]}"} "$@" ;;
+      # Fills sign in as the VM's fill account (mcfill), sessions as the desktop user. An option you give takes the
+      # place of this default for it: the vault takes each option once (a second value is a usage error there).
+      local defs=("${where[@]}" --host-key-line "$hk" --fill-key "$SSH_DIR/fill" --fill-user mcfill \
+        --ops-key "$SSH_DIR/ops" --ops-user "$GUEST_USER" ${proxy[@]+"${proxy[@]}"}) given=" " keep=() j=0
+      for a in "$@"; do case "$a" in --*) given="$given${a%%=*} " ;; esac; done
+      while [ $j -lt ${#defs[@]} ]; do
+        case "${defs[$j]}" in
+          --*=*) case "$given" in *" ${defs[$j]%%=*} "*) ;; *) keep+=("${defs[$j]}") ;; esac; j=$((j + 1)) ;;
+          *) case "$given" in *" ${defs[$j]} "*) ;; *) keep+=("${defs[$j]}" "${defs[$((j + 1))]}") ;; esac; j=$((j + 2)) ;;
+        esac
+      done
+      exec "$VAULT_BIN" bind "$vm" ${keep[@]+"${keep[@]}"} "$@" ;;
     import-session)
       # The session is for this VM (its approval policy, and where `session load` puts it).
       [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
@@ -2938,9 +3091,13 @@ if [ "${MC_REMOTE:-0}" = 1 ]; then
     reset|baseline|restore|checkpoint|checkpoints)
               if [ "${PROVIDER:-}" = sprites ]; then do_snap_sprite "$cmd" "$@"; exit $?; fi
               remote_only_mac "$cmd" "$("$PY" "$LAB_ROOT/lib/remote.py" missing --provider "${PROVIDER:-}" --feature "$cmd" 2>/dev/null || echo "it has no snapshots")" ;;
-    net)      case "${1:-status}" in
-                status) remote_net_status; exit $? ;;
-                egress) remote_net_egress "${2:-}"; exit $? ;;
+    net)      parse_flags "$@"; set -- ${REST[@]+"${REST[@]}"}    # --override: owners_check's, as for start and stop
+              case "${1:-status}" in
+                status) [ $# -le 1 ] || { [ $# -eq 2 ] && [ "$2" = --json ]; } \
+                          || mc_usage_error "usage: metacomputer net status [--json]   (nothing was run)"
+                        remote_net_status; exit $? ;;
+                egress) [ $# -eq 2 ] || mc_usage_error "usage: metacomputer net egress internet|off   (nothing was run)"
+                        remote_net_egress "${2:-}"; exit $? ;;
                 allow|remove|clear) [ "${PROVIDER:-}" = sprites ] || remote_only_mac "metacomputer net $1" "it has no allowlist of names; metacomputer net egress internet|off sets what it may reach (docs/remote.md)"
                         sprite_net_list "$@"; exit $? ;;
                 *) remote_only_mac "metacomputer net $1" "it has no allowlist of names; metacomputer net egress internet|off sets what it may reach (docs/remote.md)" ;;

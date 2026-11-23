@@ -317,7 +317,8 @@ func age(_ iso: String?) -> String? {
 func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let a = try parseArgs(argv, values: Set(["kind", "origin", "username", "approval", "project", "api-host", "header", "api-path-prefix",
                                              "answer-timeout"]).union(cardValueFlags),
-                          flags: Set(["replace"]).union(cardBoolFlags))
+                          flags: Set(["replace"]).union(cardBoolFlags),
+                          repeatable: ["origin", "project", "header", "allow-frame", "merchant-max"])
     guard a.positional.count == 1 else {
         throw usageError("usage: set NAME --kind password|totp|text|api|card|shop ... (mcomp-vault help)")
     }
@@ -553,7 +554,7 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U [--proxy-key PATH --proxy-user U --proxy-port N] (--gateway PATH | --host ADDRESS --host-key-alias mcomp-VM [--tunnel PROGRAM [--tunnel-arg=ARG ...]])"
     let a = try parseArgs(argv, values: ["port", "host-key-line", "fill-key", "fill-user", "ops-key", "ops-user", "proxy-key", "proxy-user",
                                          "proxy-port", "gateway", "host", "host-key-alias", "tunnel", "tunnel-arg",
-                                         "tunnel-id", "tunnel-check-arg"])
+                                         "tunnel-id", "tunnel-check-arg"], repeatable: ["tunnel-arg", "tunnel-check-arg"])
     guard a.positional.count == 1, validName(a.positional[0]) else { throw usageError(usage) }
     let vm = a.positional[0]
     // A computer reached over SSH elsewhere (docs/remote.md): its address and the name its host key is pinned under,
@@ -1100,7 +1101,8 @@ func cmdDisconnect(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: session save NAME --vm VM --profile P [--replace] | load NAME --vm VM [--profile P] [--site HOST ...] | policy NAME --approval session|each | delete NAME"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid", "site"], flags: ["replace"])
+    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid", "site"], flags: ["replace"],
+                          repeatable: ["site"])
     if sub == "policy" {
         guard a.positional.count == 1, validName(a.positional[0]), let ap = a.last("approval"), ["session", "each"].contains(ap) else {
             throw usageError("usage: session policy NAME --approval session|each")
