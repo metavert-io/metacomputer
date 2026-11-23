@@ -689,6 +689,13 @@ if mode == "slow":
 if mode == "flood":
     sys.stdout.write("9" * 100000)
     sys.exit(0)
+if mode == "stderr":           # what SSH, the command and the VM may write on its stderr
+    sys.stderr.write("Permission denied (publickey).\n")
+    sys.stderr.write("the page said: card 4242 4242 4242 4242, cvc 123 \x1b]0;evil title\x07 SECRET-FROM-VM\n")
+    sys.stderr.write("metacomputer: the settings now name the VM 'evilvm', not 'other' as confirmed (MCOMP_EXPECT_VM); "
+                     "refusing\n")
+    sys.stderr.flush()
+    sys.exit(255)
 print(mode)
 '''
 
@@ -735,6 +742,16 @@ def input_reset_checks():
               and took < 8, (outcomes, took))
         check("nothing to run it over: no reset", input_reset.run_guest([]) == (None, "no connection to the virtual "
                                                                                  "computer was given"))
+        # The command's stderr (the hub's reset: `metacomputer ssh ops`, SSH and the VM's own words) is kept the way the
+        # hub keeps the driver's: counts and fixed classes, and metacomputer's own refusal in its words from the pin.
+        n, why = input_reset.run_guest(transport, capture_err=True,
+                                       env=dict(os.environ, FAKE_RESET="stderr", MCOMP_EXPECT_VM="pinnedvm"))
+        check("the reset's stderr: none of its text is kept (only how many lines of which fixed classes, and "
+              "metacomputer's own refusal said from the pinned settings)", n is None
+              and "couldn't reach the VM over SSH" in why and "the command wrote 3 line(s) to stderr" in why
+              and "1 ssh: permission denied" in why and "1 metacomputer refusal" in why
+              and "the settings now name another VM, not 'pinnedvm'" in why
+              and not any(x in why for x in ("4242", "cvc", "SECRET-FROM-VM", "evil", "\x1b", "title")), why)
         # reset_now: recorded before the guest is asked; only a confirmed 0 puts the earlier record back.
         unstamp()
         os.environ["FAKE_RESET"] = "2"

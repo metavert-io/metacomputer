@@ -39,6 +39,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import owners  # noqa: E402
+import wirelimits  # noqa: E402
 
 GUEST = "/opt/metacomputer/bin/input-reset"
 RESET_TIMEOUT_S = 20.0        # SSH (5 s to connect) and the guest's xinput calls
@@ -46,7 +47,7 @@ OUT_MAX = 256                 # the guest prints one count
 INFLIGHT_WAIT_S = 10.0        # opening a handoff waits this long for acting calls already in the driver
 POLL_S = 0.25
 COUNT_RE = re.compile(rb"\s*([0-9]{1,4})\s*")
-ERR_MAX = 200                 # what a failure note quotes from the command's stderr
+ERR_WAIT_S = 2.0              # how long the end of the command's stderr is waited for, once it has ended
 REMOVED = ("Removed {n} leftover virtual input device pair(s) of the agent's driver, so the live view's mouse and "
            "keyboard reach every app.")
 TRY_LATER = ("If the live view ignores your mouse or keyboard, run `metacomputer input-reset` in your own terminal.")
@@ -61,8 +62,10 @@ def parse_count(out):
 def run_guest(transport, check=False, timeout=RESET_TIMEOUT_S, env=None, capture_err=False):
     """The guest's input-reset over transport (an SSH command line without the remote command). Returns (count, None),
     or (None, why) when it couldn't be run or its answer isn't a count: then whether it removed anything isn't known.
-    Records nothing (reset_now does, first). capture_err: why ends with what the command said on stderr (the hub's
-    own `metacomputer ssh`: its refusals), printable ASCII only, at most ERR_MAX characters."""
+    Records nothing (reset_now does, first). capture_err: why ends with what the command's stderr held, the way the hub
+    keeps the driver's (wirelimits.StderrCounter): how many lines of which fixed classes, and metacomputer's own refusals
+    (a hub pinned to its VM: the hub's own `metacomputer ssh`) in metacomputer's words from the pinned settings in env;
+    never a line of it, since what the command, SSH or the VM wrote there is the VM's text."""
     if not transport:
         return None, "no connection to the virtual computer was given"
     try:
@@ -71,8 +74,10 @@ def run_guest(transport, check=False, timeout=RESET_TIMEOUT_S, env=None, capture
                              start_new_session=True, env=env)
     except OSError as e:
         return None, f"couldn't start ssh ({e.strerror or e})"
-    out, errtext, too_long, deadline = b"", b"", False, time.monotonic() + timeout
-    streams = [p.stdout] + ([p.stderr] if capture_err else [])
+    # Its stderr is drained on a thread of its own, keeping counts and classes only (the command never blocks on it).
+    errs = wirelimits.StderrCounter(p.stderr) if capture_err else None
+    out, too_long, deadline = b"", False, time.monotonic() + timeout
+    streams = [p.stdout]
     try:
         while streams:
             left = deadline - time.monotonic()
@@ -83,30 +88,35 @@ def run_guest(transport, check=False, timeout=RESET_TIMEOUT_S, env=None, capture
                 chunk = os.read(r.fileno(), 4096)
                 if not chunk:
                     streams.remove(r)
-                elif r is p.stdout:
+                else:
                     if len(out) + len(chunk) > OUT_MAX:
                         too_long = True
                         streams = []
                         _kill(p)
                         break
                     out += chunk
-                else:
-                    errtext = (errtext + chunk)[-4096:]
         try:
             rc = p.wait(max(0.1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             _kill(p)
             return None, f"no answer within {int(timeout)} s"
     finally:
-        for f in (p.stdout, p.stderr):
+        try:
+            p.stdout.close()
+        except OSError:
+            pass
+        # Closed only once its reader has seen its end: a descriptor closed under a thread still reading it could be
+        # reused by the next file opened, and read from. Until then the reader keeps it (and closes nothing else).
+        if errs is None or errs.done.wait(ERR_WAIT_S):
             try:
-                if f:
-                    f.close()
+                if p.stderr:
+                    p.stderr.close()
             except OSError:
                 pass
     said = ""
-    if capture_err and errtext.strip():
-        said = ": " + re.sub(r"[^\x20-\x7e]+", " ", errtext.decode("utf-8", "replace")).strip()[:ERR_MAX]
+    if errs is not None:
+        summary = errs.text(wait=ERR_WAIT_S, pin=env if env is not None else os.environ, who="the command")
+        said = ": " + summary if summary else ""
     if too_long:
         return None, "the VM's answer was too long"
     n = parse_count(out)

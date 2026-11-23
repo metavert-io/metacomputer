@@ -1133,8 +1133,13 @@ CLAIMS = [
      lambda m: (int(m[1]), int(m[2].replace(",", ""))) == (mcp_hub.MAX_LAYOUT_WINDOWS, mcp_hub.MAX_LAYOUT_WINDOWS_TOTAL)),
     ("SECURITY.md", r"More than (\d+) windows open .{0,80}every pixel action is refused \(`too_many_windows`\)",
      lambda m: int(m[1]) == mcp_hub.MAX_LAYOUT_WINDOWS and '"too_many_windows"' in raw("lib/mcp_hub.py")),
-    ("SECURITY.md", r"drained with a (\d+) KB memory tail and at most (\d+) MB per connection",
-     lambda m: (int(m[1]) << 10, int(m[2]) << 20) == (wirelimits.STDERR_KEEP, wirelimits.STDERR_FILE_MAX)),
+    ("SECURITY.md", r"none of its text is kept, by the hub, the direct client \(`lib/mcp_client.py`\) and the hub's input "
+                    r"reset alike: how many lines of which fixed classes, at most (\d+) MB per connection",
+     lambda m: int(m[1]) << 20 == wirelimits.STDERR_FILE_MAX
+     and "self.stderr_counter = wirelimits.StderrCounter(self.proc.stderr, self.stderr_path)" in raw("lib/mcp_client.py")
+     and "StderrTail" not in raw("lib/mcp_client.py")
+     and "errs = wirelimits.StderrCounter(p.stderr) if capture_err else None" in raw("lib/input_reset.py")
+     and "errtext" not in raw("lib/input_reset.py")),
     ("SECURITY.md", r"Past the activity window \((\d+) min, `MCOMP_ACTIVE_S`\)",
      lambda m: int(m[1]) * 60 == owners.ACTIVE_S == mcp_hub.LEASE_MAX_S),
     ("SECURITY.md", r"\(SIGTERM, so the action log's relay can sign its end; (\d+) s later SIGKILL\)",

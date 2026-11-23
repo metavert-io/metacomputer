@@ -62,7 +62,7 @@ class MCPClient:
         self.server_info = {}
         self.protocol = None
         self.calls = 0
-        self.stderr_tail = None
+        self.stderr_counter = None
 
     # -- transport --------------------------------------------------------
     def start(self, timeout=90):
@@ -77,8 +77,10 @@ class MCPClient:
         self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE if self.stderr_path else subprocess.DEVNULL,
                                      bufsize=0, env=env)
-        if self.stderr_path:       # SSH carries the VM's stderr: a capped log, never an unbounded file
-            self.stderr_tail = wirelimits.StderrTail(self.proc.stderr, self.stderr_path, append=True)
+        if self.stderr_path:
+            # SSH carries the VM's stderr, which can echo what a page showed: none of its text is kept, as in the hub
+            # (wirelimits.StderrCounter): counts, and a fixed class per line in a capped log at stderr_path.
+            self.stderr_counter = wirelimits.StderrCounter(self.proc.stderr, self.stderr_path)
         threading.Thread(target=self._reader, daemon=True).start()
         res = self.request("initialize", {
             "protocolVersion": PROTOCOL,
@@ -179,8 +181,10 @@ class MCPClient:
             except queue.Empty:
                 continue
             if msg.get("__eof__"):
+                said = self.stderr_counter.text(wait=1.0) if self.stderr_counter else ""
                 raise MCPError(f"MCP server closed the connection during {method}"
-                               + (f" ({self.closed_why}; connection dropped)" if self.closed_why else ""))
+                               + (f" ({self.closed_why}; connection dropped)" if self.closed_why else "")
+                               + (f"; {said}" if said else ""))
             if msg.get("id") == rid and ("result" in msg or "error" in msg):
                 if "error" in msg:
                     raise MCPError(f"{method}: {msg['error']}")

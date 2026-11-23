@@ -215,7 +215,9 @@ server, the CLI and an SDK share, so references and state carry over.
   (lib/wirelimits.py, StderrCounter), at most 1 MB per connection of time and
   class in `RUN_DIR/hub/upstream.stderr`; one of metacomputer's own refusals
   (STDERR_TEMPLATES) is kept only as which one it was, and the hub says it in
-  its own words with the VM it pinned (refusal_text).
+  its own words with the VM it pinned (refusal_text). The hub's input reset
+  (lib/input_reset.py, through `metacomputer ssh`) and the direct client
+  (lib/mcp_client.py) keep their stderr the same way.
 - **Reconnecting.** When the driver connection drops (the VM stopped or
   restarted), every pending request fails with a plain message, everything the
   hub learned about that runtime is forgotten, and the next call reconnects.

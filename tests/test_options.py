@@ -240,8 +240,9 @@ def test_c():
             c.close()
             check("the VM refuses a standard driver session while bounded", False, "connected")
         except MCPError:
-            err = open(os.path.join(TMP, "mcp-stderr.log")).read()
-            check("the VM refuses a standard driver session while bounded", "accepts only bounded" in err, err[-200:])
+            err = open(os.path.join(TMP, "mcp-stderr.log")).read()       # classes only: no text of the VM's
+            check("the VM refuses a standard driver session while bounded",
+                  "driver policy: bounded sessions only" in err and "DRIVER_MODE" not in err, err[-200:])
 
         c = client(desk)
         c.call("start_session", {"session": "opt"})
@@ -317,7 +318,8 @@ def test_c():
             check("a manifest changed in the VM is refused", False, "connected")
         except MCPError:
             err = open(os.path.join(TMP, "mcp-stderr.log")).read()
-            check("a manifest changed in the VM is refused", "doesn't match its hash" in err, err[-200:])
+            check("a manifest changed in the VM is refused", "driver policy: manifest doesn't match its hash" in err,
+                  err[-200:])
         mcomp(BASE, "ssh", "ops", "rm -rf ~/.config/metacomputer/manifests")
     finally:
         r = mcomp(BASE, "security", "apply")

@@ -3123,6 +3123,29 @@ def transport_checks():
         c.close()
     finally:
         mcp_client.MAX_QUEUED_BYTES = saved
+    # The direct client's stderr (SSH carries the VM's: it can echo what a page showed) is kept as the hub keeps the
+    # driver's: counts and fixed classes, in memory and in its log; never a line of it.
+    talk = ("import sys\n"
+            "sys.stderr.write('Permission denied (publickey).\\n')\n"
+            "sys.stderr.write('metacomputer: this virtual computer accepts only bounded driver sessions (DRIVER_MODE=bounded on the host)\\n')\n"
+            "sys.stderr.write('the page said: card 4242 4242 4242 4242 cvc 123 SECRET-FROM-VM \\x1b]0;t\\x07\\n')\n"
+            "sys.stderr.flush()\n")
+    log = os.path.join(TD, "direct-client-stderr.log")
+    c = mcp_client.MCPClient(cmd=[PY, "-c", talk], stderr_path=log)
+    try:
+        c.start(timeout=20)
+        err = ""
+    except mcp_client.MCPError as e:
+        err = str(e)
+    c.close()
+    kept = open(log).read() if os.path.exists(log) else ""
+    held = repr(vars(c.stderr_counter)) if getattr(c, "stderr_counter", None) else repr(getattr(c, "stderr_tail", None) and
+                                                                                         c.stderr_tail.text(1))
+    check("the direct client's stderr: no text kept (its log has a time and class per line, its error counts and "
+          "classes, nothing of the VM's words)",
+          "3 line(s)" in err and "ssh: permission denied" in err and "driver policy: bounded sessions only" in kept
+          and not any(x in kept + err + held for x in ("4242", "SECRET-FROM-VM", "cvc", "DRIVER_MODE", "\x1b")),
+          (err, kept[-300:], held[-300:]))
 
 
 def web_checks():

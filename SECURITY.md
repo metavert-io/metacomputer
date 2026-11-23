@@ -502,8 +502,9 @@ keeps only checked window geometry (finite numbers), at most 256 windows each an
 32,768 in all; pixels checked against a layout that had more windows than that
 are refused (`too_many_windows`), since a window left out could be the target or
 what covers it. The driver connection's
-stderr (SSH carries the VM's) is drained with a 64 KB memory tail and at most
-1 MB per connection in its log file. The relay (`ACTION_LOG=on`) reads with the
+stderr (SSH carries the VM's) is drained on a thread of its own and none of its text is kept, by the hub, the
+direct client (`lib/mcp_client.py`) and the hub's input reset alike: how many lines of which fixed classes, at most
+1 MB per connection of time and class in its log file. The relay (`ACTION_LOG=on`) reads with the
 same limits. `metacomputer call` escapes control characters, C1 controls and
 bidirectional overrides when it prints to a terminal (`lib/termsafe.py`, shared
 with `metacomputer sh`); `--raw` and `--json` print the result exactly. Other
@@ -2997,7 +2998,9 @@ stderr, purchase or not: only how many lines and bytes there were and, for each 
 (driver error, driver warning, VM not running, an SSH problem, a long line); its log and a failed connection's answer give
 those, never a line's text. A line that matches one of metacomputer's own refusals from before any VM is reached (a hub
 pinned to its VM, whose settings changed) is kept only as which refusal it was; the hub says it in its own words, with
-the VM name and port it pinned when it started, never anything from the line. Both the hub and the action log read the open purchases fresh for every result (nothing
+the VM name and port it pinned when it started, never anything from the line. The same holds for the stderr of the
+hub's input reset (its `metacomputer ssh` command, where SSH and the guest's `input-reset` write: a note says how
+many lines of which classes) and of `lib/mcp_client.py`'s direct client (the transport tests). Both the hub and the action log read the open purchases fresh for every result (nothing
 cached), and the vault sends no card part until the hub for that VM has said it has seen the purchase (below). Once
 read, a purchase's masks stay: the hub, and the action-log relay, keep applying them for the rest of their process's
 life (every purchase still in the file, however many, and the newest 64 of those no longer in it; a read of the file
