@@ -75,10 +75,20 @@ type the answers (see "Tampering" below).
   (else `~/.claude/projects`), including subagent files.
 - **Codex's sessions**, `$CODEX_HOME/sessions/**/rollout-*.jsonl` (else `~/.codex`; [codex.md](codex.md)).
 - **Gemini CLI's sessions**, `~/.gemini/tmp/<project>/chats/*.jsonl` (`$GEMINI_CLI_HOME/.gemini`;
-  [gemini.md](gemini.md)): its MCP calls (`mcp_metacomputer_*`) and shell commands. OpenClaw's and Hermes Agent's
-  sessions aren't read yet: they're kept in SQLite databases, and their tool search records the MCP calls inside
-  calls of its own ([openclaw.md](openclaw.md), [hermes.md](hermes.md)). Their calls reach `learn` through the action
-  log below (`ACTION_LOG=on`), as every client's do.
+  [gemini.md](gemini.md)): its MCP calls (`mcp_metacomputer_*`) and shell commands.
+- **Antigravity CLI's conversations**, the transcript it keeps of each,
+  `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript.jsonl` (`$ANTIGRAVITY_APP_DATA_DIR`
+  for the folder; [antigravity.md](antigravity.md)): its calls of metacomputer's server through `call_mcp_tool` and its
+  `run_command` shell commands, the project folder from `conversation_summaries.db` beside it (read like OpenClaw's and
+  Hermes Agent's databases, below).
+- **OpenClaw's sessions**, kept in SQLite: `<state>/agents/<agent>/agent/openclaw-agent.sqlite` for `~/.openclaw`, each
+  `~/.openclaw-<profile>` and `$OPENCLAW_STATE_DIR` (`$OPENCLAW_HOME` moves `~`; [openclaw.md](openclaw.md)): its MCP
+  calls (`metacomputer__*`, and the same calls made through its tool search's `dispatch_action`) and its `exec` shell
+  commands. OpenClaw compresses large entries with zstd; Python 3.14 or later reads them, and with an older Python
+  the report says how many it left out.
+- **Hermes Agent's sessions**, kept in SQLite: `state.db` in `~/.hermes` (or `$HERMES_HOME`) and in each profile
+  under `profiles/` ([hermes.md](hermes.md)): its MCP calls (`mcp__metacomputer__*`, and the same calls made through
+  its tool search's `tool_call`) and its `terminal` commands.
 - **Saved headless transcripts** (`claude -p --output-format stream-json`), from
   each `--transcripts DIR`. When a session exists both ways, the headless copy is
   used and the other is skipped.
@@ -87,11 +97,25 @@ type the answers (see "Tampering" below).
 - **The signed action log and the event log** of this VM's `LOG_DIR`
   (`logs/actions/`, `logs/events.jsonl`), and of each `--logs DIR`.
 
+OpenClaw's and Hermes Agent's databases are read without the agent and without a write or a lock: each is read into
+memory as it was at its last commit (its file and the commits still in its write-ahead log, where a running agent
+keeps its newest sessions, checked frame by frame as SQLite checks them) and opened there; the agent's own files are
+only read, never changed, and nothing is made beside them. One too large for that (over 256 MB, a log over 128 MB, or a
+log whose commits would make it larger) is opened in place read-only (`immutable`), and the report notes that its
+newest changes were left out. Only your own files are read: from the agent's own folder (`~/.openclaw`, a profile's,
+`$OPENCLAW_STATE_DIR`, `~/.hermes`; it may itself be a link you made) down, no link is followed, and a database whose
+file or folder on the way another account owns is refused and noted. SQLite keeps its temporary data in memory (no
+temporary file ever holds a session), and each database gets two minutes, inside its queries too, and at most its
+2,000 most recent sessions. A database of a layout this version doesn't know, or one that can't be read, is counted in
+the report's notes, and the report goes on.
+
 Only sessions that called a metacomputer tool are read, under either prefix
 (`mcp__metacomputer__*`, or `mcp__plugin_metacomputer_metacomputer__*` in sessions from
-when the plugin brought the server itself; Gemini CLI's `mcp_metacomputer_*`). Every
+when the plugin brought the server itself; Gemini CLI's `mcp_metacomputer_*`; OpenClaw's `metacomputer__*`; Antigravity
+CLI's `call_mcp_tool` with the server `metacomputer`). Every
 transcript file changed within `--since` is scanned for that tool call's marker,
-and nothing else is kept from files that don't have it. `--since` takes `7d`
+and nothing else is kept from files that don't have it; in OpenClaw's and Hermes Agent's databases, only sessions
+with an entry within `--since` are read. `--since` takes `7d`
 (the default), `12h`, `2w` or a date; `--project PATH` keeps only sessions that
 ran in that folder or below it.
 

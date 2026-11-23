@@ -2901,6 +2901,11 @@ DELETE_WALK_EXCEPTIONS = {
     ("lib/update.py", "record_build"): ("build-vm.sh: hashes the guest files; writes only RUN_DIR/vm-build.json",
                                         ['write_json(os.path.join(run_dir, "vm-build.json")']),
     # A developer's tool in the checkout, never run by an installed metacomputer:
+    ("scripts/build-openai-plugin.py", "main"): ("packages the plugin's skills for OpenAI's plugin directory: lists only "
+                                                 "the checkout's plugin/ skill folders to read them; writes only the ZIP "
+                                                 "it names (--out, else results/openai-plugin/), whole, by rename",
+                                                 ['out = a.out or os.path.join(LAB, "results", "openai-plugin"',
+                                                  "os.replace(tmp, out)"]),
     ("scripts/sync-plugin.py", "main"): ("copies the repository's plugin files into the checkout's plugin/ and "
                                          "agent-plugin/ (the fixed COPIES pairs and WRITTEN files, under LAB); removes "
                                          "only a link that stands where a copy goes, never a folder or a file a listing "

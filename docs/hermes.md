@@ -100,9 +100,12 @@ iTerm or an SSH session, not through an agent.
 - **The vault** treats requests from under the gateway like those from Codex's app server: its conversations share one
   process, so nothing tells one from another, and "for this session" answers, project rules and session tokens don't
   apply: each use asks.
-- **`metacomputer learn`** doesn't read Hermes Agent's sessions yet: they're kept in a SQLite database
-  (`$HERMES_HOME/state.db`), and with tool search on, the MCP calls are recorded inside batched `tool_call` calls.
-  The hub's action log (`ACTION_LOG=on`) records every client's calls, and learn reads that.
+- **`metacomputer learn`** reads Hermes Agent's sessions from its SQLite database (`state.db` in `~/.hermes` or
+  `$HERMES_HOME`, and in each profile), without Hermes Agent and without a write or a lock, its newest sessions too
+  (a running gateway keeps them in the database's write-ahead log, which learn reads as well;
+  [learn.md](learn.md#what-report-reads)), with the same rules: only classes, counts, tool names and app names from a
+  fixed list, never text. It counts the calls made through tool search's `tool_call` as the tool they name. Checked
+  with sessions Hermes Agent 0.23.3 made in a throwaway home with a stand-in model.
 - **The tools' names** are `mcp__metacomputer__<tool>`, as in Claude Code and Codex.
 
 ## A benchmark run

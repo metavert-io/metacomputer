@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""install.sh's steps for OpenClaw, Hermes Agent and Gemini CLI (lib/agent_setup.py), `metacomputer agents` about them,
-and their packages: the Agent Plugins package (agent-plugin/) and the Gemini CLI extension (gemini-extension.json).
+"""install.sh's steps for OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI (lib/agent_setup.py), `metacomputer
+agents` about them, and their packages: the Agent Plugins package (agent-plugin/) and the Gemini CLI extension
+(gemini-extension.json).
 
     python3 tests/test_agent_setup.py
 
-No VM, no network, no real agent: stand-in `openclaw`, `hermes` and `gemini` commands answer the parts of each CLI the
-step uses, as the real ones do (checked against OpenClaw 2026.11.7, Hermes Agent 0.23.3 and Gemini CLI 0.70.0 in
-throwaway homes: docs/openclaw.md, docs/hermes.md, docs/gemini.md), keep what they're told in a temporary HOME, and log
-how they were called. Each runs this checkout's install.sh with a temporary HOME.
+No VM, no network, no real agent: stand-in `openclaw`, `hermes`, `gemini` and `agy` commands answer the parts of each CLI
+the step uses, as the real ones do (checked against OpenClaw 2026.11.7, Hermes Agent 0.23.3, Gemini CLI 0.70.0 and
+Antigravity CLI 1.5.15 in throwaway homes: docs/openclaw.md, docs/hermes.md, docs/gemini.md, docs/antigravity.md), keep
+what they're told in a temporary HOME, and log how they were called. Each runs this checkout's install.sh with a
+temporary HOME.
 
 - Registration: `--only-NAME` adds the MCP server metacomputer, ~/.local/bin/metacomputer mcp-lazy, with the agent's
   own command (Gemini CLI: `mcp add -s user --trust`; Hermes Agent: `config set` with a 600 s timeout; OpenClaw: `mcp
@@ -24,6 +26,9 @@ how they were called. Each runs this checkout's install.sh with a temporary HOME
 - `metacomputer agents --json` reports each agent: installed, its version, set up or not, its server in words.
 - Gemini CLI's settings.json is JSON with comments (read here as it reads it: comments yes, trailing commas no);
   GEMINI_CLI_HOME moves it.
+- Antigravity CLI's mcp_config.json (~/.gemini/config) is read as agy reads it (comments and trailing commas), while its
+  own `agy mcp` command takes plain JSON only; metacomputer's entry gets timeoutSeconds 600 (one you set stays), written
+  only over the file it read.
 - agent-plugin/ is a valid Agent Plugins 1.0.0 package (its manifests, skill names and frontmatter as Hermes Agent's
   validator wants them; its launcher hands over to the installed checkout and to nothing else), and
   gemini-extension.json runs that launcher with the context file it names.
@@ -32,9 +37,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTALL = os.path.join(LAB, "install.sh")
@@ -65,8 +72,9 @@ import fcntl, json, os, sys
 a = sys.argv[1:]
 def lock_held():
     """Whether metacomputer's lock for this agent is held right now (lib/agent_setup.py agent_lock)."""
+    base = os.path.basename(sys.argv[0])
     p = os.path.join(os.environ["HOME"], ".local", "share", "metacomputer", "locks",
-                     "agent-" + os.path.basename(sys.argv[0]) + ".lock")
+                     "agent-" + {"agy": "antigravity"}.get(base, base) + ".lock")
     try:
         fd = os.open(p, os.O_RDWR)
     except OSError:
@@ -132,6 +140,47 @@ if a[:2] == ["mcp", "remove"]:
     json.dump(d, open(path, "w"), indent=2)
     print(f'Server "{name}" removed from user settings.'); sys.exit(0)
 print("stub gemini: unhandled " + " ".join(a), file=sys.stderr); sys.exit(2)
+'''
+
+# Antigravity CLI: ~/.gemini/config/mcp_config.json; `mcp add NAME CMD ARGS` adds or replaces an entry of that name (the
+# whole entry: what else it had goes) and writes the file again as plain JSON, sorted, with "disabled": false; `mcp
+# remove NAME` exits 1 when there's none; both refuse a file with comments or trailing commas.
+AGY = COMMON + r'''
+path = os.path.join(os.environ["HOME"], ".gemini", "config", "mcp_config.json")
+def load():
+    if not os.path.exists(path):
+        return {}
+    text = open(path).read()
+    return json.loads(text) if text.strip() else {}
+def save(d):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").write(json.dumps(d, indent=2, sort_keys=True) + "\n")
+if a == ["--version"]:
+    print("1.5.15"); sys.exit(0)
+if a[:2] in (["mcp", "add"], ["mcp", "remove"]):
+    try:
+        d = load()
+    except ValueError:
+        print(f"Error: failed to parse {path}: failed to parse JSON config", file=sys.stderr); sys.exit(1)
+if a[:2] == ["mcp", "add"]:
+    if os.environ.get("STUB_FAIL_ADD"):
+        print("Error: could not write the configuration", file=sys.stderr); sys.exit(1)
+    name, cmd, args = a[2], a[3], a[4:]
+    if os.environ.get("STUB_ADD_OTHER"):
+        cmd = "/opt/other/bin/server"
+    d.setdefault("mcpServers", {})[name] = {"args": args, "command": cmd, "disabled": False}
+    save(d)
+    print(f'Added MCP server "{name}" (stdio)'); sys.exit(0)
+if a[:2] == ["mcp", "remove"]:
+    name = a[2]
+    if os.environ.get("STUB_FAIL_UNSET"):
+        print("Error: could not write the configuration", file=sys.stderr); sys.exit(1)
+    if name not in d.get("mcpServers", {}):
+        print(f'Error: MCP server "{name}" not found', file=sys.stderr); sys.exit(1)
+    del d["mcpServers"][name]
+    save(d)
+    print(f'Removed MCP server "{name}"'); sys.exit(0)
+print("stub agy: unhandled " + " ".join(a), file=sys.stderr); sys.exit(2)
 '''
 
 # Hermes Agent: config.yaml's mcp_servers through `hermes config get KEY --json` (exit 1 "Config key not set: KEY" on
@@ -259,9 +308,10 @@ print("stub openclaw: unhandled " + " ".join(a), file=sys.stderr); sys.exit(2)
 
 
 class Box:
-    """A temporary HOME with stand-in openclaw, hermes and gemini commands on PATH, running this checkout's install.sh."""
+    """A temporary HOME with stand-in openclaw, hermes, gemini and agy commands on PATH, running this checkout's
+    install.sh."""
 
-    def __init__(self, agents=("openclaw", "hermes", "gemini")):
+    def __init__(self, agents=("openclaw", "hermes", "gemini", "antigravity")):
         self.t = tempfile.mkdtemp(prefix="mcomp-agents-")
         self.home = os.path.join(self.t, "home")
         self.bin = os.path.join(self.t, "bin")
@@ -269,8 +319,8 @@ class Box:
         os.makedirs(self.home)
         os.makedirs(self.bin)
         for name in agents:
-            write(os.path.join(self.bin, name), f"#!{sys.executable}\n" + {"openclaw": OPENCLAW, "hermes": HERMES,
-                                                                           "gemini": GEMINI}[name], 0o755)
+            write(os.path.join(self.bin, CMD.get(name, name)), f"#!{sys.executable}\n" + {
+                "openclaw": OPENCLAW, "hermes": HERMES, "gemini": GEMINI, "antigravity": AGY}[name], 0o755)
         py = os.path.dirname(os.path.realpath(sys.executable))
         self.env = {"HOME": self.home, "PATH": f"{self.bin}:{py}:/usr/bin:/bin", "LANG": "en_US.UTF-8",
                     "MCOMP_BREW_PYTHON": sys.executable, "STUB_LOG": self.log,
@@ -325,8 +375,15 @@ class Box:
         shutil.rmtree(self.t, ignore_errors=True)
 
 
+CMD = {"antigravity": "agy"}       # an agent's command, where it isn't its name
+
+
 # How each stand-in keeps the entry, for the checks: (read, seed).
 def entry(b, name):
+    if name == "antigravity":
+        p = os.path.join(b.home, ".gemini", "config", "mcp_config.json")
+        d = agent_setup.jsonc_loads(open(p).read(), trailing_commas=True) if os.path.exists(p) else {}
+        return (d.get("mcpServers") or {}).get("metacomputer")
     if name == "gemini":
         p = os.path.join(b.home, ".gemini", "settings.json")
         d = json.loads(re.sub(r"^\s*//.*$", "", open(p).read(), flags=re.M)) if os.path.exists(p) else {}
@@ -339,7 +396,10 @@ def entry(b, name):
 
 
 def seed(b, name, e):
-    if name == "gemini":
+    if name == "antigravity":
+        write(os.path.join(b.home, ".gemini", "config", "mcp_config.json"),
+              json.dumps({"mcpServers": {"metacomputer": e, "other": {"command": "/bin/echo"}}}, indent=2) + "\n")
+    elif name == "gemini":
         write(os.path.join(b.home, ".gemini", "settings.json"),
               "{\n  // the user's own settings\n  \"mcpServers\": " + json.dumps({"metacomputer": e}) + "\n}\n")
     elif name == "hermes":
@@ -350,10 +410,13 @@ def seed(b, name, e):
 
 def config_file(b, name):
     return os.path.join(b.home, {"gemini": ".gemini/settings.json", "hermes": ".hermes/stub-config.json",
-                                 "openclaw": ".openclaw/openclaw.json"}[name])
+                                 "openclaw": ".openclaw/openclaw.json",
+                                 "antigravity": ".gemini/config/mcp_config.json"}[name])
 
 
 def skills_dir(b, name):
+    if name == "antigravity":
+        return os.path.join(b.home, ".gemini", "antigravity-cli", "skills")
     return os.path.join(b.home, ".hermes", "skills") if name == "hermes" else os.path.join(b.home, ".agents", "skills")
 
 
@@ -364,13 +427,13 @@ def words(c):
 
 
 def mutations(b, name):
-    return [c for c in b.calls() if c[0] == name and (words(c)[:2] in (["mcp", "add"], ["mcp", "remove"], ["mcp", "unset"],
+    return [c for c in b.calls() if c[0] == CMD.get(name, name) and (words(c)[:2] in (["mcp", "add"], ["mcp", "remove"], ["mcp", "unset"],
                                                                        ["config", "set"], ["config", "unset"]))]
 
 
-LABEL = {"openclaw": "OpenClaw", "hermes": "Hermes Agent", "gemini": "Gemini CLI"}
+LABEL = {"openclaw": "OpenClaw", "hermes": "Hermes Agent", "gemini": "Gemini CLI", "antigravity": "Antigravity CLI"}
 REMOVE = {"openclaw": "openclaw mcp unset metacomputer", "hermes": "hermes config unset mcp_servers.metacomputer",
-          "gemini": "gemini mcp remove -s user metacomputer"}
+          "gemini": "gemini mcp remove -s user metacomputer", "antigravity": "agy mcp remove metacomputer"}
 
 
 def agent_cases(name):
@@ -384,7 +447,8 @@ def agent_cases(name):
         own = isinstance(e, dict) and e.get("command") == b.link and e.get("args") == ["mcp-lazy"]
         extra = {"gemini": isinstance(e, dict) and e.get("trust") is True,
                  "hermes": isinstance(e, dict) and e.get("timeout") == 600,
-                 "openclaw": isinstance(e, dict) and e.get("requestTimeoutMs") == 600000}[name]
+                 "openclaw": isinstance(e, dict) and e.get("requestTimeoutMs") == 600000,
+                 "antigravity": isinstance(e, dict) and e.get("timeoutSeconds") == 600}[name]
         check(f"{label}: the MCP server metacomputer, ~/.local/bin/metacomputer mcp-lazy, added with its own CLI and read "
               f"back ({'--trust' if name == 'gemini' else 'a 600 s timeout'})", p.returncode == 0 and own and extra
               and f"MCP server metacomputer for every {label} session" in p.stdout, (p.returncode, e, p.stdout[-600:]))
@@ -470,6 +534,21 @@ def agent_cases(name):
                   "server: left, exit 1, recorded", p.returncode == 1 and "couldn't read" in p.stdout
                   and not mutations(b, name) and b.stamp_incomplete() == [name], p.stdout[-400:])
             os.remove(config_file(b, name))
+        elif name == "antigravity":
+            text = "{\n  // the user's own\n  \"mcpServers\": {\"x\": {\"command\": \"/bin/true\"},},\n}\n"
+            write(config_file(b, name), text)
+            p = b.install(f"--only-{name}")
+            check("Antigravity CLI: a mcp_config.json with comments and trailing commas is read as agy reads it (no "
+                  "server there), and when its own `agy mcp add` refuses that file, the run says how to add the entry by "
+                  "hand (its whole path), leaves the file as it was, exit 1, recorded",
+                  p.returncode == 1 and open(config_file(b, name)).read() == text
+                  and f'"command": "{b.link}"' in p.stdout and b.stamp_incomplete() == [name], p.stdout[-600:])
+            write(config_file(b, name), "not json " + SECRET)
+            p = b.install(f"--only-{name}")
+            check("Antigravity CLI: a mcp_config.json it can't read at all is never taken for one without the server: "
+                  "left, exit 1", p.returncode == 1 and "couldn't read" in p.stdout and not mutations(b, name),
+                  p.stdout[-400:])
+            os.remove(config_file(b, name))
         else:
             p = b.install(f"--only-{name}", STUB_FAIL_SHOW="1", STUB_FAIL_GET="1")
             check(f"{label}: a lookup that fails is never taken for no server: nothing changed, exit 1, recorded",
@@ -487,9 +566,9 @@ def agent_cases(name):
         check(f"{label}: an add that fails says so with the command to run; exit 1, recorded",
               p.returncode == 1 and f"could not add the MCP server to {label}; run:" in p.stdout
               and "metacomputer" in p.stdout.split("run:")[-1] and b.stamp_incomplete() == [name], p.stdout[-400:])
-        if name == "gemini":
+        if name in ("gemini", "antigravity"):
             p = b.install(f"--only-{name}", STUB_ADD_OTHER="1")
-            check("Gemini CLI: an add that wrote something else isn't taken for metacomputer's: exit 1",
+            check(f"{label}: an add that wrote something else isn't taken for metacomputer's: exit 1",
                   p.returncode == 1 and "could not add the MCP server" in p.stdout, p.stdout[-300:])
             os.remove(config_file(b, name))
         p = b.install(f"--only-{name}")
@@ -569,9 +648,9 @@ def lock_cases():
     import fcntl
     b = Box()
     try:
-        for name in ("openclaw", "hermes", "gemini"):
+        for name in ("openclaw", "hermes", "gemini", "antigravity"):
             p = b.install(f"--only-{name}")
-            config_calls = [c for c in b.calls() if c[0] == name and words(c)[:1] in (["mcp"], ["config"])
+            config_calls = [c for c in b.calls() if c[0] == CMD.get(name, name) and words(c)[:1] in (["mcp"], ["config"])
                             and words(c)[:2] != ["config", "path"]]
             check(f"{LABEL[name]}: every read and change of its configuration ran under its lock",
                   p.returncode == 0 and config_calls and all(c[-1] == "#locked" for c in config_calls), config_calls)
@@ -763,7 +842,7 @@ def uninstall_error_cases():
     """Every unexpected error in an agent's uninstall step keeps the command links (its configuration wasn't checked),
     and says so: a lock file that is a link, a lock folder that can't be written."""
     print("uninstall: unexpected errors")
-    for name in ("openclaw", "gemini"):
+    for name in ("openclaw", "gemini", "antigravity"):
         b = Box(agents=(name,))
         try:
             p = b.install(f"--only-{name}")
@@ -814,10 +893,10 @@ def choice_cases():
         check("--gemini sets it up again and remembers that", p.returncode == 0 and entry(b, "gemini")
               and b.choices().get("gemini") == "on", (p.stdout[-400:], b.choices()))
         st = b.agents_json()
-        check("agents.json keeps every agent's choice (claude, codex, openclaw, hermes, gemini)",
-              set(b.choices()) == {"claude", "codex", "openclaw", "hermes", "gemini"}, b.choices())
-        check("agents --json reports all five agents", all(k in st for k in ("claude_code", "codex", "openclaw", "hermes",
-                                                                             "gemini")), list(st))
+        check("agents.json keeps every agent's choice (claude, codex, openclaw, hermes, gemini, antigravity)",
+              set(b.choices()) == {"claude", "codex", "openclaw", "hermes", "gemini", "antigravity"}, b.choices())
+        check("agents --json reports all six agents", all(k in st for k in ("claude_code", "codex", "openclaw", "hermes",
+                                                                            "gemini", "antigravity")), list(st))
     finally:
         b.close()
     b = Box(agents=())
@@ -825,10 +904,10 @@ def choice_cases():
         p = b.install("--only-agents")
         check("with no agent on PATH: the command is linked, and it says how to add one later", p.returncode == 0
               and "no coding agent is installed" in p.stdout and os.path.islink(b.link)
-              and "Not installed here: OpenClaw, Hermes Agent, Gemini CLI" in p.stdout, p.stdout[-500:])
+              and "Not installed here: OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI" in p.stdout, p.stdout[-500:])
         st = b.agents_json()
         check("agents --json: each one not installed", all(st.get(k, {}).get("installed") is False
-                                                           for k in ("openclaw", "hermes", "gemini")), st)
+                                                           for k in ("openclaw", "hermes", "gemini", "antigravity")), st)
     finally:
         b.close()
 
@@ -978,10 +1057,294 @@ def package_cases():
           "policies", not any(os.path.exists(os.path.join(LAB, d)) for d in ("commands", "hooks", "agents", "policies")))
 
 
+def antigravity_cases():
+    """Antigravity CLI's tool timeout: written by the step (agy's CLI has no option for it) into metacomputer's own entry
+    only, one you set stays, never over a file that changed since it was read; and a commented file keeps the step
+    finished with a note (the server works; only long calls end at agy's 180 s)."""
+    print("Antigravity CLI: the tool timeout")
+    b = Box(agents=("antigravity",))
+    try:
+        seed(b, "antigravity", {"command": b.link, "args": ["mcp-lazy"], "timeoutSeconds": 1200})
+        before = open(config_file(b, "antigravity")).read()
+        p = b.install("--only-antigravity")
+        check("a timeoutSeconds you set on metacomputer's entry stays, and the file isn't written", p.returncode == 0
+              and open(config_file(b, "antigravity")).read() == before and not mutations(b, "antigravity"), p.stdout[-400:])
+        seed(b, "antigravity", {"command": b.link, "args": ["mcp-lazy"]})
+        p = b.install("--only-antigravity")
+        d = json.load(open(config_file(b, "antigravity")))
+        check("metacomputer's entry without one gets 600 s; the other server and every other key stay",
+              p.returncode == 0 and d["mcpServers"]["metacomputer"].get("timeoutSeconds") == 600
+              and d["mcpServers"]["other"] == {"command": "/bin/echo"} and "tool timeout 600 s" in p.stdout
+              and not [f for f in os.listdir(os.path.dirname(config_file(b, "antigravity"))) if "metacomputer-new" in f],
+              (p.stdout[-400:], d))
+        text = ("{\n  // the user's own\n  \"mcpServers\": {\"metacomputer\": {\"command\": \"" + b.link +
+                "\", \"args\": [\"mcp-lazy\"]},},\n}\n")
+        write(config_file(b, "antigravity"), text)
+        p = b.install("--only-antigravity")
+        check("in a file with comments (agy reads it; its CLI and this step don't write it), metacomputer's entry is "
+              "recognised, left as it is, and the run says how to add the timeout by hand; the step still finishes",
+              p.returncode == 0 and open(config_file(b, "antigravity")).read() == text
+              and "timeoutSeconds" in p.stdout and "already registered" in p.stdout, p.stdout[-500:])
+    finally:
+        b.close()
+    print("Antigravity CLI: its permission rule (settings.json)")
+    rule = "mcp(metacomputer/*)"
+
+    def settings_path(b):
+        return os.path.join(b.home, ".gemini", "antigravity-cli", "settings.json")
+
+    def allow_of(b):
+        try:
+            return ((json.load(open(settings_path(b))).get("permissions") or {}).get("allow")) or []
+        except (OSError, ValueError):
+            return None
+    b = Box(agents=("antigravity",))
+    try:
+        p = b.install("--only-antigravity")
+        st = os.stat(settings_path(b)) if os.path.exists(settings_path(b)) else None
+        check("a run that adds the server adds metacomputer's own rule, exactly mcp(metacomputer/*), to a new settings.json "
+              "(0600), as Gemini CLI's server gets trust", p.returncode == 0 and allow_of(b) == [rule]
+              and st and stat.S_IMODE(st.st_mode) == 0o600 and "allowed without asking" in p.stdout,
+              (p.stdout[-400:], allow_of(b)))
+        write(settings_path(b), json.dumps({"theme": "dark", "permissions": {"allow": ["command(git)"],
+                                                                             "deny": ["command(rm -rf)"]}}, indent=2) + "\n")
+        os.chmod(settings_path(b), 0o640)
+        p = b.install("--only-antigravity")
+        check("a later run (the server already there) doesn't add it back: taken out stays out", p.returncode == 0
+              and allow_of(b) == ["command(git)"], allow_of(b))
+        os.remove(config_file(b, "antigravity"))
+        p = b.install("--only-antigravity")
+        d = json.load(open(settings_path(b)))
+        check("added next to the user's own rules and settings, which stay as they were, and the file keeps its mode",
+              p.returncode == 0 and d == {"theme": "dark", "permissions": {"allow": ["command(git)", rule],
+                                                                           "deny": ["command(rm -rf)"]}}
+              and stat.S_IMODE(os.stat(settings_path(b)).st_mode) == 0o640, d)
+        p = b.install("--uninstall")
+        d = json.load(open(settings_path(b)))
+        check("--uninstall takes out exactly that rule; everything else stays", p.returncode == 0
+              and d == {"theme": "dark", "permissions": {"allow": ["command(git)"], "deny": ["command(rm -rf)"]}}
+              and f'took "{rule}" out' in p.stdout, (d, p.stdout[-400:]))
+        for theirs in (["mcp(metacomputer/click)"], ["mcp(*)"]):
+            for key in ("ask", "deny"):
+                write(settings_path(b), json.dumps({"permissions": {key: theirs}}) + "\n")
+                p = b.install("--only-antigravity")
+                check(f"a {key} rule of the user's ({theirs[0]}) wins: no allow rule is added, said",
+                      p.returncode == 0 and allow_of(b) == [] and "no rule allowing them was added" in p.stdout,
+                      (allow_of(b), p.stdout[-300:]))
+                b.install("--uninstall")
+        text = "{\n  // mine\n  \"theme\": \"dark\",\n}\n"
+        write(settings_path(b), text)
+        p = b.install("--only-antigravity")
+        check("a settings.json with comments or trailing commas is left byte for byte, with the line to add by hand; the "
+              "step still finishes (the server works; agy asks before each call)", p.returncode == 0
+              and open(settings_path(b)).read() == text and f'add "{rule}" to permissions.allow' in p.stdout,
+              p.stdout[-400:])
+        write(settings_path(b), json.dumps({"permissions": {"allow": [rule]}}) + "\n")
+        foreign = {"command": "/opt/other/bin/server", "args": ["--token", SECRET]}
+        seed(b, "antigravity", foreign)
+        p = b.install("--uninstall")
+        check("an uninstall that leaves someone else's server named metacomputer leaves the rule too",
+              allow_of(b) == [rule] and entry(b, "antigravity") == foreign, (allow_of(b), p.stdout[-300:]))
+        os.remove(config_file(b, "antigravity"))
+        p = b.install("--uninstall")
+        check("...and with no server named metacomputer left, the same rule written by the user (not by this install) "
+              "stays", allow_of(b) == [rule], (allow_of(b), p.stdout[-300:]))
+        os.remove(settings_path(b))
+        b.install("--only-antigravity")
+        os.remove(config_file(b, "antigravity"))
+        p = b.install("--uninstall")
+        check("...while the rule this install added (its record says so) goes once no server named metacomputer is left, "
+              "and the record with it", allow_of(b) == [] and f'took "{rule}" out' in p.stdout
+              and not os.path.exists(os.path.join(b.home, ".local", "share", "metacomputer", "antigravity-rule.json")),
+              (allow_of(b), p.stdout[-300:]))
+    finally:
+        b.close()
+    # Provenance: a rule the user wrote before metacomputer was installed is the user's; the install finds it there,
+    # doesn't note it as its own, and no uninstall takes it out.
+    b = Box(agents=("antigravity",))
+    try:
+        mine = {"theme": "dark", "permissions": {"allow": ["command(git)", rule]}}
+        write(settings_path(b), json.dumps(mine, indent=2) + "\n")
+        p = b.install("--uninstall")
+        check("an uninstall with no server named metacomputer leaves the user's own identical rule, and says so",
+              p.returncode == 0 and json.load(open(settings_path(b))) == mine and "didn't add it" in p.stdout,
+              (json.load(open(settings_path(b))), p.stdout[-300:]))
+        p = b.install("--only-antigravity")
+        p2 = b.install("--uninstall")
+        check("...and so does one after an install that added the server but found the rule already there",
+              p.returncode == 0 and p2.returncode == 0 and entry(b, "antigravity") is None
+              and json.load(open(settings_path(b))) == mine, (json.load(open(settings_path(b))), p2.stdout[-300:]))
+    finally:
+        b.close()
+    # A settings.json or mcp_config.json that is a link (a dotfile kept elsewhere) is never replaced: the link and the
+    # file it points to stay byte for byte, and the run says what to change by hand.
+    b = Box(agents=("antigravity",))
+    try:
+        dot = os.path.join(b.home, "dotfiles")
+        os.makedirs(dot, exist_ok=True)
+        os.makedirs(os.path.dirname(settings_path(b)), exist_ok=True)
+        write(os.path.join(dot, "agy-settings.json"), json.dumps({"theme": "dark"}) + "\n")
+        os.symlink(os.path.join(dot, "agy-settings.json"), settings_path(b))
+        p = b.install("--only-antigravity")
+        check("a settings.json that is a link stays a link, the file it points to unchanged, with the line to add by hand",
+              p.returncode == 0 and os.path.islink(settings_path(b))
+              and open(os.path.join(dot, "agy-settings.json")).read() == json.dumps({"theme": "dark"}) + "\n"
+              and "is a link" in p.stdout and f'add "{rule}" to permissions.allow' in p.stdout, p.stdout[-500:])
+        cfg = config_file(b, "antigravity")
+        seed(b, "antigravity", {"command": b.link, "args": ["mcp-lazy"]})
+        os.rename(cfg, os.path.join(dot, "mcp_config.json"))
+        os.symlink(os.path.join(dot, "mcp_config.json"), cfg)
+        before = open(os.path.join(dot, "mcp_config.json")).read()
+        p = b.install("--only-antigravity")
+        check("a mcp_config.json that is a link stays a link (no timeout written through or over it), with the line to "
+              "add by hand", os.path.islink(cfg) and open(os.path.join(dot, "mcp_config.json")).read() == before
+              and "is a link" in p.stdout and "timeoutSeconds" in p.stdout, p.stdout[-500:])
+    finally:
+        b.close()
+    # The write happens only over the file that was read: one that changed meanwhile is left as it is (in-process).
+    t = tempfile.mkdtemp(prefix="mcomp-agy-")
+    try:
+        f = os.path.join(t, "x.json")
+        write(f, "{}\n")
+        got = agent_setup.replace_if_unchanged(f, b"{ }\n", b'{"a": 1}\n')
+        got_none = agent_setup.replace_if_unchanged(f, None, b'{"a": 1}\n')
+        check("replace_if_unchanged: a file that isn't what was read (or one that appeared) is left, and nothing is left "
+              "beside it", got == "changed" and got_none == "changed" and open(f).read() == "{}\n"
+              and os.listdir(t) == ["x.json"], (got, got_none, os.listdir(t)))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+    # ...and the last check is as close to the replace as a file allows: another program's change that lands after the
+    # content was read again but before the replace (a new file renamed into place, or the same file rewritten) is
+    # caught by the file's identity, so it isn't lost. What remains is the instant between that check and the replace.
+    t = tempfile.mkdtemp(prefix="mcomp-agy-")
+    real_open = open
+    try:
+        f = os.path.join(t, "settings.json")
+        theirs = '{"permissions": {"deny": ["mcp(*)"]}}\n'
+
+        def by_rename():
+            with real_open(f + ".theirs", "w") as w:
+                w.write(theirs)
+            os.replace(f + ".theirs", f)
+
+        def in_place():
+            with real_open(f, "r+") as w:
+                w.write(theirs[:len("{}\n")])
+        for label, change, expect in (("a new file renamed into place", by_rename, theirs),
+                                      ("the same file rewritten in place", in_place, theirs[:3])):
+            write(f, "{}\n")
+            fired = []
+
+            class Reader:
+                """The file as replace_if_unchanged reads it again, another program changing it right after."""
+
+                def __init__(self, fh):
+                    self.fh = fh
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    self.fh.close()
+
+                def fileno(self):
+                    return self.fh.fileno()
+
+                def read(self, *a):
+                    got = self.fh.read(*a)
+                    if not fired:
+                        fired.append(1)
+                        time.sleep(0.01)
+                        change()
+                    return got
+
+            def opener(path, mode="r", *a, **kw):
+                fh = real_open(path, mode, *a, **kw)
+                return Reader(fh) if path == f and "r" in mode and "+" not in mode else fh
+            agent_setup.open = opener
+            try:
+                got = agent_setup.replace_if_unchanged(f, b"{}\n", b'{"permissions": {"allow": ["mcp(metacomputer/*)"]}}\n')
+            finally:
+                del agent_setup.open
+            check(f"replace_if_unchanged: another program's change right after the last read ({label}) isn't "
+                  "overwritten", fired and got == "changed" and real_open(f).read() == expect
+                  and sorted(os.listdir(t)) == ["settings.json"], (got, real_open(f).read(), os.listdir(t)))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+    # The write happens only over the file that was read: one that changed meanwhile is left as it is (in-process).
+    t = tempfile.mkdtemp(prefix="mcomp-agy-")
+    try:
+        home = os.path.join(t, "home")
+        link = os.path.join(home, ".local", "bin", "metacomputer")
+        ag = agent_setup.AGENTS["antigravity"]
+        path = ag.config({"HOME": home})
+        write(path, json.dumps({"mcpServers": {"metacomputer": {"command": link, "args": ["mcp-lazy"]}}}) + "\n")
+        real = ag._text
+        changed = json.dumps({"mcpServers": {"metacomputer": {"command": link, "args": ["mcp-lazy"]}, "new": {}}})
+
+        def text_then_change(p):
+            got = real(p)
+            write(path, changed)              # someone writes the file right after it was read
+            return got
+        ag._text = text_then_change
+        out = agent_setup.Out()
+        try:
+            ag.settle("agy", LAB, link, {"HOME": home}, out)
+        finally:
+            ag._text = real
+        check("a mcp_config.json that changed after it was read isn't replaced: said, and no file left beside it",
+              open(path).read() == changed and any("changed while" in x for x in out.lines)
+              and sorted(os.listdir(os.path.dirname(path))) == ["mcp_config.json"], (out.lines, os.listdir(os.path.dirname(path))))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
+SKILL_BUDGET = 24000     # bytes of a skill's text Antigravity CLI loads (agy plugin validate 1.5.15); the rest it doesn't
+SAFETY_SECTIONS = ("## Rules", "## Getting the user's attention", "## When a step is the user's",
+                   "## Start: one round, then the safety check")
+SAFETY_PHRASES = ("**Refusals are the user's controls,**", "**Destroying guest state needs the user's explicit OK",
+                  "**Logins, 2FA codes and API keys", "**Paying for things", "**One-time codes and sign-in links",
+                  "**Untrusted content.**", "**Hidden or AI-directed text", "**Keep the isolation",
+                  "Never give a `metacomputer` command a terminal of your own",
+                  "`health_report` before the first action")
+
+
+def skill_budget_cases():
+    """What keeps the agent safe stays within the part of SKILL.md every agent loads: Antigravity CLI loads only its first
+    24,000 bytes, so the rules (refusals and the commands only the user runs, secrets and codes, payments, untrusted
+    content and hidden text, isolation), handing a step to the user and the start's safety check come before the driving
+    guidance and the references. Counted in the whole file's bytes (stricter than agy, which counts after the front
+    matter), in the repository's skill and both packages' copies."""
+    print("SKILL.md: the safety sections within the first 24,000 bytes")
+    for rel in ("skills/metacomputer/SKILL.md", "plugin/skills/metacomputer/SKILL.md",
+                "agent-plugin/skills/metacomputer/SKILL.md"):
+        data = open(os.path.join(LAB, rel), "rb").read()
+        heads = [m.start() + 1 for m in re.finditer(rb"\n## ", data)]
+
+        def end_of(title):
+            i = data.find(b"\n" + title.encode())
+            if i < 0:
+                return None
+            later = [h for h in heads if h > i + 1]
+            return later[0] if later else len(data)
+        ends = {t: end_of(t) for t in SAFETY_SECTIONS}
+        check(f"{rel}: the rules, the user's attention, handoffs and the start's safety check end before byte "
+              f"{SKILL_BUDGET:,}", all(e is not None and e <= SKILL_BUDGET for e in ends.values()), ends)
+        late = [ph for ph in SAFETY_PHRASES if data.find(ph.encode()) < 0
+                or data.find(ph.encode()) + len(ph.encode()) > SKILL_BUDGET]
+        check(f"{rel}: every safety rule is in that part (refusals, the user's own commands, secrets, codes, payments, "
+              "untrusted and hidden text, isolation, the safety check)", not late, late)
+        check(f"{rel}: the reference material comes after them", all(
+            data.find(b"\n## " + t) > max(e for e in ends.values() if e) - 1 for t in (b"Also available", b"References")))
+        check(f"{rel}: the skill tells Antigravity CLI to read the whole file",
+              b"it loads only the first part of this file" in data and b"read the whole file" in data)
+
 def main():
     unit_cases()
-    for name in ("openclaw", "hermes", "gemini"):
+    for name in ("openclaw", "hermes", "gemini", "antigravity"):
         agent_cases(name)
+    antigravity_cases()
+    skill_budget_cases()
     link_cases()
     lock_cases()
     profile_cases()

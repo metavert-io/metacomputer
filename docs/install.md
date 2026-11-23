@@ -269,11 +269,11 @@ if your settings set it); when a build fails, the end of its log is shown.
 | `--only-claude` | Only the Claude Code step |
 | `--codex` | Set Codex up even after an earlier `--no-codex`: [codex.md](codex.md) |
 | `--no-codex` | Leave Codex alone, in this run and later ones (`--codex` undoes it) |
-| `--only-agents` | Only the agents' steps (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI), for whichever are installed (after installing one) |
+| `--only-agents` | Only the agents' steps (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI), for whichever are installed (after installing one) |
 | `--only-codex` | Only the Codex step: its MCP server, the skills in `~/.agents/skills` and metacomputer's rules for its sandbox |
-| `--openclaw`, `--hermes`, `--gemini` | Set that agent up even after an earlier `--no-...`: [openclaw.md](openclaw.md), [hermes.md](hermes.md), [gemini.md](gemini.md) |
-| `--no-openclaw`, `--no-hermes`, `--no-gemini` | Leave that agent alone, in this run and later ones (`--openclaw` and so on undo it) |
-| `--only-openclaw`, `--only-hermes`, `--only-gemini` | Only that agent's step: its MCP server, registered with its own CLI, and the skills where it reads them |
+| `--openclaw`, `--hermes`, `--gemini`, `--antigravity` | Set that agent up even after an earlier `--no-...`: [openclaw.md](openclaw.md), [hermes.md](hermes.md), [gemini.md](gemini.md), [antigravity.md](antigravity.md) |
+| `--no-openclaw`, `--no-hermes`, `--no-gemini`, `--no-antigravity` | Leave that agent alone, in this run and later ones (`--openclaw` and so on undo it) |
+| `--only-openclaw`, `--only-hermes`, `--only-gemini`, `--only-antigravity` | Only that agent's step: its MCP server, registered with its own CLI, and the skills where it reads them |
 | `--uninstall` | Remove the command, Claude Code's plugin and MCP server, the other agents' setup and the vault program (the VM stays) |
 
 `MCOMP_CONFIG=FILE ./install.sh` writes and reads that settings file instead of
@@ -302,7 +302,17 @@ above).
 | Go's build cache and modules | `~/go` and `~/Library/Caches/go-build` (Go's own defaults) |
 | Homebrew packages | Homebrew's prefix (`/opt/homebrew`) |
 | The install and build locks | `metacomputer-locks` in your per-user temporary folder (`getconf DARWIN_USER_TEMP_DIR`) |
+| The note that the install added Antigravity CLI's permission rule (so `--uninstall` takes out only that) | `~/.local/share/metacomputer/antigravity-rule.json` |
 | Volumes and reference disks, if you make any ([storage.md](storage.md)) | `STORAGE_DIR` (default `~/.local/share/metacomputer`), their records in `~/.local/share/metacomputer/storage`; rclone for S3 volumes in the checkout's `.cache/rclone-v*`. The installer neither needs nor touches them |
+
+Your agents' settings change only where the install says (their MCP server, and for Codex and Antigravity CLI a timeout,
+an approval mode or a permission rule), and only when what it changes is still what it read: Claude Code's and Codex's
+entries checked by digest right before their own CLIs change them, OpenClaw's, Hermes Agent's and Gemini CLI's read
+again right before, Codex's timeout and approval mode written in one short step that reads its `config.toml`, checks
+the entry and writes the file, and Antigravity CLI's files read again and compared right before they're replaced. That
+narrows the window to an instant without closing it: a file can't be compared and swapped against any writer, so an
+agent writing the same file in that instant can still lose its change. Install or update with your agents closed (a
+running agent may also write its settings again from what it loaded).
 
 ## Updating
 

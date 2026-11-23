@@ -11,8 +11,8 @@ subscription (below).
 
 **Gemini CLI and Antigravity CLI.** Since 2026-06-18 Google serves free and Google AI Pro/Ultra users through its
 successor, Antigravity CLI (`agy`); Gemini CLI goes on for Gemini Code Assist Standard and Enterprise and for paid
-Gemini API keys, and is still released. **Antigravity CLI is not yet supported**: it keeps its own MCP configuration
-(`~/.gemini/config/mcp_config.json`) and plugins, which this install doesn't set up.
+Gemini API keys, and is still released. Antigravity CLI keeps its own MCP configuration
+(`~/.gemini/config/mcp_config.json`) and skills, which the install sets up too: [antigravity.md](antigravity.md).
 
 ## Set it up
 
@@ -103,7 +103,8 @@ in Terminal, iTerm or an SSH session, not through an agent.
   in `<untrusted_context>` for the model; learn reads the text inside.
 - **The tools' names** are `mcp_metacomputer_<tool>` (the skill writes `mcp__metacomputer__`; use the names your tool
   list shows).
-- **Slash commands:** the plugin's `/learn` command is Claude Code's; in Gemini CLI, run `metacomputer learn report`.
+- **The lessons skill** (`/metacomputer:learn`) comes with Claude Code's plugin and Codex's; in Gemini CLI, run
+  `metacomputer learn report`.
 
 ## A benchmark run
 

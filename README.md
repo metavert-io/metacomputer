@@ -2,7 +2,7 @@
 
 **Agentic coding plus a real desktop, with the controls you'd want around it.**
 
-metacomputer gives your coding agent (Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI) a disposable Ubuntu
+metacomputer gives your coding agent (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI) a disposable Ubuntu
 computer of its own: a virtual machine on your Mac. The agent operates it the way a person would: it
 reads the screen through the accessibility tree, clicks and types, uses
 Firefox and Chrome, and records video of what it did. It also works in it the
@@ -11,8 +11,10 @@ ffmpeg. The VM is kept away from your files, your accounts, your Mac and your
 network, and what the agent does there can be logged, limited and approved.
 
 Every agent gets the same tools, skill and protections: Claude Code through its plugin and MCP server, the others
-through their MCP servers and skills ([Codex](docs/codex.md), with rules for its sandbox; [OpenClaw](docs/openclaw.md);
-[Hermes Agent](docs/hermes.md); [Gemini CLI](docs/gemini.md)). Install once and whichever you have is set up.
+through their MCP servers and skills ([Codex](docs/codex.md), with rules for its sandbox and the plugin from this
+repository's own Codex marketplace; [OpenClaw](docs/openclaw.md);
+[Hermes Agent](docs/hermes.md); [Gemini CLI](docs/gemini.md); [Antigravity CLI](docs/antigravity.md)). Install once and
+whichever you have is set up.
 
 https://github.com/user-attachments/assets/9465c66c-88fd-4e58-845e-a430c61ddf1a
 
@@ -26,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.s
 ```
 
 That's the whole install. There's no VM for you to set up: the script builds
-it, sets it up for each coding agent you have (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI), and checks
+it, sets it up for each coding agent you have (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI), and checks
 that everything works. On a Mac
 that already has Homebrew and Apple's Command Line Tools it takes about 5 minutes
 and asks you nothing; on a new Mac it offers to install those first.
@@ -160,7 +162,8 @@ and GUI apps and signed-in sites to the screen ([docs/shell.md](docs/shell.md)).
 The hub and the benchmark follow the same study.
 
 **`metacomputer learn`: it learns your apps without being told.** It reads
-your agent's own past sessions (Claude Code's, Codex's and Gemini CLI's), finds where it stumbled (refused calls, pixel clicks
+your agent's own past sessions (Claude Code's, Codex's, Gemini CLI's, Antigravity CLI's, OpenClaw's and Hermes
+Agent's), finds where it stumbled (refused calls, pixel clicks
 without a fresh screenshot, repeated mistakes, the apps where the time went) and
 proposes short lessons with the evidence. You approve the ones you want, and every
 new session starts with them, as part of the instructions sent to the model: you
@@ -548,7 +551,7 @@ fifty, from office work and games to research and teaching it a new app.
 
 ```text
 Your Mac                                                         The VM: Ubuntu 24.04, XFCE
-Your coding agent: Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI
+Your coding agent: Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI
  └─ metacomputer's skill + MCP tools (Claude Code: the plugin and an MCP server; the others: their config)
      └─ the hub: one per VM, every guard ───────────── SSH ──▶ Cua Driver ──▶ the desktop's apps
  metacomputer sh ───────────────────────────────────── SSH ──▶ bash, as the desktop user
@@ -689,7 +692,8 @@ detail.
   [Codex](https://github.com/openai/codex) ([docs/codex.md](docs/codex.md)),
   [OpenClaw](https://github.com/openclaw/openclaw) ([docs/openclaw.md](docs/openclaw.md)),
   [Hermes Agent](https://github.com/NousResearch/hermes-agent) ([docs/hermes.md](docs/hermes.md)) or
-  [Gemini CLI](https://github.com/google-gemini/gemini-cli) ([docs/gemini.md](docs/gemini.md)), or several.
+  [Gemini CLI](https://github.com/google-gemini/gemini-cli) ([docs/gemini.md](docs/gemini.md)) or
+  [Antigravity CLI](https://antigravity.google/) ([docs/antigravity.md](docs/antigravity.md)), or several.
 - Optional: Google Chrome in the VM, which means accepting
   [Google's terms](https://www.google.com/chrome/terms/).
 
@@ -795,7 +799,7 @@ metacomputer vm create work --on sprites --org YOUR-ORG                   # afte
 | `metacomputer status` shows a ✗ | Read that line. `metacomputer logs` shows the logs; `metacomputer restart` stops the VM and starts it again. |
 | A Claude Code session has no metacomputer tools | Run `/mcp` and reconnect `metacomputer`, or restart Claude Code. `metacomputer agents` says what's set up; `./install.sh --only-claude` sets it up again. |
 | A Codex session has no metacomputer tools, or a `metacomputer` command exits 77 | `./install.sh --only-codex`, then a new Codex session ([docs/codex.md](docs/codex.md#if-something-doesnt-work)). |
-| An OpenClaw, Hermes Agent or Gemini CLI session has no metacomputer tools | `metacomputer agents` says what's set up; `./install.sh --only-openclaw` (`--only-hermes`, `--only-gemini`) sets it up again. Gemini CLI starts MCP servers only in folders you trust ([OpenClaw](docs/openclaw.md#if-something-doesnt-work), [Hermes Agent](docs/hermes.md#if-something-doesnt-work), [Gemini CLI](docs/gemini.md#if-something-doesnt-work)). |
+| An OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI session has no metacomputer tools | `metacomputer agents` says what's set up; `./install.sh --only-openclaw` (`--only-hermes`, `--only-gemini`, `--only-antigravity`) sets it up again. Gemini CLI starts MCP servers only in folders you trust ([OpenClaw](docs/openclaw.md#if-something-doesnt-work), [Hermes Agent](docs/hermes.md#if-something-doesnt-work), [Gemini CLI](docs/gemini.md#if-something-doesnt-work), [Antigravity CLI](docs/antigravity.md#if-something-doesnt-work)). |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release`. |
 | "Paused: the user has the computer" | Your agent handed you a step (`metacomputer handoff status`). Do it in the live view, then run `metacomputer handoff done` (or `handoff cancel`). |
 | Screen Sharing rejects your password | It wants the live-view password, not your Mac's: `metacomputer view --open` brings the one Screen Sharing remembers up to date; `view --open --no-remember` puts it on the clipboard instead (paste with Cmd+V). |
@@ -816,7 +820,7 @@ metacomputer update          # --check: only say what's new
 ```
 
 It moves your checkout to the latest release, sets metacomputer up for each agent installed (Claude Code, Codex,
-OpenClaw, Hermes Agent, Gemini CLI, including one you installed since; `--no-claude`, `--no-codex` and the like at
+OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI, including one you installed since; `--no-claude`, `--no-codex` and the like at
 install keep one out), rebuilds only what changed, restarts
 what runs older code (it asks before restarting a VM) and tells you what's left:
 a `secrets bind` when the gateway changed, or what a VM rebuild would add
@@ -853,8 +857,9 @@ sinks and volumes stay until you delete them
 - [docs/events.md](docs/events.md): the event stream, every event, wire formats and receivers.
 - [docs/learn.md](docs/learn.md): lessons from your own sessions.
 - [docs/codex.md](docs/codex.md): using it from Codex: setup, its sandbox and the rules, and where it differs.
-- [docs/openclaw.md](docs/openclaw.md), [docs/hermes.md](docs/hermes.md), [docs/gemini.md](docs/gemini.md): using it
-  from OpenClaw, Hermes Agent and Gemini CLI, and their packages (the Agent Plugins package, the Gemini CLI extension).
+- [docs/openclaw.md](docs/openclaw.md), [docs/hermes.md](docs/hermes.md), [docs/gemini.md](docs/gemini.md),
+  [docs/antigravity.md](docs/antigravity.md): using it from OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI, and
+  their packages (the Agent Plugins package, the Gemini CLI extension).
 - [docs/moving-from-spaces.md](docs/moving-from-spaces.md): coming from Cua Spaces' Keyvault.
 - [bench/README.md](bench/README.md): the benchmark, with each cited run's records in [bench/runs/](bench/runs/).
 - [TESTING.md](TESTING.md): every test and how to run it.

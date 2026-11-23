@@ -34,7 +34,7 @@ window. It isn't another controller to that client's process or its Claude Code
 session.
 
 "Self" is the caller's own agent session (its nearest agent ancestor: Claude Code, Codex,
-OpenClaw, Hermes Agent or Gemini CLI; agent_of), or a shell it runs under, so a session never
+OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI; agent_of), or a shell it runs under, so a session never
 blocks itself.
 
 A handoff (lib/handoff.py, `metacomputer handoff`) gives the computer to the user:
@@ -212,7 +212,7 @@ def proc_cwd(pid):
 class ProcTable(dict):
     """ps_table's {pid: (ppid, comm)}, and what agent_of reads of a process when asked, kept with the table: its
     executable (exe(): the realpath of its text image), its arguments (argv()) and its working folder (cwd()). An agent
-    that runs natively (Gemini CLI's standalone build) is told by its executable; one that runs on an interpreter
+    that runs natively (Gemini CLI's standalone build, Antigravity CLI) is told by its executable; one that runs on an interpreter
     (Gemini CLI, Hermes Agent, OpenClaw's launcher) by the program it runs. live: read what isn't known yet from the
     process itself (ps_table's tables; None when it can't be read); a table made of known parts (the tests') never does:
     argvs, exes and cwds map a pid to what's known, None for what couldn't be read (an argv not given is [], an exe or
@@ -274,14 +274,27 @@ def is_codex(comm):
 # runs can't be found. It may be an agent, so it counts as one (fail closed): commands only the user runs refuse under
 # it, and the session guard, claims and the vault treat it as a session.
 UNKNOWN_AGENT = "unidentified agent"
-AGENTS = ("Claude Code", "Codex", "OpenClaw", "Hermes Agent", "Gemini CLI", UNKNOWN_AGENT)
+AGENTS = ("Claude Code", "Codex", "OpenClaw", "Hermes Agent", "Gemini CLI", "Antigravity CLI", "Antigravity app",
+          UNKNOWN_AGENT)
 # An interpreter's process (ps comm= is its program, often by its full path): the agent is told by what it runs.
 _INTERPRETER = re.compile(r"(node|nodejs|bun|deno|python[0-9.]*|Python)")
-# The agents' programs, by file name: a native executable (Gemini CLI's standalone `gemini`), the name a process gives
-# itself (OpenClaw's `openclaw-gateway`, a titled Hermes Agent's `hermes`), or the script an interpreter runs.
+# The agents' programs, by file name: a native executable (Gemini CLI's standalone `gemini`; Antigravity CLI's `agy`, a
+# Go executable its installer puts at ~/.local/bin/agy, and `antigravity`, the same executable by its release name, as
+# Homebrew's cask runs it; the Antigravity app's `Antigravity`), the name a process gives itself (OpenClaw's
+# `openclaw-gateway`, a titled Hermes Agent's `hermes`), or the script an interpreter runs. Names are matched exactly.
 AGENT_NAMES = {"gemini": "Gemini CLI", "gemini.js": "Gemini CLI", "openclaw": "OpenClaw", "openclaw.mjs": "OpenClaw",
                "openclaw-gateway": "OpenClaw", "hermes": "Hermes Agent", "hermes-agent": "Hermes Agent",
-               "hermes-acp": "Hermes Agent"}
+               "hermes-acp": "Hermes Agent", "agy": "Antigravity CLI", "antigravity": "Antigravity CLI",
+               "Antigravity": "Antigravity app"}
+# Google's Antigravity app and IDE run their agent inside the app (its language server), so the app's own processes are
+# the session: by the executable's realpath, an executable in the Contents/MacOS of an Antigravity app bundle (the
+# app's `Antigravity.app/Contents/MacOS/Antigravity`, the IDE's `Antigravity IDE.app/Contents/MacOS/Electron`, their
+# helpers), or a language server (`language_server`, the app's Contents/Resources/bin/language_server, or one named for
+# its platform, `language_server_macos_arm` and the like) in a folder of Antigravity's own (antigravity_path: a path
+# component that is or starts with "antigravity", never the word inside another name). Checked against Antigravity 2.34.0
+# and Antigravity IDE 2.8.0 (their macOS downloads' bundles).
+ANTIGRAVITY_BUNDLE = re.compile(r"/Antigravity[^/]*\.app/Contents/MacOS/[^/]+$")
+LANGUAGE_SERVER = re.compile(r"^language_server(?:_(?:macos|darwin|linux|windows)_(?:arm|arm64|x64|amd64|x86_64)(?:\.exe)?)?$")
 # ...and by a folder in a script's path: Gemini CLI's package, Hermes Agent's.
 AGENT_PATH_WORDS = (("/@google/gemini-cli/", "Gemini CLI"), ("hermes_cli", "Hermes Agent"))
 # python -m: the module's package.
@@ -338,6 +351,24 @@ def _interp_kind(name):
 def name_agent(path):
     """The agent a program is by its file name (AGENT_NAMES), else None."""
     return AGENT_NAMES.get(os.path.basename(path or ""))
+
+
+def antigravity_path(path):
+    """Whether a folder on the path is Antigravity's own: a component that is or starts with "antigravity" (or
+    ".antigravity"), case aside (Antigravity.app, antigravity-ide, ~/.antigravity), never the word inside another name
+    (not-antigravity)."""
+    return any(c.lower().startswith(("antigravity", ".antigravity")) for c in (path or "").split("/"))
+
+
+def app_agent(path):
+    """"Antigravity app" for an executable of the Antigravity app's or IDE's (ANTIGRAVITY_BUNDLE, LANGUAGE_SERVER on a
+    path of Antigravity's own), else None."""
+    p = path or ""
+    if ANTIGRAVITY_BUNDLE.search(p):
+        return "Antigravity app"
+    if LANGUAGE_SERVER.match(os.path.basename(p)) and antigravity_path(os.path.dirname(p)):
+        return "Antigravity app"
+    return None
 
 
 def path_agent(path):
@@ -505,13 +536,14 @@ def agent_kind(comm, argv=None):
     """The agent session a process is (one of AGENTS), or None, by its name: its process table command (ps comm=) or
     its executable. Claude Code and Codex by theirs; OpenClaw names its processes `openclaw` (a command it runs, an
     `agent exec` turn) and `openclaw-gateway` (the gateway that runs every conversation); Hermes Agent's is `hermes`
-    where setproctitle is installed; Gemini CLI's standalone executable is `gemini` (AGENT_NAMES). argv: an
+    where setproctitle is installed; Gemini CLI's standalone executable is `gemini`, Antigravity CLI's `agy` (or
+    `antigravity`) (AGENT_NAMES); the Antigravity app's and IDE's executables by their paths (app_agent). argv: an
     interpreter's arguments, read by script_agent (here without a working folder)."""
     if is_claude(comm):
         return "Claude Code"
     if is_codex(comm):
         return "Codex"
-    got = name_agent(comm)
+    got = name_agent(comm) or app_agent(comm)
     if got:
         return got
     return script_agent(argv, None, _interp_kind(comm)) if argv and is_interpreter(comm) else None
@@ -547,7 +579,8 @@ def agent_of(pid, table):
 
 
 def claude_of(pid, table):
-    """Nearest agent session process above pid: Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI (None outside
+    """Nearest agent session process above pid: Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI or
+    the Antigravity app (None outside
     them all). The name is older than the other agents' support; claims, events and the vault still call this process
     claude_pid."""
     for p in ancestors(pid, table)[1:]:
@@ -575,7 +608,7 @@ def agent_name(pid):
 
 def at_user_terminal(fds=(0,)):
     """The bar for commands only the user runs: every fd in fds is a terminal and no agent session (Claude Code, Codex,
-    OpenClaw, Hermes Agent or Gemini CLI) is above this process. A terminal alone doesn't tell the user from an agent: Codex's command tool can
+    OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI or the Antigravity app) is above this process. A terminal alone doesn't tell the user from an agent: Codex's command tool can
     give a command a pseudo-terminal of its own. Fails closed when the process table can't be read. Like every
     check against your own account, this stops an agent from passing by accident, not a program that sets out to
     (it can start a command outside the agent's process tree)."""
@@ -604,7 +637,7 @@ def ancestry_complete(pid, table):
 
 
 AT_TERMINAL_HINT = ("in your own terminal (Terminal, iTerm or an SSH session), not through an agent (Claude Code, "
-                    "Codex, OpenClaw, Hermes Agent, Gemini CLI), a script or a pipe")
+                    "Codex, OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI), a script or a pipe")
 
 
 def alive(pid):

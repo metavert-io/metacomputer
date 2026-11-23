@@ -20,7 +20,7 @@ The user keeps passwords, one-time-code seeds, saved browser logins, API keys an
 | Exit | Means | Do |
 | --- | --- | --- |
 | 0 | done | carry on; for a fill, `chars` is the check |
-| 2 | refused; the `reason` says why | wrong site or field: fix it (focus the right field) and try once more. "not allowed at the vault's terminal", "refused with `deny`", "refused at the Touch ID dialog": the user said no or didn't answer; ask them. "limited to Claude Code sessions in ...": this project may not use it; tell the user. A required audit sink or a multiplexer: pass the reason on. Never work around a refusal |
+| 2 | refused; the `reason` says why | wrong site or field: fix it (focus the right field) and try once more. "not allowed at the vault's terminal", "refused with `deny`", "refused at the Touch ID dialog": the user said no or didn't answer; ask them. "limited to Claude Code sessions in ..." (the vault's words, for every agent's sessions): this project may not use it; tell the user. A required audit sink or a multiplexer: pass the reason on. Never work around a refusal |
 | 3 | the vault is locked | ask the user to run `metacomputer secrets unlock` in their own terminal, then try again. No vault yet: they run `metacomputer secrets init` and `set` |
 | 4 | error | VM off, no Chrome, no tab on that site. "Rebuild the VM": the VM predates the fill or proxy account; tell the user. "Bind again": the user runs `metacomputer secrets bind` |
 | 5 | sent, but the vault never answered | it may still be finishing. Run `metacomputer secrets settle` (it returns once the vault is done) before trying again or doing anything else on that page |
@@ -31,8 +31,8 @@ A fill or sign-in you interrupt (Ctrl-C, a timeout that kills the command) is wi
 
 ## When the user has to approve
 
-A secret set to `each`, a vault unlocked with `--confirm each`, every sealed-session save, every load of a whole browser profile, an `each` API token and every use on an identity provider's sign-in page (Google, Microsoft, Apple, Okta) wait up to 2 minutes for the user. Their unlock terminal shows the question, a request id and "Asked by Claude Code in <this project>"; `metacomputer secrets requests` lists what waits. Tell them which secret, what for, and how to answer:
-- in the vault's terminal: `NAME` to allow this use, `NAME session` for the rest of this Claude Code session, `NAME unlock` until the vault locks;
+A secret set to `each`, a vault unlocked with `--confirm each`, every sealed-session save, every load of a whole browser profile, an `each` API token and every use on an identity provider's sign-in page (Google, Microsoft, Apple, Okta) wait up to 2 minutes for the user. Their unlock terminal shows the question, a request id and "Asked by <your agent> in <this project>" (Claude Code, Codex, ...); `metacomputer secrets requests` lists what waits. Tell them which secret, what for, and how to answer:
+- in the vault's terminal: `NAME` to allow this use, `NAME session` for the rest of this agent session, `NAME unlock` until the vault locks;
 - or from any terminal: `metacomputer secrets approve ID` (Touch ID or their login password; `--passphrase` for the vault passphrase), for this use only; `--scope session` or `--scope unlock` reaches further, and the dialog or the prompt names it.
 
 In presence mode (the default on a Mac with Touch ID; `metacomputer secrets status` says which) a typed answer only chooses `NAME` / `NAME session` / `NAME unlock`, and the user then confirms with Touch ID or the passphrase: tell them to expect that.

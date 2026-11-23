@@ -7,82 +7,13 @@ description: "The agent's own disposable computer (metacomputer): an isolated Ub
 
 Run its commands as `~/.local/bin/metacomputer <command>`: that absolute path works from any folder. Below, `metacomputer X` is short for it. Use one command per Bash call, with no shell variables, `;` or `&&` chains, which trip permission checks.
 
-**Not set up yet** (no `~/.local/bin/metacomputer`, or a message that this Mac has no metacomputer set up): the plugin came without the VM. Say what setup does (downloads the project to `~/metacomputer`, adds Go, GnuPG and ffmpeg with Homebrew if they're missing, builds the VM from about 1.5 GB of downloads; roughly 5-15 minutes) and ask. On a yes, run `<this skill's base directory>/../../bin/metacomputer setup --yes` in the background and report how it ends; setup adds metacomputer's MCP server to Claude Code, whose tools appear after a restart (or `/mcp`), and until then `metacomputer call` (below) reaches the same ones. If it stops because Homebrew must be installed, the user runs the same command without `--yes` in their own Terminal (Homebrew's installer asks for their password there).
+**Not set up yet** (no `~/.local/bin/metacomputer`, or a message that this Mac has no metacomputer set up): the plugin came without the VM. Say what setup does (downloads the project to `~/metacomputer`, adds Go, GnuPG and ffmpeg with Homebrew if they're missing, builds the VM from about 1.5 GB of downloads; roughly 5-15 minutes) and ask. On a yes, run `<this skill's base directory>/../../bin/metacomputer setup --yes` in the background and report how it ends; setup adds metacomputer's MCP server to each coding agent on the Mac, whose tools appear in a new session (in Claude Code, after a restart or `/mcp`), and until then `metacomputer call` (below) reaches the same ones. If it stops because Homebrew must be installed, the user runs the same command without `--yes` in their own Terminal (Homebrew's installer asks for their password there). When there's no such file (the skills came without the plugin's launcher), give the user the install line to run in their own Terminal instead: `curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash`.
 
-- **What it is.** Claude Code runs on this Mac (macOS). The virtual computer is a separate Ubuntu 24.04 ARM64 XFCE desktop in a Lume VM (`metacomputer where` shows the project folder). Its wallpaper and panel say **VIRTUAL COMPUTER**. The desktop user is `cua`, and `~` in the VM is its home.
+- **What it is.** You (the coding agent) run on this Mac (macOS). The virtual computer is a separate Ubuntu 24.04 ARM64 XFCE desktop in a Lume VM (`metacomputer where` shows the project folder). Its wallpaper and panel say **VIRTUAL COMPUTER**. The desktop user is `cua`, and `~` in the VM is its home.
 - **How you reach it.** Use the metacomputer MCP tools only: `mcp__metacomputer__*`, or `mcp__plugin_metacomputer_metacomputer__*` where an older copy of the plugin brings them. Use the prefix your tool list shows; this file writes `mcp__metacomputer__`. They are Cua Driver running inside the VM, reached through a hub on this Mac, and they cannot reach the Mac.
-- **In Codex** (this file says Claude; that's you): the tools are `mcp__metacomputer__*`, already listed, so skip ToolSearch. `metacomputer` commands need to run outside Codex's sandbox: one that exits 77 ("running inside Codex's sandbox") never ran, so run it again with escalated permissions (metacomputer's rules for Codex, which `install.sh` adds, let everyday ones through without asking). Never give a `metacomputer` command a terminal of your own (a tty) or answer a question it asks: the commands only the user runs refuse a terminal inside an agent session, Codex's included. Long waits (`metacomputer handoff`) need a command timeout of at least 10 minutes.
-- **In OpenClaw, Hermes Agent or Gemini CLI** (this file says Claude; that's you): the same tools under your agent's names, `metacomputer__*` in OpenClaw, `mcp__metacomputer__*` in Hermes Agent, `mcp_metacomputer_*` in Gemini CLI; use the names your tool list shows. Where your agent hides MCP tools behind a tool search (OpenClaw's and Hermes Agent's do by default), search it for `metacomputer` instead of ToolSearch. As in Codex: run `metacomputer` by its absolute path, never give it a terminal of your own or answer its questions, and give `metacomputer handoff` a command timeout of at least 10 minutes.
+- **In Codex:** the tools are `mcp__metacomputer__*`, already listed, so skip ToolSearch. `metacomputer` commands need to run outside Codex's sandbox: one that exits 77 ("running inside Codex's sandbox") never ran, so run it again with escalated permissions (metacomputer's rules for Codex, which `install.sh` adds, let everyday ones through without asking). Never give a `metacomputer` command a terminal of your own (a tty) or answer a question it asks: the commands only the user runs refuse a terminal inside an agent session, Codex's included. Long waits (`metacomputer handoff`) need a command timeout of at least 10 minutes.
+- **In OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI:** the same tools under your agent's names, `metacomputer__*` in OpenClaw, `mcp__metacomputer__*` in Hermes Agent, `mcp_metacomputer_*` in Gemini CLI; use the names your tool list shows. Where your agent hides MCP tools behind a tool search (OpenClaw's and Hermes Agent's do by default), search it for `metacomputer` instead of ToolSearch. In Antigravity CLI, call them through `call_mcp_tool` with `ServerName` `metacomputer` (`metacomputer_metacomputer` if it came as a plugin), `ToolName` the tool and `Arguments`; it loads only the first part of this file (the rules, handoffs and the safety check come first), so read the whole file (driving the desktop, the other commands and the references follow) before you act on the desktop. As in Codex: run `metacomputer` by its absolute path, never give it a terminal of your own or answer its questions, and give `metacomputer handoff` a command timeout of at least 10 minutes.
 - **What it can reach.** It has the public internet. It cannot reach your local network, a tailnet or the Mac's own services, and it holds none of the user's accounts, files or logins.
-
-## Which computer?
-
-| The request says… | Means | Do |
-| --- | --- | --- |
-| "a computer", "your computer", "yourself", "a virtual / disposable / sandbox / Linux computer", "record yourself" | The virtual computer | `mcp__metacomputer__*` |
-| "my screen", "my Mac", "my desktop", "the app I have open", "my Notes / Mail / Chrome / files", anything needing the user's accounts or data | The user's real computer | Never the VM. Use that computer's own tools only if this session has them and the user has approved them; otherwise say so and ask. |
-| Neither, e.g. "use Firefox to check this site" | The virtual computer | VM, and say so before acting |
-| Needs the user's logged-in accounts or files, but names no computer | Unclear | Ask which computer |
-
-- **No fallback either way.** If the VM is unavailable, don't do the work on the Mac. If the user asked for their real computer, don't quietly use the VM instead.
-- **Never use Mac GUI paths for VM work:** `open`, `osascript`/AppleScript, Mac apps or Mac computer-use tools.
-- **Say which computer, once, before acting.** For example: "Using the virtual computer (an Ubuntu VM), not your Mac."
-
-## Desktop or direct tools?
-
-Use the desktop when the outcome lives on a screen: a GUI app or a real browser session, a visual check, a recording or demo, untrusted content that should stay away from the Mac, or the user asking for a computer. Do everything else directly with normal tools (code, builds, tests, git, files, data, APIs, pages a plain fetch can read), without booting the VM. If the user explicitly asks for the computer, use it; if the GUI is clearly the worse route, say why in one line first.
-
-## Browsers
-
-Firefox is the default; Chrome is installed. Modes: **human** (the tree plus real mouse and keyboard, at a person's pace; both browsers; the default), **page** (the page's own elements, in the background; Chrome only), **hybrid** (page reads, real clicks and typing; Chrome only). `metacomputer browser` shows the defaults; the user's words override them ("in Chrome", "drive the page directly", "like a person"). Page or hybrid in Firefox: say the driver can't, offer Chrome. Name the choice in the announcement ("Using the virtual computer: Firefox, human mode.").
-- **Anything account-facing goes through human mode first:** sign-in, sign-up, checkout, account settings, posting. Sites can flag page-mode Chrome as automated; a sign-in that looks degraded there (no code box, an email that never comes) means switch to human mode and retry. Page mode is for bulk data entry, reading the user's own sites, and steps human mode can't do. Keep sign-ins in a kept profile so they last until a reset ([BROWSER.md](BROWSER.md), "Sign in once, stay signed in").
-- **"Test it as a person":** follow BROWSER.md's checklist (human mode and pacing, real window sizes, a keyboard-only pass, a screenshot per step and a recording, and what a person would notice). Checks that need no model: `metacomputer web compare|responsive|a11y|open-untrusted URL` ([BROWSER.md](BROWSER.md)).
-
-## Start: one round, then the safety check
-
-1. **In one round, in parallel:**
-   - `metacomputer who`: is it running, and is anyone else using it?
-     - Another session **ACTIVE**: stop and ask the user; take over only with their OK (`metacomputer release`). With no one to ask (a headless run), report it and end. Don't wait in sleep loops.
-     - Stopped: `metacomputer start` (about 12 s). Note that you started it.
-   - **One ToolSearch** (Claude Code; with your tool list's prefix): `select:mcp__metacomputer__health_report,mcp__metacomputer__list_windows,mcp__metacomputer__launch_app,mcp__metacomputer__get_window_state,mcp__metacomputer__run_steps,mcp__metacomputer__invoke_menu,mcp__metacomputer__zoom`, plus what the task clearly needs: `run_script` (loops), `get_desktop_state` (games, desktop-scope clicks), and for Chrome page mode `browser_prepare`, `get_browser_state`, `browser_navigate`, `browser_click`, `browser_type`, `browser_select`. Clicks, typing and keys run as `run_steps` steps, so they need no tools of their own.
-   - **Read only the notes the task needs:** [DESKTOP.md](DESKTOP.md) for desktop apps and Firefox; [BROWSER.md](BROWSER.md) for sign-ins and other account pages, testing a site as a person, rich-text web editors, Chrome, page or hybrid mode and `metacomputer web`; [EXTRA-APPS.md](EXTRA-APPS.md) for Inkscape, Audacity, Kdenlive, games and other added apps; [SECRETS.md](SECRETS.md) before any sign-in, 2FA code, API key or payment, and before running Claude Code inside the VM; [SHELL.md](SHELL.md) for file work in the VM's shell beyond a check; [STORAGE.md](STORAGE.md) for volumes, reference disks and files that must outlive a reset.
-2. **`health_report` before the first action** (in the same round as `list_windows` is fine). It must report Linux and Ubuntu arm64; if it doesn't, stop.
-3. **No `mcp__metacomputer__*` tools?** Ask the user to reconnect `metacomputer` with `/mcp`, or to restart Claude Code (in Codex: a new session; `codex mcp list` shows the server; in OpenClaw `openclaw mcp list`, in Hermes Agent `/reload-mcp`, in Gemini CLI `/mcp`, where MCP servers run only in folders the user trusts). If `/mcp` has no `metacomputer` at all, run `metacomputer agents` and pass on the command it gives for the MCP server; when it gives none (a metacomputer older than this plugin, which left the tools to the plugin), ask the user to run `metacomputer update`, then restart Claude Code. Meanwhile `metacomputer call --session NAME TOOL 'JSON'` (the same NAME on every call) goes through the same hub and guards and keeps tokens and screenshots between calls; `--json` gives the whole result.
-
-## How to drive it
-
-These hold in every app. [DESKTOP.md](DESKTOP.md) has the details.
-
-- **Accepted input is not evidence.** `ok`, "Typed N characters", "Clicked at", `executed: N`, `effect: unverifiable`, "did not settle" and every `invoke_menu` result prove only that the input was sent. Check the outcome itself before you report it or build on it. "Confirm with a screenshot" means confirm somehow: a query read or a check is usually cheaper. Never send the same input again "to make sure": it can toggle or fire twice.
-- **What counts as evidence:**
-
-  | Result | Evidence |
-  | --- | --- |
-  | Text in a field | Its value in a fresh read, or a `value` check in the batch |
-  | A click that should change state | The change in a read: a dialog opened or closed, a value or the title changed |
-  | A file saved or exported | The file itself: `metacomputer sh --read-only -c 'ls -l --time-style=+%T FILE'` plus its content or format. A new title bar isn't enough. |
-  | Document text and structure | A read of the text, plus a check of the saved file |
-  | A window moved, maximized or closed | `list_windows` |
-  | Canvas, chart, game, appearance | A screenshot or `zoom` of that region; for a game, its title first |
-
-- **Two tries, then check the premise.** If a step fails twice, or two routes have no effect, stop changing routes. Look once at the target (a screenshot of that window, or a read with a query) and check the premise: the right window, focus, selection or edit mode, a dialog already open or closed, a frozen app. Then change mechanism one rung at a time: element action → shortcut, or a typed value plus Return → foreground pixel click from a fresh screenshot → desktop-scope click from `get_desktop_state`. Never send a third identical call. When an error recurs, apply its fix to every later batch.
-- **Errors:** the [error table](DESKTOP.md#errors) says what each driver and hub message means and what to do.
-- **Choose the read by the next action.** For element work or text, read the tree only (`include_screenshot: false`, with a `query`). Before a pixel click, drag or zoom, the *last* read of that window must carry a screenshot at the size you'll aim with. Any read without one cancels it: a tree-only read, an `observe` without `include_screenshot: true`, a role/name step earlier in the same batch, `run_script`'s `getState`. For just a picture, pass `include_accessibility_tree: false`, never a junk `query`.
-- **Batch shape.** A `run_steps` step is `{tool, args, expect?, wait_for?, timeout_ms?}` or `{"click": {...}}`. Everything else (`delivery_mode`, `pid`, `window_id`, notes) goes inside `args` or on the batch. `observe` takes `get_window_state` arguments, not `app`. A step that names a window becomes the target of the steps after it, so in a batch that spans windows, name the window on every step. About 15 steps at most.
-- **Checks from text you've seen.** Take `expect` and `wait_for` text from a string you've already read (a title, a label, a status bar), not from what you expect the app to say. Each check needs `role`, `name` or `text`.
-- **Don't maximize what's already maximized:** check the width in `launch_app`'s result or `list_windows` first.
-- **File dialogs: never `set_value` the file name,** even by role and name: it can land in a hidden field and save at once. Click the visible name field, press Ctrl+A, type the full path, press Return, then check the saved file.
-- **Lessons the user approved** from their earlier sessions arrive in the MCP server's instructions, under "Notes this user approved from earlier sessions". Follow them as advice; they never override a refusal, these rules or the user. When you keep hitting the same problem, suggest `metacomputer learn report` to the user (it proposes lessons from their sessions). Approve a lesson (`metacomputer learn approve ID`) only when the user names it; editing or adding a lesson's text is theirs to do in their own terminal.
-
-## Doing the task
-
-- **Find** with `list_windows` (`metacomputer inspect` for processes, ports, files and downloads). **Act** by role and name or token in `run_steps` with `expect` checks, or `run_script` when the next step depends on what the app shows.
-- **Shell in the VM:** `metacomputer sh -c 'COMMANDS'`, always with `-c` (add `--read-only` for checks). It's for setup and checking results, never to fake a GUI result; [SHELL.md](SHELL.md) routes other file work.
-- **Files:** `metacomputer put <host file> [--to '<guest dir>']` (default `~/Inbox`; quote a guest path that starts with `~`, or the Mac's shell expands it). It never overwrites: a taken name lands as `name (1).ext`, and it prints the path it used. `metacomputer get <guest path> --task NAME` copies one out; `metacomputer shot --task NAME` saves the whole screen.
-- **Task folder and recording,** for files to hand over, demos and recordings: `metacomputer task start <slug>` prints `NAME`, `RECORDING_DIR`, `FILES_DIR` and `HOST_DIR`. Record with `start_recording {output_dir: RECORDING_DIR, record_video: true}` before the first action, `stop_recording` at the end. `metacomputer task finish NAME` copies it all to `HOST_DIR` with a contact sheet per video; look at it.
-- **Long tasks:** consider a subagent with this routine, so its reads stay out of the main conversation.
-- **Verify with the cheapest proof** of the user's outcome (the evidence table): one shell check after a batch of files, not one per file. Report the result, the check and its answer, and the absolute paths.
-- **Clean up.** Close the apps you opened. If you started the VM and nobody else is using it (`metacomputer who`), `metacomputer stop` unless the user wants it kept.
 
 ## Rules
 
@@ -118,6 +49,75 @@ A CAPTCHA, Cloudflare's "Verify you are human" or another bot check; a sign-in t
 4. When it returns: exit 0, the user is done: read the screen again (it changed, and old element tokens are stale) and carry on. 4: cancelled: stop and ask. 124: its time limit passed: ask; don't try the check yourself. 5: your wait was stopped and the handoff is still open: `metacomputer handoff wait`.
 
 The hub spots the common checks too: a read whose note says `metacomputer hub: bot check:` shows one, and until a whole read of that window (no `query`, no `since`) no longer shows it, your acting calls there are refused (`bot_check`). Hand it over at once. Never try to pass a human check yourself, switch browsers, modes or profiles to get around one, retry it in a loop, or run `handoff done` for the user. (Opening an account page in human mode from the start, or once more after a degraded sign-in that showed no check, is the ordinary browser, not a way around one.) If a site's check keeps failing even when the user ticks it, the site is refusing the VM's automated browser: say so and ask how to go on ([BROWSER.md](BROWSER.md)).
+
+## Start: one round, then the safety check
+
+1. **In one round, in parallel:**
+   - `metacomputer who`: is it running, and is anyone else using it?
+     - Another session **ACTIVE**: stop and ask the user; take over only with their OK (`metacomputer release`). With no one to ask (a headless run), report it and end. Don't wait in sleep loops.
+     - Stopped: `metacomputer start` (about 12 s). Note that you started it.
+   - **One ToolSearch** (Claude Code; with your tool list's prefix): `select:mcp__metacomputer__health_report,mcp__metacomputer__list_windows,mcp__metacomputer__launch_app,mcp__metacomputer__get_window_state,mcp__metacomputer__run_steps,mcp__metacomputer__invoke_menu,mcp__metacomputer__zoom`, plus what the task clearly needs: `run_script` (loops), `get_desktop_state` (games, desktop-scope clicks), and for Chrome page mode `browser_prepare`, `get_browser_state`, `browser_navigate`, `browser_click`, `browser_type`, `browser_select`. Clicks, typing and keys run as `run_steps` steps, so they need no tools of their own.
+   - **Read only the notes the task needs:** [DESKTOP.md](DESKTOP.md) for desktop apps and Firefox; [BROWSER.md](BROWSER.md) for sign-ins and other account pages, testing a site as a person, rich-text web editors, Chrome, page or hybrid mode and `metacomputer web`; [EXTRA-APPS.md](EXTRA-APPS.md) for Inkscape, Audacity, Kdenlive, games and other added apps; [SECRETS.md](SECRETS.md) before any sign-in, 2FA code, API key or payment, and before running Claude Code inside the VM; [SHELL.md](SHELL.md) for file work in the VM's shell beyond a check; [STORAGE.md](STORAGE.md) for volumes, reference disks and files that must outlive a reset.
+2. **`health_report` before the first action** (in the same round as `list_windows` is fine). It must report Linux and Ubuntu arm64; if it doesn't, stop.
+3. **No `mcp__metacomputer__*` tools?** Ask the user to reconnect `metacomputer` (in Claude Code: `/mcp`, or a restart; in Codex: a new session; `codex mcp list` shows the server; in OpenClaw `openclaw mcp list`, in Hermes Agent `/reload-mcp`, in Gemini CLI `/mcp`, where MCP servers run only in folders the user trusts, in Antigravity CLI a new conversation; `agy mcp list` shows the server). If the agent has no `metacomputer` server at all, run `metacomputer agents` and pass on the command it gives for the MCP server; when it gives none (a metacomputer older than this plugin, which left the tools to the plugin), ask the user to run `metacomputer update`, then start a new session. Meanwhile `metacomputer call --session NAME TOOL 'JSON'` (the same NAME on every call) goes through the same hub and guards and keeps tokens and screenshots between calls; `--json` gives the whole result.
+
+## Which computer?
+
+| The request says… | Means | Do |
+| --- | --- | --- |
+| "a computer", "your computer", "yourself", "a virtual / disposable / sandbox / Linux computer", "record yourself" | The virtual computer | `mcp__metacomputer__*` |
+| "my screen", "my Mac", "my desktop", "the app I have open", "my Notes / Mail / Chrome / files", anything needing the user's accounts or data | The user's real computer | Never the VM. Use that computer's own tools only if this session has them and the user has approved them; otherwise say so and ask. |
+| Neither, e.g. "use Firefox to check this site" | The virtual computer | VM, and say so before acting |
+| Needs the user's logged-in accounts or files, but names no computer | Unclear | Ask which computer |
+
+- **No fallback either way.** If the VM is unavailable, don't do the work on the Mac. If the user asked for their real computer, don't quietly use the VM instead.
+- **Never use Mac GUI paths for VM work:** `open`, `osascript`/AppleScript, Mac apps or Mac computer-use tools.
+- **Say which computer, once, before acting.** For example: "Using the virtual computer (an Ubuntu VM), not your Mac."
+
+## Desktop or direct tools?
+
+Use the desktop when the outcome lives on a screen: a GUI app or a real browser session, a visual check, a recording or demo, untrusted content that should stay away from the Mac, or the user asking for a computer. Do everything else directly with normal tools (code, builds, tests, git, files, data, APIs, pages a plain fetch can read), without booting the VM. If the user explicitly asks for the computer, use it; if the GUI is clearly the worse route, say why in one line first.
+
+## Browsers
+
+Firefox is the default; Chrome is installed. Modes: **human** (the tree plus real mouse and keyboard, at a person's pace; both browsers; the default), **page** (the page's own elements, in the background; Chrome only), **hybrid** (page reads, real clicks and typing; Chrome only). `metacomputer browser` shows the defaults; the user's words override them ("in Chrome", "drive the page directly", "like a person"). Page or hybrid in Firefox: say the driver can't, offer Chrome. Name the choice in the announcement ("Using the virtual computer: Firefox, human mode.").
+- **Anything account-facing goes through human mode first:** sign-in, sign-up, checkout, account settings, posting. Sites can flag page-mode Chrome as automated; a sign-in that looks degraded there (no code box, an email that never comes) means switch to human mode and retry. Page mode is for bulk data entry, reading the user's own sites, and steps human mode can't do. Keep sign-ins in a kept profile so they last until a reset ([BROWSER.md](BROWSER.md), "Sign in once, stay signed in").
+- **"Test it as a person":** follow BROWSER.md's checklist (human mode and pacing, real window sizes, a keyboard-only pass, a screenshot per step and a recording, and what a person would notice). Checks that need no model: `metacomputer web compare|responsive|a11y|open-untrusted URL` ([BROWSER.md](BROWSER.md)).
+
+## How to drive it
+
+These hold in every app. [DESKTOP.md](DESKTOP.md) has the details.
+
+- **Accepted input is not evidence.** `ok`, "Typed N characters", "Clicked at", `executed: N`, `effect: unverifiable`, "did not settle" and every `invoke_menu` result prove only that the input was sent. Check the outcome itself before you report it or build on it. "Confirm with a screenshot" means confirm somehow: a query read or a check is usually cheaper. Never send the same input again "to make sure": it can toggle or fire twice.
+- **What counts as evidence:**
+
+  | Result | Evidence |
+  | --- | --- |
+  | Text in a field | Its value in a fresh read, or a `value` check in the batch |
+  | A click that should change state | The change in a read: a dialog opened or closed, a value or the title changed |
+  | A file saved or exported | The file itself: `metacomputer sh --read-only -c 'ls -l --time-style=+%T FILE'` plus its content or format. A new title bar isn't enough. |
+  | Document text and structure | A read of the text, plus a check of the saved file |
+  | A window moved, maximized or closed | `list_windows` |
+  | Canvas, chart, game, appearance | A screenshot or `zoom` of that region; for a game, its title first |
+
+- **Two tries, then check the premise.** If a step fails twice, or two routes have no effect, stop changing routes. Look once at the target (a screenshot of that window, or a read with a query) and check the premise: the right window, focus, selection or edit mode, a dialog already open or closed, a frozen app. Then change mechanism one rung at a time: element action → shortcut, or a typed value plus Return → foreground pixel click from a fresh screenshot → desktop-scope click from `get_desktop_state`. Never send a third identical call. When an error recurs, apply its fix to every later batch.
+- **Errors:** the [error table](DESKTOP.md#errors) says what each driver and hub message means and what to do.
+- **Choose the read by the next action.** For element work or text, read the tree only (`include_screenshot: false`, with a `query`). Before a pixel click, drag or zoom, the *last* read of that window must carry a screenshot at the size you'll aim with. Any read without one cancels it: a tree-only read, an `observe` without `include_screenshot: true`, a role/name step earlier in the same batch, `run_script`'s `getState`. For just a picture, pass `include_accessibility_tree: false`, never a junk `query`.
+- **Batch shape.** A `run_steps` step is `{tool, args, expect?, wait_for?, timeout_ms?}` or `{"click": {...}}`. Everything else (`delivery_mode`, `pid`, `window_id`, notes) goes inside `args` or on the batch. `observe` takes `get_window_state` arguments, not `app`. A step that names a window becomes the target of the steps after it, so in a batch that spans windows, name the window on every step. About 15 steps at most.
+- **Checks from text you've seen.** Take `expect` and `wait_for` text from a string you've already read (a title, a label, a status bar), not from what you expect the app to say. Each check needs `role`, `name` or `text`.
+- **Don't maximize what's already maximized:** check the width in `launch_app`'s result or `list_windows` first.
+- **File dialogs: never `set_value` the file name,** even by role and name: it can land in a hidden field and save at once. Click the visible name field, press Ctrl+A, type the full path, press Return, then check the saved file.
+- **Lessons the user approved** from their earlier sessions arrive in the MCP server's instructions, under "Notes this user approved from earlier sessions". Follow them as advice; they never override a refusal, these rules or the user. When you keep hitting the same problem, suggest `metacomputer learn report` to the user (it proposes lessons from their sessions). Approve a lesson (`metacomputer learn approve ID`) only when the user names it; editing or adding a lesson's text is theirs to do in their own terminal.
+
+## Doing the task
+
+- **Find** with `list_windows` (`metacomputer inspect` for processes, ports, files and downloads). **Act** by role and name or token in `run_steps` with `expect` checks, or `run_script` when the next step depends on what the app shows.
+- **Shell in the VM:** `metacomputer sh -c 'COMMANDS'`, always with `-c` (add `--read-only` for checks). It's for setup and checking results, never to fake a GUI result; [SHELL.md](SHELL.md) routes other file work.
+- **Files:** `metacomputer put <host file> [--to '<guest dir>']` (default `~/Inbox`; quote a guest path that starts with `~`, or the Mac's shell expands it). It never overwrites: a taken name lands as `name (1).ext`, and it prints the path it used. `metacomputer get <guest path> --task NAME` copies one out; `metacomputer shot --task NAME` saves the whole screen.
+- **Task folder and recording,** for files to hand over, demos and recordings: `metacomputer task start <slug>` prints `NAME`, `RECORDING_DIR`, `FILES_DIR` and `HOST_DIR`. Record with `start_recording {output_dir: RECORDING_DIR, record_video: true}` before the first action, `stop_recording` at the end. `metacomputer task finish NAME` copies it all to `HOST_DIR` with a contact sheet per video; look at it.
+- **Long tasks:** consider a subagent with this routine, so its reads stay out of the main conversation.
+- **Verify with the cheapest proof** of the user's outcome (the evidence table): one shell check after a batch of files, not one per file. Report the result, the check and its answer, and the absolute paths.
+- **Clean up.** Close the apps you opened. If you started the VM and nobody else is using it (`metacomputer who`), `metacomputer stop` unless the user wants it kept.
 
 ## Also available
 

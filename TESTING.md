@@ -476,7 +476,7 @@ copy's VMs (off) and are stopped at the end.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
-`python3 tests/test_plugin.py` (177 checks) needs no VM. `install.sh` runs against a
+`python3 tests/test_plugin.py` (301 checks) needs no VM. `install.sh` runs against a
 stub `claude` that records its arguments and keeps its state in a temporary home,
 so this Mac's own Claude Code setup is never touched. The stub keeps MCP servers in
 three scopes as Claude Code does (user-scope ones in the temporary home's
@@ -495,6 +495,18 @@ install and update checks with the real `claude` CLI, and checks that Claude Cod
 `lib/claude_mcp.py` read the same configuration file (an empty legacy `.config.json`,
 a folder there, both files populated, a byte-order mark), with a temporary `HOME` and
 `CLAUDE_CONFIG_DIR`; it needs no network.
+- Codex and OpenAI: Codex's marketplace (`.agents/plugins/marketplace.json`, a local source `./plugin`) and manifest
+  (`plugin/.codex-plugin/plugin.json`: both skill folders, paths inside the plugin, no MCP server, hooks or version,
+  words for any agent); the `learn` skill in place of the old command (its name, a quoted description, only `learn
+  report|list|review` allowed without asking, no `$ARGUMENTS`); the skills no longer saying "Claude" where they meant
+  any agent; `scripts/build-openai-plugin.py --check`, and a ZIP built twice to the same bytes with one folder, the three
+  skills, the icon, the license and notices and nothing else, a manifest with the version given, `skills: ./skills/` and
+  `requires_local_executor: true`, regular files only and the driver pack's links pointed inside it; its checks refusing
+  a link to nothing, a skill named otherwise, a long description, no `requires_local_executor` and a link entry; a
+  linked icon, skills folder or license (in a copy of the sources) refused by `--check`, by its own reading of the
+  sources and by `sync-plugin.py --check`; and the
+  launcher in Codex's plugin cache (`~/.codex/plugins/cache`, `$CODEX_HOME/plugins/cache`) handing over, running only
+  its own get.sh for `setup`, and never handing over to a copy in that cache.
 - The marketplace lists the plugin at `./plugin`, which holds no links: its copies of
   `skills/metacomputer`, `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and
   `THIRD_PARTY_NOTICES.md` are the repository's files (`scripts/sync-plugin.py --check`),
@@ -1263,8 +1275,9 @@ Each of these needs no VM and takes seconds.
   real codex: set up, `--no-codex` remembered across runs, `--codex` again, `--no-claude` keeping Claude Code's old
   skill link, a run with both agents left alone still asking before it moves the command from another checkout, and
   neither agent on PATH.
-- `python3 tests/test_agent_setup.py`: install.sh's steps for OpenClaw, Hermes Agent and Gemini CLI against stand-in
-  `openclaw`, `hermes` and `gemini` commands (each answering the parts of its CLI the step uses, as the real one does)
+- `python3 tests/test_agent_setup.py`: install.sh's steps for OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI
+  against stand-in `openclaw`, `hermes`, `gemini` and `agy` commands (each answering the parts of its CLI the step uses,
+  as the real one does)
   in a temporary HOME: the MCP server registered with the agent's own command and read back, the skills linked, the
   choice remembered and an earlier unfinished step cleared, a second run changing nothing; an entry that isn't
   metacomputer's (another program, `~/.local/bin/metacomputer` with other arguments) left byte for byte and named by its
@@ -1272,7 +1285,21 @@ Each of these needs no VM and takes seconds.
   each ending with exit 1 and the step recorded as unfinished; `--uninstall` removing only metacomputer's own and
   keeping the command links an entry that stays runs; `--no-NAME` remembered until `--NAME`; nothing printed holding a
   configured value; `agents --json` for each; Gemini CLI's settings read as it reads them (comments, no trailing
-  commas) and `GEMINI_CLI_HOME`; and the packages: agent-plugin/'s manifests, skills (names, quoted descriptions, links
+  commas) and `GEMINI_CLI_HOME`; Antigravity CLI's mcp_config.json read as agy reads it (comments and trailing commas)
+  while its own `agy mcp` refuses such a file (the run then says how to add the entry by hand), and the 600 s
+  `timeoutSeconds` written only into metacomputer's own entry (one you set stays; a file with comments is left with a
+  note; a file that changed after it was read is never replaced, and nothing is left beside it); its permission rule,
+  exactly `mcp(metacomputer/*)`, added to settings.json by the run that adds the server (a new file 0600; the user's
+  rules, settings and the file's mode kept), not added back by a later run once taken out, not added next to an ask or
+  deny rule of the user's for metacomputer's tools or every MCP tool, a file with comments left byte for byte with the
+  line to add, and taken out by `--uninstall` only when no server named metacomputer stays and the install's own
+  record says it added the rule (the same rule written by the user, before an install or with no server, stays); a
+  settings.json or mcp_config.json that is a link left a link, its file unchanged, with the line to add; another
+  program's change landing right after the last read (a file renamed into place, or rewritten in place: a stand-in
+  reader) never overwritten; SKILL.md's rules (refusals
+  and the user's own commands, secrets, codes, payments, untrusted and hidden text, isolation), handoffs and the start's
+  safety check within its first 24,000 bytes (what Antigravity CLI loads) in the repository and both packages, the
+  references after them; and the packages: agent-plugin/'s manifests, skills (names, quoted descriptions, links
   inside the package) and launcher (it runs only an installed checkout's command), and gemini-extension.json; skill
   links of someone else's (a broken one, a relative one that works from its own folder) left alone and the step
   unfinished, one into this checkout put right, a skill that can't be linked or that OpenClaw doesn't offer leaving the
@@ -1291,7 +1318,14 @@ Each of these needs no VM and takes seconds.
   recognition of their sessions is test_session_guard's (stand-in processes as `ps` shows each agent, a titled Hermes,
   a path with spaces, the shared cases in tests/fixtures/agent_argv.json, and an interpreter whose arguments can't be
   read counting as an agent) and test_vault_ops's (Gemini CLI a session; OpenClaw's and Hermes Agent's gateways, a
-  titled Hermes and an unreadable interpreter none; the same shared cases through the test build).
+  titled Hermes and an unreadable interpreter none; the same shared cases through the test build). The shared cases
+  include Antigravity CLI's executable (`agy`, `antigravity`, a link of another name, by its realpath), the Antigravity
+  app's and IDE's (the app's main executable and its language server, the IDE's Electron and a helper, a language server
+  named for its platform in an Antigravity folder, one under `~/.antigravity`), and what isn't either (another app's
+  Electron, another product's language server of the same name, one under `/opt/not-antigravity`, `python3 -m
+  antigravity`, an editor opening a file named agy). test_session_guard
+  runs a stand-in copied into an Antigravity app bundle's places (main executable, language server, the IDE's Electron),
+  and test_handoff checks that `input-reset` and `handoff done` refuse under them.
 - Tests of commands only the user runs type at a pty in a process launchd has adopted
   (`tests/userterm.py`), so an agent running the suite isn't above it; `userterm.fake_agent`
   builds a small program named `codex` to stand for one. The vault suites use the TEST
@@ -1323,7 +1357,7 @@ Each of these needs no VM and takes seconds.
 
 ## Lessons from sessions: `tests/test_learn.py`
 
-`python3 tests/test_learn.py` (125 checks, about 45 s) needs no VM and no network.
+`python3 tests/test_learn.py` (174 checks, about 50 s) needs no VM and no network.
 Everything lives in a temporary folder (`CLAUDE_CONFIG_DIR`, `MCOMP_LESSONS_DIR`, logs,
 events, benchmark results); it checks at the end that the real store
 (`~/.local/share/metacomputer/lessons`) was never touched. Synthetic sessions, in
@@ -1335,6 +1369,20 @@ results, window titles, app names, typed text, errors and the model's own text.
 - Mining: a session with no metacomputer tool call is never parsed; both prefixes
   count; a session saved both ways counts once; `--since` and `--project` filter;
   repeats, unverified-then-act, route changes and time per app are found.
+- The other agents' sessions: Codex's and Gemini CLI's files; Antigravity CLI's compact transcripts (its server under
+  either name, its full and chunk copies never counted twice, the project from a `conversation_summaries.db` whose rows
+  are still in its write-ahead log); and OpenClaw's and Hermes Agent's SQLite databases, built here (no real session):
+  direct calls and calls through their tool search, a profile's database, OpenClaw's zstd rows (read with Python 3.14's
+  `compression.zstd`, counted in a note without it), a session committed only in the write-ahead log of a connection
+  that stays open (an uncommitted row left out), a database held under SQLite's exclusive locking mode (a SQLite reader
+  is refused; this reads its files), a torn last frame in the log (not applied), databases of another layout, a file
+  that isn't one and a link (notes, never the report's end), and no file changed or made beside any of them. Their
+  bounds: a checksummed commit claiming a database larger than the memory cap (refused before it's allocated; read in
+  place, with the note), a sort that spills past SQLite's cache (no temporary file appears in the folder SQLite would
+  use), a view of 40 million made-up rows (interrupted at the deadline, inside the query), more sessions than the cap
+  (no more leave the query), a linked agent folder or profile below the agent's own folder (refused; that folder
+  itself linked is read), a folder or the database owned by another account (a stand-in `fstat`; refused), and a
+  database swapped for a link just before the in-place read (refused; the other database isn't read).
 - Injection: nothing injected reaches the report, a proposal or its evidence, the
   store, `learn list`, the hub's instructions, or the summary and prompt that
   `--draft-with-claude` sends (to a stand-in `claude`); a hostile draft is dropped.

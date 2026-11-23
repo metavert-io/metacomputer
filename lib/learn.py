@@ -451,12 +451,17 @@ def print_report(rep, out=sys.stdout):
     p(f"Sessions with the metacomputer tools: {rep['sessions']} ({_window(rep)}; since {esc(rep['since'])}"
       + (f"; project {esc(rep['project'])}" if rep.get("project") else "") + ")")
     p(f"  sources: {src['claude_code_sessions']} Claude Code sessions, {src.get('codex_sessions', 0)} Codex sessions, "
-      f"{src.get('gemini_sessions', 0)} Gemini CLI sessions, "
+      f"{src.get('gemini_sessions', 0)} Gemini CLI sessions, {src.get('antigravity_sessions', 0)} Antigravity CLI sessions, "
+      f"{src.get('openclaw_sessions', 0)} OpenClaw sessions, "
+      f"{src.get('hermes_sessions', 0)} Hermes Agent sessions, "
       f"{src['headless_transcripts']} headless transcripts, "
-      f"{src['benchmark_sessions']} benchmark sessions ({src['scanned_files']} recent transcript files looked at, "
-      f"{src['duplicates_skipped']} duplicate copies skipped"
+      f"{src['benchmark_sessions']} benchmark sessions ({src['scanned_files']} recent transcript files looked at"
+      + (f", {src['session_databases']} session databases" if src.get("session_databases") else "")
+      + f", {src['duplicates_skipped']} duplicate copies skipped"
       + (f", {src['unreadable']} unreadable" if src.get("unreadable") else "")
       + (f", {src['cut_short']} cut short at a size or time limit" if src.get("cut_short") else "") + ")")
+    for note in src.get("notes") or []:          # fixed words and counts (lib/session_dbs.py Notes)
+        p(f"  note: {esc(note)}")
     if not rep["sessions"]:
         p("  nothing to learn from yet")
         return
