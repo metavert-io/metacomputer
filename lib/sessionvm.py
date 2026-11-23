@@ -61,9 +61,9 @@ _CS_DARWIN_USER_TEMP_DIR = 65537
 # "read": it only reads the VM or who controls it; "act": anything else. A command whose forms differ is decided from
 # its arguments the way bin/metacomputer (or the program it hands them to) parses them, in whatever order they come;
 # a form it doesn't know as a read acts. A word that isn't a command is left to bin/metacomputer, which says so.
-EXEMPT = {"help", "-h", "--help", "where", "setup", "update", "version", "vm", "list", "default", "events", "notify",
+EXEMPT = {"help", "-h", "--help", "where", "setup", "update", "version", "list", "default", "events", "notify",
           "learn", "actions", "agents", "each", "mcp", "mcp-lazy", "volume", "refdisk", "contact-sheet",
-          "checkpoints", "cloud"}       # checkpoints: the runner's list on the Mac; cloud: a provider's own, no one computer
+          "checkpoints"}       # checkpoints: the runner's list on the Mac
 READS = {"who", "status", "inspect", "logs", "get", "shot"}     # whatever their arguments
 ACTS = {"start", "stop", "restart", "reset", "restore", "baseline", "checkpoint", "build", "desktop-restart", "test",
         "call", "web", "put", "rename", "sh", "ssh", "task", "release"}
@@ -126,6 +126,18 @@ def _net(a):            # lib/netpolicy.py: the subcommand first, status when th
     return "read" if _first(a) in ("", "status") else "exempt" if _first(a) in HELP else "act"
 
 
+def _vm(a):             # scripts/vm-commands.sh: vm delete NAME --checked-provider forgets this Mac's record of a launch
+    # that may have made a server (the user says they've looked at the provider: their own terminal only); every other
+    # vm form names its computer itself
+    return "act" if "--checked-provider" in a else "exempt"
+
+
+def _cloud(a):          # lib/remote.py cloud: teardown deletes what metacomputer left at a provider, servers included,
+    # and --forget drops the record of a launch that may have made one (both at the user's own terminal only); status,
+    # doctor and setup act on no one computer
+    return "act" if "teardown" in a or "--forget" in a or any(x.startswith("--forget=") for x in a) else "exempt"
+
+
 def _trace(a):          # lib/traces.py: list, show and export read the traces kept on the Mac
     return "exempt" if _first(a) in ("list", "show", "export") + HELP else "act"
 
@@ -144,7 +156,7 @@ def _secrets(a):        # do_secrets: the vault's subcommand first, status when 
 
 FORMS = {"security": _security, "recordings": _recordings, "input-reset": _input_reset, "view": _view, "record": _record,
          "browser": _browser, "hub": _hub, "claude": _claude, "handoff": _handoff, "net": _net, "trace": _trace,
-         "secrets": _secrets}
+         "secrets": _secrets, "vm": _vm, "cloud": _cloud}
 
 
 def classify(cmd, args=()):

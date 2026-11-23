@@ -715,7 +715,9 @@ never takes the VM in use without `--force`, and keeps volumes and the vault fol
 unless a flag asks ([guide](docs/guide.md#run-a-second-vm-side-by-side)).
 
 A computer can also be an Ubuntu 24.04 VM elsewhere, reached over SSH: your own server, or
-one Oracle Cloud makes (Arm within its Always Free allowance costs nothing). Same desktop,
+one Oracle Cloud (Arm within its Always Free allowance costs nothing), Hetzner Cloud (Arm by
+default), DigitalOcean or Vultr makes (those three bill a stopped server in full: delete it
+when you're done). Same desktop,
 driver and guards, with the Mac still the controller; its own firewall keeps it from cloud
 metadata and private networks, and its live view is reached only through SSH
 ([docs/remote.md](docs/remote.md)):
@@ -723,6 +725,9 @@ metadata and private networks, and its live view is reached only through SSH
 ```bash
 metacomputer vm create box --on server --host 203.0.113.5 --user ubuntu   # your server, set up over your SSH
 metacomputer vm create arm1 --on oci --size arm-2x12                       # with OCI_* in the environment
+metacomputer vm create arm2 --on hetzner                                    # with HCLOUD_TOKEN (Arm, cax11)
+metacomputer vm create x86a --on digitalocean --region nyc3                 # with DIGITALOCEAN_TOKEN
+metacomputer vm create x86b --on vultr --region ewr                         # with VULTR_API_KEY
 metacomputer --on oci start                                                 # list, --on and default know them
 ```
 

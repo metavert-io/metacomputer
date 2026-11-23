@@ -1,8 +1,10 @@
 #!/bin/sh
 # idle-stop: power off a computer a provider bills by the hour once nothing has used it for a while
 # (/etc/metacomputer/idle-stop: minutes, or "off"; 15 by default). metacomputer-idle.timer runs it every minute.
-# A provider counts an instance the guest shut down as stopped, so it stops billing for it (its disk still costs);
-# `metacomputer start` starts it again. Your own server never gets this (metacomputer never powers it off).
+# Powering off ends the desktop and everything running in it; it doesn't end every provider's bill: Oracle Cloud bills a
+# billed size until it's stopped through its API, and Hetzner Cloud, DigitalOcean and Vultr bill a powered-off server
+# in full until it's deleted (docs/remote.md, "What a stopped computer costs"). `metacomputer start` starts it again.
+# Your own server never gets this (metacomputer never powers it off).
 #
 # In use means any of: an SSH connection to it (the hub's connection to the driver, a shell, a copy, the live
 # view's tunnel, a recording streaming to the Mac), a tmux session of the desktop user (Claude inside the
@@ -39,7 +41,7 @@ case "${1:-check}" in
     if in_use; then install -d -m 0755 /run/metacomputer; : > "$STAMP"; exit 0; fi
     idle="$(idle_min)"
     if [ "$idle" -ge "$m" ]; then
-      logger -t metacomputer "idle for $idle minutes (IDLE_STOP=$m): powering off"
+      logger -t metacomputer "idle for $idle minutes (IDLE_STOP=$m): powering off (this ends the desktop, not every provider's bill: only deleting the computer stops it at most)"
       systemctl poweroff
     fi ;;
   status)

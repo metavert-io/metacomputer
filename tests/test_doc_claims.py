@@ -181,6 +181,14 @@ def py_fn_body(text, name):
     return text[m.start():m.end() + (end.start() if end else len(rest))]
 
 
+def vps_class():
+    """lib/cloud/vps.py's VPS class, as written (to the next top-level def)."""
+    c = raw("lib/cloud/vps.py")
+    i = c.index("\nclass VPS(")
+    j = c.find("\ndef ", i + 1)
+    return c[i:j if j > 0 else len(c)]
+
+
 def py_top_fn(rel, name):
     """One top-level function of a Python file, as written (to the next top-level def)."""
     c = raw(rel)
@@ -1828,8 +1836,10 @@ CLAIMS = [
      lambda m: 'remote_py abort --vm "$VM_NAME" --op "$ABORT_OP"' in fn_src("scripts/remote-build.sh", "cleanup_failed")
      and "remote_py delete" not in fn_src("scripts/remote-build.sh", "cleanup_failed")
      and "cleanup_failed $rc" in raw("scripts/remote-build.sh") and "trap 'exit 143' TERM" in raw("scripts/remote-build.sh")
-     and 'for i in a.api.instances(s["VM_NAME"], op=op):' in py_top_fn("lib/remote.py", "cmd_abort")
-     and 'a.api.delete_nsg_by_id(made_nsg, s["VM_NAME"])' in py_top_fn("lib/remote.py", "cmd_abort")
+     and 'rows = [i["id"] for i in a.api.instances(name, op=op) if i["id"] not in found]' in py_top_fn("lib/remote.py", "reconcile")
+     and 'found.update(owned_all(a, rows, name, op, "listed for"))' in py_top_fn("lib/remote.py", "reconcile")
+     and "found, unresolved = reconcile(s, st, a, op)" in py_top_fn("lib/remote.py", "cmd_abort")
+     and "a.api.delete_nsg_by_id(g, name)" in py_top_fn("lib/remote.py", "delete_op_parts")
      and "raise Refused(" in raw("lib/remote.py") and "deleted again" in raw("lib/remote.py")),
     ("SECURITY.md", r"`start` checks\s+that no session or handoff has the computer, and never hard-stops a running instance unless its whole console\s+capture ends with the guest's power-off",
      lambda m: "def powered_off(self, name):" in raw("lib/cloud/oci.py") and "Nothing was stopped" in raw("lib/cloud/oci.py")
@@ -1840,7 +1850,8 @@ CLAIMS = [
      lambda m: __import__("cloud.oci").oci.STOP_WAIT_S >= 900 + 60
      and raw("lib/cloud/oci.py").count('"STOPPED", timeout=STOP_WAIT_S)') >= 3),
     ("SECURITY.md", r"the shared network\s+is changed only under a lock \(`vm create`, `cloud setup` and `cloud teardown` alike\), and never deleted while a\s+computer is being made in it",
-     lambda m: 'with mac_lock("oci-network"):' in py_top_fn("lib/remote.py", "cmd_cloud")
+     lambda m: "with network_lock(a.name):" in py_top_fn("lib/remote.py", "cmd_cloud")
+     and 'return mac_lock(f"{prov}-network")' in py_top_fn("lib/remote.py", "network_lock")
      and "pending = a.api.nsg_names()" in py_top_fn("lib/remote.py", "cmd_cloud")
      and "**provider_kw(args.provider)" in py_top_fn("lib/remote.py", "cmd_cloud")
      and "with self._network_lock():" in raw("lib/cloud/oci.py")),
@@ -1854,7 +1865,7 @@ CLAIMS = [
          "-o ForwardAgent=no", "-o ForwardX11=no", "-o ClearAllForwardings=yes", "-o PermitLocalCommand=no",
          "-o RemoteCommand=none", "-o GSSAPIDelegateCredentials=no", "-o Tunnel=no"))),
     ("SECURITY.md", r"`lib/remote.py`\s+takes them out of its own environment first and hands them to the adapter as a value",
-     lambda m: "    take_credentials()\n    try:" in py_top_fn("lib/remote.py", "main")
+     lambda m: "    take_credentials()\n    try:" in py_top_fn("lib/remote.py", "run")
      and "env=child_env()" in py_top_fn("lib/remote.py", "mac_lock")
      and '{"env": dict(CREDS)}' in py_top_fn("lib/remote.py", "provider_kw")),
     ("SECURITY.md", r"An API token is for the computer it was made for: each request checks that the\s+binding and the identity beside the computer's keys still name it",
@@ -1870,13 +1881,14 @@ CLAIMS = [
      and "|| !computerStill(t, p)" in raw("vault/Proxy.swift")
      and 'revoke --vm "$VM_NAME"' in raw("scripts/vm-commands.sh").split("vm_delete_remote() {", 1)[1]),
     ("SECURITY.md", r"records it as kept, so no later try takes it for a\s+lost launch, then stops it",
-     lambda m: py_top_fn("lib/remote.py", "cmd_abort").index("st.update(instance=found[0][\"id\"], op=op, kept=now()")
-     < py_top_fn("lib/remote.py", "cmd_abort").index('a.api.action(i["id"], "STOP")')),
+     lambda m: py_top_fn("lib/remote.py", "cmd_abort").index("st.update(instance=next(iter(found)), op=op, kept=now()")
+     < py_top_fn("lib/remote.py", "cmd_abort").index('a.api.action(iid, "STOP")')),
     ("SECURITY.md", r"What a build makes of the shared network and its computer's\s+group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact\s+resources and no others; the journal is on the disk \(`F_FULLFSYNC`, or `fsync` where that isn't supported\) before\s+anything billable is launched, and an error making it so refuses the launch",
      lambda m: 'made("made_network", net["vcn"])' in raw("lib/cloud/oci.py") and 'made("made_nsg", nsg)' in raw("lib/cloud/oci.py")
      and raw("lib/cloud/oci.py").index("with self._network_lock():\n            # What this operation makes")
      < raw("lib/cloud/oci.py").index('made("made_network", net["vcn"])')
-     and "a.api.delete_network_by_id(made_net)" in py_top_fn("lib/remote.py", "cmd_abort")
+     and "a.api.delete_network_by_id(made_net)" in py_top_fn("lib/remote.py", "delete_op_parts")
+     and "delete_network()" not in py_top_fn("lib/remote.py", "delete_op_parts")
      and "delete_network()" not in py_top_fn("lib/remote.py", "cmd_abort")
      and "if e.errno not in (errno.ENOTSUP" in py_top_fn("lib/remote.py", "durable")
      and "nothing was launched" in py_top_fn("lib/remote.py", "cmd_create")
@@ -1914,6 +1926,137 @@ CLAIMS = [
     ("SECURITY.md", r"one deleted and made again under the same name\s+is refused until it's bound again",
      lambda m: "readComputerID(computerIDPath(opsKey: t.binding.ops_key_path)) == want" in raw("vault/Guest.swift")
      and "computer_id: computerID" in raw("vault/Commands.swift") and '"identity", "--vm", ' not in raw("vault/Commands.swift")),
+    # The hourly providers (docs/remote.md "Hetzner Cloud, DigitalOcean and Vultr"; lib/cloud/vps.py and its drivers).
+    ("SECURITY.md", r"Vultr's firewall filters only\s+what comes in \(SSH only\): nothing outside a Vultr computer limits what it sends",
+     lambda m: __import__("cloud.vultr").vultr.MANIFEST["outside_egress"] == {"enforced": False, "private_ranges": False,
+                                                                           "metadata": False, "off": False}
+     and 'raise NotSupported("vultr", "outside egress rules"' in raw("lib/cloud/vultr.py")
+     and "if not self.manifest[\"outside_egress\"][\"enforced\"]:" in raw("lib/cloud/vps.py")),
+    ("SECURITY.md", r"neither is claimed to refuse the metadata\s+service",
+     lambda m: all(__import__(f"cloud.{p}").__dict__[p].MANIFEST["outside_egress"]["metadata"] is False
+                   and __import__(f"cloud.{p}").__dict__[p].MANIFEST["outside_egress"]["private_ranges"] is True
+                   for p in ("hetzner", "digitalocean"))
+     and "169.254" not in "".join(__import__("cloud.ubuntu_vm").ubuntu_vm.public_v4())),
+    ("SECURITY.md", r"At Hetzner Cloud, DigitalOcean and Vultr a server is made by one call, never retried;\s+its firewall and first-boot key are made first, under that provider's lock",
+     lambda m: 'tries = 5 if method in ("GET", "DELETE") else 1' in raw("lib/cloud/vps.py")
+     and all('self.call("POST", "/' + x in raw(f"lib/cloud/{p}.py") for p, x in (("hetzner", "servers"), ("digitalocean", "droplets"),
+                                                                                  ("vultr", "instances")))
+     and vps_class().index("with self._network_lock():") < vps_class().index('on_made=lambda fid: made("made_nsg", fid)')
+     < vps_class().index('made("made_key", kid)') < vps_class().index("iid = api.launch(")
+     and "a.api.delete_key_by_id(k, name)" in py_top_fn("lib/remote.py", "delete_op_parts")),
+    ("SECURITY.md", r"each by this operation's own create\s+\(never one a listing shows\) and recorded by id the moment that create returns, before anything configures it",
+     lambda m: all("def make_nsg(self, name, egress, op, on_made=None):" in raw(f"lib/cloud/{p}.py")
+                   and "self.nsg(name)" not in raw(f"lib/cloud/{p}.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0]
+                   for p in ("hetzner", "digitalocean", "vultr"))
+     and all(raw(f"lib/cloud/{p}.py").split("def make_nsg(", 1)[1].index("on_made(fw)")
+             < raw(f"lib/cloud/{p}.py").split("def make_nsg(", 1)[1].index(after)
+             for p, after in (("hetzner", "self._wait_actions("), ("vultr", '/rules", {'), ("digitalocean", "return fw")))),
+    ("SECURITY.md", r"the instance's id is journaled the moment its create returns, and the clean-up reads each journaled id directly,\s+never taking an empty listing for proof",
+     lambda m: vps_class().index('made("made_instance", iid)') < vps_class().index("api.attach_firewall(fw, iid)")
+     and 'made("made_instance", iid)' in raw("lib/cloud/oci.py")
+     and 'found = owned_all(a, recorded, name, op, "journaled")' in py_top_fn("lib/remote.py", "reconcile")
+     and "cur = a.api.instance(iid)" in py_top_fn("lib/remote.py", "owned")
+     and 'lost = mine and st.get("launch_state") == "sent" and not recorded' in py_top_fn("lib/remote.py", "reconcile")
+     and "return 3" in py_top_fn("lib/remote.py", "cmd_abort")
+     and "raise Refused(unresolved_words(s, a, prev)" in py_top_fn("lib/remote.py", "cmd_create")
+     and 'raise LaunchUnknown(' in raw("lib/cloud/vps.py")),
+    ("SECURITY.md", r"What a provider says in an error \(Hetzner Cloud, DigitalOcean,\s+Vultr\) is printed only scrubbed: the token and anything credential-shaped removed, never a raw answer, capped",
+     lambda m: "raise self._scrubbed(self.refused(status, answer, what))" in raw("lib/cloud/vps.py")
+     and 'out = out.replace(self.__token, "[redacted]")' in raw("lib/cloud/vps.py")
+     and "TOKEN_SHAPED = re.compile(" in raw("lib/cloud/vps.py") and "self.scrub(e)" in raw("lib/cloud/vps.py")
+     and "never its raw body" in raw("lib/cloud/vultr.py")),
+    ("SECURITY.md", r"A stopped server there is billed in full, which `vm create`, `stop` and\s+`status` say: only deleting it stops the charges",
+     lambda m: all(__import__(f"cloud.{p}").__dict__[p].MANIFEST["billing"]["stopped"] == "full" for p in ("hetzner", "digitalocean", "vultr"))
+     and "bills a stopped server in full, the same as a running one: only deleting it" in raw("scripts/vm-commands.sh")
+     and 'warn "$(remote_billing_words)"' in fn_src("bin/metacomputer", "do_stop_remote")
+     and 'out["billing"] = a.manifest["billing"]["note"]' in py_top_fn("lib/remote.py", "cmd_status")),
+    ("SECURITY.md", r"`bootstrap\.sh` then removes that key\s+and locks root's password \(Vultr sets one\)",
+     lambda m: 'if [ -z "$OWNER" ]; then\n  rm -f /root/.ssh/authorized_keys /root/.ssh/authorized_keys2\n  passwd -l root' in raw(
+         "provisioning/remote/bootstrap.sh") and '"disable_root: true"' in raw("lib/cloud/guest.py")),
+    ("SECURITY.md", r"The REST calls to those three go only to their API\s+addresses, over HTTPS, and never follow a redirect",
+     lambda m: 'HOSTS = ("api.hetzner.cloud", "api.digitalocean.com", "api.vultr.com")' in raw("lib/provider_http.py")
+     and 'if not url.startswith("https://") or host not in HOSTS:' in raw("lib/provider_http.py")
+     and "return None             # the 3xx comes back as an HTTPError" in raw("lib/provider_http.py")
+     and "_OPENER = urllib.request.build_opener(_NoRedirect)" in raw("lib/provider_http.py")),
+    ("docs/remote.md", r"take `OCI_\*`, `HCLOUD_TOKEN`, `DIGITALOCEAN_TOKEN` and `VULTR_API_KEY` out of the environment",
+     lambda m: all(all(k in line for k in ("OCI_API_KEY_PEM", "HCLOUD_TOKEN", "DIGITALOCEAN_TOKEN", "VULTR_API_KEY"))
+                   for line in (next(ln for ln in raw(f).splitlines() if 'do export -n "$mc_k"; done' in ln)
+                                for f in ("bin/metacomputer", "scripts/lib.sh", "scripts/remote-build.sh")))
+     and all(k in raw("lib/remote.py").split("PROVIDER_ENV = (", 1)[1].split(")", 1)[0]
+             for k in ("HCLOUD_TOKEN", "DIGITALOCEAN_TOKEN", "VULTR_API_KEY"))),
+    ("docs/remote.md", r"one outbound rule that reaches no one \(ICMP to 192\.0\.2\.1, a documentation address\)",
+     lambda m: '"destination_ips": ["192.0.2.1/32"]' in raw("lib/cloud/hetzner.py")
+     and "return inbound + [dict(OFF_RULE)]" in raw("lib/cloud/hetzner.py")
+     and "return egress_from(rules_, off=[normal(OFF_RULE)])" in raw("lib/cloud/hetzner.py")),
+    ("docs/remote.md", r"a Droplet it can't be applied to is deleted at once",
+     lambda m: "api.attach_firewall(fw, iid)\n        except Exception:" in vps_class()
+     and "api.terminate(iid)" in vps_class().split("api.attach_firewall(fw, iid)", 1)[1][:400]),
+    ("docs/remote.md", r"So on Vultr `stop`\s+asks the guest itself over SSH \(it must answer: one that doesn't is refused\) and then waits up to 2 minutes for Vultr's\s+own state to say stopped. SSH going quiet proves nothing",
+     lambda m: 'SOFT_STOP = "guest"' in raw("lib/cloud/vultr.py") and "SEES_GUEST_POWEROFF = False" in raw("lib/cloud/vultr.py")
+     and "STOP_WAIT_S = 120" in raw("lib/cloud/vultr.py")
+     and "gssh admin 'sudo /usr/local/sbin/metacomputer-admin poweroff'" in fn_src("bin/metacomputer", "do_stop_remote")
+     and "gssh admin true >/dev/null 2>&1 || die" in fn_src("bin/metacomputer", "do_stop_remote")
+     and "wait_guest_gone" not in raw("lib/remote.py") and "elif asked and guest_up is False:" not in vps_class()
+     and "Nothing was halted" in vps_class()),
+    ("docs/remote.md", r"`vm create` checks `vpc:read` before it makes anything, and `cloud doctor digitalocean` names each read scope the token lacks",
+     lambda m: "api.preflight()" in vps_class() and vps_class().index("api.preflight()") < vps_class().index("api.make_nsg(")
+     and '("vpc:read", "/vpcs")' in raw("lib/cloud/digitalocean.py") and "def scope_checks(self):" in raw("lib/cloud/digitalocean.py")
+     and 'f"token scope {scope}"' in vps_class()),
+    ("docs/remote.md", r"a server the provider says runs but whose\s+SSH doesn't answer is never stopped or started by `start`",
+     lambda m: 'if cur["state"] == "RUNNING" and guest_up is False:' in vps_class()
+     and "stopped or started. Check it" in vps_class() and 'self.api.action(st["instance"], "START")' in vps_class()
+     and vps_class().index("stopped or started. Check it") < vps_class().index('self.api.action(st["instance"], "START")')),
+    ("docs/remote.md", r"by the ids recorded when they were made \(DigitalOcean's\s+listings can lag a few seconds behind what was just made\)",
+     lambda m: 'self.api.delete_nsg_by_id(st["nsg"], name)' in vps_class()
+     and 'self.api.delete_key_by_id(st["key"], name)' in vps_class()),
+    ("SECURITY.md", r"`vm delete` refuses such a computer until you say you've\s+looked, and then the operation stays listed by `cloud status`, with the provider's console and API lookup, until a\s+teardown finds what it made",
+     lambda m: "if not getattr(args, \"checked_provider\", False):" in py_top_fn("lib/remote.py", "cmd_delete")
+     and "remember_unresolved(s, a, unresolved_op)" in py_top_fn("lib/remote.py", "cmd_delete")
+     and "if unresolved_op is None:" in py_top_fn("lib/remote.py", "cmd_delete")
+     and 'out["unresolved_launches"]' in py_top_fn("lib/remote.py", "cmd_cloud")
+     and "forget_parts(a, e[\"computer\"], e[\"op\"])" in py_top_fn("lib/remote.py", "cmd_cloud")
+     and 'remote_py delete --vm "$VM_NAME" --network-too $checked_provider' in raw("scripts/vm-commands.sh")
+     and all(hasattr(__import__("cloud").ADAPTERS[p], "look_for") for p in ("oci", "hetzner", "digitalocean", "vultr"))),
+    ("SECURITY.md", r"That list is changed under one\s+lock, so two commands at once never lose each other's entries; `vm delete --checked-provider`, `cloud teardown` and\s+`--forget` run only at your own terminal",
+     lambda m: "with mac_lock(REGISTRY_LOCK):" in py_top_fn("lib/remote.py", "update_unresolved")
+     and "update_unresolved(" in py_top_fn("lib/remote.py", "remember_unresolved")
+     and "update_unresolved(" in py_top_fn("lib/remote.py", "cmd_cloud")
+     and raw("lib/remote.py").count("write_state(unresolved_dir()") == 1
+     and '[ -z "$checked_provider" ] || user_tty || die' in raw("scripts/vm-commands.sh")
+     and 'user_tty || die "metacomputer cloud $* deletes' in raw("bin/metacomputer")
+     and __import__("sessionvm").classify("cloud", ["teardown", "hetzner"]) == "act"
+     and __import__("sessionvm").classify("vm", ["delete", "x", "--checked-provider"]) == "act"),
+    ("SECURITY.md", r"Whatever deletes, stops, starts or forgets an instance reads it by its own\s+id first and acts only if it carries, now, the computer's name and the recorded operation",
+     lambda m: all(f in py_top_fn("lib/remote.py", fn) for fn, f in (
+         ("reconcile", "owned_all("), ("cmd_delete", "owned(a, st[\"instance\"]"), ("cmd_delete", "raise NotOwned("),
+         ("check_recorded", "owned(a, st[\"instance\"]"), ("cmd_wake", "check_recorded(s, st, a)"),
+         ("cmd_sleep", "check_recorded(s, st, a)"), ("cmd_cloud", "owned_all(a, rows, e[\"computer\"], e[\"op\"]")))),
+    ("SECURITY.md", r"Every error from a provider's\s+facade or adapter is scrubbed in one place",
+     lambda m: "scrub_errors(API, API.scrubber)" in raw("lib/cloud/vps.py") and "scrub_errors(VPS, VPS.scrubber)" in raw("lib/cloud/vps.py")
+     and "scrub_errors(cls, API.scrubber)" in raw("lib/cloud/vps.py") and "scrub_errors(cls, VPS.scrubber)" in raw("lib/cloud/vps.py")),
+    ("SECURITY.md", r"`net egress` \(and DigitalOcean's\s+resolver exception\) changes a firewall only after the same check, and only the firewall recorded for the computer",
+     lambda m: "check_firewall(s, st, a)" in py_top_fn("lib/remote.py", "cmd_egress")
+     and "check_firewall(s, st, a)" in py_top_fn("lib/remote.py", "cmd_resolvers")
+     and "a.api.nsg_owner(fw)" in py_top_fn("lib/remote.py", "check_firewall")
+     and all(hasattr(__import__("cloud").ADAPTERS[p].API, "nsg_owner") for p in ("hetzner", "digitalocean", "vultr"))
+     and 'fw = st.get("nsg")      # the one recorded' in raw("lib/cloud/vps.py")),
+    ("SECURITY.md", r"everything `lib/remote.py` prints passes a last filter for the credentials it was given",
+     lambda m: "sys.stdout, sys.stderr = NoCreds(real[0]), NoCreds(real[1])" in py_top_fn("lib/remote.py", "main")
+     and "no_creds(e)" in py_top_fn("lib/remote.py", "delete_op_parts") and "no_creds(e)" in py_top_fn("lib/remote.py", "cmd_delete")
+     and "why = said(stderr, 200)" in raw("lib/spritecli.py")),
+    ("SECURITY.md", r"nor an instance that doesn't carry its operation's mark",
+     lambda m: 'if cur.get("name") != name or cur.get("op") != op:' in py_top_fn("lib/remote.py", "owned")
+     and '"op": (i.freeform_tags or {}).get(OP_TAG)' in raw("lib/cloud/oci.py")),
+    ("SECURITY.md", r"read once at its first boot, refused unless it's the VPC's\s+`resolver_ip`, pinned, never read from the computer again",
+     lambda m: 'if str(ip) not in resolvers:' in raw("lib/cloud/digitalocean.py")
+     and 'str(v.get("resolver_ip") or net[-2])' in raw("lib/cloud/digitalocean.py")
+     and "if args.first_boot and st.get(\"resolvers\") is not None:" in py_top_fn("lib/remote.py", "cmd_resolvers")
+     and 'remote_py resolvers --vm "$VM_NAME" --pinned' in raw("scripts/remote-build.sh")
+     and raw("scripts/remote-build.sh").count("resolv.conf") == 1
+     and 'got["udp"] != want' in raw("lib/cloud/digitalocean.py") and "_vpc_ranges(f.get(" not in raw("lib/cloud/digitalocean.py")
+     and 'return str(net) if net.version == 4 and net.prefixlen == 32 and private(str(net)) else None' in raw("lib/cloud/digitalocean.py")),
+    ("SECURITY.md", r"an\s+error inside a successful answer \(Hetzner's failed actions\) too",
+     lambda m: "raise self._scrubbed(ProviderError(self.label, \"action\"" in raw("lib/cloud/hetzner.py")),
     ("docs/remote.md", r"tries each of\s+the region's other domains once and then stops",
      lambda m: "Every availability domain was tried once" in raw("lib/cloud/oci.py") and "for ad in ads:" in raw("lib/cloud/oci.py")),
     ("SECURITY.md", r"`SSH_AUTH=cert` \(refused: its certificates name the Mac's gateway address\)",

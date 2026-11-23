@@ -985,7 +985,8 @@ otherwise).
   disk, volumes and Mac folders, checkpoints, the gateway's allowlist, no cost) and
   hands every action to the existing command (`HandledByCLI`: the lifecycle code in
   `bin/metacomputer` and `scripts/` is what runs, unchanged); `ubuntu-vm` (your own
-  server), `oci` (Oracle Cloud) and `sprites` (Fly Sprites), below; and `fake`, an in-memory
+  server), `oci` (Oracle Cloud), `sprites` (Fly Sprites), and `hetzner`, `digitalocean` and `vultr`, below; and
+  `fake`, an in-memory
   stand-in for the tests that never counts as a provider. `tests/test_cloud_adapters.py`
   runs the same contract against each registered adapter.
 - **A computer elsewhere** ([docs/remote.md](docs/remote.md)): an Ubuntu 24.04 VM reached
@@ -995,6 +996,12 @@ otherwise).
   `lib/cloud/oci.py` adds a thin driver (make, start, stop, delete, list, the network and
   each computer's network security group, its serial console's last lines) on Oracle's
   SDK, imported only when a call needs it, with credentials only from the environment.
+  `lib/cloud/vps.py` is the base of three more thin drivers, `hetzner.py`, `digitalocean.py`
+  and `vultr.py`, for providers that bill servers by the hour: their REST APIs through
+  `lib/provider_http.py` (handed in by `lib/remote.py`, so `lib/cloud` still opens no
+  connection), a firewall and a first-boot key per computer made before the server and
+  journaled by id, the server made by one call never retried, and a stopped server billed
+  in full (`billing.stopped = "full"`).
   Each manifest says what's enforced outside the VM (`outside_egress`) and what a stopped
   computer bills (`billing`). `lib/remote.py` is what the CLI calls for the provider and
   the computer's record (`RUN_DIR/remote.json`, 0600: the instance and the address it was

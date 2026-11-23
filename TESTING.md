@@ -312,7 +312,8 @@ changed program refused) is in `tests/test_secrets.py`.
 
 ## A computer elsewhere: `tests/test_remote.py`
 
-`python3 tests/test_remote.py` needs no VM and makes no network call or provider call (a stand-in for Oracle's API;
+`python3 tests/test_remote.py` needs no VM and makes no network call or provider call (stand-ins for Oracle's API and
+for Hetzner Cloud's, DigitalOcean's and Vultr's REST APIs;
 the CLI checks run in a copy of the checkout with its own HOME and a fake runner, tests/test_multi_vm.py's `Box`).
 - The transport: SSH straight to a computer's address, its host key pinned as `mcomp-NAME`; addresses that could be
   options, loopback, link-local or multicast refused; the hook a provider's tunnel registers becomes ssh's
@@ -331,7 +332,26 @@ the CLI checks run in a copy of the checkout with its own HOME and a fake runner
   recording stand-in; `start` refusing to stop a RUNNING instance whose console shows no power-off, `stop --force`;
   wake, sleep, delete, status and list; the manifest's outside-egress and billing truth; credentials named but
   never shown.
-- The CLI: `vm create --on server|oci` and its refusals, `ssh_base` for each role, `list` and `--on`, what a computer
+- The Hetzner Cloud, DigitalOcean and Vultr drivers (`StandInREST`, answering each provider's paths and error shapes
+  as read from its API): the computer's firewall and first-boot key made before the server, under the provider's
+  lock, each journaled by id; the create call's shape (size, region, image, IPv4 only, no backups, the firewall and
+  key, the user-data, the operation in its labels or name), sent once even when it fails; reads retried on 429 and
+  5xx; each firewall read back (SSH only in; out, every public block or nothing; Hetzner's 100-address limit per rule
+  and its one rule for "nothing"; Vultr's inbound only, nothing claimed outside); stop through the soft call (Vultr:
+  none, the CLI asks the guest), `--force`, a guest that won't shut down refused rather than powered off; start;
+  a server metacomputer didn't mark refused; delete by the recorded ids while the listings lag (DigitalOcean's, found
+  live); Vultr's "Unauthorized IP address" and permission refusals said plainly; `lib/remote.py`'s journal, abort
+  (`--keep` too), `vm delete` and `cloud teardown` with each; `lib/provider_http.py` refusing other hosts and
+  redirects.
+- The audit's findings (`audit_fixes`, one part each, all failing on the code before them): a create whose answer
+  was lost while the listing lags (the clean-up fails with exit 3, keeps the journal and blocks a new create, then
+  deletes what shows), journaled instances deleted or kept by their ids with the listing empty, the Droplet's id
+  journaled before its firewall is applied; Vultr's stop never halting on SSH silence; DigitalOcean's DNS to the
+  resolver's exact /32 (checked against its VPC, kept through `net egress`, wider ranges read back as other); a
+  firewall claimed only by this operation's own create, its id journaled before anything configures it (Vultr's rule,
+  Hetzner's actions); errors scrubbed of a reflected token, credential-shaped text and raw bodies; `vpc:read` checked
+  before anything is made and named by `cloud doctor`.
+- The CLI: `vm create --on server|oci|hetzner|digitalocean|vultr` and its refusals, `ssh_base` for each role, `list` and `--on`, what a computer
   elsewhere refuses (`reset`, `checkpoint`, `net allow`, volumes, `view --tailnet`, `SSH_AUTH=cert`, `PLACE` in
   `config/local.env`), `stop` and `vm delete`.
 - The review's fixes: provider credentials reaching `lib/remote.py` and no other program (every program metacomputer

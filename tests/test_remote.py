@@ -12,6 +12,11 @@
   EGRESS=off.
 - The OCI driver against a stand-in API: sizes, the availability domains tried once each when one is full, then a
   refusal; wake, sleep, delete, status, list; credentials only from the environment, named but never shown.
+- The Hetzner Cloud, DigitalOcean and Vultr drivers against stand-ins of their REST APIs (StandInREST): the firewall
+  and first-boot key before the server, under the lock and journaled by id; the create call's shape, sent once; each
+  firewall's rules read back (Vultr's: inbound only, nothing claimed outside); stop, start, delete by recorded ids
+  while lists lag; servers metacomputer didn't mark left alone; Vultr's address and permission refusals; and
+  lib/remote.py's journal, abort, delete and teardown with each.
 - lib/remote.py's target and probe, and the CLI in a copy of the checkout (tests/test_multi_vm.py's Box: its own HOME
   and fake runner): vm create --on server|oci and its refusals, ssh_base's options for each role, list and --on,
   what's refused for a computer elsewhere (reset, net allow, view --tailnet, PLACE outside config/vms/, SSH_AUTH=cert),
@@ -239,7 +244,7 @@ def guest_side():
           ud.startswith("#cloud-config\n") and "\nssh_pwauth: false\n" in ud and "\ndisable_root: true\n" in ud
           and "\nusers: []\n" in ud, ud[:200])
     check("...the host key made on the Mac, the only one (no others generated)", "  ed25519_private: |\n    -----BEGIN" in ud
-          and f'ed25519_public: "{KEY}"' in ud and "ssh_deletekeys: true" in ud and "ssh_genkeytypes: []" in ud)
+          and f'ed25519_public: "{KEY}"' in ud and "ssh_deletekeys: true" in ud and "ssh_genkeytypes: [ed25519]" in ud)
     files = {}
     cur = None
     for ln in ud.splitlines():
@@ -770,6 +775,1641 @@ def oci_driver():
     check("...its egress setting is read from its settings", u.egress("box")["setting"] == "internet")
 
 
+# --- the hourly providers' drivers (lib/cloud/vps.py, hetzner.py, digitalocean.py, vultr.py) ------------------------
+SYNTH_TOKEN = "SYNTHETIC-TOKEN-0000"
+VPS_ENV = {"hetzner": "HCLOUD_TOKEN", "digitalocean": "DIGITALOCEAN_TOKEN", "vultr": "VULTR_API_KEY"}
+
+
+class StandInREST:
+    """One provider's REST API in memory: the calls the drivers make, answered the way the provider answers them
+    (paths, bodies, error shapes, as read from each one's API live). Every call is recorded (method, path, body); the
+    Authorization header must carry the token and nothing is ever printed. `fail` answers a status first for a
+    (method, path prefix); `lag` makes listings come back empty (DigitalOcean's do, now and then: found live);
+    `stuck` keeps a server running whatever it's asked; `deny_ip` answers every call as Vultr does to an address not
+    on the key's list."""
+
+    def __init__(self, prov):
+        self.prov = prov
+        self.calls = []
+        self.servers, self.fws, self.keys, self.rules = {}, {}, {}, {}
+        self.n = 1000
+        self.fail = {}
+        self.lag = False
+        self.stuck = False
+        self.deny_ip = None
+        self.deny_create = None
+        self.deny_paths = set()
+        self.lag_once = set()          # listings (first path part) that come back empty once
+        self.lose_answer = set()       # (method, path) whose call is carried out, but whose answer is lost
+        self.fw_action_error = False   # Hetzner: a new firewall's actions end in an error
+        self.reflect = None            # an error body that reflects this text (a credential, say)
+        self.vpc_resolver_field = True # DigitalOcean: the VPC's resolver_ip in its answer (else the documented rule)
+        self.action_message = "it failed"   # Hetzner: what a failed action says
+        self.fw_action_stuck = None    # Hetzner: a new firewall's action, with this command, that never ends
+        self.vpc_resolver_ip = "10.10.15.254"   # DigitalOcean: the VPC's resolver_ip, when it's in the answer
+        self.locked = lambda: None
+        self.lock_seen = []
+
+    def _id(self):
+        self.n += 1
+        if self.prov == "vultr":
+            return f"{self.n:08x}-0000-4000-8000-{self.n:012x}"
+        return self.n
+
+    @staticmethod
+    def ok(status, body=None):
+        return status, {}, (json.dumps(body).encode() if body is not None else b"")
+
+    def err(self, status, code, message):
+        if self.prov == "hetzner":
+            return self.ok(status, {"error": {"code": code, "message": message, "details": {}}})
+        if self.prov == "digitalocean":
+            return self.ok(status, {"id": code, "message": message})
+        return self.ok(status, {"error": message, "status": status})
+
+    def __call__(self, method, url, headers, body, timeout):
+        if headers.get("Authorization") != f"Bearer {SYNTH_TOKEN}":
+            return self.err(401, "unauthorized", "unable to authenticate you")
+        rest = url.split("://", 1)[1].split("/", 2)[2]
+        path, _, qs = rest.partition("?")
+        q = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
+        data = json.loads(body) if body else None
+        self.calls.append((method, path, data, q))
+        if method == "GET" and path.split("/")[0] in self.lag_once and "/" not in path:
+            self.lag_once.discard(path.split("/")[0])
+            key = {"servers": "servers", "droplets": "droplets", "instances": "instances", "firewalls":
+                   "firewalls" if self.prov != "vultr" else "firewall_groups", "ssh_keys": "ssh_keys"}.get(path, path)
+            return self.ok(200, {key: [], "meta": {"pagination": {"next_page": None}, "links": {"next": ""}},
+                                 "links": {}})
+        if self.reflect is not None and method == "POST" and path in ("servers", "droplets", "instances"):
+            return (500, {}, self.reflect) if self.prov == "vultr" and not self.reflect.startswith(b"{") \
+                else (403, {}, self.reflect)
+        if (method, path) in self.lose_answer:
+            getattr(self, "h_" + self.prov)(method, path.split("/"), data, q)
+            raise OSError("the connection was reset")
+        if self.deny_ip:
+            return self.err(401, "", f"Unauthorized IP address: {self.deny_ip}")
+        for (m, prefix), statuses in list(self.fail.items()):
+            if m == method and path.startswith(prefix) and statuses:
+                return self.err(statuses.pop(0), "service_error", "a passing error")
+        return getattr(self, "h_" + self.prov)(method, path.split("/"), data, q)
+
+    # --- Hetzner Cloud ------------------------------------------------------------------------------------
+    def h_hetzner(self, m, p, d, q):
+        page = {"meta": {"pagination": {"next_page": None}}}
+        if p[0] == "servers" and len(p) == 1:
+            if m == "GET":
+                sel = q.get("label_selector", "").replace("%3D", "=")
+                out = [s for s in self.servers.values() if not sel or ("=" not in sel and sel in s["labels"])
+                       or ("=" in sel and s["labels"].get(sel.split("=")[0]) == sel.split("=")[1])]
+                return self.ok(200, dict(page, servers=[] if self.lag else out))
+            self.lock_seen.append(("server", self.locked()))
+            if self.deny_create:
+                return self.err(*self.deny_create)
+            sid = self._id()
+            s = {"id": sid, "name": d["name"], "labels": d["labels"], "status": "running",
+                 "server_type": {"name": d["server_type"]}, "location": {"name": d["location"]},
+                 "public_net": {"ipv4": {"ip": "203.0.113.7"}}, "created": "t", "body": d}
+            self.servers[sid] = s
+            for f in d.get("firewalls") or []:
+                self.fws[f["firewall"]]["applied_to"].append(sid)
+            return self.ok(201, {"server": s, "root_password": None, "action": {"id": 1}})
+        if p[0] == "servers" and len(p) >= 2 and p[1] != "actions":
+            s = self.servers.get(int(p[1]))
+            if s is None:
+                return self.err(404, "not_found", "server not found")
+            if m == "GET":
+                return self.ok(200, {"server": s})
+            if m == "DELETE":
+                del self.servers[int(p[1])]
+                for f in self.fws.values():
+                    f["applied_to"] = [x for x in f["applied_to"] if x != int(p[1])]
+                return self.ok(200, {"action": {"id": 2}})
+            if m == "POST" and p[2] == "actions" and not self.stuck:
+                s["status"] = {"poweron": "running", "shutdown": "off", "poweroff": "off"}[p[3]]
+            return self.ok(201, {"action": {"id": 3, "command": p[3]}})
+        if p[0] in ("firewalls", "servers") and len(p) == 3 and p[1] == "actions":
+            if int(p[2]) == 77:
+                return self.ok(200, {"action": {"id": 77, "status": "error",
+                                                "error": {"code": "action_failed", "message": self.action_message}}})
+            if int(p[2]) == 78:
+                return self.ok(200, {"action": {"id": 78, "status": "running", "command": self.fw_action_stuck}})
+            return self.ok(200, {"action": {"id": int(p[2]), "status": "success"}})
+        if p[0] == "images":
+            arch = q.get("architecture")
+            return self.ok(200, {"images": [{"id": 77 if arch == "arm" else 78, "name": "ubuntu-24.04",
+                                             "architecture": arch, "status": "available"}]})
+        if p[0] == "firewalls":
+            if len(p) == 1 and m == "GET":
+                sel = q.get("label_selector", "").replace("%3D", "=")
+                out = [f for f in self.fws.values() if ("=" not in sel and sel in f["labels"])
+                       or ("=" in sel and f["labels"].get(sel.split("=")[0]) == sel.split("=")[1])]
+                return self.ok(200, dict(page, firewalls=[] if self.lag else out))
+            if len(p) == 1 and m == "POST":
+                self.lock_seen.append(("firewall", self.locked()))
+                for r in d["rules"]:
+                    if len(r.get("destination_ips") or r.get("source_ips") or []) > 100:
+                        return self.err(422, "invalid_input", "value required to be smaller")
+                fid = self._id()
+                self.fws[fid] = {"id": fid, "name": d["name"], "labels": d["labels"], "rules": d["rules"], "applied_to": []}
+                acts = [{"id": 77, "command": "apply_firewall"}] if self.fw_action_error else []
+                if self.fw_action_stuck is not None:
+                    acts.append({"id": 78, "command": self.fw_action_stuck})
+                return self.ok(201, {"firewall": self.fws[fid], "actions": acts})
+            f = self.fws.get(int(p[1]))
+            if f is None:
+                return self.err(404, "not_found", "firewall not found")
+            if m == "GET":
+                return self.ok(200, {"firewall": f})
+            if m == "DELETE":
+                if f["applied_to"]:
+                    return self.err(422, "resource_in_use", "firewall is still in use")
+                del self.fws[int(p[1])]
+                return self.ok(204)
+            if m == "POST" and p[3] == "set_rules":
+                f["rules"] = d["rules"]
+                return self.ok(201, {"actions": [{"id": 9, "command": "set_firewall_rules"}]})
+        if p[0] == "ssh_keys":
+            if len(p) == 1 and m == "GET":
+                sel = q.get("label_selector", "").replace("%3D", "=")
+                out = [k for k in self.keys.values() if ("=" not in sel and sel in k["labels"])
+                       or ("=" in sel and k["labels"].get(sel.split("=")[0]) == sel.split("=")[1])]
+                return self.ok(200, dict(page, ssh_keys=[] if self.lag else out))
+            if len(p) == 1 and m == "POST":
+                self.lock_seen.append(("key", self.locked()))
+                if any(k["public_key"] == d["public_key"] for k in self.keys.values()):
+                    return self.err(409, "uniqueness_error", "SSH key with the same fingerprint already exists")
+                kid = self._id()
+                self.keys[kid] = dict(d, id=kid)
+                return self.ok(201, {"ssh_key": self.keys[kid]})
+            k = self.keys.get(int(p[1]))
+            if k is None:
+                return self.err(404, "not_found", "key not found")
+            if m == "GET":
+                return self.ok(200, {"ssh_key": k})
+            del self.keys[int(p[1])]
+            return self.ok(204)
+        if p[0] == "primary_ips":
+            return self.ok(200, dict(page, primary_ips=[]))
+        return self.err(404, "not_found", "no such path")
+
+    # --- DigitalOcean -------------------------------------------------------------------------------------
+    def h_digitalocean(self, m, p, d, q):
+        links = {"links": {}, "meta": {"total": 0}}
+        if p[0] == "droplets" and len(p) == 1:
+            if m == "GET":
+                return self.ok(200, dict(links, droplets=[] if self.lag else list(self.servers.values())))
+            self.lock_seen.append(("server", self.locked()))
+            if self.deny_create:
+                return self.err(*self.deny_create)
+            sid = self._id()
+            s = {"id": sid, "name": d["name"], "status": "active", "size_slug": d["size"], "region": {"slug": d["region"]},
+                 "vpc_uuid": "vpc-1", "networks": {"v4": [{"type": "private", "ip_address": "10.10.0.5"},
+                                     {"type": "public", "ip_address": "203.0.113.8"}]}, "created_at": "t", "body": d}
+            self.servers[sid] = s
+            return self.ok(202, {"droplet": s})
+        if p[0] == "droplets":
+            s = self.servers.get(int(p[1]))
+            if s is None:
+                return self.err(404, "not_found", "The resource you were accessing could not be found.")
+            if m == "GET":
+                return self.ok(200, {"droplet": s})
+            if m == "DELETE":
+                del self.servers[int(p[1])]
+                for f in self.fws.values():
+                    f["droplet_ids"] = [x for x in f["droplet_ids"] if x != int(p[1])]
+                return self.ok(204)
+            if not self.stuck:
+                s["status"] = {"power_on": "active", "shutdown": "off", "power_off": "off"}[d["type"]]
+            return self.ok(201, {"action": {"id": 5, "type": d["type"]}})
+        if p[0] == "images":
+            return self.ok(200, {"image": {"slug": p[1], "distribution": "Ubuntu", "name": "24.04 (LTS) x64"}})
+        if p[0] in self.deny_paths:
+            return self.err(403, "forbidden", "You are not authorized to perform this operation")
+        if p[0] == "vpcs" and len(p) == 1:
+            return self.ok(200, dict(links, vpcs=[{"id": "vpc-1", "ip_range": "10.10.0.0/20"}]))
+        if p[0] == "vpcs":
+            vpc = {"id": p[1], "ip_range": "10.10.0.0/20"}
+            if self.vpc_resolver_field:
+                vpc["resolver_ip"] = self.vpc_resolver_ip
+            return self.ok(200, {"vpc": vpc})
+        if p[0] in ("regions", "sizes", "actions"):
+            return self.ok(200, dict(links, **{p[0]: []}))
+        if p[0] == "firewalls":
+            if len(p) == 1 and m == "GET":
+                return self.ok(200, dict(links, firewalls=[] if self.lag else list(self.fws.values())))
+            if len(p) == 1 and m == "POST":
+                self.lock_seen.append(("firewall", self.locked()))
+                fid = f"fw-{self._id()}"
+                self.fws[fid] = {"id": fid, "name": d["name"], "status": "succeeded", "inbound_rules": d["inbound_rules"],
+                                 "outbound_rules": d["outbound_rules"], "droplet_ids": [], "tags": []}
+                return self.ok(202, {"firewall": self.fws[fid]})
+            f = self.fws.get(p[1])
+            if f is None:
+                return self.err(404, "not_found", "The resource you were accessing could not be found.")
+            if len(p) == 3 and p[2] == "droplets":
+                f["droplet_ids"] += d["droplet_ids"]
+                return self.ok(204)
+            if m == "GET":
+                return self.ok(200, {"firewall": f})
+            if m == "PUT":
+                f.update(inbound_rules=d["inbound_rules"], outbound_rules=d["outbound_rules"], droplet_ids=d["droplet_ids"])
+                return self.ok(200, {"firewall": f})
+            del self.fws[p[1]]
+            return self.ok(204)
+        if p[0] == "account" and p[1] == "keys":
+            if len(p) == 2 and m == "GET":
+                return self.ok(200, dict(links, ssh_keys=[] if self.lag else list(self.keys.values())))
+            if len(p) == 2 and m == "POST":
+                self.lock_seen.append(("key", self.locked()))
+                if any(k["public_key"] == d["public_key"] for k in self.keys.values()):
+                    return self.err(422, "unprocessable_entity", "SSH Key is already in use on your account")
+                kid = self._id()
+                self.keys[kid] = dict(d, id=kid)
+                return self.ok(201, {"ssh_key": self.keys[kid]})
+            k = self.keys.get(int(p[2]))
+            if k is None:
+                return self.err(404, "not_found", "The resource you were accessing could not be found.")
+            if m == "GET":
+                return self.ok(200, {"ssh_key": k})
+            del self.keys[int(p[2])]
+            return self.ok(204)
+        return self.err(404, "not_found", "no such path")
+
+    # --- Vultr --------------------------------------------------------------------------------------------
+    def h_vultr(self, m, p, d, q):
+        meta = {"meta": {"total": 0, "links": {"next": "", "prev": ""}}}
+        if p[0] == "instances" and len(p) == 1:
+            if m == "GET":
+                return self.ok(200, dict(meta, instances=[] if self.lag else list(self.servers.values())))
+            self.lock_seen.append(("server", self.locked()))
+            if self.deny_create:
+                return self.err(*self.deny_create)
+            sid = self._id()
+            s = {"id": sid, "label": d["label"], "status": "active", "power_status": "running", "plan": d["plan"],
+                 "region": d["region"], "main_ip": "203.0.113.9", "date_created": "t", "body": d,
+                 "default_password": "SYNTHETIC-ROOT-PASSWORD"}
+            self.servers[sid] = s
+            return self.ok(202, {"instance": s})
+        if p[0] == "instances":
+            s = self.servers.get(p[1])
+            if s is None:
+                return self.err(404, "", "Invalid instance-id.")
+            if m == "GET":
+                return self.ok(200, {"instance": s})
+            if m == "DELETE":
+                del self.servers[p[1]]
+                return self.ok(204)
+            if not self.stuck:
+                s["power_status"] = {"start": "running", "halt": "stopped"}[p[2]]
+            return self.ok(204)
+        if p[0] == "os":
+            return self.ok(200, dict(meta, os=[{"id": 2284, "name": "Ubuntu 24.04 LTS x64", "arch": "x64"},
+                                               {"id": 1, "name": "Ubuntu 22.04 LTS x64", "arch": "x64"}]))
+        if p[0] == "firewalls":
+            if len(p) == 1 and m == "GET":
+                return self.ok(200, dict(meta, firewall_groups=[] if self.lag else list(self.fws.values())))
+            if len(p) == 1 and m == "POST":
+                self.lock_seen.append(("firewall", self.locked()))
+                fid = self._id()
+                self.fws[fid] = {"id": fid, "description": d["description"], "instance_count": 0}
+                self.rules[fid] = []
+                return self.ok(201, {"firewall_group": self.fws[fid]})
+            f = self.fws.get(p[1])
+            if f is None:
+                return self.err(404, "", "Invalid firewall group.")
+            if len(p) == 3 and m == "GET":
+                return self.ok(200, dict(meta, firewall_rules=self.rules[p[1]]))
+            if len(p) == 3 and m == "POST":
+                r = dict(d, id=len(self.rules[p[1]]) + 1, action="accept", direction="in",
+                         source=f"{d['subnet']}/{d['subnet_size']}")
+                self.rules[p[1]].append(r)
+                return self.ok(201, {"firewall_rule": r})
+            if m == "GET":
+                return self.ok(200, {"firewall_group": f})
+            if any(s["body"].get("firewall_group_id") == p[1] for s in self.servers.values()):
+                return self.err(400, "", "Firewall group is linked to instances")
+            del self.fws[p[1]]
+            return self.ok(204)
+        if p[0] == "ssh-keys":
+            if len(p) == 1 and m == "GET":
+                return self.ok(200, dict(meta, ssh_keys=[] if self.lag else list(self.keys.values())))
+            if len(p) == 1 and m == "POST":
+                self.lock_seen.append(("key", self.locked()))
+                kid = self._id()
+                self.keys[kid] = dict(d, id=kid)
+                return self.ok(201, {"ssh_key": self.keys[kid]})
+            k = self.keys.get(p[1])
+            if k is None:
+                return self.err(404, "", "Invalid SSH key.")
+            if m == "GET":
+                return self.ok(200, {"ssh_key": k})
+            del self.keys[p[1]]
+            return self.ok(204)
+        return self.err(404, "", "no such path")
+
+
+def plant_fw(h, prov, name, op):
+    """Another operation's firewall for computer `name`, put straight into a stand-in (as the provider would list it)."""
+    fid = h._id()
+    if prov == "hetzner":
+        h.fws[fid] = {"id": fid, "name": f"metacomputer-{name}.{op[:12]}", "labels": {"metacomputer": name,
+                      "metacomputer-op": op}, "rules": [], "applied_to": []}
+    elif prov == "digitalocean":
+        fid = f"fw-{fid}"
+        h.fws[fid] = {"id": fid, "name": f"metacomputer-{name}.{op[:12]}", "status": "succeeded", "inbound_rules": [],
+                      "outbound_rules": [], "droplet_ids": [], "tags": []}
+    else:
+        h.fws[fid] = {"id": fid, "description": f"metacomputer-{name}.{op[:12]}", "instance_count": 0}
+        h.rules[fid] = []
+    return fid
+
+
+def vps_api(prov, standin):
+    """The driver's API on a stand-in, with a clock of its own: each wait's sleep moves it on, so a wait that never
+    ends ends at once, at its timeout."""
+    cls = cloud.ADAPTERS[prov]
+    now = [0.0]
+    return cls.API({VPS_ENV[prov]: SYNTH_TOKEN}, standin, sleep=lambda s: now.__setitem__(0, now[0] + s),
+                   clock=lambda: now[0])
+
+
+def vps_drivers():
+    """The three hourly providers' drivers against stand-ins of their APIs."""
+    import contextlib
+    from cloud import vps
+    from cloud.ubuntu_vm import public_v4
+    print("\nthe hourly providers' drivers (Hetzner Cloud, DigitalOcean, Vultr), on stand-ins of their APIs")
+    pub = set(public_v4())
+    for prov in ("hetzner", "digitalocean", "vultr"):
+        cls = cloud.ADAPTERS[prov]
+        label = cls.manifest["label"]
+        h = StandInREST(prov)
+        held = {"n": 0}
+
+        @contextlib.contextmanager
+        def lock():
+            held["n"] += 1
+            try:
+                yield
+            finally:
+                held["n"] -= 1
+        h.locked = lambda: held["n"] > 0
+        api = vps_api(prov, h)
+        a = cls(api=api, network_lock=lock)
+        made = []
+        r = a.create("box", user_data="#cloud-config\n", public_key=KEY + " mcomp-box-admin", op="ab" * 16,
+                     made=lambda what, rid: made.append((what, rid, held["n"] > 0)))
+        srv = h.servers[int(r["instance"]) if prov != "vultr" else r["instance"]]
+        body = srv["body"]
+        order = [c[0] + " " + c[1] for c in h.calls if c[0] in ("POST", "PUT")]
+        first_server = next(i for i, c in enumerate(order) if c.split()[1] in ("servers", "droplets", "instances"))
+        first_fw = next(i for i, c in enumerate(order) if c.split()[1] == "firewalls")
+        first_key = next(i for i, c in enumerate(order) if c.split()[1] in ("ssh_keys", "account/keys", "ssh-keys"))
+        names = [w for w, _i, _l in made]
+        check(f"{label}: its own firewall and its first-boot key are made before the server, under the lock, and each is "
+              "told to the journal with its id as it's made; then the launch is journaled as sent, and the server's id "
+              "the moment the create returns",
+              first_fw < first_server and first_key < first_server and names[:2] == ["made_nsg", "made_key"]
+              and all(lk for w, _i, lk in made if w in ("made_nsg", "made_key"))
+              and names[2:] == ["launch_state", "made_instance", "launch_state"]
+              and [x[1] for x in made[2:]] == ["sent", r["instance"], "made"]
+              and ("firewall", True) in h.lock_seen and ("key", True) in h.lock_seen
+              and ("server", False) in h.lock_seen, (order, made, h.lock_seen))
+        check(f"{label}: the server is made exactly once (one create call)",
+              sum(1 for c in order if c.split()[1] in ("servers", "droplets", "instances")) == 1, order)
+        ud_ok = (body.get("user_data") == "#cloud-config\n" if prov != "vultr"
+                 else base64.b64decode(body.get("user_data", "")).decode() == "#cloud-config\n")
+        if prov == "hetzner":
+            shape = (body["server_type"] == "cax11" and body["location"] == "fsn1" and body["image"] == 77
+                     and body["public_net"] == {"enable_ipv4": True, "enable_ipv6": False}
+                     and body["firewalls"] == [{"firewall": int(r["nsg"])}] and body["ssh_keys"] == [int(r["key"])]
+                     and body["labels"] == {"metacomputer": "box", "metacomputer-op": "ab" * 16})
+            tagged = shape
+        elif prov == "digitalocean":
+            shape = (body["size"] == "s-2vcpu-4gb" and body["region"] == "nyc3" and body["image"] == "ubuntu-24-04-x64"
+                     and body["ipv6"] is False and body["backups"] is False and body["monitoring"] is False
+                     and body["with_droplet_agent"] is False and body["ssh_keys"] == [int(r["key"])])
+            tagged = body["name"] == "mc-" + "ab" * 16 + "-box"
+            check(f"{label}: the firewall is applied to the Droplet right after it's made (it takes none in its create "
+                  "call), and read back as applied", int(r["instance"]) in h.fws[r["nsg"]]["droplet_ids"]
+                  and order.index(f"POST firewalls/{r['nsg']}/droplets") == first_server + 1, order)
+            dns = [x for x in h.fws[r["nsg"]]["outbound_rules"] if x.get("ports") == "53"]
+            check(f"{label}: no DNS exception when it's made: nothing private is let through until the resolver's exact "
+                  "address is known (F3: it was the whole VPC range)", dns == [], dns)
+        else:
+            shape = (body["plan"] == "vc2-2c-4gb" and body["region"] == "ewr" and body["os_id"] == 2284
+                     and body["enable_ipv6"] is False and body["backups"] == "disabled" and body["ddos_protection"] is False
+                     and body["activation_email"] is False and body["firewall_group_id"] == r["nsg"]
+                     and body["sshkey_id"] == [r["key"]])
+            tagged = body["label"] == "mc-" + "ab" * 16 + "-box"
+        check(f"{label}: the server's create call: the default size and region, Ubuntu 24.04 for its architecture, IPv4 "
+              "only, no backups, its firewall and key, the user-data", shape and ud_ok, body)
+        check(f"{label}: ...marked with its name and the build's operation (found again if its record is lost)",
+              tagged and [i["name"] for i in api.instances("box", op="ab" * 16)] == ["box"]
+              and api.instances("box", op="cd" * 16) == [], body)
+        check(f"{label}: the default size's architecture ({'arm64' if prov == 'hetzner' else 'x86_64'}); x86 only where "
+              "the provider has no Arm", r["arch"] == ("arm64" if prov == "hetzner" else "x86_64"))
+        why = raises(a.create, "box", user_data="x", public_key=KEY, kind=AdapterError)
+        check(f"{label}: a second create for the same name is refused (it has a server already)", why and "already" in why, why)
+        for bad, kw in (("size", {"size": "huge"}), ("region", {"region": "../x"}), ("PERSIST", {"persist": "none"}),
+                        ("user-data", {"user_data": ""}), ("key", {"public_key": ""}), ("egress", {"egress": "some"})):
+            args = dict({"user_data": "x", "public_key": KEY}, **kw)
+            why = raises(a.create, "other", **args, kind=AdapterError)
+            check(f"{label}: create refuses a bad {bad}, saying why, before anything is made",
+                  why and not h.servers.get("other"), why)
+        st = {"box": dict(r)}
+        comp = {"box": {"VM_NAME": "box", "PROVIDER": prov, "EGRESS": "internet"}}
+        s = cls(api=api, computers=comp, states=st)
+        rules = api.nsg_rules(r["nsg"])
+        check(f"{label}: its firewall lets in SSH only (TCP 22, from anywhere)", vps.inbound_ok(rules), rules)
+        if cls.manifest["outside_egress"]["enforced"]:
+            check(f"{label}: ...and lets out exactly every public IPv4 block (TCP, UDP, ICMP), nothing private (but, at "
+                  "DigitalOcean, DNS to its VPC)", api.egress_of(rules) == "internet" and s.egress("box")["outside"] == "internet"
+                  and all(set(x["addresses"]) <= pub for x in rules if x["direction"] == "out"
+                          and not (prov == "digitalocean" and x["ports"] == "53")), rules)
+            s.apply_egress("box", "off")
+            off = api.nsg_rules(r["nsg"])
+            check(f"{label}: EGRESS=off outside the computer: read back as off, SSH still in",
+                  s.egress("box")["outside"] == "off" and vps.inbound_ok(off), off)
+            s.apply_egress("box", "internet")
+            check(f"{label}: ...and internet again", s.egress("box")["outside"] == "internet")
+        else:
+            check(f"{label}: its firewall filters only what comes in: nothing claimed outside, `net egress` can't set it there",
+                  s.egress("box")["outside"] == "none" and isinstance(_err(s.apply_egress, "box", "off"), NotSupported)
+                  and cls.manifest["outside_egress"] == {"enforced": False, "private_ranges": False, "metadata": False,
+                                                         "off": False})
+        check(f"{label}: an allowlist of names is refused (NotSupported)", isinstance(_err(s.set_egress, "box", ["x.com"]),
+                                                                                    NotSupported))
+        check(f"{label}: status: awake, with its public address", s.status("box")["state"] == "awake"
+              and s.status("box")["host"].startswith("203.0.113."), s.status("box"))
+        h.calls.clear()
+        if cls.SOFT_STOP == "guest":
+            why = raises(s.sleep, "box", kind=AdapterError)
+            check(f"{label}: stop without the guest asked first (Vultr has no shutdown call): refused, nothing sent",
+                  why and "asks it over SSH" in why and not [c for c in h.calls if c[0] == "POST"], why)
+            # F2: the CLI asked the guest over SSH and its SSH went quiet, but Vultr's own state still says running
+            # (as it did live): that's no proof it's off, so nothing is halted.
+            h.calls.clear()
+            why = raises(s.sleep, "box", guest_up=False, asked=True, kind=AdapterError)
+            check(f"{label}: asked, its SSH quiet, but Vultr's own state never says stopped: nothing halted; it says the "
+                  "guest may still be on and billing, with stop --force as the choice (F2: SSH silence alone halted "
+                  "it)", why and "may still be on" in why and "stop --force" in why
+                  and not [c for c in h.calls if c[0] == "POST"], (why, h.calls[-3:]))
+            srv["power_status"] = "stopped"          # Vultr's own state says it's off: that, and only that, counts
+            h.calls.clear()
+            s.sleep("box", guest_up=None, asked=True)
+        else:
+            s.sleep("box")
+        acts = [c for c in h.calls if c[0] == "POST"]
+        if cls.SOFT_STOP == "api":
+            check(f"{label}: stop asks the guest to shut down (the provider's soft call), never a hard power-off unasked",
+                  len(acts) == 1 and ("shutdown" in json.dumps(acts[0][2]) or acts[0][1].endswith("/shutdown"))
+                  and s.status("box")["state"] == "stopped", acts)
+        else:
+            check(f"{label}: stop once Vultr's own state says the asked guest is off: nothing sent, stopped",
+                  acts == [] and s.status("box")["state"] == "stopped", acts)
+        h.calls.clear()
+        s.wake("box")
+        acts = [c for c in h.calls if c[0] == "POST"]
+        check(f"{label}: start powers a stopped server on, and waits for it to run", len(acts) == 1
+              and s.status("box")["state"] == "awake", acts)
+        h.calls.clear()
+        why = raises(s.wake, "box", guest_up=False, kind=AdapterError)
+        check(f"{label}: start of a running server whose SSH doesn't answer: refused, nothing stopped",
+              why and "Nothing was stopped" in why and not [c for c in h.calls if c[0] == "POST"], why)
+        h.calls.clear()
+        s.sleep("box", force=True)
+        acts = [c for c in h.calls if c[0] == "POST"]
+        check(f"{label}: stop --force: a power-off at once", len(acts) == 1 and ("power_off" in json.dumps(acts[0][2])
+              or acts[0][1].endswith(("/poweroff", "/halt"))), acts)
+        s.wake("box")
+        h.stuck = True
+        h.calls.clear()
+        why = raises(s.sleep, "box", kind=AdapterError)
+        check(f"{label}: a guest that doesn't shut down: refused after waiting, saying stop --force; never powered off "
+              "unasked", why and "stop --force" in why and not any(
+                  c[1].endswith(("/poweroff", "/halt")) or "power_off" in json.dumps(c[2]) for c in h.calls), why)
+        h.stuck = False
+        check(f"{label}: list: metacomputer's servers", [i["name"] for i in s.list()] == ["box"])
+        # A server that isn't metacomputer's is never touched.
+        if prov == "hetzner":
+            h.servers[9] = {"id": 9, "name": "theirs", "labels": {}, "status": "running", "server_type": {"name": "x"},
+                            "location": {"name": "fsn1"}, "public_net": {"ipv4": {"ip": "203.0.113.70"}}}
+            other = "9"
+        elif prov == "digitalocean":
+            h.servers[9] = {"id": 9, "name": "web-1", "status": "active", "size_slug": "x", "region": {"slug": "nyc3"},
+                            "networks": {"v4": []}}
+            other = "9"
+        else:
+            other = "00000009-0000-4000-8000-000000000009"
+            h.servers[other] = {"id": other, "label": "web-1", "status": "active", "power_status": "running", "plan": "x",
+                                "region": "ewr", "main_ip": "203.0.113.70", "body": {}}
+        why = raises(api.instance, other, kind=AdapterError)
+        check(f"{label}: a server metacomputer didn't mark is refused by id and left out of its lists",
+              why and "leaves it alone" in why and "theirs" not in [i["name"] for i in api.instances()]
+              and "web-1" not in [i["name"] for i in api.instances()], why)
+        why = raises(api.terminate, other, kind=AdapterError) if prov == "vultr" else None
+        if prov == "vultr":
+            check(f"{label}: ...and never deleted by id", why and other in h.servers)
+        del h.servers[int(other) if prov != "vultr" else other]
+        # Lists that lag behind (DigitalOcean's, found live): delete still goes by the ids recorded.
+        h.lag = True
+        s.delete("box")
+        h.lag = False
+        check(f"{label}: delete: the server, its firewall and its key gone, by the ids recorded (even while the "
+              "provider's lists lag behind)", not h.servers and not h.fws and not h.keys, (h.servers, h.fws, h.keys))
+        check(f"{label}: status after delete: absent", s.status("box")["state"] == "absent")
+        # Reads retried on throttling; a create never.
+        h2 = StandInREST(prov)
+        api2 = vps_api(prov, h2)
+        path = {"hetzner": "servers", "digitalocean": "droplets", "vultr": "instances"}[prov]
+        h2.fail[("GET", path)] = [429, 503]
+        check(f"{label}: a read throttled (429) or failing in passing (503) is tried again", api2.instances() == []
+              and sum(1 for c in h2.calls if c[0] == "GET" and c[1] == path) == 3)
+        h2.fail[("POST", path)] = [503]
+        why = raises(cls(api=api2).create, "two", user_data="x", public_key=KEY, kind=AdapterError)
+        check(f"{label}: a create that fails (503) is never tried again: a retry after a lost answer could make a second "
+              "server", why and sum(1 for c in h2.calls if c[0] == "POST" and c[1] == path) == 1 and not h2.servers, why)
+        # Credentials and what's said.
+        why = raises(cls.API, {}, h2, kind=AdapterError)
+        check(f"{label}: credentials only from the environment: a missing token is named ({VPS_ENV[prov]}), never shown",
+              why and VPS_ENV[prov] in why)
+        why = raises(cls.API, {VPS_ENV[prov]: SYNTH_TOKEN}, None, kind=AdapterError)
+        check(f"{label}: no HTTP transport given: refused (nothing reaches the network on its own)", why is not None)
+        h3 = StandInREST(prov)
+        h3.deny_create = (403, "forbidden", "SYNTHETIC: not allowed to make that")
+        why = raises(cls(api=vps_api(prov, h3)).create, "three", user_data="x", public_key=KEY, kind=AdapterError)
+        check(f"{label}: the provider's refusal is said in its own words, without the token",
+              why and "not allowed to make that" in why and SYNTH_TOKEN not in why and SYNTH_TOKEN not in repr(vps_api(prov, h3)),
+              why)
+        check(f"{label}: the manifest: stop-start, a disk that keeps everything, no snapshots, its own firewall in the "
+              "guest", cls.manifest["sleep_wake"]["kind"] == "stop-start" and cloud.capabilities.choose_persist(cls.manifest)
+              == "disk" and cls.manifest["snapshots"] is None and cls.manifest["egress"]["model"] == "guest-firewall")
+        check(f"{label}: its billing truth: a stopped server bills in full, the guest powering off saves nothing, and its "
+              "rate is the same awake and stopped", cls.manifest["billing"]["stopped"] == "full"
+              and cls.manifest["billing"]["guest_poweroff"] == "nothing" and "only deleting it" in cls.manifest["billing"]["note"]
+              and a.rates()["awake_per_hour"] == a.rates()["asleep_per_hour"] > 0)
+        check(f"{label}: the metadata service is never claimed as refused outside", cls.manifest["outside_egress"]["metadata"] is False)
+        for size in cls.SIZES:
+            rr = a.rates(size)
+            check(f"{label}: rates {size}: a number, the list price's date and the billing truth said",
+                  rr["awake_per_hour"] > 0 and "2026-11-23" in rr["note"] and "only deleting it" in rr["note"], rr)
+    # Hetzner: its own details.
+    from cloud import hetzner, vultr
+    rs = hetzner.rules("internet")
+    check("Hetzner Cloud: at most 100 addresses in one rule (its limit, found live), the 103 public blocks in two rules "
+          "per protocol, read back as one", all(len(x.get("destination_ips") or []) <= 100 for x in rs)
+          and sum(1 for x in rs if x["direction"] == "out") == 6
+          and vps.egress_from([hetzner.normal(x) for x in rs], off=[hetzner.normal(hetzner.OFF_RULE)]) == "internet")
+    check("Hetzner Cloud: EGRESS=off is one outbound rule that reaches no one (with none, Hetzner lets everything out): "
+          "none at all reads back as not what metacomputer set",
+          vps.egress_from([hetzner.normal(x) for x in hetzner.rules("off")], off=[hetzner.normal(hetzner.OFF_RULE)]) == "off"
+          and vps.egress_from([], off=[hetzner.normal(hetzner.OFF_RULE)]) == "other"
+          and hetzner.OFF_RULE["destination_ips"] == ["192.0.2.1/32"])
+    h = StandInREST("hetzner")
+    api = vps_api("hetzner", h)
+    k1, new1 = api.make_key("box", "ab" * 16, KEY)
+    k2, new2 = api.make_key("box", "cd" * 16, KEY)
+    check("Hetzner Cloud: the same key already there for this computer (a clean-up that didn't finish) is used, not "
+          "made again, and not recorded as this build's", k1 == k2 and new1 and not new2)
+    h.keys[int(k1)]["labels"] = {"metacomputer": "elsewhere"}
+    check("...one that's another computer's: refused", raises(api.make_key, "box", "ef" * 16, KEY, kind=AdapterError))
+    # Vultr: the address its key doesn't accept, said plainly.
+    h = StandInREST("vultr")
+    h.deny_ip = "198.51.100.23"
+    why = raises(vps_api("vultr", h).instances, kind=AdapterError)
+    check("Vultr: 'Unauthorized IP address': says which address to add (/32) and where (the key's access control)",
+          why and "198.51.100.23/32" in why and "Access Control" in why and SYNTH_TOKEN not in why, why)
+    h = StandInREST("vultr")
+    h.deny_create = (403, "", "Unauthorized: missing permission compute.instance.create")
+    why = raises(cloud.ADAPTERS["vultr"](api=vps_api("vultr", h)).create, "box", user_data="x", public_key=KEY,
+                 kind=AdapterError)
+    check("Vultr: a permission its policy lacks: Vultr's own words for it, and which call it was (nothing guessed)",
+          why and "missing permission compute.instance.create" in why and "POST /instances" in why, why)
+    h = StandInREST("vultr")
+    r = cloud.ADAPTERS["vultr"](api=vps_api("vultr", h)).create("box", user_data="x", public_key=KEY, op="ab" * 16)
+    check("Vultr: the root password it returns is never kept or shown (bootstrap.sh locks it)",
+          "SYNTHETIC-ROOT-PASSWORD" not in json.dumps(r))
+    check("Vultr: its firewall group has its SSH rules before the instance is made (a group with no rule isn't "
+          "enforced)", [c[1] for c in h.calls if c[0] == "POST"].index("instances")
+          > max(i for i, c in enumerate(c[1] for c in h.calls if c[0] == "POST") if c.endswith("/rules")))
+    check("Vultr: x86 only, no Arm size offered", all(v[0] == "x86_64" for v in vultr.SIZES.values()))
+    # The HTTP transport: only the providers' API hosts, over https, and no redirect followed.
+    import provider_http
+    for url in ("http://api.hetzner.cloud/v1/servers", "https://example.com/v1/servers", "https://api.vultr.com.evil/x"):
+        check(f"provider_http refuses {url.split('/')[2]} over {url.split(':')[0]}", isinstance(
+            _err(provider_http.send, "GET", url, {}, None, 5), OSError))
+    check("provider_http never follows a redirect (it would carry the token elsewhere)",
+          provider_http._NoRedirect().redirect_request(None, None, 302, "", {}, "https://elsewhere/") is None)
+    apt_mirror_rewrite()
+    prov_sh = open(os.path.join(LAB, "provisioning", "guest", "provision.sh")).read()
+    i_off = prov_sh.find('if [ "${MCOMP_TARGET:-}" = remote ]; then\n  # A VM reached over the internet: cloud-init off before the reboot')
+    check("provision.sh on a computer elsewhere: cloud-init off before the reboot into the desktop (its datasource may "
+          "need the metadata service, which the firewall refuses: Vultr's fell back to none and made new host keys)",
+          0 < i_off < prov_sh.index('date -Is > "$STATE/provisioned"')
+          and "touch /etc/cloud/cloud-init.disabled" in prov_sh[i_off:i_off + 600])
+    bootstrap = open(os.path.join(LAB, "provisioning", "remote", "bootstrap.sh")).read()
+    check("bootstrap.sh on a provider's computer: root's key (the provider's first-boot one) removed and its password "
+          "locked (Vultr sets one); your own server's root left alone",
+          'if [ -z "$OWNER" ]; then\n  rm -f /root/.ssh/authorized_keys /root/.ssh/authorized_keys2\n  passwd -l root' in bootstrap)
+
+
+def apt_mirror_rewrite():
+    """provision.sh's apt sources on a provider's computer: a mirror that resolves to a private address (DigitalOcean's
+    mirrors.digitalocean.com, inside DigitalOcean: found live) is replaced by Ubuntu's archive (ports for arm64); a
+    public source is left; your own server's sources are left alone (the call is only for a computer with no owner).
+    It runs before anything uses apt, once DNS works (on DigitalOcean the resolver is let through after SSH answers).
+    The block runs in a sandbox, with getent and dpkg stand-ins."""
+    src = open(os.path.join(LAB, "provisioning", "guest", "provision.sh")).read()
+    guard = 'if [ "$TARGET" = remote ] && [ ! -s /etc/metacomputer/owner ]; then'
+    blk = src[src.index("is_private4() {"):src.index(guard)]
+    td = tempfile.mkdtemp(prefix="mcapt-")
+    try:
+        results = {}
+        for arch in ("amd64", "arm64"):
+            d = os.path.join(td, arch)
+            os.makedirs(os.path.join(d, "etc", "apt", "sources.list.d"))
+            f = os.path.join(d, "etc", "apt", "sources.list.d", "ubuntu.sources")
+            with open(f, "w") as fh:
+                fh.write("Types: deb\nURIs: http://mirrors.example-cloud.test/ubuntu/\nSuites: noble noble-updates\n\n"
+                         "Types: deb\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: noble-security\n\n"
+                         "Types: deb\nURIs: http://gone.example-cloud.test/x/\nSuites: noble\n")
+            with open(os.path.join(d, "etc", "apt", "sources.list"), "w") as fh:   # Ubuntu 24.04's: a comment only
+                fh.write("# Ubuntu sources have moved to /etc/apt/sources.list.d/ubuntu.sources\n")
+            trapped = os.path.join(d, "trapped")
+            # As provision.sh runs it: set -E and an ERR trap that marks the setup failed (found live: a grep with no
+            # match inside $(...) ran it there, and the setup was marked failed with no message).
+            script = (f'set -Eeuo pipefail\ntrap \'echo trapped >> {trapped}\' ERR\ndpkg() {{ echo {arch}; }}\n'
+                      'getent() { case "$2" in mirrors.example-cloud.test) echo "10.0.0.2 STREAM";; '
+                      'gone.example-cloud.test) return 2;; *) echo "203.0.113.20 STREAM";; esac; }\n'
+                      'sed() { if [ "$1" = -i ]; then shift; f="${@: -1}"; /usr/bin/sed "$@" > "$f.new" && mv "$f.new" "$f"; '
+                      'else /usr/bin/sed "$@"; fi; }\n' + blk.replace("/etc/apt/", os.path.join(d, "etc", "apt") + "/")
+                      + "\napt_public_mirror\n")
+            r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=60)
+            results[arch] = (r.returncode, open(f).read(), r.stderr[-200:], os.path.exists(trapped))
+        amd, arm = results["amd64"], results["arm64"]
+        i_guard, i_apt = src.index(guard), src.index('"${APT[@]}" purge snapd')
+        check("provision.sh: a provider's apt mirror on its private network is replaced by Ubuntu's archive (ports for "
+              "arm64), a public source left, before the first apt call; only on a computer with no owner (your own "
+              "server's sources are yours)",
+              amd[0] == 0 and "URIs: http://archive.ubuntu.com/ubuntu/" in amd[1] and "security.ubuntu.com" in amd[1]
+              and "mirrors.example-cloud" not in amd[1] and "URIs: http://gone.example-cloud.test/x/" in amd[1]
+              and "URIs: http://ports.ubuntu.com/ubuntu-ports/" in arm[1]
+              and i_guard < i_apt and "apt_public_mirror" in src[i_guard:i_guard + 200], results)
+        check("provision.sh: ...under its own set -E and ERR trap, a source file with no URL (Ubuntu 24.04's sources.list) "
+              "and a host that doesn't resolve never run the trap (found live: they marked the setup failed)",
+              not amd[3] and not arm[3] and amd[0] == 0, results)
+        boot = open(os.path.join(LAB, "provisioning", "remote", "bootstrap.sh")).read()
+        check("...not in bootstrap.sh any more: at first boot a DigitalOcean computer can't resolve names yet (its "
+              "resolver is let through once the setup reads it)", "apt_public_mirror" not in boot and "is_private4" not in boot)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+AUDIT_GUARD = None    # a harness may run each part on its own (one part's crash doesn't hide the rest)
+
+
+def audit_fixes():
+    """The audit's seven findings (2026-11-23), each against the stand-ins: F1 a launch reconciled by its journaled ids
+    (read one by one), never by an empty listing, and one with no answer left unresolved; F2 tested in vps_drivers and
+    vps_journal; F3 DigitalOcean's DNS to the resolver's exact address only; F4 a firewall claimed only by this
+    operation's own create; F5 its id journaled before anything configures it; F6 provider errors scrubbed of
+    credentials; F7 DigitalOcean's vpc:read checked before anything is made, and named by cloud doctor."""
+    print("\nthe audit's findings (F1-F7), on the stand-ins")
+    import contextlib
+    import remote as remote_mod
+    rd = tempfile.mkdtemp(prefix="mcaudit-")
+    old = (remote_mod.user_data, remote_mod.mac_lock, remote_mod.LOST_LAUNCH_GAP_S if hasattr(remote_mod,
+           "LOST_LAUNCH_GAP_S") else None)
+    try:
+        os.environ["MCOMP_LOCK_DIR"] = os.path.join(rd, "locks")
+        remote_mod.user_data = lambda s: "#cloud-config\n"
+        if hasattr(remote_mod, "LOST_LAUNCH_GAP_S"):
+            remote_mod.LOST_LAUNCH_GAP_S = 0
+        create_path = {"hetzner": "servers", "digitalocean": "droplets", "vultr": "instances"}
+        n = [0]
+
+        def box(prov):
+            n[0] += 1
+            d = os.path.join(rd, f"{prov}-{n[0]}")
+            os.makedirs(d)
+            with open(os.path.join(d, "admin.pub"), "w") as f:
+                f.write(KEY + "\n")
+            h = StandInREST(prov)
+            api = vps_api(prov, h)
+            remote_mod.API_FACTORY = lambda: api
+            return h, api, {"VM_NAME": "box", "PLACE": prov, "PROVIDER": prov, "EGRESS": "internet", "RUN_DIR": d,
+                            "SSH_DIR": d}
+
+        def args(**k):
+            return type("A", (), dict({"op": None, "keep": False, "network_too": False}, **k))()
+        parts = []
+
+        def part_f2():
+            # F2: Vultr's stop, asked, with the guest's SSH silent and Vultr's own state still running: never halted.
+            h, api, st0 = box("vultr")
+            remote_mod.cmd_create(st0, args(op="c9" * 16))
+            srv = next(iter(h.servers.values()))
+            real_up, real_time = remote_mod.guest_up, remote_mod.time
+            clock = [0.0]
+            remote_mod.guest_up = lambda s_, st_, tries=3, wait=5.0: False
+            remote_mod.time = type("T", (), {"monotonic": staticmethod(lambda: clock[0]), "time": staticmethod(real_time.time),
+                                             "sleep": staticmethod(lambda x: clock.__setitem__(0, clock[0] + x))})
+            h.calls.clear()
+            try:
+                why = raises(remote_mod.cmd_sleep, st0, type("A", (), {"force": False, "asked": True})(), kind=Exception)
+            finally:
+                remote_mod.guest_up, remote_mod.time = real_up, real_time
+            halts = [c for c in h.calls if c[0] == "POST" and c[1].endswith("/halt")]
+            check("Vultr (F2): stop, the guest asked, its SSH silent, Vultr's own state still running: no halt is sent; "
+                  "it says the guest may still be on and billing, stop --force being the explicit choice",
+                  not halts and srv["power_status"] == "running" and why and "may still be on" in why
+                  and "stop --force" in why, (halts, why))
+        parts.append(part_f2)
+
+        def part_f1_f4():
+            for prov in ("hetzner", "digitalocean", "vultr"):
+                label = cloud.ADAPTERS[prov].manifest["label"]
+                # F1: the create reaches the provider, its answer is lost, and the listing lags behind.
+                h, api, st0 = box(prov)
+                h.lose_answer.add(("POST", create_path[prov]))
+                h.lag_once.update({create_path[prov]} if False else set())
+                real_instances = api.instances
+                api.instances = lambda tag_value=None, op=None: []          # the listing lags behind, throughout
+                op = "a1" * 16
+                raises(remote_mod.cmd_create, st0, args(op=op), kind=Exception)
+                rc = remote_mod.cmd_abort(st0, args(op=op))
+                j = remote_mod.read_state(st0["RUN_DIR"])
+                check(f"{label} (F1): a create whose answer was lost while the listing lags: the clean-up never says nothing "
+                      "is left: it fails (exit 3) and keeps the journal; the server and its firewall are left for it",
+                      rc == 3 and j.get("launching") == op and j.get("launch_state") == "sent" and len(h.servers) == 1
+                      and len(h.fws) == 1, (rc, j, len(h.servers)))
+                why = raises(remote_mod.cmd_create, st0, args(op="b2" * 16), kind=remote_mod.Refused)
+                check(f"{label} (F1): ...and a new create under that name is refused until it's resolved (no second "
+                      "server), saying how to check", why and "cloud status" in why and len(h.servers) == 1, why)
+                api.instances = real_instances                               # the listing catches up
+                rc = remote_mod.cmd_abort(st0, args(op=op))
+                j = remote_mod.read_state(st0["RUN_DIR"])
+                check(f"{label} (F1): ...once it shows (by its mark), the clean-up deletes it, its firewall and key, and "
+                      "the journal is closed", rc == 0 and not h.servers and not h.fws and not h.keys
+                      and "launching" not in j, (rc, j, h.servers, h.fws, h.keys))
+                # F1: an instance recorded by id, while the listing lags: deleted by its id (and --keep keeps it).
+                h, api, st0 = box(prov)
+                remote_mod.cmd_create(st0, args(op="c3" * 16))
+                api.instances = lambda tag_value=None, op=None: []
+                rc = remote_mod.cmd_abort(st0, args(op="c3" * 16, keep=True))
+                srv = next(iter(h.servers.values()))
+                off = srv.get("status") == "off" or srv.get("power_status") == "stopped"
+                check(f"{label} (F1): --keep-on-failure with the listing lagging: the journaled instance is kept and "
+                      "powered off by its id", rc == 0 and off and remote_mod.read_state(st0["RUN_DIR"]).get("kept"), (rc, srv))
+                rc = remote_mod.cmd_abort(st0, args(op="c3" * 16))
+                check(f"{label} (F1): ...and the clean-up deletes it by its id, though the listing shows nothing",
+                      rc == 0 and not h.servers and not h.fws and not h.keys, (h.servers, h.fws, h.keys))
+                # F4: a firewall of this computer's from another operation exists; the listing misses it once.
+                h, api, st0 = box(prov)
+                theirs = plant_fw(h, prov, "box", "d4" * 16)
+                h.lag_once.add("firewalls")
+                h.fail[("POST", create_path[prov])] = [400]                  # the create is refused: the clean-up runs
+                raises(remote_mod.cmd_create, st0, args(op="e5" * 16), kind=Exception)
+                j = remote_mod.read_state(st0["RUN_DIR"])
+                remote_mod.cmd_abort(st0, args(op="e5" * 16))
+                check(f"{label} (F4): a firewall is claimed only by this operation's own create: another operation's (which "
+                      "a lagging listing hid once) is never recorded as this one's, nor deleted by its clean-up",
+                      j.get("made_nsg") and str(j.get("made_nsg")) != str(theirs) and theirs in h.fws and len(h.fws) == 1,
+                      (j.get("made_nsg"), theirs, list(h.fws)))
+                check(f"{label} (F1): a create the provider refused (a 4xx) is journaled as refused: nothing to look for",
+                      j.get("launch_state") == "refused", j.get("launch_state"))
+        parts.append(part_f1_f4)
+
+        def part_f1_attach():
+            # F1: the instance's id is journaled before anything else is asked of it (DigitalOcean: the firewall attach).
+            h, api, st0 = box("digitalocean")
+            h.fail[("POST", "firewalls/")] = [500]                           # applying the firewall fails...
+            h.fail[("DELETE", "droplets/")] = [500] * 5                      # ...and so does the delete that follows
+            api.instances = lambda tag_value=None, op=None: []
+            raises(remote_mod.cmd_create, st0, args(op="f6" * 16), kind=Exception)
+            j = remote_mod.read_state(st0["RUN_DIR"])
+            rc = remote_mod.cmd_abort(st0, args(op="f6" * 16))
+            check("DigitalOcean (F1): the Droplet's id is journaled the moment its create returns, before the firewall is "
+                  "applied: a failure after that is cleaned up by that id, the listing lagging",
+                  j.get("made_instance") and rc == 0 and not h.servers, (j, rc, h.servers))
+        parts.append(part_f1_attach)
+
+        def part_f5():
+            # F5: a firewall's id is journaled before anything configures it.
+            for prov, knob in (("vultr", lambda h: h.fail.__setitem__(("POST", "firewalls/"), [500])),
+                               ("hetzner", lambda h: setattr(h, "fw_action_error", True))):
+                h, api, st0 = box(prov)
+                knob(h)
+                raises(remote_mod.cmd_create, st0, args(op="a7" * 16), kind=Exception)
+                j = remote_mod.read_state(st0["RUN_DIR"])
+                h.fail.clear()
+                h.fw_action_error = False
+                remote_mod.cmd_abort(st0, args(op="a7" * 16))
+                check(f"{cloud.ADAPTERS[prov].manifest['label']} (F5): the firewall's id reaches the journal as soon as its "
+                      "create returns: configuring it fails after (a rule, its actions), and the clean-up deletes it by that "
+                      "id", j.get("made_nsg") and not h.fws and not h.servers, (j.get("made_nsg"), list(h.fws)))
+        parts.append(part_f5)
+
+        def part_f6():
+            # F6: what a provider says is scrubbed of credentials before anything prints it.
+            shaped = "dop_v1_" + "0123456789abcdef" * 4
+            for prov in ("hetzner", "digitalocean", "vultr"):
+                label = cloud.ADAPTERS[prov].manifest["label"]
+                body = {"hetzner": {"error": {"code": SYNTH_TOKEN, "message": f"bad token {SYNTH_TOKEN} {shaped}"}},
+                        "digitalocean": {"id": "unauthorized", "message": f"bad token Bearer {SYNTH_TOKEN} {shaped}"},
+                        "vultr": {"error": f"bad token {SYNTH_TOKEN} {shaped}", "status": 403}}[prov]
+                h = StandInREST(prov)
+                h.reflect = json.dumps(body).encode()
+                why = raises(cloud.ADAPTERS[prov](api=vps_api(prov, h)).create, "box", user_data="x", public_key=KEY,
+                             kind=AdapterError)
+                check(f"{label} (F6): an error that reflects the token (or anything credential-shaped) is printed without "
+                      "it", why and SYNTH_TOKEN not in why and shaped not in why and "[redacted]" in why, why)
+                h2 = StandInREST(prov)
+                api2 = vps_api(prov, h2)
+
+                def reset(*a, **k):
+                    raise OSError(f"proxy said: Authorization: Bearer {SYNTH_TOKEN}")
+                api2._http = reset
+                why = raises(api2.instances, kind=AdapterError)
+                check(f"{label} (F6): ...and a connection error that carries it too", why and SYNTH_TOKEN not in why, why)
+            h = StandInREST("vultr")
+            h.reflect = f"<html>proxy page {SYNTH_TOKEN}</html>".encode()
+            why = raises(cloud.ADAPTERS["vultr"](api=vps_api("vultr", h)).create, "box", user_data="x", public_key=KEY,
+                         kind=AdapterError)
+            check("Vultr (F6): an answer that isn't its error format is never echoed raw", why and SYNTH_TOKEN not in why
+                  and "proxy page" not in why, why)
+        parts.append(part_f6)
+
+        def part_f7():
+            # F7: DigitalOcean's vpc:read, checked before anything is made, and named by cloud doctor.
+            h = StandInREST("digitalocean")
+            h.deny_paths.add("vpcs")
+            a = cloud.ADAPTERS["digitalocean"](api=vps_api("digitalocean", h))
+            why = raises(a.create, "box", user_data="x", public_key=KEY, kind=AdapterError)
+            check("DigitalOcean (F7): a token without vpc:read: refused before anything is made, naming the scope",
+                  why and "vpc:read" in why and not [c for c in h.calls if c[0] == "POST"], (why, h.calls[-3:]))
+            d = {c["check"]: c for c in a.doctor()}
+            check("DigitalOcean (F7): cloud doctor names the missing scope", "token scope vpc:read" in d
+                  and not d["token scope vpc:read"]["ok"] and "vpc:read" in d["token scope vpc:read"]["detail"]
+                  and d.get("token scope droplet:read", {}).get("ok"), list(d))
+            doc = open(os.path.join(LAB, "docs", "remote.md")).read()
+            check("docs (F7): the scopes a DigitalOcean token needs include vpc:read",
+                  "`vpc:read`" in next((ln for ln in doc.splitlines() if ln.startswith("| DigitalOcean | `DIGITALOCEAN_TOKEN`")), ""))
+        parts.append(part_f7)
+
+        def part_f3():
+            # F3: DigitalOcean's DNS to the resolver's exact addresses only, checked against the Droplet's VPC.
+            from cloud import digitalocean as dom
+            h, api, st0 = box("digitalocean")
+            remote_mod.cmd_create(st0, args(op="b8" * 16))
+            j = remote_mod.read_state(st0["RUN_DIR"])
+            pre = api.nsg_rules(j["nsg"])
+            check("DigitalOcean (F3): as made, its firewall lets nothing private through on port 53 (the whole VPC range "
+                  "was)", not [x for x in pre if x["ports"] == "53"], [x for x in pre if x["ports"] == "53"])
+            wide = [x for x in pre if x["ports"] != "53"] + [{"direction": "out", "protocol": p, "ports": "53",
+                                                             "addresses": ("10.0.0.0/8",)} for p in ("tcp", "udp")]
+            check("DigitalOcean (F3): port 53 to a whole private range reads back as not what metacomputer set (it read "
+                  "as internet)", api.egress_of(wide) == "other", wide[-2:])
+            def R(**k):
+                return type("A", (), dict({"set": [], "first_boot": False, "pinned": False}, **k))()
+            # At first boot, an address the Droplet names that isn't DigitalOcean's own resolver for its VPC, one outside
+            # the VPC, or something that isn't an address: refused, nothing pinned.
+            why = raises(remote_mod.cmd_resolvers, st0, R(set=["10.10.0.99"], first_boot=True), kind=AdapterError)
+            check("DigitalOcean (F3, re-check): another host on the Droplet's own VPC, named by the guest: refused (only "
+                  "DigitalOcean's resolver for that VPC, its resolver_ip, is let through)", why and "resolver" in why
+                  and remote_mod.read_state(st0["RUN_DIR"]).get("resolvers") is None, why)
+            why = raises(remote_mod.cmd_resolvers, st0, R(set=["10.99.0.1"], first_boot=True), kind=AdapterError)
+            check("DigitalOcean (F3): an address outside the Droplet's own VPC: refused", why and "VPC" in why, why)
+            why = raises(remote_mod.cmd_resolvers, st0, R(set=["not-an-address"], first_boot=True), kind=AdapterError)
+            check("DigitalOcean (F3): something that isn't an address: refused", why is not None, why)
+            rc = remote_mod.cmd_resolvers(st0, R(set=["10.10.15.254", "203.0.113.53"], first_boot=True))
+            j = remote_mod.read_state(st0["RUN_DIR"])
+            fw = h.fws[j["nsg"]]
+            dns = [x for x in fw["outbound_rules"] if x.get("ports") == "53"]
+            check("DigitalOcean (F3): DNS let through to exactly the private resolver the Droplet names (/32, port 53, TCP "
+                  "and UDP), recorded; its public one needs nothing; nothing else on its private network",
+                  rc == 0 and j.get("resolvers") == ["10.10.15.254/32"] and sorted(x["protocol"] for x in dns) == ["tcp", "udp"]
+                  and all(x["destinations"]["addresses"] == ["10.10.15.254/32"] for x in dns), (j.get("resolvers"), dns))
+            why = raises(remote_mod.cmd_resolvers, st0, R(set=["10.10.15.254"], first_boot=True), kind=remote_mod.Refused)
+            check("DigitalOcean (F3, re-check): pinned at first boot, the resolver is never read from the computer "
+                  "again (a second --first-boot is refused)", why and "pinned" in why, why)
+            s_ = cloud.ADAPTERS["digitalocean"](api=api, computers={"box": {"VM_NAME": "box", "PROVIDER": "digitalocean"}},
+                                                states={"box": remote_mod.read_state(st0["RUN_DIR"])})
+            s_.apply_egress("box", "off")
+            s_.apply_egress("box", "internet")
+            dns = [x for x in h.fws[j["nsg"]]["outbound_rules"] if x.get("ports") == "53"]
+            check("DigitalOcean (F3): net egress off then internet keeps exactly the recorded resolver",
+                  s_.egress("box")["outside"] == "internet" and all(x["destinations"]["addresses"] == ["10.10.15.254/32"]
+                                                                    for x in dns) and len(dns) == 2, dns)
+            rules = api.nsg_rules(j["nsg"])
+            wide = [dict(x, addresses=("10.0.0.0/8",)) if x["ports"] == "53" else x for x in rules]
+            other = [dict(x, addresses=("10.10.0.9/32",)) if x["ports"] == "53" else x for x in rules]
+            check("DigitalOcean (F3): read back, DNS to a wider private range, or to another address than the recorded "
+                  "resolver, is not what metacomputer set", api.egress_of(wide, resolvers=["10.10.15.254/32"]) == "other"
+                  and api.egress_of(other, resolvers=["10.10.15.254/32"]) == "other" and api.egress_of(wide) == "other"
+                  and api.egress_of(rules, resolvers=["10.10.15.254/32"]) == "internet" and dom.resolver_host("10.0.0.0/8") is None)
+            plan = subprocess.run([PY, os.path.join(LAB, "lib", "remote.py"), "missing", "--provider", "digitalocean",
+                                   "--feature", "reset"], capture_output=True, text=True)
+            rb = open(os.path.join(LAB, "scripts", "remote-build.sh")).read()
+            at = rb.index('if [ "$(plan resolvers)" = yes ]; then')
+            blk = rb[at:rb.index('ARCH_SEEN="$(gssh admin', at)]
+            check("the build reads the resolver from a new computer once, at its first boot (before the setup's downloads),"
+                  " and a computer set up again uses the pinned one, never read from it again",
+                  "/run/systemd/resolve/resolv.conf" in blk and 'remote_py resolvers --vm "$VM_NAME" --first-boot --set $res' in blk
+                  and 'remote_py resolvers --vm "$VM_NAME" --pinned' in blk
+                  and blk.index('if [ "$STATE_HAS_INSTANCE" = 0 ]; then') < blk.index("resolv.conf") < blk.index("else")
+                  and rb.index("remote_py resolvers") < rb.index('"$(dirname "$0")/fetch-artifacts.sh" remote'), plan.stderr)
+        parts.append(part_f3)
+
+        def part_recheck_delete():
+            # Re-check P1: vm delete of a computer whose launch is unresolved never forgets it.
+            import contextlib as _cl
+            import io
+            udir = os.path.join(rd, "unresolved")
+            os.makedirs(udir, exist_ok=True)
+            real_dir = getattr(remote_mod, "unresolved_dir", None)
+            remote_mod.unresolved_dir = lambda: udir
+            try:
+                for prov in ("hetzner", "digitalocean", "vultr"):
+                    label = cloud.ADAPTERS[prov].manifest["label"]
+                    h, api, st0 = box(prov)
+                    h.lose_answer.add(("POST", create_path[prov]))
+                    real_list = api.instances
+                    api.instances = lambda tag_value=None, op=None: []
+                    op = "d0" * 16
+                    raises(remote_mod.cmd_create, st0, args(op=op), kind=Exception)
+                    remote_mod.cmd_abort(st0, args(op=op))
+                    why = raises(remote_mod.cmd_delete, st0, args(network_too=True, checked_provider=False),
+                                 kind=remote_mod.Refused)
+                    j = remote_mod.read_state(st0["RUN_DIR"])
+                    check(f"{label} (re-check P1): vm delete with the launch unresolved: refused, the journal kept, the "
+                          "server left, and it says exactly where to look and how to go on once you've looked",
+                          why and "--checked-provider" in why and "curl" in why and op in why and j.get("launching") == op
+                          and len(h.servers) == 1, (why, j))
+                    rc = remote_mod.cmd_delete(st0, args(network_too=True, checked_provider=True))
+                    left = [e for e in remote_mod.unresolved_launches() if e.get("op") == op]
+                    out = io.StringIO()
+                    with _cl.redirect_stdout(out):
+                        remote_mod.cmd_cloud(type("A", (), {"provider": prov, "action": "status", "json": True,
+                                                            "forget": None})())
+                    shown = json.loads(out.getvalue()).get("unresolved_launches") or []
+                    check(f"{label} (re-check P1): ...with --checked-provider: the rest is deleted, and the operation stays "
+                          "recorded where cloud status shows it, with the console and API lookup",
+                          rc == 0 and len(left) == 1 and left[0]["computer"] == "box" and "curl" in left[0]["look"]
+                          and [e.get("op") for e in shown] == [op] and len(h.servers) == 1, (left, shown))
+                    check(f"{label} (re-check P1): ...and the firewall and key a server that may exist would be using are "
+                          "kept for it", len(h.fws) == 1 and len(h.keys) == 1, (list(h.fws), list(h.keys)))
+                    api.instances = real_list                     # the listing catches up: teardown settles it
+                    out = io.StringIO()
+                    with _cl.redirect_stdout(out):
+                        remote_mod.cmd_cloud(type("A", (), {"provider": prov, "action": "teardown", "json": True,
+                                                            "forget": None})())
+                    res = json.loads(out.getvalue())
+                    check(f"{label} (re-check P1): ...and cloud teardown deletes what shows under its mark, then drops it",
+                          not h.servers and not h.fws and not h.keys and res.get("unresolved_settled") == [op]
+                          and not [e for e in remote_mod.unresolved_launches() if e.get("op") == op], res)
+            finally:
+                if real_dir is not None:
+                    remote_mod.unresolved_dir = real_dir
+        parts.append(part_recheck_delete)
+
+        def part_recheck_direct_id():
+            # Re-check P2: an instance read by its journaled id must carry this operation's mark too.
+            for prov in ("hetzner", "digitalocean", "vultr"):
+                label = cloud.ADAPTERS[prov].manifest["label"]
+                h, api, st0 = box(prov)
+                op, other = "e1" * 16, "e2" * 16
+                remote_mod.cmd_create(st0, args(op=op))
+                srv = next(iter(h.servers.values()))
+                if prov == "hetzner":
+                    srv["labels"]["metacomputer-op"] = other
+                elif prov == "digitalocean":
+                    srv["name"] = f"mc-{other}-box"
+                else:
+                    srv["label"] = f"mc-{other}-box"
+                h.calls.clear()
+                for keep in (True, False):
+                    why = raises(remote_mod.cmd_abort, st0, args(op=op, keep=keep), kind=Exception)
+                    acts = [c for c in h.calls if c[0] in ("POST", "DELETE")]
+                    j = remote_mod.read_state(st0["RUN_DIR"])
+                    check(f"{label} (re-check P2): the id this operation journaled now names an instance marked for another "
+                          f"operation: {'--keep' if keep else 'the clean-up'} refuses, touches nothing, keeps the record",
+                          why and "another" not in "" and other[:12] in why and not acts and len(h.servers) == 1
+                          and j.get("instance"), (why, acts))
+        parts.append(part_recheck_direct_id)
+
+        def part_recheck_resolver():
+            # Re-check F3: with nothing pinned, a computer set up again gets DigitalOcean's documented resolver for its
+            # VPC (the second-to-last address, when the API's resolver_ip isn't there), never one read from it.
+            h, api, st0 = box("digitalocean")
+            h.vpc_resolver_field = False
+            remote_mod.cmd_create(st0, args(op="e3" * 16))
+            got = io_out = None
+            import contextlib as _cl
+            import io
+            io_out = io.StringIO()
+            with _cl.redirect_stdout(io_out):
+                remote_mod.cmd_resolvers(st0, type("A", (), {"set": [], "first_boot": False, "pinned": True})())
+            got = remote_mod.read_state(st0["RUN_DIR"]).get("resolvers")
+            check("DigitalOcean (re-check F3): --pinned with nothing pinned: DigitalOcean's documented resolver for the "
+                  "Droplet's VPC (its second-to-last address), nothing read from the computer", got == ["10.10.15.254/32"]
+                  and "10.10.15.254/32" in io_out.getvalue(), (got, io_out.getvalue()))
+        parts.append(part_recheck_resolver)
+
+        def part_recheck_action_scrub():
+            # Re-check F6: Hetzner's asynchronous action errors (inside a 200 answer) are scrubbed too.
+            h = StandInREST("hetzner")
+            h.fw_action_error = True
+            h.action_message = f"denied for Bearer {SYNTH_TOKEN} " + "dop_v1_" + "0123456789abcdef" * 4
+            why = raises(cloud.ADAPTERS["hetzner"](api=vps_api("hetzner", h)).create, "box", user_data="x",
+                         public_key=KEY, kind=AdapterError)
+            check("Hetzner Cloud (re-check F6): a failed action's error, which arrives inside a 200 answer, is printed "
+                  "without the token or anything credential-shaped", why and SYNTH_TOKEN not in why
+                  and "0123456789abcdef0123456789abcdef" not in why and "[redacted]" in why, why)
+        parts.append(part_recheck_action_scrub)
+
+        # --- the second re-check (2026-11-23, codex-recheck2.md) ----------------------------------------------------
+        def retag(prov, srv, op, name="box"):
+            # What the provider's record of a server says now: its computer and its operation.
+            if prov == "hetzner":
+                srv["labels"]["metacomputer"], srv["labels"]["metacomputer-op"] = name, op
+            elif prov == "digitalocean":
+                srv["name"] = f"mc-{op}-{name}"
+            else:
+                srv["label"] = f"mc-{op}-{name}"
+
+        def stale_listing(api, rows):
+            # A listing that lags: it shows the rows it showed before, whatever the servers say now.
+            rows = [dict(r) for r in rows]
+            api.instances = lambda tag_value=None, op=None: [dict(r) for r in rows if (tag_value is None or r["name"] ==
+                                                             tag_value) and (op is None or r["op"] == op)]
+
+        def acted(h):
+            return [c for c in h.calls if c[0] in ("POST", "DELETE", "PUT")]
+
+        def teardown(prov, forget=None):
+            import contextlib as _cl
+            import io
+            out = io.StringIO()
+            with _cl.redirect_stdout(out):
+                remote_mod.cmd_cloud(type("A", (), {"provider": prov, "action": "teardown", "json": True,
+                                                    "forget": forget})())
+            return json.loads(out.getvalue())
+
+        def part_recheck2_registry():
+            # Re-check 2, P1: the registry of unresolved launches is changed under one lock, so two changes at once
+            # (two vm deletes --checked-provider; a teardown and a vm delete) never lose each other's entries.
+            udir = os.path.join(rd, "registry")
+            os.makedirs(udir, exist_ok=True)
+            real_dir, real_read = remote_mod.unresolved_dir, remote_mod.read_state
+            remote_mod.unresolved_dir = lambda: udir
+
+            def slow_read(d, name=remote_mod.STATE_FILE):
+                out = real_read(d, name)
+                if name == remote_mod.UNRESOLVED_FILE:
+                    time.sleep(0.3)         # the other change has every chance to come between the read and the write
+                return out
+            try:
+                a = cloud.ADAPTERS["hetzner"](api=vps_api("hetzner", StandInREST("hetzner")))
+                ops = ["f1" * 16, "f2" * 16]
+                remote_mod.read_state = slow_read
+                ts = [threading.Thread(target=remote_mod.remember_unresolved, args=({"VM_NAME": f"box{i}"}, a, op))
+                      for i, op in enumerate(ops)]
+                for t in ts:
+                    t.start()
+                for t in ts:
+                    t.join()
+                remote_mod.read_state = real_read
+                got = sorted(e["op"] for e in remote_mod.unresolved_launches())
+                check("(re-check 2, P1) two vm deletes --checked-provider at once, for two computers: both unresolved "
+                      "launches stay recorded (one lock for the registry)", got == sorted(ops), got)
+                # A teardown settling one launch while a vm delete records another: the one recorded meanwhile stays.
+                h, api, st0 = box("hetzner")
+                op3, op4 = "f3" * 16, "f4" * 16
+                a = cloud.ADAPTERS["hetzner"](api=api)
+                a.create("box", user_data="x", public_key=KEY, op=op3)
+                remote_mod.update_unresolved(lambda e: []) if hasattr(remote_mod, "update_unresolved") else \
+                    remote_mod.write_unresolved([])
+                remote_mod.remember_unresolved(st0, a, op3)
+                real_term = api.terminate
+
+                def term(iid):
+                    remote_mod.remember_unresolved({"VM_NAME": "box4"}, a, op4)     # another vm delete, meanwhile
+                    return real_term(iid)
+                api.terminate = term
+                res = teardown("hetzner")
+                got = [e["op"] for e in remote_mod.unresolved_launches()]
+                check("(re-check 2, P1) a teardown that settles one unresolved launch while another is recorded: the one "
+                      "recorded meanwhile stays, the settled one goes", op4 in got and op3 not in got
+                      and res.get("unresolved_settled") == [op3] and not h.servers, (got, res))
+            finally:
+                remote_mod.unresolved_dir, remote_mod.read_state = real_dir, real_read
+        parts.append(part_recheck2_registry)
+
+        def part_recheck2_owned():
+            # Re-check 2, P2: whatever deletes, stops, starts or forgets a server reads it by its own id first and acts
+            # only if it carries the computer's name and the recorded operation (lib/remote.py owned); a listing's row
+            # is only a candidate. Anything else refuses, acts on nothing, and keeps the record.
+            udir = os.path.join(rd, "registry-owned")
+            os.makedirs(udir, exist_ok=True)
+            real_dir, real_up = remote_mod.unresolved_dir, remote_mod.guest_up
+            remote_mod.unresolved_dir = lambda: udir
+            remote_mod.guest_up = lambda *a, **k: True
+            try:
+                for prov in ("hetzner", "digitalocean", "vultr"):
+                    label = cloud.ADAPTERS[prov].manifest["label"]
+                    # The recorded server, marked now for another operation: vm delete, stop and start refuse.
+                    h, api, st0 = box(prov)
+                    op, other = "a1" * 16, "a2" * 16
+                    remote_mod.cmd_create(st0, args(op=op))
+                    srv = next(iter(h.servers.values()))
+                    retag(prov, srv, other)
+                    h.calls.clear()
+                    whys = [raises(remote_mod.cmd_delete, st0, args(network_too=True, checked_provider=False),
+                                   kind=Exception),
+                            raises(remote_mod.cmd_sleep, st0, type("A", (), {"force": True, "asked": False})(),
+                                   kind=Exception),
+                            raises(remote_mod.cmd_wake, st0, args(), kind=Exception)]
+                    j = remote_mod.read_state(st0["RUN_DIR"])
+                    check(f"{label} (re-check 2, P2): the recorded server, marked now for another operation: vm delete, "
+                          "stop --force and start each refuse, nothing is sent, and the record stays",
+                          all(w and other[:12] in w for w in whys) and not acted(h) and len(h.servers) == 1
+                          and j.get("instance"), (whys, acted(h)))
+                    # A lost launch, and a listing that still shows its mark on a server now marked for another.
+                    h, api, st0 = box(prov)
+                    op, other = "b1" * 16, "b2" * 16
+                    h.lose_answer.add(("POST", create_path[prov]))
+                    raises(remote_mod.cmd_create, st0, args(op=op), kind=Exception)
+                    srv = next(iter(h.servers.values()))
+                    stale = api.instances("box", op=op)
+                    retag(prov, srv, other)
+                    stale_listing(api, stale)
+                    h.calls.clear()
+                    whys = [raises(remote_mod.cmd_abort, st0, args(op=op, keep=k), kind=Exception) for k in (False, True)]
+                    j = remote_mod.read_state(st0["RUN_DIR"])
+                    check(f"{label} (re-check 2, P2): a stale listing shows this operation's mark on a server now marked for "
+                          "another: the clean-up and --keep refuse, touch nothing, keep the journal",
+                          all(w and other[:12] in w for w in whys) and not acted(h) and len(h.servers) == 1
+                          and j.get("launching") == op, (whys, acted(h)))
+                    # An unresolved launch in the registry, and a server under its mark whose computer is now another.
+                    h, api, st0 = box(prov)
+                    op = "c1" * 16
+                    h.lose_answer.add(("POST", create_path[prov]))
+                    raises(remote_mod.cmd_create, st0, args(op=op), kind=Exception)
+                    srv = next(iter(h.servers.values()))
+                    stale = api.instances("box", op=op)
+                    remote_mod.remember_unresolved(st0, cloud.ADAPTERS[prov](api=api), op)
+                    retag(prov, srv, op, name="other")
+                    stale_listing(api, stale)
+                    h.calls.clear()
+                    why = raises(teardown, prov, kind=Exception)
+                    kept = [e["op"] for e in remote_mod.unresolved_launches()]
+                    check(f"{label} (re-check 2, P2): cloud teardown, a server under the launch's mark whose computer is now "
+                          "another: refused, nothing deleted, the launch still recorded",
+                          why and "'other'" in why and not acted(h) and len(h.servers) == 1 and op in kept, (why, acted(h)))
+                    remote_mod.update_unresolved(lambda e: []) if hasattr(remote_mod, "update_unresolved") else \
+                        remote_mod.write_unresolved([])
+                    # A server named for the computer that its record didn't make (another operation's): vm delete refuses.
+                    h, api, st0 = box(prov)
+                    op, other = "d1" * 16, "d2" * 16
+                    remote_mod.cmd_create(st0, args(op=op))
+                    srv = next(iter(h.servers.values()))
+                    twin = json.loads(json.dumps(srv))
+                    twin["id"] = h._id()
+                    retag(prov, twin, other)
+                    h.servers[twin["id"]] = twin
+                    h.calls.clear()
+                    why = raises(remote_mod.cmd_delete, st0, args(network_too=True, checked_provider=False), kind=Exception)
+                    j = remote_mod.read_state(st0["RUN_DIR"])
+                    check(f"{label} (re-check 2, P2): vm delete with a server named for the computer that its record didn't "
+                          "make (another operation's): refused, nothing deleted (its own server neither), the record kept",
+                          why and other[:12] in why and not acted(h) and len(h.servers) == 2 and j.get("instance"),
+                          (why, acted(h)))
+            finally:
+                remote_mod.unresolved_dir, remote_mod.guest_up = real_dir, real_up
+        parts.append(part_recheck2_owned)
+
+        def part_recheck2_plan():
+            # Re-check 2, P2: a plan that can't be read is never taken for "no" (no outside layer, an api soft stop).
+            import re as _re
+            src = open(os.path.join(LAB, "bin", "metacomputer")).read()
+
+            def fn(name):
+                m = _re.search(rf"^{name}\(\) \{{.*?^\}}$", src, _re.S | _re.M)
+                return m.group(0) if m else ""
+            stubs = r'''
+set -u
+die() { echo "DIE: $*" >&2; exit 1; }
+ok() { echo "OK: $*"; }; warn() { echo "WARN: $*" >&2; }; say() { echo "SAY: $*"; }
+owners_check() { :; }; handoff_hold_unless_override() { :; }; expect_guard() { :; }; hub_stop() { :; }
+emit_event() { :; }; vm_running() { return 0; }; remote_made() { return 0; }
+remote_can_ask() { [ "$CREDS" = 1 ]; }
+remote_where() { echo "Hetzner Cloud"; }; remote_cred_names() { echo HCLOUD_TOKEN; }
+remote_py() { echo "remote_py $*" >> "$LOG"; if [ "$1" = plan ]; then echo "metacomputer: no size big" >&2; return 1; fi; return 0; }
+gssh() { echo "gssh $*" >> "$LOG"; echo off; }
+remote_egress_guest() { echo off; }
+browser_set() { echo "browser_set $*" >> "$LOG"; }
+view_tunnel_close() { :; }; vault_disconnect() { :; }; sprite_tunnels_left() { :; }; do_record() { :; }
+PROVIDER=hetzner VM_NAME=box RUN_DIR=/nonexistent-run MC_SETTINGS_LABEL=x EGRESS=internet IDLE_STOP=15
+'''
+            body = "\n".join(fn(n) for n in ("parse_flags", "remote_plan_load", "remote_plan", "remote_billing_words",
+                                              "remote_net_egress", "do_stop_remote"))
+            res = {}
+            for what, creds, call in (("egress", "0", "remote_net_egress off"), ("stop", "1", "do_stop_remote")):
+                log = os.path.join(rd, f"plan-{what}.log")
+                open(log, "w").close()
+                r = subprocess.run(["bash", "-c", stubs + body + "\n" + call], capture_output=True, text=True,
+                                   env=dict(os.environ, LOG=log, CREDS=creds))
+                res[what] = (r.returncode, open(log).read(), r.stderr)
+            rc, log, err = res["egress"]
+            check("(re-check 2, P2) net egress off when the provider's plan can't be read: refused, saying why, and nothing "
+                  "is changed (not the guest's firewall, not the setting)", rc != 0 and "gssh" not in log
+                  and "browser_set" not in log and "nothing was changed" in err, res["egress"])
+            rc, log, err = res["stop"]
+            check("(re-check 2, P2) stop when the plan can't be read: refused before anything is sent (never taken for a "
+                  "provider that asks the guest itself)", rc != 0 and "remote_py sleep" not in log and "gssh" not in log
+                  and "nothing was stopped" in err, res["stop"])
+            rb = open(os.path.join(LAB, "scripts", "remote-build.sh")).read()
+            got = {}
+            if "plan_word() {" in rb:
+                blk = rb[rb.index("plan() {"):rb.index("\n", rb.index('[ -n "$(plan provider)" ]'))]
+                whole = ("kind=made\narch=arm64\nlabel=x\nidle_stop=15\negress=off\noutside=yes\nbilling_stopped=full\n"
+                         "soft_stop=api\nprovider=hetzner\nresolvers=no")
+                for k, p in (("whole", whole), ("no outside", whole.replace("outside=yes\n", "")),
+                             ("unknown word", whole.replace("outside=yes", "outside=maybe"))):
+                    r = subprocess.run(["bash", "-c", 'die() { echo "DIE: $*" >&2; exit 1; }\nVM_NAME=box\nPLAN="$1"\n'
+                                        + blk + "\necho GOES-ON", "-", p], capture_output=True, text=True)
+                    got[k] = "GOES-ON" in r.stdout
+            check("(re-check 2, P2) the build: a plan without a word it decides on (outside), or with one it doesn't know, "
+                  "stops it before anything is made; a whole plan goes on",
+                  got == {"whole": True, "no outside": False, "unknown word": False}, got)
+        parts.append(part_recheck2_plan)
+
+        def part_recheck2_timeout_scrub():
+            # Re-check 2, P2: every exception leaving a provider's facade or adapter is scrubbed in one place: an action
+            # that never ends, whose timeout says which action in the provider's own words, too.
+            h = StandInREST("hetzner")
+            h.fw_action_stuck = f"apply_firewall Bearer {SYNTH_TOKEN} " + "hcloud_" + "abcdef0123456789" * 4
+            why = raises(cloud.ADAPTERS["hetzner"](api=vps_api("hetzner", h)).create, "box", user_data="x",
+                         public_key=KEY, op="7a" * 16, kind=AdapterError)
+            check("Hetzner Cloud (re-check 2, P2): an action that never ends: its timeout is printed without the token or "
+                  "anything credential-shaped", why and "didn't happen" in why and SYNTH_TOKEN not in why
+                  and "abcdef0123456789abcdef0123456789" not in why and "[redacted]" in why, why)
+        parts.append(part_recheck2_timeout_scrub)
+
+        def part_recheck2_user_only():
+            # Re-check 2, P2: cloud teardown (it deletes servers), --forget and vm delete --checked-provider (each says
+            # the person looked at the provider) run only at the user's own terminal.
+            env = {k: v for k, v in os.environ.items() if k not in ("MCOMP_CONFIG", "HCLOUD_TOKEN", "CLAUDECODE")}
+            env["MCOMP_SESSIONS_DIR"] = os.path.join(rd, "sessions")
+            out = {}
+            for k, argv in (("teardown", ["cloud", "teardown", "hetzner"]),
+                            ("forget", ["cloud", "status", "hetzner", "--forget", "0" * 32]),
+                            ("checked", ["vm", "delete", "box", "--checked-provider"])):
+                r = subprocess.run([os.path.join(LAB, "bin", "metacomputer"), *argv], capture_output=True, text=True,
+                                   stdin=subprocess.DEVNULL, env=env, timeout=120)
+                out[k] = (r.returncode, r.stderr[-400:])
+            check("(re-check 2, P2) cloud teardown, --forget and vm delete --checked-provider, run without the user's own "
+                  "terminal: refused, saying to run it there, before anything asks the provider",
+                  all(rc != 0 and "your own terminal" in e and "API token" not in e for rc, e in out.values()), out)
+        parts.append(part_recheck2_user_only)
+
+        def part_recheck2_unpinned_resolver():
+            # Re-check 2, P3: with nothing pinned, DigitalOcean's resolver_ip must lie in the Droplet's own VPC too.
+            h, api, st0 = box("digitalocean")
+            h.vpc_resolver_ip = "10.99.0.53"
+            remote_mod.cmd_create(st0, args(op="e4" * 16))
+            h.calls.clear()
+            why = raises(remote_mod.cmd_resolvers, st0, type("A", (), {"set": [], "first_boot": False,
+                                                                       "pinned": True})(), kind=Exception)
+            j = remote_mod.read_state(st0["RUN_DIR"])
+            check("DigitalOcean (re-check 2, P3): with nothing pinned, a resolver_ip outside the Droplet's own VPC (an "
+                  "inconsistent answer) makes no DNS exception: refused, the firewall unchanged, nothing pinned",
+                  why and "10.99.0.53" in why and not [c for c in h.calls if c[0] == "PUT"] and j.get("resolvers") is None,
+                  (why, acted(h)))
+        parts.append(part_recheck2_unpinned_resolver)
+
+        # --- the third re-check (2026-11-23, codex-recheck3.md) -----------------------------------------------------
+        SECRET = "synthetic-secret-" + "0a1b2c3d" * 4
+        # A multi-line credential shaped like an API key's PEM (synthetic: its lines are made up, its armour says so)
+        PEM = ("-----BEGIN SYNTHETIC TEST CREDENTIAL-----\n" + "c3ludGhldGljLWxpbmUtb25lLWZvci1hLXRlc3Qtb25seQ" + "x" * 18
+               + "\n" + "c3ludGhldGljLWxpbmUtdHdvLWZvci1hLXRlc3Qtb25seQ" + "y" * 18
+               + "\n-----END SYNTHETIC TEST CREDENTIAL-----\n")
+        PEM_LINE = PEM.splitlines()[2]
+
+        def part_recheck3_creds():
+            # Re-check 3, P2: whatever lib/remote.py prints passes no_creds: the top-level handler's OCI ServiceError,
+            # the clean-up's warnings; and what Fly's sprite command says is scrubbed where it becomes a message.
+            import contextlib as _cl
+            import io
+            saved = dict(remote_mod.CREDS)
+            real_cloud, real_api = remote_mod.cmd_cloud, remote_mod.API_FACTORY
+            try:
+                remote_mod.CREDS.clear()
+
+                class ServiceError(Exception):
+                    status, code = 401, "NotAuthenticated"
+                    message = f"the key {PEM_LINE} and {SECRET} weren't accepted"
+
+                def refuse(args):
+                    raise ServiceError("refused")
+                remote_mod.cmd_cloud = refuse
+                err = io.StringIO()
+                env_before = {k: os.environ.get(k) for k in ("OCI_API_KEY_PEM", "HCLOUD_TOKEN")}
+                os.environ["OCI_API_KEY_PEM"], os.environ["HCLOUD_TOKEN"] = PEM, SECRET
+                with _cl.redirect_stderr(err):
+                    rc = remote_mod.main(["cloud", "status", "oci"])
+                for k, v in env_before.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+                said = err.getvalue()
+                check("(re-check 3, P2) the top-level handler's OCI ServiceError: printed without a credential this "
+                      "program was given (a line of the API key's PEM, a token)", rc == 1 and "refused" in said
+                      and PEM_LINE not in said and SECRET not in said and "[redacted]" in said, said)
+                remote_mod.cmd_cloud = real_cloud
+                # The clean-up's warnings: what it couldn't delete, and the network vm delete couldn't.
+
+                class Boom:
+                    def __getattr__(self, n):
+                        def fail(*a, **k):
+                            raise RuntimeError(f"the provider said {SECRET}")
+                        return fail
+                a = type("A", (), {"name": "oci", "manifest": {"label": "Oracle Cloud"}, "api": Boom()})()
+                err = io.StringIO()
+                with _cl.redirect_stderr(err):
+                    remote_mod.delete_op_parts({"VM_NAME": "box"}, {"made_nsg": "nsg-1"}, a, "c3" * 16, [])
+                warned = err.getvalue()
+                api = FakeOCI()
+                d = os.path.join(rd, "oci-creds")
+                os.makedirs(d, exist_ok=True)
+                st0 = {"VM_NAME": "box", "PLACE": "oci", "PROVIDER": "oci", "SIZE": "arm-1x6", "EGRESS": "internet",
+                       "RUN_DIR": d, "SSH_DIR": d}
+                remote_mod.API_FACTORY = lambda: api
+                remote_mod.cmd_create(st0, args(op="c4" * 16))
+
+                def no_network():
+                    raise RuntimeError(f"denied: {SECRET}")
+                api.delete_network = no_network
+                err = io.StringIO()
+                with _cl.redirect_stderr(err):
+                    remote_mod.cmd_delete(st0, args(network_too=True, checked_provider=False))
+                warned += err.getvalue()
+                check("(re-check 3, P2) the clean-up's warnings (what a build made, and the network vm delete couldn't "
+                      "delete) never show a credential this program was given", "wasn't all deleted" in warned
+                      and "network wasn't" in warned and SECRET not in warned and warned.count("[redacted]") >= 2, warned)
+                import spritecli
+                cli = spritecli.SpriteCLI("/usr/bin/false")
+                fly = "FlyV1 fm2_" + "lJPECAAAAAAAAbcdefghij0123456789ABCDEF" * 3
+                cli.run = lambda *a, **k: (1, b"", f"Error: unauthorized for token {fly}\n".encode())
+                why = raises(cli.api, "org", "/v1/sprites", kind=AdapterError)
+                check("(re-check 3, P2) Fly's sprite command's error, which becomes the message: anything credential-"
+                      "shaped in it (its own sign-in, which this program never sees) is replaced",
+                      why and "unauthorized" in why and "lJPECAAAAAAAAbcdefghij0123456789" not in why
+                      and "[redacted]" in why, why)
+            finally:
+                remote_mod.CREDS.clear()
+                remote_mod.CREDS.update(saved)
+                remote_mod.cmd_cloud, remote_mod.API_FACTORY = real_cloud, real_api
+        parts.append(part_recheck3_creds)
+
+        def part_recheck3_egress():
+            # Re-check 3, P2: net egress (and DigitalOcean's resolver exception) change a firewall only when the
+            # recorded instance is still the computer's (owned) and the firewall is the one recorded for it, marked
+            # for this computer and operation.
+            for prov in ("hetzner", "digitalocean"):
+                label = cloud.ADAPTERS[prov].manifest["label"]
+                for what in ("instance", "firewall"):
+                    h, api, st0 = box(prov)
+                    op, other = "e5" * 16, "e6" * 16
+                    remote_mod.cmd_create(st0, args(op=op))
+                    if what == "instance":
+                        retag(prov, next(iter(h.servers.values())), other)
+                    else:
+                        fw = next(iter(h.fws.values()))
+                        if prov == "hetzner":
+                            fw["labels"]["metacomputer-op"] = other
+                        else:
+                            fw["name"] = f"metacomputer-box.{other[:12]}"
+                    h.calls.clear()
+                    whys = [raises(remote_mod.cmd_egress, st0, type("A", (), {"set": "off", "setup": False})(),
+                                   kind=Exception)]
+                    if prov == "digitalocean":
+                        whys.append(raises(remote_mod.cmd_resolvers, st0, type("A", (), {"set": [], "first_boot": False,
+                                                                                         "pinned": True})(),
+                                           kind=Exception))
+                    check(f"{label} (re-check 3, P2): the {what} marked now for another operation: net egress off"
+                          f"{' and the resolver exception' if prov == 'digitalocean' else ''} refuse, and no rule is "
+                          "changed", all(w and other[:12] in w for w in whys) and not acted(h), (whys, acted(h)))
+        parts.append(part_recheck3_egress)
+
+        def part_recheck3_stop_first():
+            # Re-check 3, P2: stop checks the plan (and the credentials) before it touches anything here: the hub and
+            # a recording are left as they were when it refuses.
+            import re as _re
+            src = open(os.path.join(LAB, "bin", "metacomputer")).read()
+
+            def fn(name):
+                m = _re.search(rf"^{name}\(\) \{{.*?^\}}$", src, _re.S | _re.M)
+                return m.group(0) if m else ""
+            run_dir = os.path.join(rd, "stop-first")
+            os.makedirs(run_dir, exist_ok=True)
+            open(os.path.join(run_dir, "manual-recording"), "w").write("r1\n")
+            log = os.path.join(rd, "stop-first.log")
+            open(log, "w").close()
+            stubs = r'''
+set -u
+die() { echo "DIE: $*" >&2; exit 1; }
+ok() { echo "OK: $*"; }; warn() { echo "WARN: $*" >&2; }; say() { echo "SAY: $*"; }
+owners_check() { :; }; handoff_hold_unless_override() { :; }; expect_guard() { :; }
+hub_stop() { echo "hub_stop" >> "$LOG"; }
+do_record() { echo "do_record $*" >> "$LOG"; }
+emit_event() { :; }; vm_running() { return 0; }; remote_made() { return 0; }; remote_can_ask() { return 0; }
+remote_where() { echo "Hetzner Cloud"; }; remote_cred_names() { echo HCLOUD_TOKEN; }
+remote_py() { echo "remote_py $*" >> "$LOG"; if [ "$1" = plan ]; then echo "metacomputer: no size big" >&2; return 1; fi; return 0; }
+gssh() { echo "gssh $*" >> "$LOG"; }
+view_tunnel_close() { :; }; vault_disconnect() { :; }; sprite_tunnels_left() { :; }
+PROVIDER=hetzner VM_NAME=box MC_SETTINGS_LABEL=x EGRESS=internet IDLE_STOP=15
+'''
+            body = "\n".join(fn(n) for n in ("parse_flags", "remote_plan_load", "remote_plan", "remote_billing_words",
+                                              "do_stop_remote"))
+            r = subprocess.run(["bash", "-c", stubs + body + "\ndo_stop_remote"], capture_output=True, text=True,
+                               env=dict(os.environ, LOG=log, RUN_DIR=run_dir))
+            done = open(log).read()
+            check("(re-check 3, P2) stop when the plan can't be read: refused before the hub is stopped or a recording "
+                  "finished, so \"nothing was stopped\" holds", r.returncode != 0 and "hub_stop" not in done
+                  and "do_record" not in done and "remote_py sleep" not in done and "nothing was stopped" in r.stderr,
+                  (r.returncode, done, r.stderr[-300:]))
+        parts.append(part_recheck3_stop_first)
+
+        for part in parts:
+            if AUDIT_GUARD:
+                AUDIT_GUARD(part.__name__, part)
+            else:
+                part()
+    finally:
+        os.environ.pop("MCOMP_LOCK_DIR", None)
+        remote_mod.API_FACTORY = None
+        remote_mod.user_data, remote_mod.mac_lock = old[0], old[1]
+        if old[2] is not None:
+            remote_mod.LOST_LAUNCH_GAP_S = old[2]
+        shutil.rmtree(rd, ignore_errors=True)
+
+
+def vps_journal():
+    """lib/remote.py with an hourly provider: the journal before anything is made, the firewall and key recorded by id
+    under the provider's lock, the failed build's clean-up deleting exactly those, and vm delete."""
+    print("\nlib/remote.py with the hourly providers")
+    import contextlib
+    import remote as remote_mod
+    rd = tempfile.mkdtemp(prefix="mcvps-")
+    old_ud, old_lock = remote_mod.user_data, remote_mod.mac_lock
+    try:
+        os.environ["MCOMP_LOCK_DIR"] = os.path.join(rd, "locks")
+        remote_mod.user_data = lambda s: "#cloud-config\n"
+        for prov in ("hetzner", "digitalocean", "vultr"):
+            label = cloud.ADAPTERS[prov].manifest["label"]
+            d = os.path.join(rd, prov)
+            os.makedirs(d)
+            with open(os.path.join(d, "admin.pub"), "w") as f:
+                f.write(KEY + " mcomp-box-admin\n")
+            settings = {"VM_NAME": "box", "PLACE": prov, "PROVIDER": prov, "EGRESS": "internet", "RUN_DIR": d, "SSH_DIR": d}
+            h = StandInREST(prov)
+            locks = []
+
+            @contextlib.contextmanager
+            def spy(name):
+                locks.append(name)
+                h.locked = lambda: True
+                try:
+                    yield
+                finally:
+                    h.locked = lambda: False
+            remote_mod.mac_lock = spy
+            remote_mod.API_FACTORY = lambda: vps_api(prov, h)
+            seen = []
+            real = h.__class__.__call__
+
+            def watch(method, url, headers, body, timeout, h=h):
+                if method == "POST" and url.endswith(("/v1/servers", "/v2/droplets", "/v2/instances")):
+                    seen.append(remote_mod.read_state(d).get("launching"))
+                return real(h, method, url, headers, body, timeout)
+            h_api = vps_api(prov, watch)
+            remote_mod.API_FACTORY = lambda: h_api
+            op = "a1" * 16
+            remote_mod.cmd_create(settings, type("A", (), {"op": op})())
+            st = remote_mod.read_state(d)
+            check(f"{label}: the journal names the operation before the server is made", seen == [op], seen)
+            check(f"{label}: the record: its server, firewall and key, each by the id this operation made it with, under "
+                  f"the provider's own lock ({prov}-network)", st.get("instance") and st.get("made_nsg") == st.get("nsg")
+                  and st.get("made_key") == st.get("key") and locks == [f"{prov}-network"] and st.get("region"), (st, locks))
+            check(f"{label}: the admin key's public half is the one given for the first boot", any(
+                k.get("public_key", k.get("ssh_key")) == KEY + " mcomp-box-admin" for k in h.keys.values()))
+            # A failed build: abort --op deletes exactly what it made.
+            remote_mod.cmd_abort(settings, type("A", (), {"op": "b2" * 16, "keep": False})())
+            check(f"{label}: abort with another operation's id: nothing deleted", h.servers and h.fws and h.keys)
+            remote_mod.cmd_abort(settings, type("A", (), {"op": op, "keep": True})())
+            srv = next(iter(h.servers.values()))
+            stopped = srv.get("status") == "off" or srv.get("power_status") == "stopped"
+            check(f"{label}: --keep-on-failure: kept, recorded, powered off (the build failed), nothing deleted",
+                  stopped and remote_mod.read_state(d).get("kept") and h.fws and h.keys)
+            remote_mod.cmd_abort(settings, type("A", (), {"op": op, "keep": False})())
+            check(f"{label}: abort of its own operation: its server, its firewall and its key deleted, by id",
+                  not h.servers and not h.fws and not h.keys, (h.servers, h.fws, h.keys))
+            # vm delete of a set-up computer (made again), with the provider's lists lagging.
+            remote_mod.write_state(d, {})
+            remote_mod.cmd_create(settings, type("A", (), {"op": "c3" * 16})())
+            h.lag = True
+            remote_mod.cmd_delete(settings, type("A", (), {"network_too": True})())
+            h.lag = False
+            check(f"{label}: vm delete: nothing of it left at the provider", not h.servers and not h.fws and not h.keys,
+                  (h.servers, h.fws, h.keys))
+            # A listing that still shows a server already deleted (DigitalOcean's lag the other way): asked by id, it's
+            # gone, so vm delete neither refuses nor deletes anything for it.
+            ghost = {"id": "0000270f-0000-4000-8000-00000000270f" if prov == "vultr" else "9999", "name": "box",
+                     "state": "RUNNING", "shape": "x", "ad": "x", "created": "t", "op": "c3" * 16}
+            real_list = h_api.instances
+            h_api.instances = lambda tag_value=None, op=None: [ghost]
+            h.calls.clear()
+            try:
+                rc = remote_mod.cmd_delete(settings, type("A", (), {"network_too": False})())
+            finally:
+                h_api.instances = real_list
+            check(f"{label}: a stale listing of a deleted server: vm delete goes ahead, deletes nothing for it",
+                  rc == 0 and not [c for c in h.calls if c[0] == "DELETE" and ghost["id"] in c[1]], h.calls[-5:])
+            # A firewall left without its server (a build cut off): teardown refuses; then it's deleted.
+            api = h_api
+            api.make_nsg("pending", "internet", op="f" * 32)
+            why = raises(remote_mod.cmd_cloud, type("A", (), {"provider": prov, "action": "teardown", "json": True})(),
+                         kind=remote_mod.Refused)
+            check(f"{label}: cloud teardown while a computer's firewall is there without its server: refused",
+                  why and "being made" in why, why)
+            api.delete_nsg("pending")
+            api.make_key("old", "d4" * 16, KEY + " other")
+            remote_mod.cmd_cloud(type("A", (), {"provider": prov, "action": "teardown", "json": True})())
+            check(f"{label}: ...and once nothing is being made, it deletes first-boot keys left over", not h.keys, h.keys)
+        # Vultr's stop through lib/remote.py: only after the CLI asked the guest, and only once its SSH has gone quiet.
+        d = os.path.join(rd, "vultr-stop")
+        os.makedirs(d)
+        with open(os.path.join(d, "admin.pub"), "w") as f:
+            f.write(KEY + "\n")
+        settings = {"VM_NAME": "box", "PLACE": "vultr", "PROVIDER": "vultr", "EGRESS": "internet", "RUN_DIR": d, "SSH_DIR": d}
+        h = StandInREST("vultr")
+        h_api = vps_api("vultr", h)
+        remote_mod.API_FACTORY = lambda: h_api
+        remote_mod.mac_lock = old_lock
+        remote_mod.cmd_create(settings, type("A", (), {"op": "d4" * 16})())
+        srv = next(iter(h.servers.values()))
+        clock = [0.0]
+        real_time, real_up = remote_mod.time, remote_mod.guest_up
+        remote_mod.time = type("T", (), {"monotonic": staticmethod(lambda: clock[0]), "time": staticmethod(real_time.time),
+                                         "sleep": staticmethod(lambda x: clock.__setitem__(0, clock[0] + x))})
+        answers = []
+        remote_mod.guest_up = lambda s_, st_, tries=3, wait=5.0: answers.pop(0) if answers else False
+        try:
+            why = raises(remote_mod.cmd_sleep, settings, type("A", (), {"force": False, "asked": False})(),
+                         kind=remote_mod.Refused)
+            check("Vultr: lib/remote.py sleep without the CLI having asked the guest: refused, nothing sent",
+                  why and "asks it over SSH" in why and srv["power_status"] == "running", why)
+            h.calls.clear()
+            answers[:] = [False] * 1000                 # its SSH goes quiet (stalled, cut off, or not obeying)
+            why = raises(remote_mod.cmd_sleep, settings, type("A", (), {"force": False, "asked": True})(),
+                         kind=AdapterError)
+            check("Vultr (F2): asked, its SSH silent for minutes, Vultr's own state still running: never halted; "
+                  "says it may still be on and billing (stop --force: the explicit choice)",
+                  why and "may still be on" in why and "billed" in why and "stop --force" in why
+                  and not [c for c in h.calls if c[0] == "POST"] and srv["power_status"] == "running", (why, h.calls[-3:]))
+            h.calls.clear()
+            remote_mod.cmd_sleep(settings, type("A", (), {"force": True, "asked": False})())
+            check("Vultr: stop --force halts it (the user's call)", [c[1] for c in h.calls if c[0] == "POST"][-1:]
+                  == [f"instances/{srv['id']}/halt"] and srv["power_status"] == "stopped", h.calls[-3:])
+        finally:
+            remote_mod.time, remote_mod.guest_up = real_time, real_up
+        cli = open(os.path.join(LAB, "bin", "metacomputer")).read()
+        stop = cli.split("do_stop_remote() {", 1)[1].split("\n}\n", 1)[0]
+        egress = cli.split("remote_net_egress() {", 1)[1].split("\n}\n", 1)[0]
+        egress = egress.split("\n  fi\n", 1)[1] if 'if [ "${PROVIDER:-}" = sprites ]; then' in egress else egress
+        check("stop (CLI): with a provider that has no shutdown call, the guest must answer, is asked over SSH, then "
+              "lib/remote.py sleep --asked; one that doesn't answer is refused, never halted",
+              "gssh admin true >/dev/null 2>&1 || die" in stop and "metacomputer-admin poweroff" in stop
+              and "asked=--asked" in stop and stop.index("gssh admin true") < stop.index("metacomputer-admin poweroff"))
+        check("net egress (CLI): a provider with no outside egress layer (Vultr) changes only the guest's firewall",
+              'if remote_made && [ "$outside" = no ]; then' in egress
+              and egress.index("remote_plan_load") < egress.index("remote_plan outside") < egress.index("remote_py egress"))
+        # The plan the CLI reads.
+        out = subprocess.run([PY, os.path.join(LAB, "lib", "remote.py"), "missing", "--provider", "hetzner",
+                              "--feature", "reset"], capture_output=True, text=True).stdout
+        check("reset on an hourly provider's computer: refused, saying it needs snapshots", "snapshots" in out, out)
+    finally:
+        os.environ.pop("MCOMP_LOCK_DIR", None)
+        remote_mod.API_FACTORY = None
+        remote_mod.user_data, remote_mod.mac_lock = old_ud, old_lock
+        shutil.rmtree(rd, ignore_errors=True)
+
+
 def dhcp_stacks():
     """F6: the DHCP clients of both network stacks get out, in the full rules and in the fallback: systemd-networkd's
     (its own account) and NetworkManager's (root, DHCPv6 to ff02::1:2). Matched by ports and destinations, never by an
@@ -1266,8 +2906,9 @@ def network_race():
     check("create makes the network (and the computer's group, after it) only while holding the network lock",
           api.network_calls and all(api.network_calls) and not held, api.network_calls)
     rsrc = open(os.path.join(LAB, "lib", "remote.py")).read()
-    check("remote.py gives the OCI adapter that lock (its name: oci-network)",
-          'kw["network_lock"] = lambda: mac_lock("oci-network")' in rsrc and "**provider_kw(prov, s))" in rsrc)
+    check("remote.py gives the OCI adapter that lock (its name: oci-network; each provider's own: PROVIDER-network)",
+          'kw["network_lock"] = lambda: network_lock(prov)' in rsrc and 'return mac_lock(f"{prov}-network")' in rsrc
+          and "**provider_kw(prov, s))" in rsrc)
     # A delete with --network-too while another computer's group exists (it's being made): the network stays.
     rd = tempfile.mkdtemp(prefix="mcnet-")
     try:
@@ -1562,7 +3203,8 @@ def review_build_cleanup(c):
             "cmd = sys.argv[2] if len(sys.argv) > 2 else ''",
             "open(%r, 'a').write(' '.join(sys.argv[2:]) + chr(10))" % oplog,
             "if cmd == 'plan':",
-            "    print('kind=made', 'arch=arm64', 'label=Oracle Cloud', 'idle_stop=15', 'egress=internet', sep=chr(10))",
+            "    print('kind=made', 'arch=arm64', 'label=Oracle Cloud', 'idle_stop=15', 'egress=internet', 'outside=yes',"
+            "          'billing_stopped=storage', 'soft_stop=api', 'provider=oci', 'resolvers=no', sep=chr(10))",
             "elif cmd == 'create':",
             "    rd = os.path.join(%r, '.run-vms', 'arm1')" % b.co,
             "    os.makedirs(rd, exist_ok=True)",
@@ -1628,7 +3270,8 @@ def review_resumed_failure(c):
             "cmd = sys.argv[2] if len(sys.argv) > 2 else ''",
             "open(%r, 'a').write(' '.join(sys.argv[2:]) + chr(10))" % oplog,
             "if cmd == 'plan':",
-            "    print('kind=made', 'arch=arm64', 'label=Oracle Cloud', 'idle_stop=15', 'egress=off', sep=chr(10))",
+            "    print('kind=made', 'arch=arm64', 'label=Oracle Cloud', 'idle_stop=15', 'egress=off', 'outside=yes',"
+            "          'billing_stopped=storage', 'soft_stop=api', 'provider=oci', 'resolvers=no', sep=chr(10))",
             "elif cmd == 'status':",
             "    print(json.dumps({'provider_state': 'STOPPED'}))",
             "elif cmd == 'egress':",
@@ -1666,7 +3309,8 @@ def review_resume_setup(c):
             "cmd = sys.argv[2] if len(sys.argv) > 2 else ''",
             "open(%r, 'a').write(' '.join(sys.argv[2:]) + chr(10))" % oplog,
             "if cmd == 'plan':",
-            "    print('kind=made', 'arch=arm64', 'label=Oracle Cloud', 'idle_stop=15', 'egress=off', sep=chr(10))",
+            "    print('kind=made', 'arch=arm64', 'label=Oracle Cloud', 'idle_stop=15', 'egress=off', 'outside=yes',"
+            "          'billing_stopped=storage', 'soft_stop=api', 'provider=oci', 'resolvers=no', sep=chr(10))",
             "elif cmd == 'status':",
             "    print(json.dumps({'provider_state': 'STOPPED'}))",
             "elif cmd == 'egress':",
@@ -1873,6 +3517,61 @@ def cli(td):
                   and not os.path.exists(os.path.join(b.co, "config", "vms", "bad1.env")), r.stderr[-300:])
         r = b.run("vm", "create", "oci", "--on", "oci", "--no-build", "--yes")
         check("a computer can't be called oci (a place's name)", r.returncode != 0 and "place's name" in r.stderr, r.stderr)
+        # The hourly providers: their defaults, sizes and regions checked, the region written.
+        for name, args, want in (("hz1", ["--on", "hetzner"], ("PLACE=hetzner", "PROVIDER=hetzner", "SIZE=cax11",
+                                                               "REGION=fsn1", "IDLE_STOP=15", "EGRESS=internet")),
+                                 ("do1", ["--on", "digitalocean", "--size", "s-4vcpu-8gb", "--region", "sfo2", "--egress", "off"],
+                                  ("PLACE=digitalocean", "PROVIDER=digitalocean", "SIZE=s-4vcpu-8gb", "REGION=sfo2", "EGRESS=off")),
+                                 ("vu1", ["--on", "vultr", "--idle-stop", "off"], ("PLACE=vultr", "PROVIDER=vultr",
+                                                                                   "SIZE=vc2-2c-4gb", "REGION=ewr", "IDLE_STOP=off"))):
+            r = b.run("vm", "create", name, *args, "--no-build", "--yes")
+            f = os.path.join(b.co, "config", "vms", f"{name}.env")
+            text = open(f).read() if os.path.exists(f) else ""
+            check(f"vm create {' '.join(args)}: its place, provider, size and region (defaults filled in)",
+                  r.returncode == 0 and all(x in text.splitlines() for x in want), (r.stderr[-300:], text))
+        for args, want in ((["--on", "hetzner", "--size", "huge"], "no size"),
+                           (["--on", "vultr", "--region", "x/y"], "region"),
+                           (["--on", "digitalocean", "--host", "192.0.2.3"], "your own server"),
+                           (["--on", "oci", "--region", "fsn1"], "OCI_REGION"),
+                           (["--on", "server", "--host", "192.0.2.3", "--user", "o", "--region", "fsn1"], "--region"),
+                           (["--region", "fsn1"], "elsewhere")):
+            r = b.run("vm", "create", "bad2", *args, "--no-build", "--yes")
+            check(f"vm create {' '.join(args)[:44]}: refused ({want})", r.returncode != 0 and want in r.stderr
+                  and not os.path.exists(os.path.join(b.co, "config", "vms", "bad2.env")), r.stderr[-300:])
+        r = b.run("vm", "create", "hetzner", "--on", "hetzner", "--no-build", "--yes")
+        check("a computer can't be called hetzner (a place's name)", r.returncode != 0 and "place's name" in r.stderr, r.stderr)
+        r = b.run("--vm", "hz1", "stop", "--override")
+        check("stop on Hetzner Cloud without its token: refused, naming the variable, and saying a stopped server is billed "
+              "in full", r.returncode != 0 and "HCLOUD_TOKEN" in r.stderr and "only deleting it" in r.stderr, r.stderr[-400:])
+        r = b.run("vm", "delete", "do1", "--confirm", "do1")
+        check("vm delete of a DigitalOcean computer without its token: refused, naming it, nothing deleted",
+              r.returncode != 0 and "DIGITALOCEAN_TOKEN" in r.stderr and os.path.exists(os.path.join(b.co, "config", "vms",
+                                                                                                    "do1.env")), r.stderr[-300:])
+        script = ('MCOMP_VM_ARG=hz1; . "$1/scripts/lib.sh"; env | grep -cE "^(HCLOUD_TOKEN|DIGITALOCEAN_TOKEN|VULTR_API_KEY)=" || true; '
+                  '( mc_export_provider_env; env | grep -E "^(HCLOUD_TOKEN|DIGITALOCEAN_TOKEN|VULTR_API_KEY)=" | cut -d= -f1 | sort )')
+        r = subprocess.run(["/bin/bash", "-c", script, "_", b.co], capture_output=True, text=True, timeout=60,
+                           env=b.env(HCLOUD_TOKEN="t1", DIGITALOCEAN_TOKEN="t2", VULTR_API_KEY="t3"))
+        check("the three API tokens in the environment: not exported to what metacomputer starts, but handed to "
+              "lib/remote.py", r.stdout.split() == ["0", "DIGITALOCEAN_TOKEN", "HCLOUD_TOKEN", "VULTR_API_KEY"],
+              (r.stdout, r.stderr))
+        r = subprocess.run(["/bin/bash", "-c", 'MCOMP_VM_ARG=vu1; . "$1/scripts/lib.sh"; remote_can_ask && echo yes || echo no',
+                            "_", b.co], capture_output=True, text=True, timeout=60, env=b.env(VULTR_API_KEY="t3"))
+        r2 = subprocess.run(["/bin/bash", "-c", 'MCOMP_VM_ARG=vu1; . "$1/scripts/lib.sh"; remote_can_ask && echo yes || echo no',
+                             "_", b.co], capture_output=True, text=True, timeout=60, env=b.env(HCLOUD_TOKEN="t1"))
+        check("remote_can_ask: a provider's own token, and no other's", r.stdout.strip() == "yes" and r2.stdout.strip() == "no",
+              (r.stdout, r2.stdout, r.stderr))
+        r = b.run("default", "hz1")
+        rj = b.run("default", "hz1", "--json")
+        try:
+            dj = json.loads(rj.stdout)
+        except ValueError:
+            dj = {}
+        check("default hz1: says where it is (Hetzner Cloud), not this Mac (found live: it said this Mac for any "
+              "computer)", r.returncode == 0 and "hz1 (Hetzner Cloud, config/vms/hz1.env) is now your default computer"
+              in r.stdout and dj.get("place") == "hetzner" and dj.get("where") == "Hetzner Cloud", (r.stdout, rj.stdout))
+        os.remove(os.path.join(b.co, "config", "default-vm"))
+        for name in ("hz1", "do1", "vu1"):
+            os.remove(os.path.join(b.co, "config", "vms", f"{name}.env"))
         # ssh_base for each role: the transport's target after the same strict options as the Mac's VMs.
         script = ('MCOMP_VM_ARG="$1"; . "$2/scripts/lib.sh"; ssh_base "$3"; printf "%s\\n" "${SSH_ARGS[@]}"')
         args = {}
@@ -1977,6 +3676,9 @@ def main():
     guest_side()
     firewall()
     oci_driver()
+    vps_drivers()
+    vps_journal()
+    audit_fixes()
     network_race()
     credentials_children()
     owner_ssh_options()

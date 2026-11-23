@@ -182,7 +182,7 @@ class SDK:
         if i.compartment_id != self.compartment:
             raise AdapterError("that instance isn't in the configured compartment; metacomputer leaves it alone")
         return {"id": i.id, "state": i.lifecycle_state, "shape": i.shape, "name": (i.freeform_tags or {}).get(TAG),
-                "ad": i.availability_domain}
+                "ad": i.availability_domain, "op": (i.freeform_tags or {}).get(OP_TAG)}
 
     def public_ip(self, iid):
         for att in self._all(self.compute.list_vnic_attachments, self.compartment, instance_id=iid):
@@ -464,7 +464,9 @@ class SDK:
         except self.oci.exceptions.ServiceError as e:
             if "capacity" in (e.message or "").lower():
                 raise Capacity(f"Oracle Cloud is out of {shape} capacity in {ad.split(':')[-1]} now") from None
-            raise AdapterError(f"Oracle Cloud refused the instance: {e.status} {e.code}: {e.message}") from None
+            err = AdapterError(f"Oracle Cloud refused the instance: {e.status} {e.code}: {e.message}")
+            err.status = e.status          # a 4xx: Oracle made nothing; a 5xx proves nothing (lib/remote.py)
+            raise err from None
         return i.id
 
     def wait_state(self, iid, want, timeout=600):
@@ -501,6 +503,21 @@ class OCI(RemoteVM):
     credentials, made at the first call that needs it)."""
     name = "oci"
     manifest = MANIFEST
+    STOP_WAIT_S = STOP_WAIT_S
+    SOFT_STOP = "api"            # OCI's SOFTSTOP asks the guest to shut down (ACPI)
+    takes_key = False            # OCI makes an instance without a key or a root password
+    thing = "instance"
+    size_of = staticmethod(size_of)
+
+    @staticmethod
+    def look_for(name, op):
+        return (f"Oracle Cloud's console (Compute > Instances in the compartment, freeform tag metacomputer-op={op}), or: "
+                f"oci compute instance list --compartment-id \"$OCI_COMPARTMENT\" --query "
+                f"\"data[?\\\"freeform-tags\\\".\\\"metacomputer-op\\\"=='{op}']\"")
+
+    @staticmethod
+    def arch(size):
+        return SIZES[size_of(size)][3]
 
     def __init__(self, computers=None, states=None, api=None, env=None, network_lock=None):
         super().__init__(computers, states)
@@ -562,12 +579,21 @@ class OCI(RemoteVM):
         ads = ads or api.availability_domains(shape)
         if not ads:
             raise AdapterError(f"no availability domain in this region offers {shape} to this compartment")
+        made = made or (lambda what, rid: None)
         for ad in ads:
+            made("launch_state", "sent")     # from here an instance may exist: the journal says so before the call
             try:
                 iid = api.launch(name, ad, shape, ocpus, mem, img["id"], net["subnet"], user_data, nsg_id=nsg, op=op)
             except Capacity as e:
+                made("launch_state", "refused")
                 tried.append(str(e))
                 continue
+            except AdapterError as e:
+                if isinstance(getattr(e, "status", None), int) and 400 <= e.status < 500:
+                    made("launch_state", "refused")
+                raise
+            made("made_instance", iid)       # journaled the moment the launch returns
+            made("launch_state", "made")
             return {"instance": iid, "ad": ad, "shape": shape, "size": sz, "image": img["name"], "arch": arch,
                     "ocpus": ocpus, "memory_gb": mem, "nsg": nsg}
         raise Capacity("; ".join(tried) + ". Every availability domain was tried once; try again later, or another size")
