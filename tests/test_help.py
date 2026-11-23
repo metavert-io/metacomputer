@@ -18,6 +18,7 @@ No VM, no network; nothing of this Mac's VMs, settings, vault or agents is read 
 """
 import concurrent.futures
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -340,6 +341,7 @@ class Lab:
         for f in ("run_tests.py", "agentic_claude.sh"):
             shutil.copy(os.path.join(LAB, "tests", f), os.path.join(self.box.co, "tests", f))
         os.makedirs(os.path.join(self.box.root, "victim"), exist_ok=True)       # what a delete would take (safe-rmtree)
+        self.qcow2raw = os.path.join(td, "qcow2raw")
         self.site = os.path.join(td, "site-" + tag)
         write(os.path.join(self.site, "sitecustomize.py"), SITECUSTOMIZE)
         for path, text in VMS.items():
@@ -452,8 +454,11 @@ def run_forms(td, items, tag):
             if item[0] == "strict":
                 out.append((item, None, lab.run(list(item[2]), item[3], list(item[4]))))
                 continue
-            if item[0] == "entry":
-                out.append((item, None, run_entry(lab, item[1], item[3])))
+            if item[0] == "valid":
+                out.append((item, None, run_entry(lab, item[1], list(item[2]), True)))
+                continue
+            if item[0] == "misuse":
+                out.append((item, None, run_entry(lab, item[1], list(item[2]), False)))
                 continue
             vm, cmd, args = item
             out.append(((tuple(vm), cmd, tuple(args)), None, lab.run(vm, cmd, args)))
@@ -578,15 +583,15 @@ def bash_fn(rel, name):
     return m.group(0) if m else ""
 
 
-def forms_values(rel, where):
-    """The options that take a value in the forms a hand-parsed program declares (lib/strictargs.py expect()) in the
-    function starting at WHERE: `--name VALUE` and `[--name VALUE]`."""
-    src = open(os.path.join(LAB, rel)).read()
-    body = src[src.index(where):]
-    body = body[:body.index("\ndef ", 1) if "\ndef " in body[1:] else len(body)]
-    call = body[body.index("strictargs.expect("):]
-    call = call[:call.index("prog=")]
-    return set(re.findall(r"\[?(--[a-z][a-z-]*) [A-Z~]", call))
+def forms_values(rel, prefix=""):
+    """The options that take a value in the forms a hand-parsed program declares (lib/strictargs.py expect(), as it
+    describes them itself under MCOMP_PARSE_ONLY=describe), in its forms that start with PREFIX: `--name VALUE` and
+    `[--name VALUE]`."""
+    r = subprocess.run([PY, "-B", os.path.join(LAB, rel)], env=dict(os.environ, MCOMP_PARSE_ONLY="describe"),
+                       capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL, cwd=LAB)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("parse-only-describe: ")), "")
+    forms = json.loads(line.split(": ", 1)[1]).get("forms", []) if line else []
+    return {o for f in forms if f.startswith(prefix) for o in re.findall(r"\[?(--[a-z][a-z-]*) [A-Z~]", f)}
 
 
 def real_value_options():
@@ -606,9 +611,9 @@ def real_value_options():
         "agents": progs("metacomputer agents"), "cloud": progs("remote.py cloud"),
         "sh": hand_parsed("lib/vm_shell.py", r"value\(\)"),
         "claude": hand_parsed("lib/vm_claude.py", r"value\(\)"),
-        "call": forms_values("lib/mcomp_sdk.py", "def call_main("),
+        "call": forms_values("lib/mcomp_sdk.py", "call "),
         "put": hand_parsed("lib/guest_put.py", r"rest\[i \+ 1\]"),
-        "each": forms_values("lib/each.py", "def main("),
+        "each": forms_values("lib/each.py"),
         "secrets": vault_values(),
         # bin/metacomputer's and scripts/vm-commands.sh's own parsers: an option whose branch reads the next word ($2)
         "vm": set(re.findall(r'^\s*(--[a-z-]+)\) (?:vc_once [^;]*; )?\[ \$# -ge 2 \][^\n]*"\$2"',
@@ -819,191 +824,38 @@ def checkpoint_p1_checks(td):
     finally:
         b.close()
 
-# --- every program in the tree: found by a scan, each run with every misuse (round 5) ---------------------------------
-# A program is any tracked file that's executable, starts with #!, or is Python with a `__main__` (the suites
-# themselves, tests/test_*.py, aside). Each must have an entry in ENTRY: how it's run and a command line it takes (it's
-# never run as such: it would act), its flag, its option that takes a value, whether a word too many is refused (not
-# where its last arguments take any number), and where what's appended goes (before a `--` whose rest is another
-# program's). Every misuse below is then run on the copy, with stand-ins recording calls, connections and writes: a
-# request for usage (-h, --help) is answered or refused; anything shaped like one, an option it doesn't have, its flag
-# or its value option twice, a request for usage as that value, and a word too many are refused (exit 2); and nothing
-# is called, connected or written for any of them. A new program fails here until it has an entry.
-BOX = "{BOX}"
-G, R, S = ("provisioning/guest/rootfs/opt/metacomputer/bin/", "provisioning/remote/rootfs/opt/metacomputer/bin/",
-           "provisioning/sprite/rootfs/opt/metacomputer/sprite/")
+# --- every program in the tree (tests/entrypoints.py): found by a scan, valid lines and every misuse (round 6) ---------
+import entrypoints  # noqa: E402
 
 
-def E(run, base, flag=None, value=None, extra=True, at=None, env=None, stdin="", more=()):
-    return {"run": run, "base": base, "flag": flag, "value": value, "extra": extra, "at": at, "env": env or {}, "stdin": stdin,
-            "more": more}
-
-
-ENTRY = {
-    "bin/metacomputer": "FORMS",          # every command of its dispatch: FORMS and strict_forms() above
-    "agent-plugin/bin/metacomputer": E("bash", ["checkpoint", "--delete", "keep", "--yes"], "--yes", ("--delete", "k2"),
-                                       env={"MCOMP_HOME": "{CO}"}),
-    "plugin/bin/metacomputer": E("bash", ["checkpoint", "--delete", "keep", "--yes"], "--yes", ("--delete", "k2"),
-                                 env={"MCOMP_HOME": "{CO}"}),
-    "plugin/bin/metacomputer#setup": E("bash", ["setup", "--no-build"], "--no-build", ("--dir", "x"),
-                                       env={"CLAUDE_CODE_PLUGIN_CACHE_DIR": "{CO}"}),
-    "get.sh": E("bash", ["--no-build"], "--no-build", ("--dir", "x")),
-    "plugin/get.sh": E("bash", ["--no-build"], "--no-build", ("--dir", "x")),
-    "install.sh": E("bash", ["--no-build"], "--no-build", ("--lume=standard", "--lume=secure")),
-    "scripts/build-tools.sh": E("bash", [], "--check"),
-    "scripts/build-vault.sh": E("bash", [], "--force", ("--test", "x")),
-    "scripts/build-vm.sh": E("bash", [], "--replace"),
-    "scripts/check-public.sh": E("bash", ["-a"], "-a", ("-r", "."), extra=False),
-    "scripts/fetch-artifacts.sh": E("bash", ["rclone"]),
-    "scripts/lib.sh": E("bash", []),
-    "scripts/pin-gpg-key.sh": E("bash", ["b", "0" * 40, "o"]),
-    "scripts/release.sh": E("bash", ["9.9.9"], "--dry-run"),
-    "scripts/remote-build.sh": E("bash", [], "--keep-on-failure"),
-    "scripts/safe-rmtree.sh": E("bash", [BOX + "/victim"], "--quiet", extra=False),
-    "scripts/sync-plugin.py": E("py", [], "--check"),
-    "scripts/build-openai-plugin.py": E("py", [], None, ("--out", "x.zip")),
-    "scripts/vendor-driver-skill.py": E("py", ["src"]),
-    "scripts/verify-audit.py": E("py", ["f.jsonl"], "--quiet", ("--expect-start", "1"), extra=False),
-    "scripts/vm-commands.sh": E("bash", []),
-    "tests/agentic_claude.sh": E("bash", ["task.md"]),
-    "tests/run_tests.py": E("py", ["A"], None, ("--run-id", "r1"), extra=False),
-    "tests/skill/analyze.py": E("py", ["t.jsonl"]),
-    "tests/skill/run_headless.sh": E("bash", ["o", "n", "w", "p"], "--global-mcp"),
-    "bench/bench.py": E("py", ["list"], None, ("--set", "s")),
-    "bench/guest/calc-overlay.sh": E("sh", ["debs"]),
-    "bench/guest/server.py": E("py", ["root", "log", "8000"]),
-    "lib/actionlog.py": E("py", ["list"], None, ("--days", "3")),
-    "lib/agent_setup.py": E("py", ["status", "openclaw", "--root", "r", "--link", "l"], None, ("--root", "r2")),
-    "lib/agents.py": E("py", ["status"], "--json"),
-    "lib/botcheck.py": E("py", []),
-    "lib/browser_tools.py": E("py", ["read", "https://example.com"], "--json", ("--task", "t")),
-    "lib/claude_mcp.py": E("py", ["user-recheck", "n"]),
-    "lib/defaultvm.py": E("py", ["read", "f"]),
-    "lib/driver_profiles.py": E("py", ["render"]),
-    "lib/each.py": E("py", ["main", "--", "status"], None, ("--timeout", "5"), at=0, more=(["--timeout-typo=10"],)),
-    "lib/events.py": E("py", ["status"], "--json"),
-    "lib/guest_import.py": E("py", ["dest"], "--quiet", ("--timeout", "5")),
-    "lib/guest_inspect.py": E("py", ["system"], None, ("--minutes", "5"), extra=False),
-    "lib/guest_profiles.py": E("py", ["check", "firefox", "p"]),
-    "lib/guest_put.py": E("py", ["--transport", "1", "ssh", "f"], "--overwrite", ("--to", "d"), extra=False),
-    "lib/handoff.py": E("py", ["done"], None, ("--note", "n")),
-    "lib/input_reset.py": E("py", ["view", "--transport", "1", "ssh"], None, ("--transport", "1")),
-    "lib/learn.py": E("py", ["list"], "--json"),
-    "lib/liveview.py": E("py", ["clip"], None, ("--clear-after", "3")),
-    "lib/mcomp_sdk.py": E("py", ["call", "list_windows"], "--json", ("--session", "s1")),
-    "lib/mcp_client.py": E("py", ["--tools"]),
-    "lib/mcp_hub.py": E("py", ["stop"], "--quiet"),
-    "lib/mcp_lazy.py": E("py", ["--refresh-cache"], "--seed"),
-    "lib/mcp_relay.py": E("py", ["/usr/bin/true"], extra=False, at=0),
-    "lib/netpolicy.py": E("py", ["status"], "--json"),
-    "lib/owners.py": E("py", ["release"]),
-    "lib/page_guest.py": E("py", ["read", "{}"]),
-    "lib/placement.py": E("py", ["resolve"], None, ("--vm", "v")),
-    "lib/proxywrap.py": E("py", ["--", "/usr/bin/true"], extra=False, at=0),
-    "lib/recording.py": E("py", ["probe", "f.mkv"]),
-    "lib/remote.py": E("py", ["missing", "--provider", "oci", "--feature", "x"], None, ("--feature", "y")),
-    "lib/safedelete.py": E("py", ["rmtree", BOX + "/victim"], "--quiet", extra=False),
-    "lib/sessionvm.py": E("py", ["show"], "--json"),
-    "lib/shop.py": E("py", ["status"], "--json"),
-    "lib/storage.py": E("py", ["volume", "list"], "--json"),
-    "lib/termsafe.py": E("py", [], None, ("--max", "10")),
-    "lib/traces.py": E("py", ["show", "t"], "--json"),
-    "lib/tunnellog.py": E("py", ["--log", BOX + "/t.log", "--fork", "--", "/usr/bin/true"], "--fork", ("--cap", "4096"),
-                          at=3),
-    "lib/update.py": E("py", ["version"], "--json"),
-    "lib/vm_claude.py": E("py", ["--transport", "1", "ssh", "status"], "--json", ("--session", "s1")),
-    "lib/vm_claude_guest.sh": E("bash", ["status", "s1"], extra=False, at=0),
-    "lib/vm_shell.py": E("py", ["--transport", "1", "ssh", "-c", "true"], "--json", ("--cwd", "w")),
-    "lib/vm_shell_guest.py": E("py", []),
-    "lib/vms.py": E("py", ["all-known"]),
-    "provisioning/guest/finalize.sh": E("bash", ["cuaadmin", "cua"]),
-    "provisioning/guest/provision.sh": E("bash", ["/opt/p"]),
-    "provisioning/remote/bootstrap.sh": E("bash", ["d", "o", "22"]),
-    "provisioning/sprite/bootstrap.sh": E("bash", ["d"]),
-    G + "desktop-record": E("sh", ["stop"]),
-    G + "driver-mcp": E("sh", []),
-    G + "guest-status": E("py", []),
-    G + "input-reset": E("sh", [], "--check"),
-    G + "secret-fill": E("py", [], None, ("--deadline", "5")),
-    G + "session-init": E("sh", []),
-    G + "session-run": E("sh", ["true"], extra=False, at=0),
-    G + "storage-helper": E("py", ["status"]),
-    "provisioning/guest/rootfs/usr/local/sbin/metacomputer-admin": E("sh", ["status"]),
-    R + "guest-firewall": E("sh", ["status"]),
-    R + "guest-firewall#render": E("sh", ["render", "--egress", "off"], None, ("--ports", "22")),
-    R + "idle-stop": E("sh", ["status"]),
-    R + "remote-uninstall": E("sh", ["rollback"]),
-    S + "hide-sprite-api": E("sh", ["true"], extra=False, at=0),
-    S + "in-session": E("bash", ["true"], extra=False, at=0),
-    S + "services": E("bash", ["status"]),
-    S + "svc-desktop": E("bash", []),
-    S + "svc-session": E("bash", []),
-    S + "svc-sshd": E("bash", []),
-    S + "svc-xvfb": E("bash", []),
-    S + "xvfb-inner": E("bash", []),
-}
-
-
-def entry_points():
-    """Every program in the tree, by a scan (not a list): tracked files that are executable, start with #! or are
-    Python with a __main__; tests/test_*.py, the suites, aside."""
-    out = subprocess.run(["git", "-C", LAB, "ls-files", "-s"], capture_output=True, text=True).stdout.splitlines()
-    found = set()
-    for line in out:
-        meta, path = line.split("\t", 1)
-        full = os.path.join(LAB, path)
-        if (path.startswith("tests/test_") and path.endswith(".py")) or not os.path.isfile(full) or os.path.islink(full):
-            continue
-        data = open(full, "rb").read()
-        if meta.split()[0] == "100755" or data.startswith(b"#!") or (path.endswith(".py") and b'__name__ == "__main__"' in data):
-            found.add(path)
-    return found
-
-
-def entry_forms():
-    out = []
-    for key, sp in sorted(ENTRY.items()):
-        if sp == "FORMS":
-            continue
-        base, at = list(sp["base"]), sp["at"]
-        at = len(base) if at is None else at
-
-        def put(*words):
-            return base[:at] + list(words) + base[at:]
-        for h in ("-h", "--help"):
-            out.append((key, f"a request for usage ({h})", put(h), "either"))
-        for bad in ("-hx", "--help=x", "--hel"):
-            out.append((key, f"something shaped like a request for usage ({bad})", put(bad), "refuse"))
-        out.append((key, "an option it doesn't have", put("--no-such-option"), "refuse"))
-        if sp["flag"]:
-            twice = [sp["flag"]] if sp["flag"] in base else [sp["flag"], sp["flag"]]
-            out.append((key, f"its flag twice ({sp['flag']})", put(*twice), "refuse"))
-        if sp["value"]:
-            v = sp["value"]
-            if v[0].startswith("--") and "=" in v[0]:          # --x=A --x=B
-                out.append((key, f"its value option twice ({v[0].split('=')[0]})", put(v[0], v[1]), "refuse"))
-                out.append((key, "a request for usage as its value", put(v[0].split("=")[0] + "=--help"), "either"))
-            else:
-                out.append((key, f"its value option twice ({v[0]})", put(v[0], v[1], v[0], v[1] + "2"), "refuse"))
-                out.append((key, f"a request for usage as its value ({v[0]} --help)", put(v[0], "--help"), "either"))
-                out.append((key, f"an option as its value ({v[0]} --bogus)", put(v[0], "--bogus"), "refuse"))
-        if sp["extra"]:
-            out.append((key, "a word too many", put("extra-word"), "refuse"))
-        for words in sp["more"]:
-            out.append((key, f"what it doesn't take ({' '.join(words)})", put(*words), "refuse"))
-    return out
-
-
-def run_entry(lab, key, args, timeout=60):
-    """One program run on the copy with ARGS (its spec's interpreter, environment and stdin), as run_direct."""
-    sp = ENTRY[key]
-    path = os.path.join(lab.box.co, key.split("#")[0])
-    fill = lambda s: s.replace("{BOX}", lab.box.root).replace("{CO}", lab.box.co)      # noqa: E731
+def run_entry(lab, key, args, parse_only, timeout=60):
+    """One program run on the copy with ARGS (its entry's interpreter, environment and stdin), as run_direct; with
+    PARSE_ONLY its parser ends the run once it takes the line. A VM program runs its guard alone."""
+    sp = entrypoints.PROGRAMS[key]
+    rel = key.split("#")[0]
+    path = os.path.join(lab.box.co, rel)
+    fill = lambda x: x.replace("{BOX}", lab.box.root).replace("{CO}", lab.box.co)      # noqa: E731
     args = [fill(a) for a in args]
-    argv = {"py": [PY, "-B", path], "bash": ["/bin/bash", path], "sh": ["/bin/sh", path]}[sp["run"]] + args
+    if sp["run"] == "guard":
+        shell = "/bin/bash" if "bash" in open(path).readline() else "/bin/sh"
+        argv = [shell, "-c", entrypoints.guard_of(rel) + "\necho GUARD-PASSED", os.path.basename(rel), *args]
+    elif sp["run"] == "go":
+        argv = [lab.qcow2raw, *args]
+    elif sp["run"] == "uninstalled":
+        argv = ["/bin/bash", path, *args]
+    else:
+        argv = {"py": [PY, "-B", path], "bash": ["/bin/bash", path], "sh": ["/bin/sh", path]}[sp["run"]] + args
     calls = os.path.join(lab.calls_dir, f"entry-{lab.n}.log")
     lab.n += 1
     env = lab.env(calls)
     env.update({k: fill(v) for k, v in sp["env"].items()})
+    if sp["run"] == "uninstalled":                 # no metacomputer set up: an empty home, no MCOMP_HOME
+        env["HOME"] = os.path.join(lab.box.root, "empty-home")
+        os.makedirs(env["HOME"], exist_ok=True)
+        env.pop("MCOMP_HOME", None)
+        env["CLAUDE_CODE_PLUGIN_CACHE_DIR"] = os.path.join(lab.box.root, "no-plugins")
+    if parse_only:
+        env["MCOMP_PARSE_ONLY"] = "1"
     before = lab.snapshot()
     try:
         r = subprocess.run(argv, env=env, input=sp["stdin"], capture_output=True, text=True, timeout=timeout,
@@ -1014,78 +866,124 @@ def run_entry(lab, key, args, timeout=60):
     after = lab.snapshot()
     called = open(calls).read().splitlines() if os.path.exists(calls) else []
     changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p)
-                     and "__pycache__" not in p and not os.path.isdir(os.path.join(p, "__pycache__")))
+                     and "__pycache__" not in p and not os.path.isdir(os.path.join(p, "__pycache__"))
+                     and not p.startswith(os.path.join(lab.box.root, "empty-home")))
     return rc, out, err, called, changed
 
 
-# The forms the VM's programs are run with, by their callers (build-vm.sh and remote-build.sh, the cloud-init they
-# write, bin/metacomputer, the vault, lib/*.py, the Sprite's services): each program's own command-line guard (the
-# lines after "metacomputer's command-line rules", run alone, never the rest) must take every one of them. Found on a
-# test VM: finalize.sh took one word, build-vm.sh gives it two (ADMIN GUEST_USER), and the build stopped.
-GUEST_CALLER_FORMS = {
-    "provisioning/guest/finalize.sh": [["cuaadmin", "cua"], ["cuaadmin"], []],
-    "provisioning/guest/provision.sh": [["/opt/metacomputer-payload"], []],
-    "provisioning/remote/bootstrap.sh": [["/run/metacomputer-bootstrap", "", "22"], ["/tmp/d", "owner", "2222"], ["/tmp/d"]],
-    "provisioning/sprite/bootstrap.sh": [["/tmp/d"]],
-    G + "desktop-record": [["start", "n", "20", "standard", "off"], ["stream", "n", "20", "high", "auto"], ["stop"], ["status"]],
-    "provisioning/guest/rootfs/usr/local/sbin/metacomputer-admin": [
-        [v] for v in ("restart-desktop", "reboot", "poweroff", "status", "logs", "provision-log", "updates", "firewall", "idle")
-    ] + [["logs", "400"], ["egress", "status"], ["egress", "off"], ["idle", "15"], ["ssh-auth", "cert"], ["ssh-auth", "key"],
-         ["ssh-auth", "status"], ["driver-policy", "bounded"], ["driver-policy", "status"], ["storage", "attach"]],
-    G + "input-reset": [[], ["--check"]],
-    G + "session-run": [["import", "-window", "root", "png:-"], ["sh", "-c", "x"], ["wmctrl", "-ic", "0x1"]],
-    G + "driver-mcp": [[]],
-    G + "session-init": [[]],
-    R + "guest-firewall": [["apply"], ["mark-setup"], ["end-setup"], ["status"], ["render-emergency"],
-                           ["render", "--egress", "off", "--ports", "22", "--uids", "1"]],
-    R + "idle-stop": [[], ["check"], ["status"]],
-    R + "remote-uninstall": [["rollback"], ["all"]],
-    S + "services": [["sshd"], ["desktop"], ["status"]],
-    S + "in-session": [["runuser", "-u", "cua", "--", "env", "-i"], ["/usr/sbin/sshd", "-D", "-e"]],
-    S + "hide-sprite-api": [["/usr/bin/tini", "--", "/usr/bin/sleep", "infinity"]],
-    S + "svc-desktop": [[]], S + "svc-session": [[]], S + "svc-sshd": [[]], S + "svc-xvfb": [[]], S + "xvfb-inner": [[]],
-    "bench/guest/calc-overlay.sh": [["/tmp/debs"]],
-    "lib/vm_claude_guest.sh": [["start", "claude", "--model", "x"], ["keys", "s", "Enter"], ["status", "s"], ["probe", "s"]],
-}
-
-
-def guard_of(rel):
-    """The command-line guard of a program the VM runs: the lines after its "metacomputer's command-line rules"
-    note, up to the first that isn't part of it."""
-    lines = open(os.path.join(LAB, rel)).read().split("\n")
-    i = next(n for n, ln in enumerate(lines) if ln.startswith("# metacomputer's command-line rules"))
-    while i < len(lines) and lines[i].startswith("#"):
-        i += 1
-    out = []
-    while i < len(lines) and lines[i].startswith(("mc_usage=", "case ", "for mc_a", "  ")):
-        out.append(lines[i])
-        i += 1
-    return "\n".join(out)
-
-
-def guest_caller_checks():
-    bad = []
-    for rel, forms in sorted(GUEST_CALLER_FORMS.items()):
-        guard = guard_of(rel)
-        shell = "/bin/bash" if "bash" in open(os.path.join(LAB, rel)).readline() else "/bin/sh"
-        for args in forms:
-            r = subprocess.run([shell, "-c", guard + "\necho GUARD-PASSED", os.path.basename(rel), *args],
-                               capture_output=True, text=True, timeout=30)
-            if r.returncode != 0 or "GUARD-PASSED" not in r.stdout:
-                bad.append((rel, args, r.returncode, r.stderr[-160:]))
-    check(f"the VM's programs take every form their callers give them ({sum(map(len, GUEST_CALLER_FORMS.values()))} "
-          "forms, each program's guard run alone)", not bad, bad[:6])
-
-
-def entry_point_checks():
-    found = entry_points()
-    covered = {k.split("#")[0] for k in ENTRY}
-    check(f"every program in the tree ({len(found)}, found by a scan) has its misuse matrix here",
-          not (found - covered) and len(found) > 80, sorted(found - covered))
-    check("...and the matrix names no program the tree doesn't have", not (covered - found), sorted(covered - found))
+def entry_point_checks(td):
+    found = entrypoints.entry_points()
+    covered = {k.split("#")[0] for k in entrypoints.PROGRAMS}
+    check(f"every program in the tree ({len(found)}, found by a scan: executable, #!, __main__, tools/*/main.go) has its "
+          "entry in tests/entrypoints.py", not (found - covered) and len(found) > 80, sorted(found - covered))
+    check("...and the entries name no program the tree doesn't have", not (covered - found), sorted(covered - found))
     vo = open(os.path.join(TESTS, "test_vault_ops.py")).read()
-    check("...the vault's every form is walked by tests/test_vault_ops.py (spec_walk, its dispatch included)",
-          "def spec_walk(" in vo and "runMain's every command" in vo)
+    check("...the vault's every form is walked by tests/test_vault_ops.py (spec_walk, _tunnel and its dispatch included)",
+          "def spec_walk(" in vo and "runMain's every command" in vo and '"_tunnel"' in vo)
+    # Each program is run by something in the repository (its callers, which its valid lines are), by a person as its
+    # usage says, or it's a library run only to refuse being run.
+    bad = []
+    for key, sp in entrypoints.PROGRAMS.items():
+        if sp == "FORMS" or "#" in key:
+            continue
+        if sp["by"] == "callers" and not entrypoints.caller_lines(key):
+            bad.append(key)
+        if sp["by"] != "sourced" and not sp["rows"]:
+            bad.append(key + " (no valid line)")
+    check("...each has valid lines, and one run by the repository has a caller in it (bin/, scripts/, lib/, "
+          "provisioning/, vault/, install.sh, get.sh, the launchers, bench/)", not bad, bad)
+    for key, o in entrypoints.GUARD_OPTIONS.items():
+        rel = key[0] if isinstance(key, tuple) else key
+        g = entrypoints.guard_of(rel)
+        check(f"{' '.join(key) if isinstance(key, tuple) else key}: its guard's options are the ones it reads (in the "
+              "guard itself)", all(x in g for x in o["flags"] + o["values"]))
+
+
+def build_qcow2raw(td):
+    """tools/qcow2raw, built (offline, from Go's module cache) into TD, as scripts/build-tools.sh builds it."""
+    out = os.path.join(td, "qcow2raw")
+    r = subprocess.run(["go", "build", "-o", out, "."], cwd=os.path.join(LAB, "tools", "qcow2raw"), capture_output=True,
+                       text=True, env=dict(os.environ, GOFLAGS="-mod=mod", GOPROXY="off"), timeout=600)
+    check("tools/qcow2raw builds (Go, offline) for its rows", r.returncode == 0, r.stderr[-400:])
+    return out
+
+
+def entry_items(td):
+    """Phase A: every program's valid lines (its callers', and one per declared form or subcommand), parse-only."""
+    items = []
+    for key, sp in sorted(entrypoints.PROGRAMS.items()):
+        if sp == "FORMS":
+            continue
+        rows = [list(r) for r in sp["rows"]]
+        if sp["synth"]:
+            rel = key.split("#")[0]
+            r = subprocess.run([PY, "-B", os.path.join(LAB, rel)], env=dict(os.environ, MCOMP_PARSE_ONLY="describe"),
+                               capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL, cwd=LAB)
+            line = next((ln for ln in r.stdout.splitlines() if ln.startswith("parse-only-describe: ")), None)
+            check(f"{key}: its declaration describes itself (MCOMP_PARSE_ONLY=describe)", line is not None,
+                  (r.returncode, r.stdout[-200:], r.stderr[-200:]))
+            if line:
+                for row in entrypoints.synth_rows(json.loads(line.split(": ", 1)[1])):
+                    if row not in rows:
+                        rows.append(row)
+        items += [("valid", key, tuple(row)) for row in rows]
+    return items
+
+
+def entry_results(results):
+    """Phase A's checks, and phase B's rows (every misuse after each valid line)."""
+    misuse, forms_seen = [], {}
+    for key, problem, res in results:
+        if problem or key[0] != "valid":
+            continue
+        _, ekey, row = key
+        rc, out, err, called, changed = res
+        sp = entrypoints.PROGRAMS[ekey]
+        words = f"{ekey} {' '.join(row)}"
+        if sp["run"] == "uninstalled":
+            check(f"{words} (nothing set up): the usage, exit 0, nothing run", rc == 0 and "usage" in out and not called
+                  and not changed, (rc, out[-200:], err[-200:], called[:3]))
+            misuse += [("misuse", ekey, (w,), "not-run", f"{w} with nothing set up") for w in ("status", "--bogus", "-hx")]
+            continue
+        if sp["run"] == "guard":
+            info = entrypoints.guard_info(ekey.split("#")[0], list(row))
+            ok = rc == 0 and "GUARD-PASSED" in out
+        else:
+            line = next((ln for ln in out.splitlines() if ln.startswith("parse-only: ")), "")
+            try:
+                info = json.loads(line.split(" taken ", 1)[1]) if " taken " in line else None
+            except ValueError:
+                info = None
+            ok = rc == 0 and info is not None
+        check(f"{words}: a valid line (as its callers pass it, or its declaration makes it) is taken, nothing called, "
+              "connected or written", ok and not called and not changed, (rc, called[:3], changed[:3], (err or out)[-300:]))
+        if not ok:
+            continue
+        if sp["run"] == "guard":
+            info = dict(info)
+        if "form" in info:
+            forms_seen.setdefault(ekey, set()).add(info["form"])
+            forms_seen.setdefault(ekey + "#n", info.get("forms"))
+        for what, args, want in entrypoints.misuse_rows(list(row), info):
+            if sp["run"] == "guard" and what == "a word too many":
+                args = list(row) + ["extra0", "extra1", "extra2"]
+            misuse.append(("misuse", ekey, tuple(args), want, what))
+    for key in [k for k in forms_seen if not k.endswith("#n")]:
+        n = forms_seen.get(key + "#n")
+        if n:
+            check(f"{key}: every one of its {n} declared forms has a valid line", forms_seen[key] >= set(range(n)),
+                  sorted(set(range(n)) - forms_seen[key]))
+    return misuse
+
+
+def misuse_check(key, res):
+    _, ekey, args, want, what = key
+    rc, out, err, called, changed = res
+    words = f"{ekey} {' '.join(args)}"
+    ok_rc = {"refuse": rc == 2, "either": rc in (0, 2), "not-run": rc not in (0, "timeout")}[want]
+    check(f"{words}: {what} is {dict(refuse='refused (exit 2)', either='answered or refused', **{'not-run': 'not run'})[want]}; "
+          "nothing is called, connected or written", ok_rc and not called and not changed,
+          (rc, called[:3], changed[:3], (err or out)[-240:]))
 
 
 def setup_options_check():
@@ -1134,15 +1032,15 @@ def main():
 
         value_option_checks()
         setup_options_check()
-        entry_point_checks()
-        guest_caller_checks()
+        entry_point_checks(td)
+        build_qcow2raw(td)
         own_parser_checks(td)
         checkpoint_p1_checks(td)
 
         todo = (forms() + [("direct", rel, f) for rel in direct_targets() for f in FLAGS]
                 + [("shape", tuple(vm), cmd, tuple(a)) for vm, cmd, a in shape_forms()]
                 + [("strict", what, vm, cmd, a) for what, vm, cmd, a in strict_forms()]
-                + [("entry", key, what, a, want) for key, what, a, want in entry_forms()])
+                + entry_items(td))
         workers = max(2, min(8, (os.cpu_count() or 4)))
         parts = [todo[i::workers] for i in range(workers)]
         results = []
@@ -1150,19 +1048,23 @@ def main():
             futs = [ex.submit(run_forms, td, p, f"w{i}") for i, p in enumerate(parts)]
             for f in futs:
                 results.extend(f.result())
+        # Phase B: every misuse after each valid line phase A took (what each line's parser said it declares).
+        misuse = entry_results(results)
+        parts = [misuse[i::workers] for i in range(workers)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = [ex.submit(run_forms, td, p, f"m{i}") for i, p in enumerate(parts)]
+            for f in futs:
+                for key, problem, res in f.result():
+                    if problem:
+                        check("the copy runs a plain command first (nothing called)", False, problem)
+                    elif key[0] == "misuse":
+                        misuse_check(key, res)
         for key, problem, res in results:
             if problem:
                 check("the copy runs a plain command first (nothing called)", False, problem)
                 continue
-            if key[0] == "entry":
-                _, ekey, what, args, want = key
-                rc, out, err, called, changed = res
-                words = f"{ekey} {' '.join(args)}"
-                ok_rc = rc == 2 if want == "refuse" else rc in (0, 2)
-                check(f"{words}: {what} is {'refused (exit 2)' if want == 'refuse' else 'answered or refused'}; nothing is "
-                      "called, connected or written", ok_rc and not called and not changed,
-                      (rc, called[:3], changed[:3], (err or out)[-240:]))
-                continue
+            if key[0] == "valid":
+                continue                          # (entry_results)
             if key[0] == "strict":
                 _, what, vm, cmd, args = key
                 rc, out, err, called, changed = res

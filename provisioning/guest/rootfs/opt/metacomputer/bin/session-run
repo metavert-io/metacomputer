@@ -8,6 +8,7 @@
 mc_usage="session-run CMD [ARGS...]"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 case "${1:-}" in ''|-*) echo "session-run: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 RUN="/run/user/$(id -u)/metacomputer"
 if [ ! -s "$RUN/session.env" ]; then
   echo "metacomputer: the desktop session is not up (no $RUN/session.env)" >&2

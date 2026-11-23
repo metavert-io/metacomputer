@@ -493,7 +493,7 @@ copy's VMs (off) and are stopped at the end.
 
 ## `--help` and `-h` everywhere: `tests/test_help.py`
 
-`python3 tests/test_help.py` (about 2,500 checks, under 20 s) needs no VM. Each worker has its own copy of the checkout
+`python3 tests/test_help.py` (about 12,000 checks, a few minutes) needs no VM. Each worker has its own copy of the checkout
 (tests/test_multi_vm.py's Box) with a throwaway HOME and four computers' settings: the main VM, another VM on this
 Mac, your own server and a Fly Sprite. Stand-ins on PATH record every call of the programs that reach a VM, the VM
 runner, SSH, a provider, the vault, the network or this Mac's settings (ssh, the runner, sprite, oci, curl, git,
@@ -529,12 +529,28 @@ while `checkpoint --delete keep --yes` does. Every form is also run with the opt
 error, nothing run; and with its flag given twice.
 
 Every program in the tree: a scan finds them (tracked files that are executable, start with `#!`, or are Python with
-a `__main__`; the suites aside), and each must have an entry in `ENTRY` (how it's run and a command line it takes),
-or the check fails: a new program fails until it has one. Each is run on the copy with every misuse: `-h` and
-`--help` (answered or refused), `-hx`, `--help=x`, `--hel`, an option it doesn't have, its flag twice, its value option
-twice, `--help` and an option as that option's value, and a word too many (where its arguments end), each refused
-with exit 2 but the requests for usage; for every one, nothing is called (stand-ins on the PATH), connected (a
-sitecustomize) or written. The vault's forms are walked by tests/test_vault_ops.py, its dispatch scanned there too.
+a `__main__`, the suites aside, and the Go programs the repository compiles, `tools/*/main.go`), and each must have an
+entry in tests/entrypoints.py, or the check fails: a new program fails until it has one. An entry is how the program
+is run and its valid command lines, as its callers pass them (one run by the repository must have a caller in it:
+bin/, scripts/, lib/, provisioning/, vault/, the installers, the launchers, bench/); a program whose parser describes
+itself (lib/strictargs.py's argparse or `expect()` forms, with `MCOMP_PARSE_ONLY=describe`) also gets a valid line
+made from its declaration for every subcommand and form. Each valid line runs with `MCOMP_PARSE_ONLY=1`: the program's
+parser takes it and ends the run there, saying what that form declares (its flags, its options that take a value, how
+many words it took and may take); it must be taken, with nothing called, connected or written, so a program too strict
+for its own callers fails (finalize.sh with the build's two words, `remote.py exec --vm demo -- /usr/bin/true --help`).
+Every declared form must have a valid line. Then every misuse is made from that declaration and put after the valid
+line (before a `--` whose rest is another program's): `-h` and `--help` (answered or refused), `-hx`, `--help=x`,
+`--hel`, an option it doesn't have, each flag twice, each option that takes a value twice (unless it's meant to
+repeat), `--help` and an option as each such option's value (`--x --bogus` and `--x=--bogus`; a text that may start
+with `-`, like `handoff --say`, takes the second), and a word too many;
+each is refused with exit 2 but the requests for usage, and for every one nothing is called (stand-ins on the PATH),
+connected (a sitecustomize) or written. The VM's programs run with only their command-line guard (the lines between
+"metacomputer's command-line rules" and "end of the command-line rules"), so every action of
+`lib/vm_claude_guest.sh` gets its own trailing misuse (`stop s1 --help`); `tools/qcow2raw` is built (offline, from Go's
+module cache) and run; the plugin's launchers also run with nothing set up (`--help`: their usage, exit 0; anything
+else is not run). The vault's forms are walked by tests/test_vault_ops.py (each form's valid line taken under
+`MCOMP_PARSE_ONLY=1` in a test build, every flag and value option misused, and its `_tunnel` mode), its dispatch
+scanned there too.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 

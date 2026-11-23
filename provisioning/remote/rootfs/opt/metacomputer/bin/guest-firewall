@@ -44,6 +44,20 @@
 mc_usage="guest-firewall apply | mark-setup | end-setup | render [--egress internet|off|setup] [--ports LIST] [--uids LIST] [--until T] | render-emergency [--ports LIST] [--uids LIST] | status"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 case "$#:${1:-}" in 1:apply|1:mark-setup|1:end-setup|1:status|*:render|*:render-emergency) ;; *) echo "guest-firewall: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+mc_render_opts() { # render's options (--egress --ports --uids --until) or render-emergency's (--ports --uids): each
+  # once, one of its own, with a value that isn't an option or a request for usage
+  mc_ok=" --ports --uids "; [ "$1" = render ] && mc_ok=" --egress --ports --uids --until "
+  mc_seen=" "; shift
+  while [ $# -gt 0 ]; do
+    case "$mc_ok" in *" $1 "*) ;; *) echo "guest-firewall: '$1' isn't one of its options here (nothing was run); usage: $mc_usage" >&2; exit 2 ;; esac
+    case "$mc_seen" in *" $1 "*) echo "guest-firewall: $1 given twice (nothing was run)" >&2; exit 2 ;; esac
+    mc_seen="$mc_seen$1 "
+    { [ $# -ge 2 ] && case "$2" in -*) false ;; esac; } || { echo "guest-firewall: $1 needs a value, not an option (nothing was run)" >&2; exit 2; }
+    shift 2
+  done
+}
+case "${1:-}" in render|render-emergency) mc_render_opts "$@" ;; esac
+# end of the command-line rules
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 CONF=/etc/metacomputer/egress

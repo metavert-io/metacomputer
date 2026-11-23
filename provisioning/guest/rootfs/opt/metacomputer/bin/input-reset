@@ -13,6 +13,7 @@
 # refused (exit 2), and nothing is done.
 case "$*" in -h|--help) echo "usage: input-reset [--check]"; exit 0 ;; esac
 case "$#:${1:-}" in 0:|1:--check) ;; *) echo "input-reset: usage: input-reset [--check] (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 S=/opt/metacomputer/bin/session-run
 command -v xinput >/dev/null || { echo "xinput not installed" >&2; exit 2; }
 ids=$($S xinput list --short 2>/dev/null | LC_ALL=C.UTF-8 grep -E 'CUA v1\.[^[]*pointer[[:space:]]+id=[0-9]+[[:space:]]+\[master pointer' | grep -o 'id=[0-9]*' | cut -d= -f2)

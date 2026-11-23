@@ -25,11 +25,22 @@
 set -u
 umask 022    # what Claude Code and the programs it starts inherit; the token's file is written under 077
 # metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own): -h or --help alone shows
-# the usage; an action it doesn't have is refused (exit 2) before anything is done. ARGS are the action's own
-# (checked by the Mac): Claude Code's arguments for start, key names for keys.
-case "$*" in -h|--help) echo "usage: vm_claude_guest.sh ACTION SESSION [ARGS...]"; exit 0 ;; esac
-case "${1:-}" in status|start|send|keys|read|wait|show|probe|stop) ;;
-  *) echo "usage: vm_claude_guest.sh status|start|send|keys|read|wait|show|probe|stop SESSION [ARGS...] (nothing was run)" >&2; exit 2 ;; esac
+# the usage; an action it doesn't have, a word too many or missing for it, or an option or anything shaped like one
+# among its own words, is refused (exit 2) before anything is done. Each action's words (the Mac's, checked there
+# too): status, probe, stop: none; read N; show 0|1; wait TIMEOUT QUIET LINES; send ENTER WAIT TIMEOUT QUIET LINES;
+# keys KEY...; start WORKDIR AUTH BASE_URL SKIP SHOW INSTALL [-- CLAUDE_ARGS...] (Claude Code's own, whatever they are).
+mc_usage="vm_claude_guest.sh status|probe|stop SESSION | read|show SESSION N | wait SESSION T Q L | send SESSION E W T Q L | keys SESSION KEY... | start SESSION WORKDIR AUTH BASE_URL SKIP SHOW INSTALL [-- CLAUDE_ARGS...]"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+mc_n=0 mc_dash=""
+for mc_a in "$@"; do
+  [ "$mc_a" = -- ] && [ "${1:-}" = start ] && [ "$mc_n" -eq 8 ] && break     # start: the rest is Claude Code's
+  case "$mc_a" in -*) mc_dash=1 ;; esac           # (no key name starts with -: vm_claude.py's NAMED_KEYS and KEY_RE)
+  mc_n=$((mc_n + 1))
+done
+case "${1:-}:$mc_n" in status:2|probe:2|stop:2|read:3|show:3|wait:5|send:7|start:8|keys:[3-9]|keys:[1-9][0-9]) ;;
+  *) mc_dash=1 ;; esac
+[ -z "$mc_dash" ] || { echo "usage: $mc_usage (nothing was run)" >&2; exit 2; }
+# end of the command-line rules
 
 TOKEN="${MCOMP_CLAUDE_TOKEN:-}"
 TEXT="${MCOMP_CLAUDE_TEXT:-}"

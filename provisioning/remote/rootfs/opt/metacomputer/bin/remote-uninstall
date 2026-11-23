@@ -16,6 +16,7 @@ mc_usage="remote-uninstall rollback | all"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 for mc_a in "$@"; do case "$mc_a" in -*) echo "remote-uninstall: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
 case "$#:${1:-}" in 1:rollback|1:all) ;; *) echo "remote-uninstall: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 BACKUP=/var/lib/metacomputer/rollback

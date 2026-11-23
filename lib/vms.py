@@ -514,7 +514,7 @@ def main(argv=None):
     p.add_argument("--selected", default="")
     p.add_argument("--default", default="")
     p.add_argument("--default-problem", default="")
-    p.add_argument("--overridden-by", default="")
+    p.add_argument("--overridden-by", default="", action="text")     # what chose the VM: "--vm NAME", "MCOMP_VM=NAME"
     p.add_argument("--on", default="")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("facts")

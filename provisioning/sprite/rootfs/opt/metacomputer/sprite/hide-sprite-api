@@ -15,6 +15,7 @@
 mc_usage="hide-sprite-api CMD [ARGS...]"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 case "${1:-}" in ''|-*) echo "hide-sprite-api: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -eu
 mount -t tmpfs -o size=1m,mode=0755,nosuid,nodev,noexec sprite-hidden /.sprite
 exec "$@"

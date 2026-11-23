@@ -19,6 +19,7 @@ mc_usage="bootstrap.sh DIR [OWNER] [SSH_PORT]"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 for mc_a in "$@"; do case "$mc_a" in -*) echo "bootstrap.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
 case "$#:${1:-}" in [123]:*) ;; *) echo "bootstrap.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -Eeuo pipefail
 # A failure says where, on the console and in cloud-init's log (a step that fails under set -e says nothing otherwise).
 trap 'echo "bootstrap: failed at line $LINENO: $BASH_COMMAND" >&2' ERR

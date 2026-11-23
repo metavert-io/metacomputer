@@ -297,25 +297,23 @@ def redact(args):
 
 
 def main(argv):
-    if not argv or argv[0] in ("-h", "--help"):
-        print(__doc__)
-        return 0
-    if argv[0] != "--call":     # --call's words are `metacomputer call`'s, which checks them (lib/mcomp_sdk.py)
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import strictargs           # its command line, by metacomputer's rules, before anything is done
-        strictargs.expect(argv, ["--probe", "--tools", "--describe TOOL"], prog="mcp_client.py", usage=__doc__)
-    # Everything here goes through the hub (lib/mcomp_sdk.py), like `metacomputer call`.
-    import mcomp_sdk
-    if argv[0] == "--probe":
+    if not argv:
+        argv = ["--help"]                   # (no words: its usage, as -h)
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    import mcomp_sdk            # (everything here goes through the hub, like `metacomputer call`)
+    forms = ["--probe", "--tools", "--describe TOOL"] + ["--call " + f for f in mcomp_sdk.CALL_FORMS]
+    p = strictargs.expect(argv, forms, prog="mcp_client.py", usage=__doc__, defer=True)
+    if p.form == 3 and argv[0] != "--call":
+        print(f"mcp_client.py: --call comes first: --call {mcomp_sdk.CALL_FORMS[0]} (nothing was run)", file=sys.stderr)
+        return 2
+    if p.form == 3:
+        return mcomp_sdk.call_main(argv[1:], of=forms)  # (its own check of call's words: the same form, parse-only there)
+    strictargs.parsed("mcp_client.py", p.info)
+    if p.form == 0:
         return mcomp_sdk.probe_main()
-    if argv[0] == "--call":
-        return mcomp_sdk.call_main(argv[1:])
-    if argv[0] == "--tools":
+    if p.form == 1:
         return mcomp_sdk.tools_main(["tools"])
-    if argv[0] == "--describe" and len(argv) > 1:
-        return mcomp_sdk.tools_main(["describe", argv[1]])
-    print(__doc__)
-    return 2
+    return mcomp_sdk.tools_main(["describe", p.opts["--describe"]])
 
 
 if __name__ == "__main__":

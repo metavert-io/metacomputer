@@ -14,6 +14,7 @@ mc_usage="session-init (no arguments: run at the desktop's login)"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 for mc_a in "$@"; do case "$mc_a" in -*) echo "session-init: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
 case "$#:${1:-}" in 0:) ;; *) echo "session-init: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -u
 RUN="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/metacomputer"
 mkdir -p "$RUN" "$HOME/.cache/metacomputer"

@@ -407,11 +407,10 @@ def session_check(limit=20):
 
 def main(argv):
     if argv[:1] == ["codex-entry"]:            # for install.sh (see codex_entry)
-        if len(argv) != 5 or argv[1] != "--root" or argv[3] != "--link":
-            print("usage: agents.py codex-entry --root CHECKOUT --link ~/.local/bin/metacomputer", file=sys.stderr)
-            return 2
+        p = strictargs.expect(argv, ["codex-entry --root CHECKOUT --link LINK"], prog="agents.py",
+                              usage="usage: agents.py codex-entry --root CHECKOUT --link ~/.local/bin/metacomputer")
         prog, why = trusted("codex")
-        fields = (codex_entry(prog, argv[2], argv[4]) if prog else
+        fields = (codex_entry(prog, p.opts["--root"], p.opts["--link"]) if prog else
                   ["error", why or "Codex's codex command isn't on PATH", "", "", ""])
         print("\x1f".join(str(f).replace("\x1f", " ").replace("\n", " ") for f in fields))
         return 0

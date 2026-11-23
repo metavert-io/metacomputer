@@ -13,6 +13,7 @@ mc_usage="finalize.sh [ADMIN [GUEST_USER]]"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 for mc_a in "$@"; do case "$mc_a" in -*) echo "finalize.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
 case "$#:${1:-}" in 0:|1:*|2:*) ;; *) echo "finalize.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -Eeuo pipefail
 ADMIN="${1:-cuaadmin}"
 GUSER="${2:-cua}"

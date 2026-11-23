@@ -157,6 +157,18 @@ def _help_shaped(s):
     return s in ("-h", "--help", "--h", "--he", "--hel") or s.startswith("--help=") or (s.startswith("-h") and not s.startswith("--"))
 
 
+# Each action's options, and those that take a value: parse() reads exactly these (tests/test_help.py makes its rows
+# from them too).
+ACTION_OPTIONS = {"start": {"--token", "--ttl", "--model", "--skip-permissions", "--cwd", "--show", "--no-install"},
+                  "send": {"--file", "--no-enter", "--wait", "--timeout", "--quiet", "--lines"},
+                  "read": {"--lines", "--all"},
+                  "wait": {"--timeout", "--quiet", "--lines"},
+                  "keys": set(), "show": {"--again"}, "status": set(), "renew": {"--ttl"}, "stop": {"--revoke"},
+                  "_keeper": set(), "_probe": set()}
+COMMON_OPTIONS = {"--session", "--json", "--override", "-h", "--help"}
+VALUE_OPTIONS = {"--session", "--token", "--ttl", "--model", "--cwd", "--file", "--timeout", "--quiet", "--lines"}
+
+
 def parse(argv):
     o = {"action": "start", "session": "claude", "json": False, "override": False, "help": False,
          "token": None, "ttl": None, "model": None, "skip": False, "cwd": DEFAULT_WORKDIR, "show": False,
@@ -171,13 +183,7 @@ def parse(argv):
     elif argv and not argv[0].startswith("-"):
         raise Usage(f"unknown action {argv[0]!r} (one of {', '.join(ACTIONS)})")
     act = o["action"]
-    allowed = {"start": {"--token", "--ttl", "--model", "--skip-permissions", "--cwd", "--show", "--no-install"},
-               "send": {"--file", "--no-enter", "--wait", "--timeout", "--quiet", "--lines"},
-               "read": {"--lines", "--all"},
-               "wait": {"--timeout", "--quiet", "--lines"},
-               "keys": set(), "show": {"--again"}, "status": set(), "renew": {"--ttl"}, "stop": {"--revoke"},
-               "_keeper": set(), "_probe": set()}[act]
-    allowed |= {"--session", "--json", "--override", "-h", "--help"}
+    allowed = ACTION_OPTIONS[act] | COMMON_OPTIONS
     positional = []
     i, given = 0, set()
     while i < len(argv):
@@ -1207,6 +1213,12 @@ def main(argv):
         if o["help"]:
             print(USAGE)
             return 0
+        if os.environ.get("MCOMP_PARSE_ONLY") == "1":       # tests/test_help.py: taken, and what its form declares
+            import strictargs
+            allowed = ACTION_OPTIONS[o["action"]] | COMMON_OPTIONS
+            strictargs.parsed("metacomputer claude", {
+                "flags": sorted(allowed - VALUE_OPTIONS - {"-h", "--help"}), "values": sorted(allowed & VALUE_OPTIONS),
+                "words": 0, "max_words": None if o["action"] in ("keys", "send") or "--" in argv else 0})
         text = read_text(o) if o["action"] == "send" else ""
     except Usage as e:
         if want_json:

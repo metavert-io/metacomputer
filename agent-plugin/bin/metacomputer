@@ -14,6 +14,14 @@ for mc_to in ${MCOMP_HOME:+"$MCOMP_HOME/bin/metacomputer"} "$HOME/.local/bin/met
   [ -f "$(dirname "$(dirname "$mc_to")")/install.sh" ] || continue
   exec "$mc_to" "$@"
 done
+# No metacomputer set up here: -h or --help says what this is and how to set it up (exit 0); anything else is refused
+# below (exit 1), and nothing is run either way.
+case "$*" in -h|--help)
+  printf '%s\n' "usage: metacomputer COMMAND [ARGS]   (this launcher runs the metacomputer set up on this Mac, with the same" \
+    "arguments: \$MCOMP_HOME/bin/metacomputer or ~/.local/bin/metacomputer; none is set up yet. Set it up in Terminal:" \
+    "  curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash)"
+  exit 0 ;;
+esac
 printf '%s\n' "metacomputer isn't set up on this Mac yet (no ~/.local/bin/metacomputer). Set it up in Terminal (macOS on" \
   "Apple silicon; it says what it will do, asks first, and builds the VM):" \
   "  curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash" \

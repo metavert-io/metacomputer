@@ -9,6 +9,7 @@ mc_usage="metacomputer-admin restart-desktop|reboot|poweroff|status|logs [N]|pro
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 for mc_a in "$@"; do case "$mc_a" in -*) echo "metacomputer-admin: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
 case "$#:${1:-}" in 1:restart-desktop|1:reboot|1:poweroff|1:status|1:logs|2:logs|1:provision-log|1:updates|1:firewall|2:egress|1:idle|2:idle|2:ssh-auth|2:driver-policy|2:storage) ;; *) echo "metacomputer-admin: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 CA=/etc/ssh/metacomputer-ca.pub

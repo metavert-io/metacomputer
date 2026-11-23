@@ -794,6 +794,9 @@ def main(argv):
     if len(argv) != 2 or argv[0] not in ACTIONS or any(_help_shaped(a) for a in argv) or argv[1].startswith("-"):
         print(json.dumps({"ok": False, "error": "usage: page_guest.py ACTION JSON (ACTION: " + ", ".join(ACTIONS) + ")"}))
         return 2
+    if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+        print("parse-only: page_guest.py: taken " + json.dumps({"flags": [], "values": [], "words": 2, "max_words": 2}))
+        sys.exit(0)
     try:
         a = json.loads(argv[1])
         if not isinstance(a, dict):

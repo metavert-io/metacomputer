@@ -15,6 +15,7 @@ mc_usage="svc-session (no arguments: a Sprite service)"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 for mc_a in "$@"; do case "$mc_a" in -*) echo "svc-session: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
 case "$#:${1:-}" in 0:) ;; *) echo "svc-session: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -eu
 install -d -o root -g root -m 0755 /run/metacomputer
 echo "$$" > /run/metacomputer/session.pid

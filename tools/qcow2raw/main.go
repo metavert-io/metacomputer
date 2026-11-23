@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/lima-vm/go-qcow2reader"
 	"github.com/lima-vm/go-qcow2reader/convert"
@@ -24,10 +25,34 @@ func main() {
 	}
 }
 
-func run() error {
-	if len(os.Args) < 3 || len(os.Args) > 4 {
-		return fmt.Errorf("usage: qcow2raw <in.qcow2> <out.raw> [size-bytes]")
+const usage = "usage: qcow2raw <in.qcow2> <out.raw> [size-bytes]"
+
+// metacomputer's command-line rules (scripts/strictargs.sh, lib/strictargs.py): exactly -h or --help prints the
+// usage; an option or anything shaped like one (a path that starts with '-' is ./-name), a size that isn't a number,
+// or a word too many or missing is a usage error (exit 2), before any file is opened or made.
+func checkArgs(args []string) {
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		fmt.Println(usage)
+		os.Exit(0)
 	}
+	bad := len(args) < 2 || len(args) > 3
+	for i, a := range args {
+		if strings.HasPrefix(a, "-") || (i == 2 && strings.Trim(a, "0123456789") != "") {
+			bad = true
+		}
+	}
+	if bad {
+		fmt.Fprintln(os.Stderr, "qcow2raw: "+usage+" (nothing was done)")
+		os.Exit(2)
+	}
+	if os.Getenv("MCOMP_PARSE_ONLY") == "1" { // tests/test_help.py's valid forms: taken, nothing done
+		fmt.Printf("parse-only: qcow2raw: taken {\"flags\": [], \"values\": [], \"words\": %d, \"max_words\": 3}\n", len(args))
+		os.Exit(0)
+	}
+}
+
+func run() error {
+	checkArgs(os.Args[1:])
 	in, err := os.Open(os.Args[1])
 	if err != nil {
 		return err

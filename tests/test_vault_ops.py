@@ -418,11 +418,40 @@ def spec_walk(BIN, env, vdir, calls, audit_recs):
             v = (sp["values"] + sp["lists"])[0]
             variants.append((f"a request for usage as --{v}'s value", argv + [f"--{v}", "--help"]))
             variants.append((f"a malformed one inline (--{v}=--help=x)", argv + [f"--{v}=--help=x"]))
+        # Round 6: every flag and every value option of the form, not only the first, each after the valid line.
+        for f in sp["flags"][1:]:
+            variants.append((f"a flag twice (--{f})", argv + [f"--{f}"] * (1 if f"--{f}" in argv else 2)))
+        for v in sp["values"][1:]:
+            variants.append((f"a value option twice (--{v})", argv + [f"--{v}", "x", f"--{v}", "y"]))
+        for v in sp["values"] + sp["lists"]:
+            if v in ("tunnel-arg", "tunnel-check-arg"):     # (ssh's own arguments: they may start with '-')
+                continue
+            variants.append((f"an option as --{v}'s value", argv + [f"--{v}", "--bogus"]))
+            variants.append((f"an option as --{v}'s value (--{v}=--bogus)", argv + [f"--{v}=--bogus"]))
         for what, a in variants:
             tried += 1
             r = subprocess.run([BIN, *a], env=env, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
             if r.returncode != 64:
                 bad.append((form, what, a, r.returncode, r.stderr[-160:]))
+        # ...and the form's valid line itself is taken (MCOMP_PARSE_ONLY=1, a test build: it ends there, nothing done).
+        r = subprocess.run([BIN, *argv], env=dict(env, MCOMP_PARSE_ONLY="1"), capture_output=True, text=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
+        tried += 1
+        if r.returncode != 0 or "parse-only:" not in r.stdout:
+            bad.append((form, "its valid line", argv, r.returncode, r.stderr[-160:]))
+    # The vault's other entry, ssh's ProxyCommand for a provider's tunnel (`_tunnel [--sha256 HEX] -- PROGRAM [ARGS...]`):
+    # its own parser, outside the declarations. Its valid lines are taken (the program's own --help is the program's);
+    # every misuse is refused (2) before anything runs.
+    for a, ok in ((["--", "/usr/bin/true"], True), (["--sha256", "0" * 64, "--", "/usr/bin/true", "--help"], True),
+                  (["--help"], False), (["-h"], False), (["--bogus", "--", "/usr/bin/true"], False),
+                  (["--sha256", "--help", "--", "/usr/bin/true"], False),
+                  (["--sha256", "0" * 64, "--sha256", "0" * 64, "--", "/usr/bin/true"], False),
+                  (["--", "relative"], False), ([], False), (["--", "/usr/bin/true", "x"], True)):
+        tried += 1
+        r = subprocess.run([BIN, "_tunnel", *a], env=dict(env, MCOMP_PARSE_ONLY="1"), capture_output=True, text=True,
+                           timeout=30, stdin=subprocess.DEVNULL)
+        if (r.returncode == 0 and "parse-only:" in r.stdout) != ok or (not ok and r.returncode != 2):
+            bad.append(("_tunnel", "valid" if ok else "misuse", a, r.returncode, r.stderr[-160:]))
     after = snapshot()
     changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
     check(f"every form of every vault command ({len(specs)} declarations, {tried} command lines): what it doesn't take is "

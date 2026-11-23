@@ -26,11 +26,13 @@
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/scripts/strictargs.sh"
+SA_DEFER=1
 if ! sa_check build-vault.sh "scripts/build-vault.sh [--force] | --out PATH | --test PATH" 0 0 "--force" "--out --test" "$@"; then
   sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0
 fi
 case " $* " in *" --out "*" --test "*|*" --test "*" --out "*|*" --force "*" --out "*|*" --force "*" --test "*|*" --out "*" --force "*|*" --test "*" --force "*)
   sa_fail build-vault.sh "scripts/build-vault.sh [--force] | --out PATH | --test PATH" "one of --force, --out or --test" ;; esac
+sa_parsed build-vault.sh
 SRC="$ROOT/vault"
 INSTALL_DIR="$HOME/.local/share/metacomputer/bin"
 INSTALLED="$INSTALL_DIR/mcomp-vault"

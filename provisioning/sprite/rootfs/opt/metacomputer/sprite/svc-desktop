@@ -12,6 +12,7 @@ mc_usage="svc-desktop (no arguments: a Sprite service)"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 for mc_a in "$@"; do case "$mc_a" in -*) echo "svc-desktop: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
 case "$#:${1:-}" in 0:) ;; *) echo "svc-desktop: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -eu
 . /etc/metacomputer/sprite.env
 U="${GUEST_USER:-cua}"; UID_="$(id -u "$U")"; D="${DISPLAY_NUM:-0}"

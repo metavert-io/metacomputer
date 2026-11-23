@@ -181,6 +181,20 @@ def _help_shaped(s):
     return s in ("-h", "--help", "--h", "--he", "--hel") or s.startswith("--help=") or (s.startswith("-h") and not s.startswith("--"))
 
 
+# Its options, declared once (parse() reads exactly these; tests/test_help.py makes its rows from them).
+SHELL_FLAGS = ("--json", "--raw", "--read-only", "--override")
+SHELL_VALUES = ("-c", "--command", "--file", "--cwd", "--timeout", "--max-output")
+
+
+def _parsed_end(argv):
+    """MCOMP_PARSE_ONLY=1 (tests/test_help.py): the command line is taken; say what it declares, exit 0."""
+    if os.environ.get("MCOMP_PARSE_ONLY") == "1":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import strictargs
+        strictargs.parsed("metacomputer sh", {"flags": list(SHELL_FLAGS), "values": ["--file", "--cwd",
+                          "--timeout", "--max-output"], "words": 0, "max_words": None if "--" in argv else 0})
+
+
 def parse(argv):
     o = {"source": None, "command": None, "file": None, "cwd": None, "timeout": DEFAULT_TIMEOUT,
          "max_output": DEFAULT_OUTPUT, "json": False, "raw": False, "read_only": False, "override": False,
@@ -784,6 +798,7 @@ def main(argv):
         if o["help"]:
             print(USAGE)
             return 0
+        _parsed_end(argv)
         script = read_script(o)
     except Usage as e:
         if want_json:

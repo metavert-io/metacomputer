@@ -10,8 +10,10 @@
 set -uo pipefail
 . "$(dirname "$0")/../../scripts/strictargs.sh"
 mc_u='tests/skill/run_headless.sh OUT_DIR NAME WORKDIR "PROMPT" [--global-mcp]'
+SA_DEFER=1
 if ! sa_check run_headless.sh "$mc_u" 4 4 "--global-mcp" "" "$@"; then sed -n '2,/^set -/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0; fi
 [ $# -eq 4 ] || [ "${5:-}" = --global-mcp ] || sa_fail run_headless.sh "$mc_u" "--global-mcp comes last"
+sa_parsed run_headless.sh
 OUT="$1"; NAME="$2"; WORKDIR="$3"; PROMPT="$4"; MODE="${5:-}"
 mkdir -p "$OUT" && OUT="$(cd "$OUT" && pwd)"
 LAB="$(cd "$(dirname "$0")/../.." && pwd)"

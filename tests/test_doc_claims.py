@@ -823,11 +823,26 @@ CLAIMS = [
     ("docs/commands.md", r"The same rules hold for every program in the repository, not only\s+`metacomputer`: scripts/ "
                          r"\(scripts/strictargs.sh\), lib/ \(lib/strictargs.py\)",
      lambda m: "sa_check() {" in raw("scripts/strictargs.sh") and "def expect(" in raw("lib/strictargs.py")
-     and "def entry_points():" in raw("tests/test_help.py") and "def entry_forms():" in raw("tests/test_help.py")
+     and "def entry_points():" in raw("tests/entrypoints.py") and "def misuse_rows(" in raw("tests/entrypoints.py")
+     and "def entry_results(" in raw("tests/test_help.py")
      and '. "$(dirname "$SELF")/../scripts/strictargs.sh"' in raw("bin/metacomputer")
      and all('. "' in raw(f"scripts/{s}") and "strictargs.sh" in raw(f"scripts/{s}") for s in (
          "build-tools.sh", "build-vault.sh", "build-vm.sh", "check-public.sh", "fetch-artifacts.sh", "pin-gpg-key.sh",
          "release.sh", "remote-build.sh", "safe-rmtree.sh"))),
+    ("docs/commands.md", r"launchers \(with nothing set up, `--help` still prints their usage\), the programs the VM runs and the ones the\s+"
+                         r"repository compiles \(`tools/qcow2raw`\); what follows a `--` they pass on stays that program's own\."
+                         r" tests/test_help.py\s+finds each by a scan, checks that each takes the command lines its callers give it",
+     lambda m: all('case "$*" in -h|--help)' in raw(f"{d}/bin/metacomputer") for d in ("plugin", "agent-plugin"))
+     and "func checkArgs(" in raw("tools/qcow2raw/main.go") and '"tools/qcow2raw": P("go"' in raw("tests/entrypoints.py")
+     and '"plugin/bin/metacomputer#uninstalled"' in raw("tests/entrypoints.py")
+     and '["exec", "--vm", "demo", "--", "/usr/bin/true", "--help"]' in raw("tests/entrypoints.py")
+     and 'PARSE_ONLY = os.environ.get("MCOMP_PARSE_ONLY") == "1"' in raw("lib/strictargs.py")
+     and "a valid line (as its callers pass it" in raw("tests/test_help.py")),
+    ("docs/commands.md", r"a value that starts with `-` where no value can \(a name, a folder, a number\), whether given as\s+"
+                         r"`--out VALUE` or `--out=VALUE`",
+     lambda m: "not an option ('{v[:40]}'" in raw("lib/strictargs.py") and "dashValueOptions" in raw("vault/ArgSpecs.swift")
+     and 'f"an option as {v}\'s value ({v}=--bogus)"' in raw("tests/entrypoints.py")
+     and "an option as --{v}'s value (--{v}=--bogus)" in raw("tests/test_vault_ops.py")),
     ("docs/codex.md", r"one that only asks for its usage \(`--help` or `-h`\) prints it, since it runs nothing",
      lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
      < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')),

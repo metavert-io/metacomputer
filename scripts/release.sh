@@ -46,6 +46,7 @@ die()  { printf '\n%s\n' "${r}release: $1${o}" >&2; shift; local l; for l in "$@
 would() { printf '%s\n' "  would run: $*"; }
 
 . "$(dirname "$0")/strictargs.sh"
+SA_DEFER=1
 if ! sa_check release.sh "scripts/release.sh VERSION [--tag [--draft-release]] [--dry-run [--skip-tests]]" 1 1 \
        "--tag --dry-run --skip-tests --draft-release" "" "$@"; then usage; exit 0; fi
 VERSION="" TAG_STEP=0 DRY=0 SKIP_TESTS=0 DRAFT=0
@@ -64,6 +65,7 @@ done
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "release: VERSION is MAJOR.MINOR.PATCH, like 0.3.0 (no v)" >&2; exit 2; }
 [ "$SKIP_TESTS" = 0 ] || [ "$DRY" = 1 ] || { echo "release: --skip-tests goes with --dry-run only" >&2; exit 2; }
 [ "$DRAFT" = 0 ] || [ "$TAG_STEP" = 1 ] || { echo "release: --draft-release goes with --tag" >&2; exit 2; }
+sa_parsed release.sh
 
 ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null)" || die "not in a git checkout"
 cd "$ROOT" || die "can't enter $ROOT"

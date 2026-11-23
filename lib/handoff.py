@@ -751,6 +751,9 @@ def cmd_guard(argv):
         if len(argv) != 2 or argv[0] != "--hold-fd" or not argv[1].isdigit() or not 3 <= int(argv[1]) <= 255:
             err("usage: guard [--hold-fd N]")
             return EXIT_USAGE
+    # (MCOMP_PARSE_ONLY, tests/test_help.py: taken; nothing checked or held)
+    strictargs.parsed("handoff.py guard", {"flags": [], "values": ["--hold-fd"], "words": 1, "max_words": 1})
+    if argv:
         fd = int(argv[1])
         try:
             st, want = os.fstat(fd), os.lstat(owners.dispatch_path())
@@ -775,7 +778,7 @@ def cmd_guard(argv):
 def sub_parser(sub):
     ap = strictargs.Parser(prog=f"metacomputer handoff {sub}")
     if sub in ("done", "cancel"):
-        ap.add_argument("--note", help="what Claude should know (at most 500 characters)")
+        ap.add_argument("--note", action="text", help="what Claude should know (at most 500 characters)")
     if sub in ("wait", "status"):
         ap.add_argument("--json", action="store_true")
     return ap
@@ -787,7 +790,7 @@ def open_parser():
         description="Hand the virtual computer to the user and wait until they hand it back "
                     "(docs/guide.md, \"When Claude needs you\"). Also: done [--note], cancel [--note], wait, status.")
     ap.add_argument("--why", default="other", choices=owners.HANDOFF_WHY)
-    ap.add_argument("--say", required=True, help="what the user should do, in one line (no secrets or full links)")
+    ap.add_argument("--say", action="text", required=True, help="what the user should do, in one line (no secrets or full links)")
     ap.add_argument("--timeout", default=f"{DEFAULT_TIMEOUT_S // 60}m", help="time limit (default 15m, at most 2h)")
     ap.add_argument("--json", action="store_true", help="the outcome as one JSON line at the end")
     ap.add_argument("--override", action="store_true", help="open it while another session is using the computer "
@@ -846,6 +849,7 @@ def main(argv):
             TRANSPORT_PROBLEM[:] = ["couldn't set up SSH to the VM"]
         argv = argv[2 + k:]
     if len(argv) == 2 and argv[0] == "_dialog":
+        strictargs.parsed("handoff.py _dialog", {"flags": [], "values": [], "words": 2, "max_words": 2})
         return run_dialog(argv[1])
     if argv and argv[0] in SUBCOMMANDS:
         sub, rest = argv[0], argv[1:]

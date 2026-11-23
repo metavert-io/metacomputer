@@ -8,6 +8,10 @@ import json, os, subprocess, sys, time
 if sys.argv[1:]:
     print("usage: guest-status (no arguments)", file=sys.stdout if sys.argv[1:] in (["-h"], ["--help"]) else sys.stderr)
     sys.exit(0 if sys.argv[1:] in (["-h"], ["--help"]) else 2)
+if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+    print("parse-only: guest-status: taken " + json.dumps({"flags": [], "values": [], "words": 0, "max_words": 0}))
+    sys.exit(0)
+# end of the command-line rules
 
 UID = os.getuid()
 RUN = f"/run/user/{UID}/metacomputer"

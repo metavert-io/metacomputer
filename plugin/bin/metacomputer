@@ -32,6 +32,14 @@ for mc_to in ${MCOMP_HOME:+"$MCOMP_HOME/bin/metacomputer"} "$HOME/.local/bin/met
   esac
   exec "$mc_to" "$@"
 done
+# No metacomputer set up here: -h or --help says what this is and how to set it up (exit 0); setup's own words are
+# checked below; anything else is refused (exit 1), and nothing is run either way.
+case "$*" in -h|--help)
+  printf '%s\n' "usage: metacomputer COMMAND [ARGS]   (this plugin's launcher runs the metacomputer set up on this Mac, with the same" \
+    "arguments; none is set up yet. \`$(basename "$0") setup [--dir DIR] [--no-build] [--yes]\` sets it up (it asks first)," \
+    "or in Terminal: curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.sh | bash)"
+  exit 0 ;;
+esac
 mc_root="$(dirname "$(dirname "$mc_self")")"
 if ! mc_in_plugins "$mc_self"; then   # loaded in place (a local marketplace) from a checkout that isn't set up
   printf '%s\n' "metacomputer: this plugin is loaded from a metacomputer checkout that isn't set up yet: run ./install.sh" \
@@ -42,20 +50,29 @@ fi
 if [ "${1:-}" = setup ]; then
   shift; mc_args=(--confirm) mc_seen=" "
   # metacomputer's command-line rules (scripts/strictargs.sh; the plugin carries no scripts/): each option once, a
-  # folder for --dir (never an option), nothing shaped like a request for usage but -h or --help.
+  # folder for --dir (never an option), nothing shaped like a request for usage but -h or --help. Its options (each
+  # case below is one of these; tests/test_help.py makes every misuse from this declaration):
+  mc_flags="--no-chrome --no-build --no-codex --no-claude --no-openclaw --no-hermes --no-gemini --no-antigravity --yes --dry-run"
+  mc_vals="--dir"
   while [ $# -gt 0 ]; do
     case "$1" in -h?*|--h|--he|--hel|--help=*) echo "metacomputer setup: '$1' isn't a request for usage: -h or --help" >&2; exit 2 ;; esac
     case "$mc_seen" in *" ${1/#-y/--yes} "*) echo "metacomputer setup: $1 given twice" >&2; exit 2 ;; esac
     mc_seen="$mc_seen${1/#-y/--yes} "
+    case " $mc_flags $mc_vals -y -h --help " in *" $1 "*) ;;
+      *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, ${mc_flags// /, })" >&2; exit 2 ;; esac
     case "$1" in
       --dir) [ $# -ge 2 ] || { echo "metacomputer setup: --dir needs a folder" >&2; exit 2; }
              case "$2" in -*) echo "metacomputer setup: --dir needs a folder, not '$2'" >&2; exit 2 ;; esac
              mc_args+=(--dir "$2"); shift ;;
-      --no-chrome|--no-build|--no-codex|--no-claude|--no-openclaw|--no-hermes|--no-gemini|--no-antigravity|--yes|-y|--dry-run|--help|-h) mc_args+=("$1") ;;
-      *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, --no-chrome, --no-build, --no-claude, --no-codex, --no-openclaw, --no-hermes, --no-gemini, --no-antigravity, --yes, --dry-run)" >&2; exit 2 ;;
+      *) mc_args+=("$1") ;;             # one of its flags (above), passed on to get.sh
     esac
     shift
   done
+  if [ "${MCOMP_PARSE_ONLY:-}" = 1 ]; then         # (tests/test_help.py: taken, nothing done; what it declares)
+    printf 'parse-only: metacomputer setup: taken {"flags": [%s], "values": [%s], "words": 1, "max_words": 1}\n' \
+      "$(printf '"%s", ' $mc_flags | sed 's/, $//')" "$(printf '"%s", ' $mc_vals | sed 's/, $//')"
+    exit 0
+  fi
   mc_get="$(readlink -f "$mc_root/get.sh" 2>/dev/null)"
   if [ -n "$mc_get" ] && [ "$mc_get" = "$mc_root/get.sh" ] && [ -f "$mc_get" ] && mc_in_plugins "$mc_get"; then
     exec /bin/bash "$mc_get" "${mc_args[@]}"

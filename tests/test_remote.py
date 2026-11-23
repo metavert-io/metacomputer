@@ -3928,8 +3928,10 @@ def remote_helpers():
         check("...the provider's record gives the address", r.stdout.split(b"\0")[-2] == b"cua@198.51.100.4", r)
         r = subprocess.run([PY, rp, "target", "--vm", "box", "--user", "cua", "--host", "-oProxyCommand=touch x"],
                            capture_output=True, text=True, timeout=30)
-        check("...an address that could be an option: refused, nothing printed", r.returncode == 1 and r.stdout == ""
-              and "isn't an IP address" in r.stderr, r)
+        # (its parser refuses it first now, as a value that starts with '-': lib/strictargs.py; target's own check of
+        # the address stays behind it)
+        check("...an address that could be an option: refused, nothing printed", r.returncode == 2 and r.stdout == ""
+              and "--host needs a value, not an option" in r.stderr, r)
         with open(os.path.join(td, "remote.json"), "w") as f:
             f.write("not json")
         r = subprocess.run([PY, rp, "target", "--vm", "box", "--user", "cua", "--run-dir", td], capture_output=True, text=True)

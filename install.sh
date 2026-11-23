@@ -71,6 +71,7 @@ SWITCH=0; ALLOW_DOWNGRADE=0; CODEX=auto; ONLY_CODEX=0; ONLY_AGENTS=0
 OPENCLAW=auto; HERMES=auto; GEMINI=auto; ANTIGRAVITY=auto; ONLY_OPENCLAW=0; ONLY_HERMES=0; ONLY_GEMINI=0; ONLY_ANTIGRAVITY=0
 # The command-line rules every metacomputer program follows (scripts/strictargs.sh): each option once, nothing else.
 . "$ROOT/scripts/strictargs.sh"
+SA_DEFER=1
 if ! sa_check install.sh "./install.sh [OPTIONS]   (./install.sh --help lists them)" 0 0 "--yes -y --no-chrome --no-build \
        --replace-vm --fresh-sources --no-claude --claude --only-agents --no-plugin --only-claude --uninstall --switch \
        --allow-downgrade --codex --no-codex --only-codex --openclaw --no-openclaw --only-openclaw --hermes --no-hermes \
@@ -100,6 +101,7 @@ done
 [ "$ONLY_GEMINI" = 0 ] || [ "$GEMINI" != no ] || { echo "--only-gemini and --no-gemini together leave nothing to do" >&2; exit 2; }
 [ "$ONLY_ANTIGRAVITY" = 0 ] || [ "$ANTIGRAVITY" != no ] || { echo "--only-antigravity and --no-antigravity together leave nothing to do" >&2; exit 2; }
 [ "$((ONLY_CODEX + ONLY_CLAUDE + ONLY_AGENTS + ONLY_OPENCLAW + ONLY_HERMES + ONLY_GEMINI + ONLY_ANTIGRAVITY))" -le 1 ] || { echo "--only-claude, --only-codex, --only-openclaw, --only-hermes, --only-gemini, --only-antigravity and --only-agents: one at a time (--only-agents does them all)" >&2; exit 2; }
+sa_parsed install.sh
 
 b=$'\033[1m'; d=$'\033[2m'; g=$'\033[32m'; y=$'\033[33m'; r=$'\033[31m'; o=$'\033[0m'
 [ -t 1 ] || { b=; d=; g=; y=; r=; o=; }

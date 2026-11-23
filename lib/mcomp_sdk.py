@@ -334,13 +334,19 @@ def say_err(text):
     sys.stderr.write(f"metacomputer call: {termsafe.escape_for_terminal(str(text))}\n")
 
 
-def call_main(argv):
+# Its command lines, declared once (lib/strictargs.py expect(); tests/test_help.py makes its misuse and valid rows from
+# them): `call`'s, and the whole program's modes.
+CALL_FORMS = ["[--session NAME] [--timeout SECONDS] [--json] [--raw] TOOL [JSON]"]
+CLI_FORMS = ["call " + f for f in CALL_FORMS] + ["probe", "tools", "describe TOOL"]
+
+
+def call_main(argv, of=None):
+    """`metacomputer call`; OF: the forms it's one of (CLI_FORMS, mcp_client.py's), whose first CALL_FORMS are its."""
     # Its command line (lib/strictargs.py): anything it wouldn't use is refused before the hub is reached, a request
     # for usage given as --session's value too (`call --session --help TOOL` once ran TOOL in a session named --help).
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import strictargs
-    p = strictargs.expect(argv, ["[--session NAME] [--timeout SECONDS] [--json] [--raw] TOOL [JSON]"], prog="metacomputer call",
-                          usage=USAGE)
+    p = strictargs.expect(argv, CALL_FORMS, prog="metacomputer call", usage=USAGE, defer=True)
     session, rest = p.opts.get("--session"), p.words
     as_json, raw = bool(p.opts.get("--json")), bool(p.opts.get("--raw"))
     if as_json and raw:
@@ -364,6 +370,9 @@ def call_main(argv):
     if not isinstance(args, dict):
         say_err("the arguments must be a JSON object")
         return 2
+    # (MCOMP_PARSE_ONLY: taken, with its own checks; nothing done. Which form, of the forms it was given as.)
+    strictargs.parsed("metacomputer call", dict(p.info, form=(of or CALL_FORMS).index(
+        next(f for f in (of or CALL_FORMS) if f.endswith(CALL_FORMS[p.form]))), forms=len(of or CALL_FORMS)))
     try:
         env = resolve_env()
         if session and mcp_hub.mode(env) == "off":
@@ -430,11 +439,11 @@ def tools_main(argv):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "call":
-        sys.exit(call_main(sys.argv[2:]))
-    if len(sys.argv) > 1 and sys.argv[1] == "probe":
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # every mode's command line, before the hub is reached (`probe --help` was a probe)
+    if sys.argv[1:2] == ["call"]:
+        sys.exit(call_main(sys.argv[2:], of=CLI_FORMS))     # (its own forms, CALL_FORMS: CLI_FORMS' call)
+    strictargs.expect(sys.argv[1:], CLI_FORMS, prog="mcomp_sdk.py", usage=__doc__)
+    if sys.argv[1] == "probe":
         sys.exit(probe_main())
-    if len(sys.argv) > 1 and sys.argv[1] in ("tools", "describe"):
-        sys.exit(tools_main(sys.argv[1:]))
-    print(__doc__)
-    sys.exit(2)
+    sys.exit(tools_main(sys.argv[1:]))

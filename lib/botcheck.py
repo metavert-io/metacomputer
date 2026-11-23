@@ -119,4 +119,8 @@ if __name__ == "__main__":
     if sys.argv[1:]:             # no arguments (it reads a page's JSON on stdin): -h says so; anything else is refused
         print("usage: botcheck.py < PAGE.json", file=sys.stdout if sys.argv[1:] in (["-h"], ["--help"]) else sys.stderr)
         sys.exit(0 if sys.argv[1:] in (["-h"], ["--help"]) else 2)
+    import os
+    if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+        print("parse-only: botcheck.py: taken " + json.dumps({"flags": [], "values": [], "words": 0, "max_words": 0}))
+        sys.exit(0)
     print(json.dumps({"kind": detect(json.load(sys.stdin))}))

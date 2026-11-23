@@ -304,4 +304,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1].startswith("-"):
         print(__doc__, file=sys.stderr)
         sys.exit(2)
+    if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+        print("parse-only: mcp_relay.py: taken " + json.dumps({"flags": [], "values": [], "words": 1, "max_words": None, "passthrough": True}))
+        sys.exit(0)
     sys.exit(main(sys.argv[1:]))

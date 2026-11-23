@@ -2969,7 +2969,7 @@ def _emit_parser(sub, name):
     p = sub.add_parser(name)
     p.add_argument("family", choices=FAMILIES)
     p.add_argument("type")
-    p.add_argument("--message", required=True)
+    p.add_argument("--message", required=True, action="text")
     p.add_argument("--severity", choices=SEVERITIES)
     p.add_argument("--action")
     p.add_argument("--data", help="a small JSON object")

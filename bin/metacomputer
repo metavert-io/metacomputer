@@ -402,6 +402,7 @@ mc_take() { # USAGE MIN MAX "FLAGS" "VALUE-OPTIONS" ARGS...: each argument a fla
     shift
   done
   [ "$n" -ge "$min" ] || mc_usage_error "usage: metacomputer $u"
+  MC_TAKEN=1 SA_FLAGS="$flags" SA_VALS="$vals" SA_WORDS="$n" SA_MAX="$max"
 }
 mc_strict() { # CMD ARGS...
   local c="${1:-help}" sub; [ $# -gt 0 ] && shift
@@ -502,6 +503,10 @@ mc_strict() { # CMD ARGS...
   return 0
 }
 mc_strict "$@"
+# MCOMP_PARSE_ONLY=1 (tests/test_help.py's valid forms): a command line this file's grammar took ends here, doing
+# nothing; one it leaves to its program's parser goes on to that parser, which ends there (lib/strictargs.py,
+# scripts/strictargs.sh).
+if [ "${MCOMP_PARSE_ONLY:-}" = 1 ] && [ "${MC_TAKEN:-0}" = 1 ]; then sa_parsed metacomputer; fi
 # Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
 # Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
 # confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it

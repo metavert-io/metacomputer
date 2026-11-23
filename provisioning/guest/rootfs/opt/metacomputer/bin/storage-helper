@@ -462,9 +462,12 @@ def main(argv):
     if argv[1:] in (["-h"], ["--help"]):
         print("usage: storage-helper version|attach|status")
         return 0
-    if len(argv) != 2:
+    if len(argv) != 2 or argv[1] not in ("version", "attach", "status"):
         print("usage: storage-helper version|attach|status", file=sys.stderr)
         return 2
+    if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+        print("parse-only: storage-helper: taken " + json.dumps({"flags": [], "values": [], "words": 1, "max_words": 1}))
+        sys.exit(0)
     verb = argv[1] if len(argv) > 1 else ""
     if verb == "version":
         print(VERSION)

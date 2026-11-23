@@ -163,6 +163,10 @@ func argSpecForm(_ cmd: String, _ rest: [String]) throws -> (String, [String])? 
     }
 }
 
+/// The options whose values are another program's arguments, which may start with '-': ssh's, for a provider's tunnel
+/// (lib/remote.py passes each as --tunnel-arg=ARG).
+let dashValueOptions: Set<String> = ["tunnel-arg", "tunnel-check-arg"]
+
 /// runMain's check, before the command runs: the command line against its own form's declaration (parseArgs(_:form:)).
 /// A command with no declaration and no subcommand is refused here, so a new one can't slip past.
 func checkArgs(_ cmd: String, _ rest: [String]) throws {
@@ -204,6 +208,11 @@ func scanArgs(_ argv: [String], _ spec: ArgSpec, form: String? = nil) throws -> 
                     i += 1
                 }
                 if isHelpWord(v) { throw usageError("--\(name) needs a value, not a request for usage (-h, --help) (mcomp-vault help)") }
+                // Nor an option (`--csv=--bogus`, `--selector --x`), but for ssh's own arguments; the value isn't repeated
+                // (it may be something typed where it doesn't go).
+                if v.hasPrefix("-") && v != "-" && !dashValueOptions.contains(name) {
+                    throw usageError("--\(name) needs a value, not an option (a word starting with '-'; a file named so is ./ and its name) (mcomp-vault help)")
+                }
                 a.values[name, default: []].append(v)
             } else if spec.flags.contains(name) && inline == nil {
                 if a.flags.contains(name) { throw usageError("--\(name) given twice") }    // a flag once, as a value

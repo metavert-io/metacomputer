@@ -22,6 +22,7 @@ mc_usage="provision.sh [PAYLOAD]"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 for mc_a in "$@"; do case "$mc_a" in -*) echo "provision.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
 case "$#:${1:-}" in 0:|1:*) ;; *) echo "provision.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
 set -Eeuo pipefail
 PAYLOAD="${1:-/opt/metacomputer-payload}"
 LOG=/var/log/metacomputer-provision.log

@@ -26,6 +26,9 @@ if not 2 <= len(sys.argv[1:]) <= 3 or any(a.startswith("-") for a in sys.argv[1:
         or (len(sys.argv) > 3 and not sys.argv[3].isdigit()):
     print("usage: server.py ROOT LOG [PORT]", file=sys.stderr)
     sys.exit(2)
+if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+    print("parse-only: server.py: taken " + json.dumps({"flags": [], "values": [], "words": len(sys.argv) - 1, "max_words": 3}))
+    sys.exit(0)
 ROOT, LOG = sys.argv[1], sys.argv[2]
 PORT = int(sys.argv[3]) if len(sys.argv) > 3 else 8000
 ACCEPT = ("/submit", "/answer", "/reserve", "/pick", "/ship", "/code", "/book", "/extend")

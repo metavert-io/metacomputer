@@ -649,7 +649,16 @@ def refresh_check():
     return 0
 
 
+# Its internal modes' command lines (bin/metacomputer _runinfo, build-vm.sh, install.sh, its own background check),
+# declared once (lib/strictargs.py expect(); tests/test_help.py makes its rows from them): each is checked before it
+# runs (`_record-build DIR --help` once wrote DIR/vm-build.json with --help for its digest).
+INTERNAL_FORMS = ["_runinfo-json VM STATE RUN_DIR NETGW GW HUB_FILE WATCHER VAULT_DIR KIND", "_record-build RUN_DIR [DIGEST]",
+                  "_guest-digest", "_status-line", "_refresh-check", "_after-install"]
+
+
 def main(argv):
+    if argv[:1] and argv[0].startswith("_"):
+        strictargs.expect(argv, INTERNAL_FORMS, prog="update.py")
     if argv and argv[0] == "_runinfo-json":
         runinfo_json(argv[1:])
         return 0
