@@ -44,6 +44,7 @@ import contextlib
 import glob
 import json
 import os
+import stat
 import sys
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -518,14 +519,16 @@ def mentions(path):
 
 
 def unlisted(folder):
-    """Why a folder searched for configuration files (profiles) may hide one, or None: "can't be listed"."""
+    """Why a folder searched for configuration files (profiles) may hide one, or None: "can't be listed" (it can't be
+    looked at, or isn't readable and searchable for this account). Checked without listing it."""
     try:
-        os.listdir(folder)
+        if not stat.S_ISDIR(os.stat(folder).st_mode):
+            return None
     except (FileNotFoundError, NotADirectoryError):
         return None
     except OSError:
         return "can't be listed"
-    return None
+    return None if os.access(folder, os.R_OK | os.X_OK) else "can't be listed"
 
 
 # --- the steps ---------------------------------------------------------------------------------------------------
