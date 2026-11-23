@@ -800,8 +800,13 @@ def test_g():
         other = None
         if cwins:
             cw = cwins[0]
-            rc, res, _ = call_json(cfg, "set_value", json.dumps({"pid": cpid, "window_id": cw["window_id"],
-                                                                 "element_token": "s1:1", "value": "x"}))
+            # A token the hub handed out from a read of Chrome's window (one it never handed out is refused as stale
+            # before any guard looks at the call: lib/mcp_hub.py untag_ids, TOKEN_STALE).
+            _rc, res0, _ = call_json(cfg, "--session", "cg0", "get_window_state", json.dumps(
+                {"pid": cpid, "window_id": cw["window_id"], "include_screenshot": False}))
+            sid0 = (res0.get("structuredContent") or {}).get("snapshot_id")
+            rc, res, _ = call_json(cfg, "--session", "cg0", "set_value", json.dumps(
+                {"pid": cpid, "window_id": cw["window_id"], "element_token": f"{sid0}:1", "value": "x"}))
             rc2, res2, _ = call_json(cfg, "run_script", json.dumps({"script": f"const a = await cua.getApp({{pid: {cpid}}}); return 1;"}))
             check("the Chrome guard applies to `call`: set_value and run_script aimed at Chrome are refused",
                   rc == 1 and "browser_type" in text_of_result(res) and rc2 == 1 and "run_steps" in text_of_result(res2),
@@ -814,7 +819,7 @@ def test_g():
                                                                                       "value": "x"}))
             check("…by an element token alone too: the hub knows the token came from Chrome's window; a token from a "
                   "read it never saw is refused", sid and rc == 1 and "browser_type" in text_of_result(res) and rc2 == 1
-                  and (res2.get("structuredContent") or {}).get("code") == "element_token_unknown",
+                  and (res2.get("structuredContent") or {}).get("code") == "element_token_stale",
                   (sid, text_of_result(res)[:120], text_of_result(res2)[:120]))
         guest_ok(cfg, "pkill -f '[b]rowser-profiles'; true")
 
