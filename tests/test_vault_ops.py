@@ -362,6 +362,80 @@ def main():
     return 0 if all(ts.results) else 1
 
 
+def spec_walk(BIN, env, vdir, calls, audit_recs):
+    """Round 4: every form of every vault command (its declaration, from the test build's _argspecs: options with one
+    value, lists, flags, how many words) given what it doesn't take: an option of no form, another form's option, a word
+    too many, a request for usage as an option's value (--site --help) and as a word (-hx). Each is a usage error (64)
+    before anything runs: the unlocked vault is asked nothing, the VM is reached by nothing, no record is written and
+    no file in the vault's folder changes. Found by review: `rule remove ID --site --help` removed the rule (--site was
+    the add form's, read by nothing), and `revoke --all ID ID` revoked the first id."""
+    specs = json.loads(subprocess.run([BIN, "_argspecs"], env=env, capture_output=True, text=True, timeout=30).stdout or "{}")
+    allopts = {}
+    for form, sp in specs.items():
+        for o in sp["values"] + sp["lists"]:
+            allopts[o] = True
+        for o in sp["flags"]:
+            allopts.setdefault(o, False)
+
+    def base(form, sp):
+        # The form's own words (and the option that picks it), then enough words for its minimum.
+        picks = {"fill --request": ["fill", "--request", "0000abcd"], "pay --purchase": ["pay", "--purchase", "0" * 32],
+                 "pay --done": ["pay", "--purchase", "0" * 32, "--done"], "token renew": ["token", "renew", "--all"],
+                 "rule add code": ["rule", "add", "code"], "rule add relay": ["rule", "add", "relay"]}
+        argv = picks.get(form, form.split())
+        have = {"rule add code": 1, "rule add relay": 1}.get(form, 0)
+        return argv + [f"w{i}" for i in range(have, sp["min"])], have
+
+    def snapshot():
+        out = {}
+        for root, _dirs, files in os.walk(vdir):
+            for f in files:
+                p = os.path.join(root, f)
+                if not f.endswith(".sock") and os.path.isfile(p) and not os.path.islink(p):
+                    out[p] = hashlib.sha256(open(p, "rb").read()).hexdigest()
+        return out
+
+    before, n_calls, n_recs = snapshot(), len(calls()), len(audit_recs())
+    bad, tried = [], 0
+    for form, sp in sorted(specs.items()):
+        argv, have = base(form, sp)
+        mine = set(sp["values"] + sp["lists"] + sp["flags"])
+        cmd = form.split()[0]
+        sibling = sorted(o for f2, s2 in specs.items() if f2 != form and f2.split()[0] == cmd
+                         for o in s2["values"] + s2["lists"] + s2["flags"] if o not in mine)
+        other = sibling[0] if sibling else sorted(o for o in allopts if o not in mine)[0]
+        variants = [("an unknown option", argv + ["--no-such-option"]),
+                    (f"another form's option (--{other})", argv + [f"--{other}"] + (["x"] if allopts[other] else [])),
+                    ("a request for usage as a word (-hx)", argv + ["-hx"])]
+        if sp["max"] < 1000:
+            variants.append(("a word too many", argv + [f"x{i}" for i in range(sp["max"] - max(sp["min"], have) + 1)]))
+        if sp["values"] or sp["lists"]:
+            v = (sp["values"] + sp["lists"])[0]
+            variants.append((f"a request for usage as --{v}'s value", argv + [f"--{v}", "--help"]))
+            variants.append((f"a malformed one inline (--{v}=--help=x)", argv + [f"--{v}=--help=x"]))
+        for what, a in variants:
+            tried += 1
+            r = subprocess.run([BIN, *a], env=env, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+            if r.returncode != 64:
+                bad.append((form, what, a, r.returncode, r.stderr[-160:]))
+    after = snapshot()
+    changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+    check(f"every form of every vault command ({len(specs)} declarations, {tried} command lines): what it doesn't take is "
+          "a usage error (64) before anything runs; nothing asked of the unlocked vault or the VM, no record, no file changed",
+          len(specs) > 60 and not bad and not changed and len(calls()) == n_calls and len(audit_recs()) == n_recs,
+          (bad[:6], changed[:4], len(calls()) - n_calls, len(audit_recs()) - n_recs))
+    # The two the review found, and that their right forms still go through (the parser, not the command, refused).
+    rr = subprocess.run([BIN, "rule", "remove", "0000abcd", "--site", "--help"], env=env, capture_output=True, text=True,
+                        timeout=30, stdin=subprocess.DEVNULL)
+    rv = subprocess.run([BIN, "revoke", "--all", "deadbeef", "cafebabe"], env=env, capture_output=True, text=True, timeout=30,
+                        stdin=subprocess.DEVNULL)
+    ok = subprocess.run([BIN, "rule", "list", "--json"], env=env, capture_output=True, text=True, timeout=30,
+                        stdin=subprocess.DEVNULL)
+    check("`rule remove ID --site --help` and `revoke --all ID ID` are usage errors; `rule list --json` still answers",
+          rr.returncode == 64 and "--site" in rr.stderr and rv.returncode == 64 and "at most 1 word" in rv.stderr
+          and ok.returncode == 0, (rr.returncode, rr.stderr[-120:], rv.returncode, rv.stderr[-120:], ok.returncode))
+
+
 def run(td, procs):
     BIN = os.environ.get("MCOMP_VAULT_TEST_BIN")
     if not BIN:
@@ -789,6 +863,7 @@ def run(td, procs):
     u = start_unlock(["--for", "20m", *allow], T, passphrase=current)
     r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
     check("a fill while four sinks are set", r.returncode == 0, r.stdout + r.stderr)
+    spec_walk(BIN, dict(env, **T), vdir, calls, audit_recs)     # unlocked, with secrets, rules and sinks to change
     check("records the vault writes carry a creation MAC", "mac" in audit_recs()[-1], audit_recs()[-1])
     open(os.path.join(stubdir, "nested-value-next"), "w").close()
     r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")

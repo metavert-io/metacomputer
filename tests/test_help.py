@@ -546,20 +546,20 @@ def hand_parsed(rel, pattern):
 
 
 def vault_values():
-    src = "".join(open(os.path.join(LAB, "vault", f)).read() for f in sorted(os.listdir(os.path.join(LAB, "vault")))
-                  if f.endswith(".swift"))
+    """The vault's options that take a value (one, or a list), from its declarations (vault/ArgSpecs.swift)."""
+    src = open(os.path.join(LAB, "vault", "ArgSpecs.swift")).read()
     consts = {m.group(1): re.findall(r'"([a-z][a-z0-9-]*)"', m.group(2))
               for m in re.finditer(r"let (\w+)\s*(?::\s*Set<String>)?\s*=\s*(?:Set\()?\[([^\]]*)\]", src)}
     vals = set()
-    for m in re.finditer(r"parseArgs\(", src):
+    for m in re.finditer(r"\bArgSpec\(", src):
         depth, i = 1, m.end()
         while depth and i < len(src):
             depth += {"(": 1, ")": -1}.get(src[i], 0)
             i += 1
-        v = re.search(r"values:\s*(.*?)(?:,\s*flags:|$)", src[m.end():i - 1], re.S)
-        if v:
+        body = src[m.end():i - 1]
+        for v in re.finditer(r"(?:values|lists):\s*(.*?)(?=,\s*(?:values|lists|flags|words):|$)", body, re.S):
             vals |= set(re.findall(r'"([a-z][a-z0-9-]*)"', v.group(1)))
-            for ident in re.findall(r"\b([a-z]\w*(?:Flags|Values))\b", v.group(1)):
+            for ident in re.findall(r"\b([a-z]\w*)\b", v.group(1)):
                 vals |= set(consts.get(ident, []))
     return {"--" + x for x in vals}
 
@@ -710,15 +710,26 @@ FILLS_A_WORD = {("vm", ("create",)), ("vm", ("delete",)), ("notify", ()), ("call
                 ("web", ("gpu",)), ("web", ("debug",)), ("cloud", ("teardown",))}
 
 
+# The options before the command (--vm NAME, --on PLACE), misused: given twice, or with a request for usage (or
+# another option) for a value. `metacomputer --vm --help --vm NAME reset --yes` once reset the VM: the second --vm
+# replaced the first, and nothing after saw the --help. Each is prefixed to every form: a usage error, nothing run.
+GLOBAL_MISUSE = (("--vm", "--help", "--vm", "helpvm"), ("--vm", "-h"), ("--vm=--help=x",), ("--vm", "helpvm", "--vm", "helpvm"),
+                 ("--on", "mac", "--on", "mac"), ("--on", "-hx"))
+
+
 def strict_forms():
     vals, _subs, _fns = bash_tables()
     real, _ = real_value_options()
     out, seen = [], set()
     for vm, cmd, args in FORMS:
         base = [a for a in args if a != H]
-        if cmd in ("help", "-h", "--help", "ssh") or (tuple(vm), cmd, tuple(base)) in seen:
+        if (tuple(vm), cmd, tuple(base)) in seen:
             continue
         seen.add((tuple(vm), cmd, tuple(base)))
+        for g in GLOBAL_MISUSE:
+            out.append((f"global options misused ({' '.join(g)})", tuple(g) + tuple(vm), cmd, tuple(base)))
+        if cmd in ("help", "-h", "--help", "ssh"):
+            continue
         out.append(("an unknown option", tuple(vm), cmd, tuple(base + [JUNK_OPTION])))
         for bad in MALFORMED_HELP:
             out.append((f"a malformed request for usage ({bad})", tuple(vm), cmd, tuple(base + [bad])))
@@ -758,6 +769,19 @@ def checkpoint_p1_checks(td):
             r = b.run("checkpoint", *args)
             check(f"checkpoint {' '.join(args)}: refused (usage error), the checkpoint kept", r.returncode == 2
                   and not b.deletes() and "helpvm-ckpt-keep" in b.vms(), (r.returncode, b.deletes(), r.stderr[-300:]))
+        # codex re-check 3, P1: the same with a request for usage hidden as the first of two --vm (the second replaced
+        # it before either help scanner or the strict parsers looked): it deleted keep.
+        for pre in (["--vm", "--help", "--vm", "helpvm"], ["--vm", "-h", "--vm", "helpvm"], ["--vm", "--help=x", "--vm", "helpvm"],
+                    ["--vm=-hx", "--vm", "helpvm"], ["--vm", "helpvm", "--vm", "helpvm"]):
+            b.set_vms([runner_vm("helpvm"), runner_vm("helpvm-ckpt-keep")])
+            r = b.run(*pre, "checkpoint", "--delete", "keep", "--yes")
+            check(f"{' '.join(pre)} checkpoint --delete keep --yes: refused (usage error), the checkpoint kept",
+                  r.returncode == 2 and "usage" in r.stderr and not b.deletes() and "helpvm-ckpt-keep" in b.vms(),
+                  (r.returncode, b.deletes(), r.stderr[-300:]))
+        b.set_vms([runner_vm("helpvm"), runner_vm("helpvm-ckpt-keep")])
+        r = b.run("--vm", "helpvm", "checkpoint", "--delete", "keep", "--yes")
+        check("...and `--vm helpvm checkpoint --delete keep --yes` deletes it (the copy's runner can)", r.returncode == 0
+              and b.deletes() == ["helpvm-ckpt-keep"], (r.returncode, b.deletes(), r.stderr[-300:]))
         b.set_vms([runner_vm("helpvm"), runner_vm("helpvm-ckpt-keep")])
         r = b.run("checkpoint", "--delete", "keep", "--yes")
         check("...and `checkpoint --delete keep --yes` deletes it (the copy's runner can)", r.returncode == 0

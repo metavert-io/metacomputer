@@ -3617,6 +3617,15 @@ def review_egress(c):
     check("net egress while another session uses the computer: refused without --override, past that check with it",
           r0.returncode != 0 and "another session is using" in r0.stderr and "another session is using" not in r.stderr,
           (r0.stderr[-200:], r.stderr[-200:]))
+    # (round 4) Only --override is taken out before net's own grammar: another flag (before the subcommand too) is a
+    # usage error, as on main, never dropped on the way to changing the setting.
+    env_before = open(os.path.join(b.co, "config", "vms", "own1.env")).read()
+    bad = [b.run("--vm", "own1", "net", *a) for a in (["--yes", "egress", "off"], ["--discard-unsynced", "egress", "off"],
+                                                      ["egress", "--yes", "off"], ["--override", "--yes", "egress", "off"])]
+    check("net --yes egress off (and --discard-unsynced, anywhere): a usage error, nothing asked, the setting as it was",
+          all(x.returncode == 2 and "usage" in x.stderr and "doesn't answer" not in x.stderr for x in bad)
+          and open(os.path.join(b.co, "config", "vms", "own1.env")).read() == env_before,
+          [(x.returncode, x.stderr[-160:]) for x in bad])
     text = open(os.path.join(b.co, "config", "vms", "own1.env")).read()
     check("net egress off on a computer that doesn't answer: refused, the setting left as it was",
           r.returncode != 0 and "doesn't answer" in r.stderr and "nothing was" in r.stderr
@@ -4282,6 +4291,31 @@ def view_tunnel_pipes():
             os.close(fd)
         check("...a pipe that never runs dry: the reader still says the tunnel is up within moments, then drains on",
               told and status == b"0" and secs < 3, (secs, status))
+        # (round 4) A cap smaller than the line saying the rest was left out: refused (the command line before anything
+        # runs, and the log itself), so no cap is ever overrun; at exactly that size the file holds the line and no more.
+        small = os.path.join(td, "small-cap", "t.log")
+        ran = os.path.join(td, "small-cap-ran")
+        r = subprocess.run([PY, os.path.join(LAB, "lib", "tunnellog.py"), "--log", small, "--cap", "16", "--fork", "--",
+                            "/usr/bin/touch", ran], capture_output=True, text=True, timeout=30)
+        r2 = subprocess.run([PY, os.path.join(LAB, "lib", "tunnellog.py"), "--log", small, "--cap", "4096", "--cap",
+                             "8192", "--fork", "--", "/usr/bin/touch", ran], capture_output=True, text=True, timeout=30)
+        try:
+            _tl.Log(os.open(os.devnull, os.O_WRONLY), 16)
+            small_log = "accepted"
+        except ValueError:
+            small_log = "refused"
+        exact = os.path.join(td, "exact-cap.log")
+        efd = os.open(exact, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        el = _tl.Log(efd, len(_tl.CUT))
+        for _ in range(3):
+            el.write(b"y" * 1000)
+        os.close(efd)
+        check("...a cap smaller than the left-out line (--cap 16) is refused before anything runs, as is a second --cap; "
+              "the log refuses one too, and at exactly that size holds the line and no more",
+              r.returncode == 2 and "--cap" in r.stderr and r2.returncode == 2 and not os.path.exists(ran)
+              and not os.path.exists(small) and small_log == "refused"
+              and open(exact, "rb").read() == _tl.CUT, (r.returncode, r.stderr[-200:], r2.returncode, small_log,
+                                                        os.path.getsize(exact)))
         # A log that's a link, or shared with another file (a hard link): refused, nothing written through it.
         if os.path.lexists(log):
             os.remove(log)

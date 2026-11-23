@@ -392,45 +392,7 @@ struct Args {
     func has(_ k: String) -> Bool { flags.contains(k) }
 }
 
-/// --name VALUE / --name=VALUE for valueFlags, --name for boolFlags. A value option is given once: a second one is a
-/// usage error, unless it's in `repeatable` (the options a command reads as a list, with all()), so nothing a command
-/// doesn't use is ever let through (a later value silently winning over an earlier one, say).
-func parseArgs(_ argv: [String], values valueFlags: Set<String>, flags boolFlags: Set<String> = [],
-               repeatable: Set<String> = []) throws -> Args {
-    var a = Args()
-    var i = 0
-    while i < argv.count {
-        let x = argv[i]
-        if x.hasPrefix("--") && x.count > 2 {
-            var name = String(x.dropFirst(2))
-            var inline: String?
-            if let eq = name.firstIndex(of: "=") {
-                inline = String(name[name.index(after: eq)...])
-                name = String(name[..<eq])
-            }
-            if valueFlags.contains(name) {
-                if a.values[name] != nil && !repeatable.contains(name) {
-                    throw usageError("--\(name) given twice")
-                }
-                if let v = inline {
-                    a.values[name, default: []].append(v)
-                } else {
-                    guard i + 1 < argv.count else { throw usageError("--\(name) needs a value") }
-                    a.values[name, default: []].append(argv[i + 1])
-                    i += 1
-                }
-            } else if boolFlags.contains(name) && inline == nil {
-                a.flags.insert(name)
-            } else {
-                throw usageError("unknown option --\(name)")
-            }
-        } else {
-            a.positional.append(x)
-        }
-        i += 1
-    }
-    return a
-}
+// Command lines are read by their declarations: vault/ArgSpecs.swift (parseArgs(_:form:), parseArgs(_:command:)).
 
 // MARK: - audit log
 

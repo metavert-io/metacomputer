@@ -801,13 +801,21 @@ CLAIMS = [
                          r"second value for an option that takes one",
      lambda m: "mc_strict \"$@\"" in raw("bin/metacomputer") and "mc_help_malformed \"$@\"" in raw("bin/metacomputer")
      and raw("bin/metacomputer").index('mc_strict "$@"') < raw("bin/metacomputer").index('. "$LIB"')
-     and 'throw usageError("--\\(name) given twice")' in raw("vault/Util.swift")
+     and 'throw usageError("--\\(name) given twice")' in raw("vault/ArgSpecs.swift")
      and 'self.register("action", "store", _Once)' in raw("lib/strictargs.py")
      and all("strictargs.Parser(" in raw(f"lib/{m_}.py") and "argparse.ArgumentParser(" not in raw(f"lib/{m_}.py")
              for m_ in ("events", "handoff", "learn", "agents", "shop", "browser_tools", "traces", "update", "storage",
                         "netpolicy", "remote"))
      and 'elif a.startswith("-") and a != "-":' in raw("lib/guest_put.py")      # put: ./-name for such a file
      and "def strict_forms():" in raw("tests/test_help.py")),
+    ("docs/commands.md", r"and `--vm` or `--on` given twice or with an option for its value \(`--vm --help --vm NAME`\)\. The vault "
+                         r"checks each of its command lines against what that command's form declares",
+     lambda m: raw("bin/metacomputer").index("mc_global --vm") < raw("bin/metacomputer").index('if mc_help_malformed "$@"')
+     and "try checkArgs(cmd, rest)" in raw("vault/Commands.swift")
+     and raw("vault/Commands.swift").index("try checkArgs(cmd, rest)") < raw("vault/Commands.swift").index('case "init": return')
+     and not any(re.search(r"parseArgs\([^\n]*(values|flags):", raw(f"vault/{f}"))        # no declaration but the table's
+                 for f in os.listdir(os.path.join(LAB, "vault")) if f.endswith(".swift"))
+     and "GLOBAL_MISUSE" in raw("tests/test_help.py") and "def spec_walk(" in raw("tests/test_vault_ops.py")),
     ("docs/codex.md", r"one that only asks for its usage \(`--help` or `-h`\) prints it, since it runs nothing",
      lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
      < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')),

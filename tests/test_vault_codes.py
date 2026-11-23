@@ -864,7 +864,7 @@ def run(td, procs):
     rid = js(r.stdout).get("request_id", "00000000")
     time.sleep(3.5)
     n7 = len(calls())
-    r2 = client("fill", "--request", rid, "--vm", "cvm", "--json")
+    r2 = client("fill", "--request", rid, "--vm", "cvm")        # (its answer is JSON; --json was never read, and is refused)
     check("a rule that expired while the request waited no longer covers its retry: needs approval (exit 7), nothing sent",
           js(r.stdout).get("state") == "given" and r2.returncode == 7 and not value_calls(n7, CODE3), (r.stdout[-200:], r2.stdout[-200:]))
     client("deny", rid)

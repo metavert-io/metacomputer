@@ -25,7 +25,7 @@ func showRecoveryKey(_ text: String) {
 func cmdInit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     try refusePassphraseStdin(argv)
     // --passphrase, as other vaults spell it: this vault always uses one (typed twice, never an argument).
-    let a = try parseArgs(argv, values: [], flags: ["enclave", "no-enclave", "passphrase"])
+    let a = try parseArgs(argv, command: "init")
     guard !(a.has("enclave") && a.has("no-enclave")) else { throw usageError("--enclave or --no-enclave, not both") }
     let enclave = a.has("no-enclave") ? false : (a.has("enclave") || enclaveAvailable())
     if enclave && !enclaveAvailable() { throw VaultError("this Mac has no Secure Enclave; use --no-enclave") }
@@ -70,7 +70,7 @@ func rewrite(_ paths: Paths, from old: VaultKey, passphrase: [UInt8], enclave: B
 }
 
 func cmdRekey(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["enclave", "no-enclave"])
+    let a = try parseArgs(argv, command: "rekey")
     guard !(a.has("enclave") && a.has("no-enclave")) else { throw usageError("--enclave or --no-enclave, not both") }
     try requireTTY("rekey")
     installPromptSignalHandlers()
@@ -90,7 +90,7 @@ func cmdRekey(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdRecover(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["no-enclave"])
+    let a = try parseArgs(argv, command: "recover")
     try requireTTY("recover")
     installPromptSignalHandlers()
     _ = try readHeader(paths)
@@ -118,7 +118,7 @@ func cmdRecover(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 /// rewritten, then checked; only then are the older keys dropped. Cut short at any point,
 /// every file still opens, and running it again finishes the job.
 func cmdRotateSessionKey(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    _ = try parseArgs(argv, values: [])
+    _ = try parseArgs(argv, command: "rotate-session-key")
     try requireTTY("rotate-session-key")
     installPromptSignalHandlers()
     let (key, _) = try unlockKey(paths)

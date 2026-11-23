@@ -239,8 +239,7 @@ func cmdAP2(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: ap2 init [--replace] (your own terminal) | ap2 key [--json] | ap2 sign CARD --vm VM --origin https://shop "
         + "--checkout-jwt FILE|- [--ttl 15m]"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "origin", "checkout-jwt", "ttl", "request-id", "on-behalf-pid"],
-                          flags: ["replace", "json"])
+    let a = try parseArgs(Array(argv.dropFirst()), command: "ap2")
     switch sub {
     case "init":
         guard a.positional.isEmpty else { throw usageError(usage) }

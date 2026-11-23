@@ -524,7 +524,9 @@ refuses it: tests/test_vault_ops.py; a command a computer elsewhere doesn't have
 list of install.sh's options must be install.sh's own; `lib/guest_put.py` and `lib/actionlog.py`, run directly,
 refuse an unknown option and `verify --all FILE`. And `checkpoint --delete keep --delete --help --yes` (with `-h`,
 `--help=x`, `-hx`, an extra word, an unknown option), on a copy whose runner has the checkpoint, deletes nothing,
-while `checkpoint --delete keep --yes` does.
+while `checkpoint --delete keep --yes` does. Every form is also run with the options before the command misused
+(`--vm --help --vm NAME`, `--vm -h`, `--vm=--help=x`, `--vm NAME --vm NAME`, `--on mac --on mac`, `--on -hx`): a usage
+error, nothing run.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
@@ -2127,6 +2129,10 @@ tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
 `python3 tests/test_vault_ops.py` (215 checks, about 3 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
+- **declarations:** every form of every command, as the test build lists them (`_argspecs`), given an unknown
+  option, another form's option, a word too many, a request for usage as an option's value (`--site --help`,
+  `--site=--help=x`) and as a word (`-hx`): each a usage error (64) with the vault unlocked, nothing asked of it or the
+  VM, no record and no file changed; `rule remove ID --site --help` and `revoke --all ID ID` among them;
 - **keys:** `init` binds to the Secure Enclave (when the Mac has one) and prints a
   recovery key; `--no-enclave`; `rekey` (the old passphrase and recovery key stop
   working); on a Mac whose Enclave can't use the key (a test-build switch), only the

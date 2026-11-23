@@ -151,18 +151,29 @@ SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
 # --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same);
 # --on PLACE picks it by where it is (lib/placement.py, below, once the settings are read).
-MCOMP_VM_ARG=""; MC_ON_ARG=""; MC_ON_GIVEN=0
+# Each is given once, and its value is a name or a place, never an option or a request for usage (no VM name or place
+# starts with '-'): `--vm --help --vm NAME reset --yes` is refused here, before anything else reads the command line.
+MCOMP_VM_ARG=""; MC_ON_ARG=""; MC_ON_GIVEN=0; mc_vm_given=0
+mc_global() { # OPTION VALUE GIVEN-BEFORE: the global option's value, refused (exit 2, nothing run) unless it's one
+  local what="a VM name (metacomputer vm list)" u="usage: metacomputer [--vm NAME] [--on mac|cloud] COMMAND ...; nothing was run"
+  [ "$1" = --vm ] || what="a place: mac (this Mac) or cloud"
+  [ "$3" = 0 ] || { printf 'metacomputer: %s given twice (%s)\n' "$1" "$u" >&2; exit 2; }
+  case "$2" in
+    "") printf 'metacomputer: %s needs %s (%s)\n' "$1" "$what" "$u" >&2; exit 2 ;;
+    -*) printf "metacomputer: %s needs %s, not '%s' (%s)\n" "$1" "$what" \
+          "$(printf '%s' "$2" | LC_ALL=C tr -c '[:print:]' '?' | cut -c1-40)" "$u" >&2; exit 2 ;;
+  esac
+}
 while [ $# -gt 0 ]; do
   case "$1" in
-    --vm) [ $# -ge 2 ] && [ -n "$2" ] || { echo "metacomputer: --vm needs a VM name (metacomputer vm list)" >&2; exit 2; }
-          MCOMP_VM_ARG="$2"; shift 2 ;;
-    --vm=*) MCOMP_VM_ARG="${1#--vm=}"; [ -n "$MCOMP_VM_ARG" ] || { echo "metacomputer: --vm needs a VM name" >&2; exit 2; }; shift ;;
-    --on) [ $# -ge 2 ] && [ -n "$2" ] || { echo "metacomputer: --on needs a place: mac (this Mac) or cloud" >&2; exit 2; }
-          MC_ON_ARG="$2"; MC_ON_GIVEN=1; shift 2 ;;
-    --on=*) MC_ON_ARG="${1#--on=}"; MC_ON_GIVEN=1; [ -n "$MC_ON_ARG" ] || { echo "metacomputer: --on needs a place: mac (this Mac) or cloud" >&2; exit 2; }; shift ;;
+    --vm)   mc_global --vm "${2:-}" "$mc_vm_given"; MCOMP_VM_ARG="$2"; mc_vm_given=1; shift 2 ;;
+    --vm=*) mc_global --vm "${1#--vm=}" "$mc_vm_given"; MCOMP_VM_ARG="${1#--vm=}"; mc_vm_given=1; shift ;;
+    --on)   mc_global --on "${2:-}" "$MC_ON_GIVEN"; MC_ON_ARG="$2"; MC_ON_GIVEN=1; shift 2 ;;
+    --on=*) mc_global --on "${1#--on=}" "$MC_ON_GIVEN"; MC_ON_ARG="${1#--on=}"; MC_ON_GIVEN=1; shift ;;
     *) break ;;
   esac
 done
+unset mc_vm_given
 # --help and -h, wherever a person types them (after the command, its subcommand or its arguments; up to a `--`,
 # after which the words are a script's or another command's), print the command's usage and exit 0 here, before
 # anything else runs: no settings are read (a computer named with --vm isn't even looked up), nothing reaches a VM,
@@ -420,6 +431,7 @@ mc_strict() { # CMD ARGS...
         start|serve) mc_take "hub $sub" 0 0 "" "" "$@" ;;
         stop)   mc_take "hub stop [--if-idle]" 0 0 "--if-idle" "" "$@" ;;
         env)    mc_take "hub env --json" 0 0 "--json" "" "$@" ;;
+        *)      mc_usage_error "usage: metacomputer hub [status [--json|--brief] | start | stop [--if-idle]]" ;;
       esac ;;
     record)
       sub="${1:-status}"; [ $# -gt 0 ] && shift
@@ -427,12 +439,14 @@ mc_strict() { # CMD ARGS...
         start)       mc_take "record start [NAME] [FPS]" 0 2 "" "" "$@" ;;
         stop|status) mc_take "record $sub" 0 0 "" "" "$@" ;;
         moments)     mc_take "record moments FILE" 1 1 "" "" "$@" ;;
+        *)           mc_usage_error "usage: metacomputer record start [NAME] [FPS] | stop | status | moments FILE" ;;
       esac ;;
     task)
       sub="${1:-}"; [ $# -gt 0 ] && shift
       case "$sub" in
         start)  mc_take "task start SLUG [--no-sync]" 0 1 "--no-sync" "" "$@" ;;
         finish) mc_take "task finish NAME" 1 1 "" "" "$@" ;;
+        *)      mc_usage_error "usage: metacomputer task start SLUG [--no-sync] | finish NAME" ;;
       esac ;;
     events)
       [ "${1:-}" != watcher ] || { shift; mc_take "events watcher [start|stop|status]" 0 1 "" "" "$@"; } ;;
@@ -447,6 +461,7 @@ mc_strict() { # CMD ARGS...
                     mc_usage_error "usage: metacomputer browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" ;; esac
                   case " $* " in *" --new "*|*" --delete "*) ;; "  ") ;; *)
                     mc_usage_error "usage: metacomputer browser profiles [--new NAME | --delete NAME [--firefox] [--yes]]" ;; esac ;;
+        *) mc_usage_error "usage: metacomputer browser [default firefox|chrome | mode human|page|hybrid | pacing human|fast | profiles ... | --json]" ;;
       esac ;;
     net)
       sub="${1:-status}"; [ $# -gt 0 ] && shift
@@ -458,6 +473,7 @@ mc_strict() { # CMD ARGS...
         clear)  mc_take "net clear [--override]" 0 0 "--override" "" "$@" ;;
         allow)  mc_take "net allow NAME... [--for 2h] [--exact] [--override]" 1 99 "--exact --override" "--for=" "$@" ;;
         remove) mc_take "net remove NAME... [--exact] [--override]" 1 99 "--exact --override" "" "$@" ;;
+        *)      mc_usage_error "usage: metacomputer net [status [--json] | allow NAME... [--for 2h] [--exact] | remove NAME... | clear | egress internet|off]" ;;
       esac ;;
     put)             mc_take "put HOST_PATH... [--to GUEST_DIR] [--overwrite]" 1 99999 "--overwrite" "--to" "$@" ;;
     test)            mc_take "test [A B C D E F | all] [--run-id ID] [--override]" 0 99 "--override" "--run-id" "$@" ;;
@@ -3091,7 +3107,10 @@ if [ "${MC_REMOTE:-0}" = 1 ]; then
     reset|baseline|restore|checkpoint|checkpoints)
               if [ "${PROVIDER:-}" = sprites ]; then do_snap_sprite "$cmd" "$@"; exit $?; fi
               remote_only_mac "$cmd" "$("$PY" "$LAB_ROOT/lib/remote.py" missing --provider "${PROVIDER:-}" --feature "$cmd" 2>/dev/null || echo "it has no snapshots")" ;;
-    net)      parse_flags "$@"; set -- ${REST[@]+"${REST[@]}"}    # --override: owners_check's, as for start and stop
+    net)      # --override (owners_check's, as for start and stop) and nothing else is taken out; what's left is checked
+              # again with net's own grammar (mc_strict), so no other flag is dropped here unread.
+              mc_n=(); for mc_a in "$@"; do case "$mc_a" in --override) OVERRIDE=1 ;; *) mc_n+=("$mc_a") ;; esac; done
+              set -- ${mc_n[@]+"${mc_n[@]}"}; mc_strict net "$@"
               case "${1:-status}" in
                 status) [ $# -le 1 ] || { [ $# -eq 2 ] && [ "$2" = --json ]; } \
                           || mc_usage_error "usage: metacomputer net status [--json]   (nothing was run)"

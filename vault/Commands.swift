@@ -154,6 +154,13 @@ func runMain(_ argv: [String]) -> Int32 {
     }
     #endif
     do {
+        // The command line against its form's declaration (vault/ArgSpecs.swift), before anything runs.
+        #if MCOMP_VAULT_TESTING
+        if cmd == "_argspecs" { return cmdArgSpecs() }
+        if !["test-legacy-totp-link", "test-agent-kind"].contains(cmd) { try checkArgs(cmd, rest) }
+        #else
+        try checkArgs(cmd, rest)
+        #endif
         switch cmd {
         case "init": return try cmdInit(paths, rest)
         case "set": return try cmdSet(paths, rest)
@@ -196,7 +203,7 @@ func runMain(_ argv: [String]) -> Int32 {
         case "audit-sink": return try cmdAuditSink(paths, rest)
         case "status": return try cmdStatus(paths, rest)
         case "audit": return try cmdAudit(paths, rest)
-        case "selftest": return rest == ["--local-auth"] ? localAuthSelftest() : selftest()
+        case "selftest": return rest.contains("--local-auth") ? localAuthSelftest() : selftest()
         #if MCOMP_VAULT_TESTING
         case "test-legacy-totp-link": return try testLegacyTOTPLink(paths, rest)
         case "test-agent-kind": return try testAgentKind(rest)
@@ -315,10 +322,7 @@ func age(_ iso: String?) -> String? {
 // MARK: - set / delete
 
 func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: Set(["kind", "origin", "username", "approval", "project", "api-host", "header", "api-path-prefix",
-                                             "answer-timeout"]).union(cardValueFlags),
-                          flags: Set(["replace"]).union(cardBoolFlags),
-                          repeatable: ["origin", "project", "header", "allow-frame", "merchant-max"])
+    let a = try parseArgs(argv, command: "set")
     guard a.positional.count == 1 else {
         throw usageError("usage: set NAME --kind password|totp|text|api|card|shop ... (mcomp-vault help)")
     }
@@ -505,7 +509,7 @@ func durationWords(_ s: Int) -> String {
 }
 
 func cmdDelete(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [])
+    let a = try parseArgs(argv, command: "delete")
     guard a.positional.count == 1, validName(a.positional[0]) else { throw usageError("usage: delete NAME") }
     let name = a.positional[0]
     try requireTTY("delete")
@@ -552,9 +556,7 @@ func checkKeyFile(_ raw: String, _ flag: String) throws -> String {
 
 func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U [--proxy-key PATH --proxy-user U --proxy-port N] (--gateway PATH | --host ADDRESS --host-key-alias mcomp-VM [--tunnel PROGRAM [--tunnel-arg=ARG ...]])"
-    let a = try parseArgs(argv, values: ["port", "host-key-line", "fill-key", "fill-user", "ops-key", "ops-user", "proxy-key", "proxy-user",
-                                         "proxy-port", "gateway", "host", "host-key-alias", "tunnel", "tunnel-arg",
-                                         "tunnel-id", "tunnel-check-arg"], repeatable: ["tunnel-arg", "tunnel-check-arg"])
+    let a = try parseArgs(argv, command: "bind")
     guard a.positional.count == 1, validName(a.positional[0]) else { throw usageError(usage) }
     let vm = a.positional[0]
     // A computer reached over SSH elsewhere (docs/remote.md): its address and the name its host key is pinned under,
@@ -676,7 +678,7 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     try refusePassphraseStdin(argv)
     // --passphrase, as other vaults spell it: unlocking always asks for it here.
-    let a = try parseArgs(argv, values: ["for", "confirm"], flags: ["allow-multiplexer", "touch-id", "require-presence", "no-require-presence", "passphrase"])
+    let a = try parseArgs(argv, command: "unlock")
     guard a.positional.isEmpty else {
         throw usageError("usage: unlock [--for 30m] [--confirm session|each] [--allow-multiplexer] [--touch-id] [--require-presence | --no-require-presence]")
     }
@@ -750,7 +752,7 @@ func cmdUnlock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 
 /// `lock`: end the running unlock now. Anyone may (it only restricts); the unlock terminal says who asked.
 func cmdLock(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["json"])
+    let a = try parseArgs(argv, command: "lock")
     guard a.positional.isEmpty else { throw usageError("usage: lock") }
     do {
         let res = try request(paths, ["op": "lock"], timeout: 15)
@@ -838,7 +840,7 @@ func request(_ paths: Paths, _ req: [String: Any], timeout: Int, cancellable: Bo
 /// settle: wait until the unlock process has finished every request it got before this one (it answers only then), or
 /// isn't running. A requester that couldn't confirm that its request stopped (exit 5) runs this before going on.
 func cmdSettle(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["timeout"], flags: ["json"])
+    let a = try parseArgs(argv, command: "settle")
     guard a.positional.isEmpty, let t = Int(a.last("timeout") ?? "600"), t > 0, t <= 3600 else {
         throw usageError("usage: settle [--timeout SECONDS] [--json]")
     }
@@ -916,8 +918,7 @@ func lockedUse(_ paths: Paths, _ op: String, _ fields: [String: Any]) -> Int32 {
 }
 
 func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm", "field", "profile", "selector", "request-id", "on-behalf-pid", "origin", "browser-pid", "request",
-                                         "window-id"], flags: ["human", "json"])
+    let a = try parseArgs(argv, command: "fill")
     if a.last("request") != nil { return try cmdFillRequest(paths, a) }
     guard a.positional.count == 1, let vm = a.last("vm"), let field = a.last("field") else {
         throw usageError("usage: fill NAME --vm VM --field password|username|otp|text [--profile P] [--browser-pid PID] [--selector CSS] [--origin https://site]"
@@ -963,7 +964,7 @@ func cmdFill(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 
 func cmdLogin(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: login NAME --vm VM --password-selector CSS [--username-selector CSS] [--profile P] [--browser-pid PID] [--request-id ID] [--origin https://site]"
-    let a = try parseArgs(argv, values: ["vm", "profile", "password-selector", "username-selector", "request-id", "on-behalf-pid", "origin", "browser-pid"])
+    let a = try parseArgs(argv, command: "login")
     guard a.positional.count == 1, let vm = a.last("vm"), let ps = a.last("password-selector") else { throw usageError(usage) }
     let name = a.positional[0]
     guard validName(name), validName(vm) else { throw usageError("names: letters, digits, '.', '_' and '-'") }
@@ -998,7 +999,7 @@ func cmdToken(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         let rest = Array(argv.dropFirst())
         if rest.contains("--all") || rest.contains(where: { matches($0, "^[0-9a-f]{8}$") }) { return try cmdTokenRenew(paths, rest) }
     }
-    let a = try parseArgs(argv, values: ["vm", "ttl", "request-id", "on-behalf-pid"])
+    let a = try parseArgs(argv, command: "token")
     guard a.positional.count == 1, let vm = a.last("vm"), validName(a.positional[0]), validName(vm) else {
         throw usageError("usage: token NAME --vm VM [--ttl 15m] | token renew ID|--all --vm VM [--ttl 15m]")
     }
@@ -1018,7 +1019,7 @@ func cmdToken(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 /// VM stays the same. The unlock process applies the same rules as for a new token, and asks where one would.
 func cmdTokenRenew(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: token renew ID|--all --vm VM [--ttl 15m]"
-    let a = try parseArgs(argv, values: ["vm", "ttl", "request-id", "on-behalf-pid"], flags: ["all"])
+    let a = try parseArgs(argv, command: "token renew")
     guard let vm = a.last("vm"), validName(vm), a.has("all") != (a.positional.count == 1), a.positional.count <= 1,
           a.positional.allSatisfy({ matches($0, "^[0-9a-f]{8}$") }) else { throw usageError(usage) }
     // Whether this runs at a terminal (you typing it): the unlock process checks the kernel's view too, and a renewal
@@ -1043,7 +1044,7 @@ func cmdTokenRenew(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdTokens(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["json"])
+    let a = try parseArgs(argv, command: "tokens")
     let res: [String: Any]
     do { res = try request(paths, ["op": "tokens"], timeout: 15) } catch ClientError.locked {
         if a.has("json") { oprint(jsonLine(["ok": false, "reason": "locked", "tokens": []])) } else { oprint("The vault is locked: no tokens are live.") }
@@ -1060,7 +1061,7 @@ func cmdTokens(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdRevoke(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm"], flags: ["all"])
+    let a = try parseArgs(argv, command: "revoke")
     let byVM = a.last("vm")
     guard [a.has("all"), a.positional.count == 1, byVM != nil].filter({ $0 }).count == 1,
           a.positional.allSatisfy({ matches($0, "^[0-9a-f]{8}$") }), byVM.map(validName) ?? true else {
@@ -1085,7 +1086,7 @@ func cmdRevoke(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 /// connected (Fly Sprites): an open tunnel would keep it awake, and billing. Anyone may (it only closes); other VMs'
 /// connections are left as they are.
 func cmdDisconnect(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["vm"])
+    let a = try parseArgs(argv, command: "disconnect")
     guard a.positional.isEmpty, let vm = a.last("vm"), validName(vm) else { throw usageError("usage: disconnect --vm VM") }
     do {
         let res = try request(paths, ["op": "disconnect", "vm": vm], timeout: 15)
@@ -1101,8 +1102,7 @@ func cmdDisconnect(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: session save NAME --vm VM --profile P [--replace] | load NAME --vm VM [--profile P] [--site HOST ...] | policy NAME --approval session|each | delete NAME"
     guard let sub = argv.first else { throw usageError(usage) }
-    let a = try parseArgs(Array(argv.dropFirst()), values: ["vm", "profile", "approval", "request-id", "on-behalf-pid", "site"], flags: ["replace"],
-                          repeatable: ["site"])
+    let a = try parseArgs(Array(argv.dropFirst()), command: "session")
     if sub == "policy" {
         guard a.positional.count == 1, validName(a.positional[0]), let ap = a.last("approval"), ["session", "each"].contains(ap) else {
             throw usageError("usage: session policy NAME --approval session|each")
@@ -1160,7 +1160,7 @@ func cmdSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdList(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["json"])
+    let a = try parseArgs(argv, command: "list")
     let res: [String: Any]
     do { res = try request(paths, ["op": "list"], timeout: 15) } catch ClientError.locked {
         if a.has("json") { oprint(jsonLine(["ok": false, "reason": "locked"])) }
@@ -1220,7 +1220,7 @@ func cmdList(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdStatus(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: [], flags: ["json"])
+    let a = try parseArgs(argv, command: "status")
     var out: [String: Any] = ["vault": paths.vault, "socket": paths.socket, "exists": vaultExists(paths), "build": Build.kind,
                               "unlocked": false]
     if let h = try? readHeader(paths) {
@@ -1269,7 +1269,11 @@ func cmdStatus(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 }
 
 func cmdAudit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["tail"], flags: ["json", "verify", "head"])
+    let a = try parseArgs(argv, command: "audit")
+    // One of: the records (--tail N, --json), --verify (--json), --head; nothing another would leave unread.
+    guard !a.has("head") || (a.flags == ["head"] && a.values.isEmpty), !a.has("verify") || a.last("tail") == nil else {
+        throw usageError("usage: audit [--tail N] [--json] | audit --verify [--json] | audit --head")
+    }
     let n = Int(a.last("tail") ?? "20") ?? 20
     guard fileExists(paths.audit) else { oprint("No audit records yet (\(paths.audit))."); return Exit.ok }
     if a.has("head") {
@@ -1326,7 +1330,7 @@ func cmdAudit(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 
 func cmdVersion(_ argv: [String]) -> Int32 {
     let info: [String: Any] = ["build": Build.kind, "source": buildSourceHash, "enclave_available": enclaveAvailable()]
-    if argv.contains("--json") { oprint(jsonLine(info)) } else {
+    if (try? parseArgs(argv, command: "version"))?.has("json") == true { oprint(jsonLine(info)) } else {
         oprint("mcomp-vault \(Build.kind) build, source \(buildSourceHash)")
     }
     return Exit.ok

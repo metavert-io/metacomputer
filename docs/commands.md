@@ -19,7 +19,11 @@ leaves them to the guest's command). Right after an option that takes a value it
 never the rest of what was typed. Every command refuses, before it does anything, what it wouldn't use: an option it
 doesn't have, a second value for an option that takes one (options that take a list, like `--site`, repeat), a word
 beyond its arguments, an abbreviated option, and a request for usage that isn't exactly `-h` or `--help` (`--help=x`,
-`-hx`, `--hel`): each is a usage error (a file whose name starts with `-` is given as `./-name`). `metacomputer --vm NAME COMMAND`
+`-hx`, `--hel`): each is a usage error (a file whose name starts with `-` is given as `./-name`). So is a request for
+usage given as an option's value or a word where nothing reads it, and `--vm` or `--on` given twice or with an option
+for its value (`--vm --help --vm NAME`). The vault checks each of its command lines against what that command's form
+declares (vault/ArgSpecs.swift: its options, those that repeat, its flags and how many words it takes), so an option
+of another of its subcommands is refused too. `metacomputer --vm NAME COMMAND`
 runs any command on the VM `NAME`; without `--vm`, a command acts on your default
 computer ([More than one VM](#more-than-one-vm)).
 

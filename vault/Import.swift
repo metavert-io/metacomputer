@@ -417,7 +417,7 @@ func totpImportName(_ login: String, _ taken: Set<String>) -> String {
 /// `import-passwords --browser chrome [--profile NAME] | --csv FILE [--site HOST ...] [--dry-run]`
 func cmdImportPasswords(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: import-passwords --browser chrome [--profile NAME] [--site HOST ...] [--dry-run] | import-passwords --csv FILE [--site HOST ...] [--dry-run]"
-    let a = try parseArgs(argv, values: ["browser", "profile", "csv", "site"], flags: ["dry-run"], repeatable: ["site"])
+    let a = try parseArgs(argv, command: "import-passwords")
     guard a.positional.isEmpty, (a.last("browser") == nil) != (a.last("csv") == nil) else { throw usageError(usage) }
     if let b = a.last("browser"), b != "chrome" { throw usageError("--browser: only chrome (the others: export a CSV and use --csv)") }
     let profile = a.last("profile") ?? "Default"
@@ -588,9 +588,8 @@ func cookieForSites(_ hostKey: String, _ sites: [String]) -> Bool {
 ///  [--allow-identity-provider] [--replace] [--dry-run]`
 func cmdImportSession(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: import-session --browser chrome --site HOST [--site ...] --name NAME --vm VM --to-profile P [--profile NAME] [--allow-identity-provider] [--replace] [--dry-run]"
-    let a = try parseArgs(argv, values: ["browser", "app", "profile", "site", "name", "vm", "to-profile"],
-                          flags: ["allow-identity-provider", "replace", "dry-run"], repeatable: ["site"])
-    guard a.positional.isEmpty else { throw usageError(usage) }
+    let a = try parseArgs(argv, command: "import-session")
+    guard a.positional.isEmpty, a.last("browser") == nil || a.last("app") == nil else { throw usageError(usage) }
     guard (a.last("browser") ?? a.last("app")) == "chrome" else { throw usageError("--browser chrome (the only browser this imports from)") }
     let profile = a.last("profile") ?? "Default"
     guard validChromeProfile(profile) else { throw usageError("--profile: a Chrome profile folder's name, like Default or \"Profile 1\"") }

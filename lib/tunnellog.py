@@ -79,6 +79,8 @@ def listening(port, pid):
 
 class Log:
     def __init__(self, fd, cap):
+        if cap < len(CUT):      # the line saying the rest was left out must fit too
+            raise ValueError(f"a log's cap is at least {len(CUT)} bytes")
         self.fd, self.cap, self.n, self.cut = fd, cap, 0, False
 
     def write(self, data):
@@ -168,25 +170,38 @@ def main(argv):
     i = argv.index("--")
     opts, cmd = argv[:i], argv[i + 1:]
     log, cap, mode, port, wait = None, CAP, None, 0, 15.0
+    seen = set()
     j = 0
     while j < len(opts):
         o = opts[j]
+        # Each option once, and one of --fork or --listen: anything else is a usage error, before anything runs.
+        if o in seen or (o in ("--fork", "--listen") and mode):
+            print(f"tunnellog.py: {o} given twice, or with --fork/--listen (usage below)\n{__doc__}", file=sys.stderr)
+            return 2
+        seen.add(o)
         if o in ("--log", "--cap", "--listen", "--wait") and j + 1 < len(opts):
             v = opts[j + 1]
-            if o == "--log":
-                log = v
-            elif o == "--cap":
-                cap = int(v)
-            elif o == "--listen":
-                mode, port = "listen", int(v)
-            else:
-                wait = float(v)
+            try:
+                if o == "--log":
+                    log = v
+                elif o == "--cap":
+                    cap = int(v)
+                    if cap < len(CUT):
+                        raise ValueError
+                elif o == "--listen":
+                    mode, port = "listen", int(v)
+                else:
+                    wait = float(v)
+            except ValueError:
+                print(f"tunnellog.py: usage: {o} {v!r}: " + (f"a number of bytes, at least {len(CUT)} (the line saying the "
+                      "rest was left out fits in it)" if o == "--cap" else "a number"), file=sys.stderr)
+                return 2
             j += 2
         elif o == "--fork":
             mode = "fork"
             j += 1
         else:
-            print(f"tunnellog.py: unknown option {o}", file=sys.stderr)
+            print(f"tunnellog.py: unknown option {o} (usage below)\n{__doc__}", file=sys.stderr)
             return 2
     if not log or not mode or not cmd:
         print(__doc__, file=sys.stderr)
