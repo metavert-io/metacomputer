@@ -629,7 +629,7 @@ func runTunnel(_ argvIn: [String]) -> Int32 {
         return 2
     }
     #if MCOMP_VAULT_TESTING
-    if ProcessInfo.processInfo.environment["MCOMP_PARSE_ONLY"] == "1" { print("parse-only: mcomp-vault _tunnel: taken"); return 0 }
+    if ProcessInfo.processInfo.environment["MCOMP_PARSE_ONLY"] == "1" { print("parse-only: mcomp-vault _tunnel: taken"); return 99 }
     #endif
     let prog = argv[1]
     // The parent (ssh), seen first: one that's gone already (this process was orphaned before it could look: launchd

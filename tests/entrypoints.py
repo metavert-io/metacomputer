@@ -7,8 +7,9 @@ bin/metacomputer's dispatch hands on). Programs whose parser describes itself (l
 forms) get a valid line made from their declaration for every subcommand and form too.
 
 Each valid line runs with MCOMP_PARSE_ONLY=1: the program's parser takes it and ends the run there, saying what that
-form declares (its flags, its options that take a value, how many words it took and may take). It must be taken, with
-nothing called, connected or written: a program too strict for its own callers fails here (finalize.sh's two words).
+form declares (its flags, its options that take a value, how many words it took and may take), with exit 99 ("parse
+only: nothing was done"), never 0, so a guard run that way refuses. It must be taken, with nothing called, connected or
+written: a program too strict for its own callers fails here (finalize.sh's two words).
 Then every misuse is made from that declaration and put after the valid line (before a `--` whose rest is another
 program's): -h and --help (answered or refused), -hx, --help=x, --hel, an option it doesn't have, each of its flags twice,
 each option that takes a value twice, with --help and with an option (--x --bogus, --x=--bogus) for its value, and the

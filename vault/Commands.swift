@@ -158,8 +158,9 @@ func runMain(_ argv: [String]) -> Int32 {
         #if MCOMP_VAULT_TESTING
         if cmd == "_argspecs" { return cmdArgSpecs() }
         if !["test-legacy-totp-link", "test-agent-kind"].contains(cmd) { try checkArgs(cmd, rest) }
-        // Test builds: MCOMP_PARSE_ONLY=1 ends a command line its declaration took (tests/test_vault_ops.py's valid rows).
-        if ProcessInfo.processInfo.environment["MCOMP_PARSE_ONLY"] == "1" { oprint("parse-only: mcomp-vault \(cmd): taken"); return Exit.ok }
+        // Test builds: MCOMP_PARSE_ONLY=1 ends a command line its declaration took (tests/test_vault_ops.py's valid rows),
+        // with 99 ("parse only: nothing was done"), never success.
+        if ProcessInfo.processInfo.environment["MCOMP_PARSE_ONLY"] == "1" { oprint("parse-only: mcomp-vault \(cmd): taken"); return 99 }
         #else
         try checkArgs(cmd, rest)
         #endif

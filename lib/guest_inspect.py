@@ -427,7 +427,7 @@ def main(argv):
             return 2
     if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
         print("parse-only: guest_inspect.py: taken " + json.dumps({"flags": [], "values": ["--minutes", "--top"], "words": len([a for a in argv if not a.startswith("-")]) - len([a for k, a in enumerate(argv) if k and argv[k - 1] in ("--minutes", "--top")]), "max_words": None if argv[:1] not in (["--json-out"], ["--render"], ["--render-profiles"]) else 0}))
-        sys.exit(0)
+        sys.exit(99)        # parse only: nothing was done (never 0: a check run this way refuses)
     if argv[:1] == ["--json-out"]:
         # `inspect --json`: the VM's snapshot as JSON, written again by this Mac (ASCII only: every control or
         # non-ASCII character is a \u escape), so nothing the VM sent reaches a terminal raw. The same JSON.

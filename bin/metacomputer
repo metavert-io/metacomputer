@@ -503,10 +503,14 @@ mc_strict() { # CMD ARGS...
   return 0
 }
 mc_strict "$@"
-# MCOMP_PARSE_ONLY=1 (tests/test_help.py's valid forms): a command line this file's grammar took ends here, doing
-# nothing; one it leaves to its program's parser goes on to that parser, which ends there (lib/strictargs.py,
-# scripts/strictargs.sh).
-if [ "${MCOMP_PARSE_ONLY:-}" = 1 ] && [ "${MC_TAKEN:-0}" = 1 ]; then sa_parsed metacomputer; fi
+# MCOMP_PARSE_ONLY (tests/test_help.py's valid forms): a command line this file's grammar took ends here, saying what
+# it declares; every other ends here too. Either way nothing is done and the exit is 99 ("parse only"), never 0, so no
+# command runs with the parsers' and guards' shortcut in its environment (a guard that took it would have let it by).
+if [ -n "${MCOMP_PARSE_ONLY:-}" ]; then
+  if [ "$MCOMP_PARSE_ONLY" = 1 ] && [ "${MC_TAKEN:-0}" = 1 ]; then sa_parsed metacomputer; fi
+  echo "metacomputer: MCOMP_PARSE_ONLY is set (the tests' switch): parse only, nothing was done; unset it" >&2
+  exit 99
+fi
 # Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
 # Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
 # confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it
@@ -606,6 +610,7 @@ session_guard() {
   case "$rc" in
     0|2) ;;                     # 2: it couldn't tell, and said so
     3) exit 1 ;;                # refused: it said why
+    99) die "the session check didn't run (MCOMP_PARSE_ONLY, the tests' switch: parse only); nothing was done" ;;
     *) warn "couldn't check which computer this agent session holds (lib/sessionvm.py exit $rc); going on" ;;
   esac
   export MCOMP_GUARD_VM="$VM_NAME:$SSH_PORT"

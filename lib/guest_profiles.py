@@ -126,7 +126,7 @@ def main(argv):
     import json
     if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
         print("parse-only: guest_profiles.py: taken " + json.dumps({"flags": [], "values": [], "words": 3, "max_words": 3}))
-        sys.exit(0)
+        sys.exit(99)        # parse only: nothing was done (never 0: a check run this way refuses)
     action, kind, name = argv
     if not NAME_RE.match(name) or name in (".", ".."):
         print("bad profile name", file=sys.stderr)

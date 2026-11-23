@@ -1117,6 +1117,41 @@ def fill_checks():
     check("fill, login and session load stop (exit 4) while the user has the computer; the vault isn't asked",
           all(x.returncode == 4 and "the user has the computer" in x.stderr for x in rs) and not lines(),
           ([x.returncode for x in rs], rs[0].stderr[-200:], lines()))
+    # MCOMP_PARSE_ONLY (the tests' switch that ends a program once its parser takes the line) in the environment never
+    # lets a guard pass: a parse-only run ends with 99, never 0, and bin/metacomputer runs no command with it set. Found
+    # by review: with it set, `handoff.py guard --hold-fd N` and `owners.py check` returned 0 and the fill reached the
+    # vault while the user had the computer.
+    for val in ("1", "describe"):
+        open(log, "w").close()
+        rs = [subprocess.run([mc, "secrets"] + a, env=dict(e, MCOMP_PARSE_ONLY=val), capture_output=True, text=True,
+                             timeout=60)
+              for a in (["fill", "site", "--field", "password"], ["login", "site", "--password-selector", "#p"],
+                        ["session", "load", "s"], ["fill", "site", "--vm=fltest", "--field", "password"])]
+        check(f"MCOMP_PARSE_ONLY={val} set, the user has the computer: fill, login and session load are refused "
+              "(non-zero); the vault isn't asked", all(x.returncode not in (0, None) for x in rs) and not lines(),
+              ([x.returncode for x in rs], rs[0].stderr[-200:], lines()))
+    os.makedirs(os.path.dirname(owners.dispatch_path()), exist_ok=True)
+    dfd = os.open(owners.dispatch_path(), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        g = {po: subprocess.run(hcmd("guard", "--hold-fd", str(dfd)), env=env(MCOMP_PARSE_ONLY=po), pass_fds=(dfd,),
+                                capture_output=True, text=True, timeout=60) for po in (None, "1")}
+    finally:
+        os.close(dfd)
+    check("handoff.py guard --hold-fd N while the user has the computer: 4; with MCOMP_PARSE_ONLY=1 still refused "
+          "(99: parse only, never 0)", g[None].returncode == 4 and g["1"].returncode == 99,
+          {k: (v.returncode, v.stderr[-160:]) for k, v in g.items()})
+    oc = {po: subprocess.run([sys.executable, os.path.join(LAB, "lib", "owners.py"), "check"], env=env(MCOMP_PARSE_ONLY=po),
+                             capture_output=True, text=True, timeout=60) for po in (None, "1")}
+    check("owners.py check while the user has the computer: refused; with MCOMP_PARSE_ONLY=1 too (99, never 0)",
+          oc[None].returncode not in (0, 99) and oc["1"].returncode == 99,
+          {k: (v.returncode, v.stderr[-160:]) for k, v in oc.items()})
+    clear()
+    oc = subprocess.run([sys.executable, os.path.join(LAB, "lib", "owners.py"), "check"], env=env(MCOMP_PARSE_ONLY="1"),
+                        capture_output=True, text=True, timeout=60)
+    check("...and with nothing holding the computer, owners.py check under MCOMP_PARSE_ONLY=1 still isn't a pass (99)",
+          oc.returncode == 99, (oc.returncode, oc.stdout[-160:]))
+    handoff.write_record({"v": 1, "id": "h-eeeeeeeeeeee", "status": "open", "why": "login", "say": "x",
+                          "opened": now, "deadline": now + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None})
     r = subprocess.run([mc, "input-reset"], env=e, capture_output=True, text=True, timeout=60)
     check("input-reset (it acts on the desktop) stops too", r.returncode == 4 and "the user has the computer" in r.stderr,
           (r.returncode, r.stderr[-300:]))

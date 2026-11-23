@@ -954,9 +954,10 @@ def entry_results(results):
                 info = json.loads(line.split(" taken ", 1)[1]) if " taken " in line else None
             except ValueError:
                 info = None
-            ok = rc == 0 and info is not None
-        check(f"{words}: a valid line (as its callers pass it, or its declaration makes it) is taken, nothing called, "
-              "connected or written", ok and not called and not changed, (rc, called[:3], changed[:3], (err or out)[-300:]))
+            ok = rc == 99 and info is not None      # parse only: exit 99, never 0 (a guard run this way refuses)
+        check(f"{words}: a valid line (as its callers pass it, or its declaration makes it) is taken (parse only: exit 99 "
+              "and its declaration), nothing called, connected or written", ok and not called and not changed,
+              (rc, called[:3], changed[:3], (err or out)[-300:]))
         if not ok:
             continue
         if sp["run"] == "guard":

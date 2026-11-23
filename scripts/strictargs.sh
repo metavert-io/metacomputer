@@ -11,8 +11,9 @@
 #   - a flag or a value option given twice;
 #   - a value that starts with '-' (an option typed in the wrong place: no value of ours does);
 #   - fewer than MIN or more than MAX words (MAX "n": no limit). A word starting with '-' is an option, never a word.
-# MCOMP_PARSE_ONLY=1 (tests/test_help.py's valid forms): once a command line is taken, say so and exit 0, doing nothing
-# else; a program that checks more after sa_check sets SA_DEFER=1 and calls sa_parsed PROG after those checks.
+# MCOMP_PARSE_ONLY=1 (tests/test_help.py's valid forms): once a command line is taken, say so and exit 99 ("parse
+# only: nothing was done"), doing nothing else; never 0, so a check run this way refuses. A program that checks more
+# after sa_check sets SA_DEFER=1 and calls sa_parsed PROG after those checks.
 # SA_DASHDASH=1 lets `--` end the options (the rest are words, counted, whatever they look like); otherwise `--` is a
 # usage error like any unknown option.
 
@@ -79,12 +80,13 @@ sa_json_list() { # WORDS: a JSON list of them (option names: no quotes or backsl
   printf '[%s]' "$out"
 }
 
-sa_parsed() { # PROG: its command line is taken (MCOMP_PARSE_ONLY=1: say so, and what its grammar declares; exit 0)
+sa_parsed() { # PROG: its command line is taken (MCOMP_PARSE_ONLY=1: say so, and what its grammar declares; exit 99)
   [ "${MCOMP_PARSE_ONLY:-}" = 1 ] || return 0
   printf 'parse-only: %s: taken {"flags": %s, "values": %s, "words": %s, "max_words": %s}\n' "$1" \
     "$(sa_json_list "${SA_FLAGS:-}")" "$(sa_json_list "${SA_VALS:-}")" "${SA_WORDS:-0}" \
     "$([ "${SA_MAX:-0}" = n ] && echo null || echo "${SA_MAX:-0}")"
-  exit 0
+  echo "parse only: nothing was done" >&2
+  exit 99
 }
 
 sa_value_ok() { # PROG USAGE OPTION VALUE

@@ -45,9 +45,10 @@ func checkArgs(args []string) {
 		fmt.Fprintln(os.Stderr, "qcow2raw: "+usage+" (nothing was done)")
 		os.Exit(2)
 	}
-	if os.Getenv("MCOMP_PARSE_ONLY") == "1" { // tests/test_help.py's valid forms: taken, nothing done
+	if os.Getenv("MCOMP_PARSE_ONLY") == "1" { // tests/test_help.py's valid forms: taken, nothing done (exit 99, never 0)
 		fmt.Printf("parse-only: qcow2raw: taken {\"flags\": [], \"values\": [], \"words\": %d, \"max_words\": 3}\n", len(args))
-		os.Exit(0)
+		fmt.Fprintln(os.Stderr, "parse only: nothing was done")
+		os.Exit(99)
 	}
 }
 

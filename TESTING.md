@@ -536,7 +536,8 @@ bin/, scripts/, lib/, provisioning/, vault/, the installers, the launchers, benc
 itself (lib/strictargs.py's argparse or `expect()` forms, with `MCOMP_PARSE_ONLY=describe`) also gets a valid line
 made from its declaration for every subcommand and form. Each valid line runs with `MCOMP_PARSE_ONLY=1`: the program's
 parser takes it and ends the run there, saying what that form declares (its flags, its options that take a value, how
-many words it took and may take); it must be taken, with nothing called, connected or written, so a program too strict
+many words it took and may take), with exit 99 ("parse only: nothing was done"), never 0, so a guard or check run with
+it set refuses; it must be taken (99 and that declaration), with nothing called, connected or written, so a program too strict
 for its own callers fails (finalize.sh with the build's two words, `remote.py exec --vm demo -- /usr/bin/true --help`).
 Every declared form must have a valid line. Then every misuse is made from that declaration and put after the valid
 line (before a `--` whose rest is another program's): `-h` and `--help` (answered or refused), `-hx`, `--help=x`,
@@ -1260,7 +1261,7 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (229 checks, about two minutes): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (246 checks, about two minutes): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
@@ -1273,7 +1274,9 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
   future modification time doesn't stretch it, or from the first failure when nothing about the file can be
   read), `sh` refused with or without `--override` and also when the handoff opens after its admission check
   (nothing runs), `web`'s Firefox cleanup left alone, `secrets fill`, `login`, `session load` and `input-reset`
-  stopped (exit 4) with the vault never asked, `input-reset` at the user's own terminal going ahead during their
+  stopped (exit 4) with the vault never asked (and refused, the vault never asked, with `MCOMP_PARSE_ONLY` set,
+  `1` or `describe`: `handoff.py guard --hold-fd N` and `owners.py check` end a parse-only run with 99, never 0, and
+  bin/metacomputer runs no command with it set), `input-reset` at the user's own terminal going ahead during their
   handoff (a stand-in ssh; an agent with a terminal of its own and a run without one still stopped, `--check`
   recording nothing, exit 3 when it can't be known whether an agent call runs, as with `MCP_HUB=off`), the driver's
   leftover input devices (lib/input_reset.py, a stand-in guest): the guest's answer read with limits (one count; SSH

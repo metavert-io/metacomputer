@@ -433,11 +433,12 @@ def spec_walk(BIN, env, vdir, calls, audit_recs):
             r = subprocess.run([BIN, *a], env=env, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
             if r.returncode != 64:
                 bad.append((form, what, a, r.returncode, r.stderr[-160:]))
-        # ...and the form's valid line itself is taken (MCOMP_PARSE_ONLY=1, a test build: it ends there, nothing done).
+        # ...and the form's valid line itself is taken (MCOMP_PARSE_ONLY=1, a test build: it ends there with 99, never 0,
+        # nothing done).
         r = subprocess.run([BIN, *argv], env=dict(env, MCOMP_PARSE_ONLY="1"), capture_output=True, text=True, timeout=30,
                            stdin=subprocess.DEVNULL)
         tried += 1
-        if r.returncode != 0 or "parse-only:" not in r.stdout:
+        if r.returncode != 99 or "parse-only:" not in r.stdout:
             bad.append((form, "its valid line", argv, r.returncode, r.stderr[-160:]))
     # The vault's other entry, ssh's ProxyCommand for a provider's tunnel (`_tunnel [--sha256 HEX] -- PROGRAM [ARGS...]`):
     # its own parser, outside the declarations. Its valid lines are taken (the program's own --help is the program's);
@@ -450,7 +451,7 @@ def spec_walk(BIN, env, vdir, calls, audit_recs):
         tried += 1
         r = subprocess.run([BIN, "_tunnel", *a], env=dict(env, MCOMP_PARSE_ONLY="1"), capture_output=True, text=True,
                            timeout=30, stdin=subprocess.DEVNULL)
-        if (r.returncode == 0 and "parse-only:" in r.stdout) != ok or (not ok and r.returncode != 2):
+        if (r.returncode == 99 and "parse-only:" in r.stdout) != ok or (not ok and r.returncode != 2):
             bad.append(("_tunnel", "valid" if ok else "misuse", a, r.returncode, r.stderr[-160:]))
     after = snapshot()
     changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))

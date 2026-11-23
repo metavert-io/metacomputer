@@ -32,9 +32,12 @@ import re
 import sys
 
 HELP = ("-h", "--help")
-# MCOMP_PARSE_ONLY=1 (tests/test_help.py's valid forms): once a command line is taken, say so and exit 0, doing nothing
-# else, so a test can show a program's real arguments aren't refused without the program acting on them.
+# MCOMP_PARSE_ONLY=1 (tests/test_help.py's valid forms): once a command line is taken, say so and end the run doing
+# nothing else, so a test can show a program's real arguments aren't refused without the program acting on them. It
+# ends with PARSE_ONLY_EXIT, never 0: a guard or check run this way (an inherited environment, an agent setting it)
+# refuses, so whatever it guards never goes ahead.
 PARSE_ONLY = os.environ.get("MCOMP_PARSE_ONLY") == "1"
+PARSE_ONLY_EXIT = 99                    # "parse only: nothing was done" (scripts/strictargs.sh, the vault: the same)
 # MCOMP_PARSE_ONLY=describe: the program's declaration itself (every subcommand's options and words, or its forms), as
 # JSON, before anything is read or done (tests/test_help.py makes a valid command line for each from it).
 DESCRIBE = os.environ.get("MCOMP_PARSE_ONLY") == "describe"
@@ -64,13 +67,14 @@ NUMBER = re.compile(r"-\d+(\.\d+)?[a-z]*$")
 
 
 def parsed(prog, info=None):
-    """A program's command line is taken: under MCOMP_PARSE_ONLY, the end of its run (exit 0, nothing done), saying
+    """A program's command line is taken: under MCOMP_PARSE_ONLY, the end of its run (exit 99, nothing done), saying
     what the form it took declares (INFO: its flags, its options that take a value, how many words it has and may
     have), from which tests/test_help.py makes that form's misuse rows."""
     if PARSE_ONLY:
         import json
         print(f"parse-only: {prog}: taken " + json.dumps(info or {}))
-        sys.exit(0)
+        print("parse only: nothing was done", file=sys.stderr)
+        sys.exit(PARSE_ONLY_EXIT)
 
 
 def _describe(parser, ns):
@@ -218,7 +222,7 @@ class Parser(argparse.ArgumentParser):
         if DESCRIBE:
             import json
             print("parse-only-describe: " + json.dumps(_tree(self)))
-            sys.exit(0)
+            sys.exit(PARSE_ONLY_EXIT)
         ns = super().parse_args(args, namespace)
         if PARSE_ONLY:                          # (subcommands' parsers go through parse_known_args, never here)
             parsed(self.prog, _describe(self, ns))
@@ -380,7 +384,7 @@ def expect(argv, forms, prog, usage=None, defer=False):
     if DESCRIBE:
         import json
         print("parse-only-describe: " + json.dumps({"forms": forms}))
-        sys.exit(0)
+        sys.exit(PARSE_ONLY_EXIT)
     short = "usage: " + "\n       ".join(f"{prog} {f}".rstrip() for f in forms)
     text = usage or short
     head = argv[:argv.index("--")] if "--" in argv and any(" -- " in f" {f} " for f in forms) else argv

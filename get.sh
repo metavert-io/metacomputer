@@ -748,7 +748,8 @@ main() {
   if [ "${MCOMP_PARSE_ONLY:-}" = 1 ]; then         # (tests/test_help.py: taken, nothing done; what it declares)
     printf 'parse-only: get.sh: taken {"flags": [%s], "values": [%s], "words": 0, "max_words": 0}\n' \
       "$(printf '"%s", ' $flags | sed 's/, $//')" "$(printf '"%s", ' $vals | sed 's/, $//')"
-    exit 0
+    echo "parse only: nothing was done" >&2
+    exit 99                                       # (never 0)
   fi
   case "$DIR" in '') ;; /*) ;; *) DIR="$PWD/$DIR" ;; esac
   # When piped into bash, stdin is the rest of this script: nothing below may read it.

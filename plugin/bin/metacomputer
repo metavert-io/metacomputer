@@ -71,7 +71,8 @@ if [ "${1:-}" = setup ]; then
   if [ "${MCOMP_PARSE_ONLY:-}" = 1 ]; then         # (tests/test_help.py: taken, nothing done; what it declares)
     printf 'parse-only: metacomputer setup: taken {"flags": [%s], "values": [%s], "words": 1, "max_words": 1}\n' \
       "$(printf '"%s", ' $mc_flags | sed 's/, $//')" "$(printf '"%s", ' $mc_vals | sed 's/, $//')"
-    exit 0
+    echo "parse only: nothing was done" >&2
+    exit 99                                       # (never 0)
   fi
   mc_get="$(readlink -f "$mc_root/get.sh" 2>/dev/null)"
   if [ -n "$mc_get" ] && [ "$mc_get" = "$mc_root/get.sh" ] && [ -f "$mc_get" ] && mc_in_plugins "$mc_get"; then

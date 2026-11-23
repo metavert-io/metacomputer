@@ -796,7 +796,7 @@ def main(argv):
         return 2
     if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
         print("parse-only: page_guest.py: taken " + json.dumps({"flags": [], "values": [], "words": 2, "max_words": 2}))
-        sys.exit(0)
+        sys.exit(99)        # parse only: nothing was done (never 0: a check run this way refuses)
     try:
         a = json.loads(argv[1])
         if not isinstance(a, dict):

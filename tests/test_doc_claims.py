@@ -838,6 +838,12 @@ CLAIMS = [
      and '["exec", "--vm", "demo", "--", "/usr/bin/true", "--help"]' in raw("tests/entrypoints.py")
      and 'PARSE_ONLY = os.environ.get("MCOMP_PARSE_ONLY") == "1"' in raw("lib/strictargs.py")
      and "a valid line (as its callers pass it" in raw("tests/test_help.py")),
+    ("TESTING.md", r"`handoff.py guard --hold-fd N` and `owners.py check` end a parse-only run with 99, never 0, and\s+"
+                   r"bin/metacomputer runs no command with it set",
+     lambda m: "PARSE_ONLY_EXIT = 99" in raw("lib/strictargs.py") and "sys.exit(PARSE_ONLY_EXIT)" in raw("lib/strictargs.py")
+     and "exit 99" in raw("scripts/strictargs.sh") and 'if [ -n "${MCOMP_PARSE_ONLY:-}" ]; then' in raw("bin/metacomputer")
+     and "(99: parse only, never 0)" in raw("tests/test_handoff.py")
+     and "ok = rc == 99 and info is not None" in raw("tests/test_help.py")),
     ("docs/commands.md", r"a value that starts with `-` where no value can \(a name, a folder, a number\), whether given as\s+"
                          r"`--out VALUE` or `--out=VALUE`",
      lambda m: "not an option ('{v[:40]}'" in raw("lib/strictargs.py") and "dashValueOptions" in raw("vault/ArgSpecs.swift")
