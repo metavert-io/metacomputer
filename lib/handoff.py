@@ -5,7 +5,7 @@ Some steps are the user's to do: a CAPTCHA or "verify you are human" check, a si
 themselves, a 2FA prompt the vault can't fill. Claude never tries to pass them. It hands the computer over
 and waits:
 
-  handoff.py --why captcha|login|2fa|other --say "what to do" [--timeout 15m] [--json] [--override]
+  handoff.py --why captcha|login|2fa|payment|other --say "what to do" [--timeout 15m] [--json] [--override]
         Tells the user (a needs_you event, through the event stream's cleaning and limits), prints the same
         instructions, and waits until they hand the computer back. While it's open, every acting call waits
         (owners.open_handoff): the hub's clients, `metacomputer sh`, the vault's fills, and the lifecycle

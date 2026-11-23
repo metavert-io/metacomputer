@@ -839,7 +839,7 @@ def claims():
 # cleanup, `metacomputer sh`, the vault's fills and the lifecycle commands that check for other controllers.
 HANDOFF_FILE = "handoff.state"
 HANDOFF_MAX_S = 7200          # the longest time limit; a record that can't be read counts as open this long
-HANDOFF_WHY = ("captcha", "login", "2fa", "other")
+HANDOFF_WHY = ("captcha", "login", "2fa", "payment", "other")
 HANDOFF_STATUS = ("open", "done", "cancelled", "timed_out")
 HANDOFF_ID_RE = re.compile(r"h-[0-9a-f]{12}")
 

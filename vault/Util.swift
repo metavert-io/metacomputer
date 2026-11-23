@@ -160,6 +160,27 @@ func readFileBytes(_ path: String, max: Int = 1 << 31) throws -> [UInt8] {
     return out
 }
 
+/// The first `max` bytes of a file (all of it when shorter), however long the file is.
+func readFilePrefix(_ path: String, max: Int) throws -> [UInt8] {
+    let fd = open(path, O_RDONLY | O_CLOEXEC)
+    guard fd >= 0 else { throw VaultError("cannot read \(path)") }
+    defer { close(fd) }
+    var out = [UInt8](repeating: 0, count: max)
+    var got = 0
+    while got < max {
+        let n = out.withUnsafeMutableBytes { p in read(fd, p.baseAddress! + got, max - got) }
+        if n < 0 { if errno == EINTR { continue }; throw VaultError("cannot read \(path)") }
+        if n == 0 { break }
+        got += n
+    }
+    return Array(out[0..<got])
+}
+
+/// Remove a folder of this process's own making and everything in it (no links followed).
+func removeTree(_ path: String) {
+    try? FileManager.default.removeItem(atPath: path)
+}
+
 func writeAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
     var off = 0
     while off < bytes.count {
@@ -440,6 +461,86 @@ func canonicalJSON(_ v: Any) -> String {
     return "null"
 }
 
+/// A JSON value with its numbers kept as written (their text, never a Double), for comparing untrusted documents exactly.
+indirect enum LexJSON {
+    case obj([(String, LexJSON)]), arr([LexJSON]), str(String), num(String), lit(String)
+}
+
+/// JSON text as LexJSON; nil when it isn't one JSON value, names a key twice in an object, or nests deeper than 64.
+func parseLexJSON(_ b: [UInt8]) -> LexJSON? {
+    var i = 0
+    func ws() { while i < b.count, b[i] == 0x20 || b[i] == 0x09 || b[i] == 0x0A || b[i] == 0x0D { i += 1 } }
+    func str() -> String? {
+        guard i < b.count, b[i] == 0x22 else { return nil }
+        var j = i + 1, esc = false
+        while j < b.count {
+            if esc { esc = false } else if b[j] == 0x5C { esc = true } else if b[j] == 0x22 { break }
+            j += 1
+        }
+        guard j < b.count, let s = (try? JSONSerialization.jsonObject(with: Data(b[i...j]), options: [.fragmentsAllowed])) as? String else { return nil }
+        i = j + 1
+        return s
+    }
+    func val(_ depth: Int) -> LexJSON? {
+        guard depth < 64 else { return nil }
+        ws()
+        guard i < b.count else { return nil }
+        switch b[i] {
+        case 0x7B, 0x5B:
+            let object = b[i] == 0x7B
+            i += 1
+            var pairs: [(String, LexJSON)] = [], items: [LexJSON] = [], keys = Set<String>()
+            ws()
+            if i < b.count, b[i] == (object ? 0x7D : 0x5D) { i += 1; return object ? .obj(pairs) : .arr(items) }
+            while true {
+                ws()
+                if object {
+                    guard let k = str(), keys.insert(k).inserted else { return nil }
+                    ws()
+                    guard i < b.count, b[i] == 0x3A else { return nil }
+                    i += 1
+                    guard let v = val(depth + 1) else { return nil }
+                    pairs.append((k, v))
+                } else {
+                    guard let v = val(depth + 1) else { return nil }
+                    items.append(v)
+                }
+                ws()
+                guard i < b.count else { return nil }
+                if b[i] == 0x2C { i += 1; continue }
+                if b[i] == (object ? 0x7D : 0x5D) { i += 1; return object ? .obj(pairs) : .arr(items) }
+                return nil
+            }
+        case 0x22:
+            return str().map { .str($0) }
+        default:
+            var j = i
+            while j < b.count, (0x30...0x39).contains(b[j]) || [0x2D, 0x2B, 0x2E, 0x65, 0x45].contains(b[j]) || (0x61...0x7A).contains(b[j]) { j += 1 }
+            let tok = String(decoding: b[i..<j], as: UTF8.self)
+            guard j > i else { return nil }
+            i = j
+            if ["true", "false", "null"].contains(tok) { return .lit(tok) }
+            return matches(tok, "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$") ? .num(tok) : nil
+        }
+    }
+    guard let v = val(0) else { return nil }
+    ws()
+    return i == b.count ? v : nil
+}
+
+/// LexJSON in one canonical form: keys sorted, numbers as written (so 1.0 and 1 differ, and nothing is rounded).
+func lexCanonical(_ v: LexJSON) -> String {
+    switch v {
+    case .obj(let pairs):
+        return "{" + pairs.sorted { Array($0.0.unicodeScalars.map { $0.value }).lexicographicallyPrecedes($1.0.unicodeScalars.map { $0.value }) }
+            .map { canonicalString($0.0) + ":" + lexCanonical($0.1) }.joined(separator: ",") + "}"
+    case .arr(let items): return "[" + items.map(lexCanonical).joined(separator: ",") + "]"
+    case .str(let s): return canonicalString(s)
+    case .num(let n): return n
+    case .lit(let l): return l
+    }
+}
+
 func canonicalString(_ s: String) -> String {
     var out = "\""
     for u in s.utf16 {
@@ -595,6 +696,23 @@ func procEntry(_ pid: pid_t) -> ProcEntry? {
     let name = withUnsafeBytes(of: k.kp_proc.p_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
     let st = k.kp_proc.p_un.__p_starttime
     return ProcEntry(pid: pid, ppid: k.kp_eproc.e_ppid, name: name, start: Double(st.tv_sec) + Double(st.tv_usec) / 1e6)
+}
+
+/// When a process started (seconds, microseconds) and whose it is: with its pid, that names one process (a pid used
+/// again later has another start). nil when there's no such process.
+func procStartUID(_ pid: pid_t) -> (sec: UInt64, usec: UInt64, uid: uid_t)? {
+    var b = proc_bsdinfo()
+    let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &b, size) == size else { return nil }
+    return (b.pbi_start_tvsec, b.pbi_start_tvusec, b.pbi_uid)
+}
+
+/// A folder (or plain file) of this user's that nobody else can use: not a link, owned by this user, no group or other
+/// access bits.
+func privatePath(_ path: String, folder: Bool) -> Bool {
+    var st = stat()
+    guard lstat(path, &st) == 0 else { return false }
+    return (st.st_mode & S_IFMT) == (folder ? S_IFDIR : S_IFREG) && st.st_uid == getuid() && st.st_mode & 0o077 == 0
 }
 
 func procCwd(_ pid: pid_t) -> String? {
@@ -915,6 +1033,11 @@ struct Requester {
     var claimedClaudePID: pid_t? = nil
     var claimedProject: String? = nil
     var claimedClientPID: pid_t? = nil
+    // A shared agent process (sharedAgentProcess: Codex's app server, an OpenClaw or Hermes Agent gateway, an
+    // unidentified agent's process; no single session): that process itself, with its start time. A purchase it starts
+    // is bound to it (PaymentServer.ownPurchase); nothing else uses it.
+    var hostPID: pid_t? = nil
+    var hostStart: Double? = nil
 
     static func of(_ pid: pid_t) -> Requester {
         let exe = pid > 0 ? (processPath(pid).map { URL(fileURLWithPath: $0).lastPathComponent } ?? "?") : "?"
@@ -929,7 +1052,7 @@ struct Requester {
                     // tokens (each use asks). Arguments that can't be read count the same way: unknown never names a
                     // session.
                     return Requester(clientPID: pid, clientExe: exe, claudePID: nil, claudeStart: nil, project: nil,
-                                     agent: shared)
+                                     agent: shared, hostPID: p, hostStart: e.start)
                 }
                 let cwd = procCwd(p).map { realPath($0) ?? $0 }
                 return Requester(clientPID: pid, clientExe: exe, claudePID: p, claudeStart: e.start, project: cwd, agent: kind)

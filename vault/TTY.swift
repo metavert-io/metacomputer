@@ -153,15 +153,21 @@ enum ApprovalScope { case use, session, unlock }
 /// vault locks; anything else refuses (approvalAnswer). The unlock process reads the answer while it
 /// also serves `approve ID` / `deny ID` (Server.swift, waitForDecision); anything typed before the
 /// question is discarded; no answer within the timeout, Ctrl-C or the terminal closing all refuse.
-func approvalPrompt(_ question: String, name: String) -> String {
-    question + "\n  Type \(name) to allow this use (\(name) session: for this Claude Code session; "
+func approvalPrompt(_ question: String, name: String, purchase: Bool = false) -> String {
+    // A purchase is allowed for itself only: no wider answer is offered.
+    if purchase { return question + "\n  Type \(name) to allow this one purchase. Anything else refuses: " }
+    return question + "\n  Type \(name) to allow this use (\(name) session: for this Claude Code session; "
         + "\(name) unlock: until the vault locks). Anything else refuses: "
 }
 
 /// The prompt in presence mode: what's typed chooses how far the approval reaches, and macOS's dialog (or a
 /// passphrase proof) confirms it; anything else refuses.
-func presencePrompt(_ question: String, name: String, id: String) -> String {
-    question + "\n  Confirm this one use with Touch ID or your login password in macOS's dialog (or `metacomputer secrets approve \(id) --passphrase`)."
+func presencePrompt(_ question: String, name: String, id: String, purchase: Bool = false) -> String {
+    if purchase {
+        return question + "\n  Confirm this one purchase with Touch ID or your login password in macOS's dialog (or `metacomputer secrets approve \(id) --passphrase`)."
+            + " Typing never approves it. Anything else refuses: "
+    }
+    return question + "\n  Confirm this one use with Touch ID or your login password in macOS's dialog (or `metacomputer secrets approve \(id) --passphrase`)."
         + "\n  To reach further, type \(name) session (this Claude Code session) or \(name) unlock (until the vault locks): a new dialog"
         + " then names that, and only it can allow it. Typing never approves on its own. Anything else refuses: "
 }

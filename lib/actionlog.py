@@ -23,7 +23,9 @@ result summary and timing, and the calls the hub refused.
   verification. Records after the last checkpoint are reported as unsigned;
   a file without a final checkpoint ended abnormally or was cut short.
 - Typed text, values and scripts are replaced by their length unless
-  ACTION_LOG_TEXT=keep. Results are kept only as a hash and sizes.
+  ACTION_LOG_TEXT=keep. Results are kept only as a keyed fingerprint (HMAC-SHA256 under a per-install secret beside the
+  signing key, so short values in them can't be recovered by trying candidates) and sizes, all taken after card
+  details are masked (lib/cardmask.py).
 
 What it proves: that a file matches what the holder of the signing key
 signed. It can't stop someone who has that key (anyone with your login on this
@@ -36,7 +38,9 @@ ssh-agent backed by hardware (ACTION_LOG_KEY=path/to/key.pub) to prevent that.
   actionlog.py event KIND < JSON   one record in a file of its own (metadata only; used by
                                    `metacomputer secrets` for fills and sealed sessions)
 """
+import copy
 import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -56,6 +60,37 @@ EVERY_N, EVERY_S = 20, 60
 SIGN_TIMEOUT_S = float(os.environ.get("MCOMP_SIGN_TIMEOUT_S") or 10)
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import cardmask  # noqa: E402  (card details never reach the log: SECURITY.md, "Paying for things")
+except Exception:  # without it, records that could hold a card's details aren't written in full
+    cardmask = None
+WITHHELD = "metacomputer couldn't check this record for card details, so its content isn't kept"
+
+
+def _card_hints():
+    """The masks for this connection's VM: the open purchases read fresh for every record (a purchase that opened a
+    moment ago counts at once), and every one this relay has read before, for its life (cardmask.StickyHints)."""
+    try:
+        return cardmask.hints_for(os.environ)
+    except Exception:
+        return [{"exp": True, "cvc_len": 3}, {"cvc_len": 4}]
+
+
+def mask_record(rec):
+    """A record with card details masked (every key and value, the call's arguments, a result's text and an error's
+    message alike) before it's written, the hash chain computed over that; one that can't be checked keeps only its
+    type, id, tool and timing."""
+    try:
+        if cardmask is None:
+            raise RuntimeError("no masker")
+        cardmask.mask_value(rec, _card_hints())
+        return rec
+    except Exception:
+        kept = {k: rec[k] for k in ("type", "id", "tool", "ms", "t", "ts") if k in rec}
+        kept["withheld"] = WITHHELD
+        return kept
 
 
 def settings():
@@ -110,13 +145,36 @@ def redact(obj, depth=0):
     return obj
 
 
-def summarize_result(res, keep_text):
+def result_mac_key(key):
+    """A per-install secret beside the action log's signing key (0600, made on first use): results are fingerprinted with
+    an HMAC under it, so a short value in a result (a card's security code, a postal code) can't be found from the log
+    by trying every candidate, as an unkeyed hash would allow."""
+    path = (os.path.join(os.path.dirname(key), "action-log.results-hmac") if key.endswith(".pub") else key + ".results-hmac")
+    try:
+        with open(path, "rb") as f:
+            k = f.read(64).strip()
+        if len(k) >= 32:
+            return k
+    except FileNotFoundError:
+        pass
+    os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
+    k = os.urandom(32).hex().encode()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(k)
+    return k
+
+
+def summarize_result(res, keep_text, mac_key=None):
+    """A result's summary, from the result as masked (card details hidden): its error flag, a keyed fingerprint (HMAC-SHA256
+    under mac_key; none without one), image count, text size and, with keep_text, its text."""
     if not isinstance(res, dict):
         return {"kind": type(res).__name__}
     images = sum(1 for c in res.get("content") or [] if isinstance(c, dict) and c.get("type") == "image")
     texts = [c.get("text", "") for c in res.get("content") or [] if isinstance(c, dict) and c.get("type") == "text"]
-    out = {"error": bool(res.get("isError")), "sha256": hashlib.sha256(canonical(res)).hexdigest(),
-           "images": images, "text_chars": sum(len(t) for t in texts)}
+    out = {"error": bool(res.get("isError")), "images": images, "text_chars": sum(len(t) for t in texts)}
+    if mac_key:
+        out["hmac"] = hmac.new(mac_key, canonical(res), hashlib.sha256).hexdigest()
     if keep_text and texts:
         out["text"] = "\n".join(texts)[:400]
     return out
@@ -185,6 +243,7 @@ class ActionLog:
         self.unsigned, self.last_sign = 0, time.time()
 
     def _add(self, rec):
+        rec = mask_record(rec)
         with self.lock:
             if self.closed:
                 return
@@ -212,10 +271,25 @@ class ActionLog:
         t0 = self.started.pop(call_id, None)
         rec = {"type": "result", "id": call_id, "tool": tool,
                "ms": int((time.time() - t0) * 1000) if t0 else None}
+        # Masked first: what's cut short, fingerprinted or kept is the masked result, never the raw one.
+        try:
+            if cardmask is None:
+                raise RuntimeError("no masker")
+            msg = copy.deepcopy(msg)
+            cardmask.mask_value(msg, _card_hints())
+        except Exception:
+            rec["withheld"] = WITHHELD
+            self._add(rec)
+            return
         if "error" in msg:
-            rec["rpc_error"] = str((msg.get("error") or {}).get("message", ""))[:300]
+            # (masked again once cut short, whatever the text mode: an error's message is kept as text)
+            rec["rpc_error"] = cardmask.mask_text(str((msg.get("error") or {}).get("message", ""))[:300], _card_hints())
         else:
-            rec["result"] = summarize_result(msg.get("result"), self.keep_text)
+            try:
+                mk = result_mac_key(self.key)
+            except OSError:
+                mk = None
+            rec["result"] = summarize_result(msg.get("result"), self.keep_text, mk)
         self._add(rec)
 
     def refused(self, tool, args, reason, client=None):

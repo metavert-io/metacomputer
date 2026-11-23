@@ -22,6 +22,7 @@ import json
 import os
 import re
 import threading
+import time
 
 MAX_JSON_DEPTH = 100          # MCP messages nest a handful of levels; Python's parser gives up near 1000
 MAX_JSON_NODES = 1_000_000    # values in one message (a 5,000-element tree is tens of thousands; base64 has none)
@@ -278,3 +279,158 @@ class StderrTail:
             self.done.wait(wait)
         with self.lock:
             return bytes(self.buf).decode("utf-8", "replace")
+
+
+# What the hub keeps of a line of the driver's stderr: one of these fixed classes, never the line (it can echo what a page
+# in the VM showed, a card's details among it). The first that matches wins; anything else is "driver output".
+STDERR_CLASSES = (
+    ("vm not running", re.compile(r"not running", re.I)),
+    ("ssh: permission denied", re.compile(r"permission denied", re.I)),
+    ("ssh: connection refused", re.compile(r"connection refused", re.I)),
+    ("ssh: host key changed", re.compile(r"host key verification failed|remote host identification has changed", re.I)),
+    ("connection timed out", re.compile(r"timed out|timeout", re.I)),
+    ("driver error", re.compile(r"\b(error|fatal|panic|traceback|exception)\b", re.I)),
+    ("driver warning", re.compile(r"\bwarn(ing)?\b", re.I)),
+)
+STDERR_LINE_MAX = 16384       # a longer line is classed "long line" (and read no further than its end)
+# metacomputer's own refusals (bin/metacomputer, before any VM is reached: a hub pinned to its VM), recognised by their
+# fixed words; the hub keeps only which one it was (an id), never the line or anything in it. Its message is written from
+# the hub's own pinned settings (STDERR_REFUSALS, refusal_text), so a driver that writes a line of the same shape can
+# carry nothing through it.
+_NAME, _PORT, _PATH = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", r"[0-9]{1,5}", r"[A-Za-z0-9/._ ~-]{1,300}"
+_HINT = r"(?:\. This hub serves only the VM it started with \(metacomputer hub stop ends it\))?"
+STDERR_TEMPLATES = tuple((tid, re.compile("^" + t + "$")) for tid, t in (
+    ("settings gone", r"metacomputer: the settings file for the VM '" + _NAME + r"' \(" + _PATH + r"\) is gone, and without it the settings name '" + _NAME + r"'; refusing" + _HINT),
+    ("another vm", r"metacomputer: the settings now name the VM '" + _NAME + r"', not '" + _NAME + r"' as confirmed \(MCOMP_EXPECT_VM\); refusing" + _HINT),
+    ("another port", r"metacomputer: the settings now give " + _NAME + r" the SSH port " + _PORT + r", not " + _PORT + r" as when this started \(MCOMP_EXPECT_SSH_PORT\); refusing" + _HINT),
+    ("another host key", r"metacomputer: " + _NAME + r"'s pinned host key \(known_hosts in its SSH_DIR\) isn't the one it had when this started \(MCOMP_EXPECT_HOSTKEY\); refusing" + _HINT),
+))
+_REFUSAL_HINT = ". This hub serves only the VM it started with (metacomputer hub stop ends it)"
+STDERR_REFUSALS = {
+    "settings gone": "metacomputer: the settings file for the VM '{vm}' is gone, and the settings now name another VM; refusing",
+    "another vm": "metacomputer: the settings now name another VM, not '{vm}' as confirmed (MCOMP_EXPECT_VM); refusing",
+    "another port": "metacomputer: the settings now give {vm} another SSH port, not {port} as when this started (MCOMP_EXPECT_SSH_PORT); refusing",
+    "another host key": "metacomputer: {vm}'s pinned host key (known_hosts in its SSH_DIR) isn't the one it had when this started (MCOMP_EXPECT_HOSTKEY); refusing",
+}
+
+
+def refusal_text(tid, pin=None):
+    """A recognised refusal's message, from the hub's own pinned settings (MCOMP_EXPECT_VM, _SSH_PORT), each used only when
+    it has the shape of a VM name or a port; never from the line the driver's stream carried."""
+    pin = pin or {}
+    vm, port = str(pin.get("MCOMP_EXPECT_VM") or ""), str(pin.get("MCOMP_EXPECT_SSH_PORT") or "")
+    vm = vm if re.fullmatch(_NAME, vm) else "this hub's VM"
+    port = port if re.fullmatch(_PORT, port) and 0 < int(port) < 65536 else "its port"
+    return STDERR_REFUSALS[tid].format(vm=vm, port=port) + _REFUSAL_HINT
+
+
+def stderr_class(line):
+    for name, rx in STDERR_CLASSES:
+        if rx.search(line):
+            return name
+    return "driver output"
+
+
+class StderrCounter:
+    """Drain a child's stderr on a thread of its own, keeping none of its text: how many lines and bytes, and how many of
+    each fixed class (STDERR_CLASSES) the lines fell in. The log file at `path` (0600) gets one line per line read, with
+    its time and class only, up to `file_max` bytes. A line is looked at only to class it, then dropped; at most
+    STDERR_LINE_MAX bytes of one are held while it's read. The child never blocks on a full pipe."""
+
+    def __init__(self, stream, path=None, file_max=None):
+        self.stream = stream
+        self.path = path
+        self.file_max = STDERR_FILE_MAX if file_max is None else file_max
+        self.total = 0
+        self.lines = 0
+        self.counts = {}
+        self.known = []             # which of metacomputer's own refusals (STDERR_TEMPLATES) came, the last few: ids only
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True, name="stderr-counter")
+        self.thread.start()
+
+    def _run(self):
+        f = None
+        if self.path:
+            try:
+                f = os.fdopen(os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w")
+            except OSError:
+                f = None
+        written, pending, skipping = 0, bytearray(), False
+
+        def count(cls):
+            nonlocal written
+            with self.lock:
+                self.lines += 1
+                self.counts[cls] = self.counts.get(cls, 0) + 1
+            if f is not None and written < self.file_max:
+                rec = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {cls}\n"
+                try:
+                    f.write(rec)
+                    f.flush()
+                    written += len(rec)
+                except (OSError, ValueError):
+                    pass
+        try:
+            fd = self.stream.fileno()
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                with self.lock:
+                    self.total += len(chunk)
+                pending += chunk
+                while True:
+                    i = pending.find(b"\n")
+                    if i < 0:
+                        break
+                    if skipping:
+                        skipping = False
+                    elif i > STDERR_LINE_MAX:
+                        count("long line")
+                    else:
+                        line = pending[:i].decode("utf-8", "replace").rstrip("\r")
+                        tid = next((tid for tid, t in STDERR_TEMPLATES if t.match(line)), None)
+                        if tid:
+                            with self.lock:
+                                self.known = (self.known + [tid])[-3:]
+                            count("metacomputer refusal")
+                        else:
+                            count(stderr_class(line))
+                    del pending[:i + 1]
+                if len(pending) > STDERR_LINE_MAX:
+                    if not skipping:
+                        count("long line")
+                    skipping = True
+                    pending.clear()
+            if pending and not skipping:
+                count(stderr_class(pending.decode("utf-8", "replace")))
+            pending.clear()
+        except (OSError, ValueError, AttributeError):
+            pass
+        finally:
+            if f is not None:
+                try:
+                    f.close()
+                except OSError:
+                    pass
+            self.done.set()
+
+    def classes(self, wait=0.0):
+        if wait:
+            self.done.wait(wait)
+        with self.lock:
+            return dict(self.counts)
+
+    def text(self, wait=0.0, pin=None):
+        """A summary the hub may show: how many lines, of which classes; never a line. A recognised refusal of
+        metacomputer's own is said in the hub's words, from its pinned settings (`pin`, refusal_text)."""
+        c = self.classes(wait)
+        if not c:
+            return ""
+        with self.lock:
+            n, known = self.lines, list(dict.fromkeys(self.known))
+        said = [refusal_text(t, pin) for t in known]
+        return ("; ".join(said) + "; " if said else "") + f"the driver wrote {n} line(s) to stderr: " + ", ".join(
+            f"{v} {k}" for k, v in sorted(c.items(), key=lambda kv: -kv[1]))
