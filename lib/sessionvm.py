@@ -120,8 +120,10 @@ def _handoff(a):        # lib/handoff.py: status and wait, first, only look; any
     return "read" if _first(a) in ("status", "wait") else "exempt" if _first(a) in HELP else "act"
 
 
-def _net(a):            # lib/netpolicy.py: the subcommand first, status when there's none (the gateway on the Mac)
-    return "exempt" if _first(a) in ("", "status") + HELP else "act"
+def _net(a):            # lib/netpolicy.py: the subcommand first, status when there's none: what the computer can
+    # reach now (its gateway's rules on this Mac; a computer elsewhere: read from it over SSH, and its provider's);
+    # egress (a computer elsewhere), allow, remove and clear change it
+    return "read" if _first(a) in ("", "status") else "exempt" if _first(a) in HELP else "act"
 
 
 def _trace(a):          # lib/traces.py: list, show and export read the traces kept on the Mac

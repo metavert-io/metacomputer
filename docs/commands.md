@@ -254,15 +254,15 @@ metacomputer: this Codex session's MCP tools act on demo, but this command would
   (`metacomputer sh`, `call`, `claude` and scripts claim the computer they act on).
 - **Not checked:** a command that names its computer (`--vm NAME`, `MCOMP_VM`, `MCOMP_CONFIG`, or a caller that pinned
   it); commands that act on no one computer or name their own (`list`, `vm`, `default`, `each`, `volume`, `refdisk`,
-  `events`, `notify`, `learn`, `actions`, `agents`, `setup`, `update`, `version`, `where`, `help`); forms that only
-  read files and settings on the Mac (`checkpoints`, `recordings` without `--sync`, `record moments`, `browser` and
-  `browser --json`, `hub env`, `net` and `net status`, `trace list|show|export`, and the vault's `secrets` (status),
+  `events`, `notify`, `learn`, `actions`, `agents`, `setup`, `update`, `version`, `where`, `help`, and `cloud`, a
+  provider's own resources); forms that only read files and settings on the Mac (`checkpoints`, `recordings` without
+  `--sync`, `record moments`, `browser` and `browser --json`, `hub env`, `trace list|show|export`, and the vault's `secrets` (status),
   `secrets list|status|audit|tokens|requests|selftest|settle|version`, `secrets rule list` and `secrets audit-sink
   list|show`); what a command
   that passed starts for the same computer; anything run outside an agent session.
 - **Forms that only read the VM, or who controls it** (`who`, `status`, `inspect`, `logs`, `get`, `shot`, `view --print|--tailnet`, `hub`
   and `hub status`, `claude read|wait|status`, `handoff status|wait`, `security` without `apply`, `record` and `record
-  status`, `browser profiles`, `input-reset --check`) go ahead, with a note on stderr naming both computers. A form is
+  status`, `browser profiles`, `input-reset --check`, `net` and `net status`) go ahead, with a note on stderr naming both computers. A form is
   read from the arguments as the command itself parses them, in whatever order they come (`security --json apply`
   applies, so it's checked as acting); one that isn't a read form acts.
 - **Records.** The MCP server and each claim leave a small record of the session's computer in a private folder of this

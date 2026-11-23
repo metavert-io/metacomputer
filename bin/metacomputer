@@ -341,9 +341,14 @@ remote_only_mac() { # WHAT WHY: refused for a computer elsewhere, saying why (li
   die "$1 isn't available for $VM_NAME, a computer reached over SSH ($(remote_where)): $2"
 }
 do_start_remote() {
-  local a; for a in "$@"; do case "$a" in --no-volumes) ;; *) die "usage: metacomputer start" ;; esac; done
+  parse_flags "$@"
+  local a; for a in ${REST[@]+"${REST[@]}"}; do case "$a" in --no-volumes) ;; *) die "usage: metacomputer start [--override]" ;; esac; done
   vm_lock_or_die "metacomputer start"
   expect_guard
+  # Starting may stop it first (a guest that powered itself off, as its console shows): not while a session or the
+  # user (a handoff) has it.
+  owners_check
+  handoff_hold_unless_override
   vm_exists "$VM_NAME" || die "$VM_NAME isn't set up yet: $(mc_cmd) build"
   say "starting $VM_NAME ($(remote_where))"
   if remote_made; then
@@ -391,7 +396,7 @@ do_stop_remote() {
 # what its own firewall has in force, each said apart: a setting is never taken for what's in force.
 remote_egress_guest() { # the guest's own firewall's EGRESS, or "unknown"
   local v; v="$(gssh admin 'sudo /usr/local/sbin/metacomputer-admin egress status' 2>/dev/null | tail -1)"
-  case "$v" in internet|off|fallback|none) printf '%s' "$v" ;; *) printf 'unknown' ;; esac
+  case "$v" in internet|off|setup|fallback|none) printf '%s' "$v" ;; *) printf 'unknown' ;; esac
 }
 remote_net_status() {
   local outside="not asked (no credentials in this command)" guest

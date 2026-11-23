@@ -27,21 +27,24 @@
 #     123), matched by their accounts;
 #   - EGRESS=internet (the default): the rest of the internet is open; EGRESS=off: nothing else leaves (package updates
 #     included), as the provider's rules say too where it has them.
+#   - While the computer is being set up (/etc/metacomputer/setup-egress, which finalize.sh removes), EGRESS=off lets
+#     out apt's downloads too (the _apt account, TCP 80 and 443, public addresses only): what the setup installs.
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 CONF=/etc/metacomputer/egress
 PORTS_CONF=/etc/metacomputer/ssh-ports
 TABLE=metacomputer
 MARK=/run/metacomputer/firewall-fallback
+SETUP=/etc/metacomputer/setup-egress
 
 private4="0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/3"
 private6="::/127, ::ffff:0:0/96, 64:ff9b::/96, 64:ff9b:1::/48, 100::/64, 2001:db8::/32, fc00::/7, fe80::/10, ff00::/8"
 
 uid_of() { id -u "$1" 2>/dev/null || true; }
-system_uids() { # "resolve=N network=N timesync=N": the accounts the exceptions are for, as this system has them
+system_uids() { # "resolve=N network=N timesync=N apt=N": the accounts the exceptions are for, as this system has them
   r="$(uid_of systemd-resolve)"; n="$(uid_of systemd-network)"
   t="$(uid_of _chrony)"; [ -n "$t" ] || t="$(uid_of systemd-timesync)"
-  printf 'resolve=%s network=%s timesync=%s' "$r" "$n" "$t"
+  printf 'resolve=%s network=%s timesync=%s apt=%s' "$r" "$n" "$t" "$(uid_of _apt)"
 }
 pick() { # KEY "k=v k=v": the value, if it's a number
   for kv in $2; do
@@ -89,10 +92,10 @@ EOF
 EOF
 }
 
-render() { # EGRESS PORTS UIDS
+render() { # EGRESS PORTS UIDS (EGRESS: internet, off, or setup: off but apt's downloads, while it's being set up)
   egress="$1"; ports="$(ports_of "$2")"; uids="$3"
-  case "$egress" in internet|off) ;; *) echo "guest-firewall: egress must be internet or off, not '$egress'" >&2; exit 2 ;; esac
-  r="$(pick resolve "$uids")"; n="$(pick network "$uids")"; t="$(pick timesync "$uids")"
+  case "$egress" in internet|off|setup) ;; *) echo "guest-firewall: egress must be internet or off, not '$egress'" >&2; exit 2 ;; esac
+  r="$(pick resolve "$uids")"; n="$(pick network "$uids")"; t="$(pick timesync "$uids")"; a="$(pick apt "$uids")"
   echo "# metacomputer guest firewall (guest-firewall render; EGRESS=$egress)"
   head_rules "$ports" sets
   cat <<EOF
@@ -107,6 +110,10 @@ EOF
   [ -z "$t" ] || printf '\t\tmeta skuid %s meta l4proto udp th dport 123 accept comment "the clock"\n' "$t"
   printf '\t\tip daddr @private4 counter reject comment "metadata, link-local and private ranges"\n'
   printf '\t\tip6 daddr @private6 counter reject comment "metadata, link-local and private ranges"\n'
+  if [ "$egress" = setup ]; then
+    [ -z "$a" ] || printf '\t\tmeta skuid %s meta l4proto tcp th dport { 80, 443 } accept comment "apt downloads, during the setup only"\n' "$a"
+    printf '\t\tcounter reject comment "EGRESS=off"\n'
+  fi
   [ "$egress" != off ] || printf '\t\tcounter reject comment "EGRESS=off"\n'
   printf '\t}\n}\n'
 }
@@ -126,7 +133,7 @@ opts() { # parse --egress --ports --uids into EG PT UI
   EG=internet; PT=""; UI=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --egress) EG="${2:-}"; shift ;;
+      --egress) EG="${2:-}"; shift ;;   # internet, off or setup
       --ports) PT="${2:-}"; shift ;;
       --uids) UI="${2:-}"; shift ;;
       *) echo "usage: guest-firewall render [--egress internet|off] [--ports LIST] [--uids LIST]" >&2; exit 2 ;;
@@ -140,6 +147,7 @@ opts() { # parse --egress --ports --uids into EG PT UI
 case "${1:-}" in
   apply)
     egress="$(head -n 1 "$CONF" 2>/dev/null | tr -d ' \t\r' || true)"; [ -n "$egress" ] || egress=internet
+    [ "$egress" != off ] || [ ! -e "$SETUP" ] || egress=setup      # off, but the setup's apt downloads
     install -d -m 0755 /run/metacomputer
     tmp="$(mktemp /run/metacomputer-firewall.XXXXXX)"
     if (render "$egress" "$(saved_ports)" "$(system_uids)") > "$tmp" 2>/dev/null && nft -c -f "$tmp" && nft -f "$tmp"; then

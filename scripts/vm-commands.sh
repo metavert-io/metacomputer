@@ -612,7 +612,7 @@ vm_delete_remote() {
   if remote_made; then printf '%s\n' "  its instance on $(remote_where) and the instance's disk (everything on it), its security group, and metacomputer's network there once no computer of yours uses it"
   elif [ "$remove_from_server" = 1 ]; then printf '%s\n' "  metacomputer's setup on your server at ${SSH_HOST:-?}, through your own SSH and sudo: its SSH settings (yours put back), its firewall, its sudo rules and its accounts' access (their homes and the packages stay)"
   else printf '%s\n' "  nothing on your server: $VM_NAME is your own server at ${SSH_HOST:-?}, which stays as it is (--remove-from-server takes metacomputer's setup off it)"; fi
-  printf '%s\n' "  its identity, so its vault binding stops working (a computer made again under this name is bound again)"
+  printf '%s\n' "  its identity, so its vault binding and every API token made for it stop working (a computer made again under this name is bound again); its own vault is locked if it's unlocked"
   printf '%s\n' "  its settings, config/vms/$VM_NAME.env, and its runtime folder"
   [ "$del_vault" = 0 ] || printf '%s\n' "  its vault folder $(mc_tilde "$own_vault"), with every secret in it"
   printf '%s\n' "It keeps:" "  its logs ($(vm_path "$LOG_DIR")) and SSH keys ($(mc_tilde "$SSH_DIR"))"
@@ -638,8 +638,11 @@ vm_delete_remote() {
   hub_stop
   if [ "$remove_from_server" = 1 ]; then
     say "taking metacomputer's setup off $SSH_HOST (as ${SETUP_USER:-?}, with your sudo)"
-    local own=(ssh -o BatchMode=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no
-               -o KbdInteractiveAuthentication=no -o ConnectTimeout=15 -p "${SSH_HOST_PORT:-22}" "${SETUP_USER:-}@${SSH_HOST:-}")
+    # Never through a shared connection (your ssh config's ControlMaster): the check after the removal is a new
+    # process that authenticates on its own.
+    local own=(ssh -o ControlMaster=no -o ControlPath=none -o BatchMode=yes -o PreferredAuthentications=publickey
+               -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o ConnectTimeout=15 -p "${SSH_HOST_PORT:-22}"
+               "${SETUP_USER:-}@${SSH_HOST:-}")
     "${own[@]}" 'sudo -n /opt/metacomputer/bin/remote-uninstall all' </dev/null \
       || die "it couldn't be taken off (above: your own SSH, with sudo that doesn't ask, is needed); nothing here was deleted"
     "${own[@]}" true </dev/null || die "after the removal your own account can't sign in to ${SSH_HOST:-?}: use your provider's console. Nothing here was deleted"
@@ -647,6 +650,12 @@ vm_delete_remote() {
     gone+=("metacomputer's setup on your server")
   fi
   remote_py identity --vm "$VM_NAME" --remove >/dev/null 2>&1 || true
+  # Its identity is gone, so its vault binding refuses, and every token made for it stops at its next use (the vault
+  # checks the identity then). Its own vault is locked too (anyone may lock: it only restricts), which ends its
+  # tokens and closes its tunnel now, whether or not --delete-vault removes the folder after.
+  if [ "$(mc_vault_dir)" = "$own_vault" ] && [ -S "$own_vault/vault.sock" ] && [ -x "$VAULT_BIN" ]; then
+    MCOMP_VAULT_DIR="$own_vault" "$VAULT_BIN" lock >/dev/null 2>&1 && gone+=("its vault's live tokens and tunnel (the vault is locked)")
+  fi
   if remote_made; then
     local had=0
     "$PY" -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("instance") else 1)' "$RUN_DIR/remote.json" 2>/dev/null && had=1

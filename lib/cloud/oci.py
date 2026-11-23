@@ -81,6 +81,13 @@ class Capacity(AdapterError):
     """OCI has no room for that shape in that availability domain now ("Out of host capacity")."""
 
 
+# A soft stop: OCI gives the guest 15 minutes (900 s) to shut down before it powers it off; then the instance's own
+# transition to STOPPED. A stop is waited for that long, so a valid stop is never reported as failed.
+SHUTDOWN_WINDOW_S = 900
+STOP_WAIT_S = SHUTDOWN_WINDOW_S + 180
+CONSOLE_CHUNK = 262144              # bytes per read of a console capture (OCI keeps up to 1 MB of it)
+
+
 def credentials(env=None):
     """The SDK's config from the environment: KeyError-free, refusing (AdapterError) with the names that are missing,
     never their values."""
@@ -309,8 +316,17 @@ class SDK:
                 if self.compute.get_console_history(h.id).data.lifecycle_state == "SUCCEEDED":
                     break
                 time.sleep(2)
-            text = self.compute.get_console_history_content(h.id, length=262144).data
-            text = text if isinstance(text, str) else text.decode(errors="replace")
+            # Read through to the end of the capture (OCI says what's left in opc-bytes-remaining): its last line
+            # is what the guest said last, not the last line of its first part.
+            text, offset = "", 0
+            for _ in range(64):
+                r = self.compute.get_console_history_content(h.id, offset=offset, length=CONSOLE_CHUNK)
+                chunk = r.data if isinstance(r.data, str) else (r.data or b"").decode(errors="replace")
+                text = (text + chunk)[-2 * CONSOLE_CHUNK:]
+                left = int(((r.headers or {}).get("opc-bytes-remaining") or "0").strip() or 0)
+                if left <= 0 or not chunk:
+                    break
+                offset += CONSOLE_CHUNK
         finally:
             try:
                 self.compute.delete_console_history(h.id)
@@ -535,11 +551,11 @@ class OCI(RemoteVM):
                                    f"Check it (metacomputer --vm {name} status); to restart it anyway: metacomputer "
                                    f"--vm {name} stop --force, then start")
             self.api.action(st["instance"], "STOP")
-            self.api.wait_state(st["instance"], "STOPPED")
+            self.api.wait_state(st["instance"], "STOPPED", timeout=STOP_WAIT_S)
             cur = self.api.instance(st["instance"]) or cur
         if cur["state"] != "RUNNING":
             if cur["state"] == "STOPPING":
-                self.api.wait_state(st["instance"], "STOPPED")
+                self.api.wait_state(st["instance"], "STOPPED", timeout=STOP_WAIT_S)
             self.api.action(st["instance"], "START")
             self.api.wait_state(st["instance"], "RUNNING")
         return self.status(name)
@@ -554,7 +570,7 @@ class OCI(RemoteVM):
             hard = force or (guest_up is False and self.powered_off(name))
             self.api.action(st["instance"], "STOP" if hard else "SOFTSTOP")
         if cur:
-            self.api.wait_state(st["instance"], "STOPPED")
+            self.api.wait_state(st["instance"], "STOPPED", timeout=STOP_WAIT_S)
         return self.status(name)
 
     def delete(self, name):

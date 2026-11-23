@@ -217,8 +217,9 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   provider enforces them (OCI: a network security group per computer): never let metadata, link-local or private
   ranges through, never claim more outside isolation than the manifest's `outside_egress` (OCI can't filter
   169.254.0.0/16), and keep the live view on its `127.0.0.1` behind the `view` key. Never hard-stop a provider's
-  RUNNING instance without proof the guest is off (`stop --force` is the user's call); a failed build deletes what it
-  made. Your own server: keep the owner's access (ports, saved SSH settings, checks with rollback). Everything a
+  RUNNING instance without proof the guest is off (`stop --force` is the user's call); a failed build deletes what its
+  own operation made and nothing else (`lib/remote.py abort --op`); `lib/remote.py` drops `OCI_*` from its own
+  environment before it starts anything; owner checks never ride a shared SSH connection (`ControlPath=none`). Your own server: keep the owner's access (ports, saved SSH settings, checks with rollback). Everything a
   provider makes stays in the configured compartment, tagged. Tests: `python3 tests/test_remote.py` (no VM, no
   network).
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every

@@ -283,6 +283,14 @@ def firewall():
     check("an account the system hasn't: no exception for it (never a rule for a uid that isn't a number)",
           "th dport 53" not in miss and "th dport 123" not in miss and "skuid 998" in miss, miss[-400:])
     check("an egress setting that isn't one is refused", render("sometimes").returncode == 2)
+    st = subprocess.run(["/bin/sh", FIREWALL, "render", "--egress", "setup", "--ports", "22", "--uids",
+                         uids + " apt=42"], capture_output=True, text=True).stdout
+    sto = st.split("chain output")[1] if "chain output" in st else ""
+    check("EGRESS=off while it's being set up: apt's downloads (_apt, TCP 80/443) after the private refusals, then "
+          "everything else refused (found by review: a new computer with EGRESS=off couldn't install anything)",
+          "meta skuid 42 meta l4proto tcp th dport { 80, 443 } accept" in sto and sto.index("@private4") < sto.index("skuid 42")
+          < sto.index('"EGRESS=off"'), sto[-600:])
+    check("...and once set up, off is off: no apt exception", "skuid 42" not in render("off", uids + " apt=42").stdout)
     em = subprocess.run(["/bin/sh", FIREWALL, "render-emergency", "--ports", "2222", "--uids", uids], capture_output=True,
                         text=True).stdout
     emo = em.split("chain output")[1]
@@ -369,7 +377,8 @@ def fail_closed():
     fn = prov.split("remote_ssh_and_firewall() {", 1)[1].split("\n}\n", 1)[0] if "remote_ssh_and_firewall() {" in prov else ""
     check("...the server's own SSH settings saved first, and put back when the new ones would lock the owner out",
           in_order(fn, "/var/lib/metacomputer/rollback/sshd_config.d", 'cp -r --preserve=mode,timestamps "$PAYLOAD/remote/rootfs/." /',
-                   "sshd -t", "remote-uninstall rollback", "systemctl reload ssh"))
+                   "if ! sshd -t") and in_order(fn[fn.find("if ! sshd -t"):], "if ! sshd -t", "remote-uninstall rollback",
+                                                "systemctl reload ssh"))
     un = readf("provisioning", "remote", "rootfs", "opt", "metacomputer", "bin", "remote-uninstall")
     check("remote-uninstall (review item 13): the service disabled, the network's dependency removed, only its own "
           "table deleted, the server's SSH settings put back, sshd checked before reload",
@@ -379,12 +388,27 @@ def fail_closed():
     r = subprocess.run(["/bin/sh", "-n", os.path.join(LAB, "provisioning", "remote", "rootfs", "opt", "metacomputer", "bin",
                                                        "remote-uninstall")], capture_output=True)
     check("remote-uninstall parses", bool(un) and r.returncode == 0, r.stderr)
+    nm = readf("provisioning", "remote", "rootfs", "etc", "systemd", "system", "NetworkManager.service.d",
+               "10-metacomputer-firewall.conf")
+    check("NetworkManager requires the firewall too (a server Ubuntu set up with it), and the firewall runs before it "
+          "(found by review: only systemd-networkd did)", "Requires=metacomputer-firewall.service" in nm
+          and "After=metacomputer-firewall.service" in nm and "NetworkManager.service" in unit.split("Before=")[1].split("\n")[0])
+    check("...a server whose network neither manages is refused by the setup, its own settings put back",
+          in_order(fn, "systemctl is-enabled --quiet systemd-networkd.service", "NetworkManager.service",
+                   "remote-uninstall rollback", "false"))
+    check("the setup's apt downloads for EGRESS=off: marked by bootstrap.sh and provision.sh, ended by finalize.sh, "
+          "which loads the rules again", "/etc/metacomputer/setup-egress" in boot and "/etc/metacomputer/setup-egress" in fn
+          and in_order(readf("provisioning", "guest", "finalize.sh"), "rm -f /etc/metacomputer/setup-egress",
+                       "/opt/metacomputer/bin/guest-firewall apply", "finalized"))
+    uninstall_order()
 
 
 class FakeOCI:
     """The SDK facade's calls, in memory: instances, a network, availability domains that may be full."""
 
     def __init__(self, full=(), console="", fail_record=False):
+        self.waits = []
+        self.made_with = []
         self.network_calls = []
         self.locked = lambda: None
         self.full = set(full)
@@ -433,6 +457,7 @@ class FakeOCI:
                 and (op is None or i.get("op") == op)]
 
     def make_nsg(self, name, egress):
+        self.made_with.append(egress)
         self.make_network()
         self.nsgs.setdefault(name, {"id": "nsg-" + name, "egress": None})
         self.nsg_egress("nsg-" + name, egress)
@@ -470,6 +495,7 @@ class FakeOCI:
         self.inst[iid]["state"] = {"START": "RUNNING", "SOFTSTOP": "STOPPED", "STOP": "STOPPED"}[what]
 
     def wait_state(self, iid, want, timeout=600):
+        self.waits.append((want, timeout))
         return want
 
     def terminate(self, iid):
@@ -560,6 +586,10 @@ def oci_driver():
     api.actions.clear()
     s.sleep("box", guest_up=True, force=True)
     check("...stop --force: a plain stop at once", api.actions == ["STOP"], api.actions)
+    check("a stop is waited for through OCI's own shutdown window (900 s) and the transition after it, never less "
+          "(found by review: 600 s reported a valid soft stop as failed)",
+          api.waits and all(t >= 900 + 60 for w, t in api.waits if w == "STOPPED") and oci.STOP_WAIT_S >= 960,
+          [t for w, t in api.waits if w == "STOPPED"])
     s.wake("box")
     api.console = "[ 12.3] reboot: Power down"
     api.actions.clear()
@@ -618,6 +648,272 @@ def oci_driver():
     check("...its egress setting is read from its settings", u.egress("box")["setting"] == "internet")
 
 
+def uninstall_order():
+    """remote-uninstall, in a sandbox with a stand-in systemctl that does what systemd's Requires= does: stopping the
+    firewall while a network manager still requires it stops the network manager too (found by review)."""
+    td = tempfile.mkdtemp(prefix="mcun-")
+    try:
+        fake = os.path.join(td, "bin")
+        os.makedirs(fake)
+        etc = os.path.join(td, "etc")
+        for d in ("systemd/system/systemd-networkd.service.d", "systemd/system/NetworkManager.service.d", "ssh/sshd_config.d"):
+            os.makedirs(os.path.join(etc, d))
+        for d in ("systemd-networkd", "NetworkManager"):
+            open(os.path.join(etc, "systemd/system", d + ".service.d", "10-metacomputer-firewall.conf"), "w").write("x\n")
+        log = os.path.join(td, "calls")
+        with open(os.path.join(fake, "systemctl"), "w") as f:
+            f.write(f'#!/bin/sh\necho "$*" >> {log}\n'
+                    f'case "$*" in\n'
+                    f'  "disable --now metacomputer-firewall.service")\n'
+                    f'    [ -e {etc}/systemd/system/systemd-networkd.service.d/10-metacomputer-firewall.conf ] && touch {td}/networkd-stopped\n'
+                    f'    exit 0 ;;\n'
+                    f'  "is-active --quiet systemd-networkd.service") [ ! -e {td}/networkd-stopped ] ;;\n'
+                    f'  "is-active --quiet NetworkManager.service") exit 3 ;;\n'
+                    f'  "start systemd-networkd.service") rm -f {td}/networkd-stopped ;;\n'
+                    f'  *) exit 0 ;;\nesac\n')
+        for n in ("nft", "sshd"):
+            with open(os.path.join(fake, n), "w") as f:
+                f.write("#!/bin/sh\nexit 0\n")
+        for n in os.listdir(fake):
+            os.chmod(os.path.join(fake, n), 0o755)
+        src = open(os.path.join(LAB, "provisioning", "remote", "rootfs", "opt", "metacomputer", "bin", "remote-uninstall")).read()
+        src = src.replace('[ "$(id -u)" = 0 ]', "true").replace("PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"PATH={fake}:/usr/bin:/bin")
+        src = src.replace("/etc/", etc + "/").replace("/var/lib/metacomputer", td + "/var").replace("/run/metacomputer", td + "/run")
+        script = os.path.join(td, "remote-uninstall")
+        open(script, "w").write(src)
+        r = subprocess.run(["/bin/sh", script, "rollback"], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+        calls = open(log).read().splitlines() if os.path.exists(log) else []
+        never_stopped = not os.path.exists(os.path.join(td, "networkd-stopped"))
+        check("remote-uninstall rollback: the network's dependency removed and systemd reloaded before the firewall "
+              "stops, so the running network manager never stops with it",
+              r.returncode == 0 and never_stopped and "daemon-reload" in calls
+              and calls.index("daemon-reload") < calls.index("disable --now metacomputer-firewall.service")
+              and "start systemd-networkd.service" not in calls, (r.stderr[-300:], calls))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def credentials_children():
+    """Item 2, as re-checked: no program lib/remote.py starts gets the provider's credentials (getconf for its lock
+    folder, the settings resolver's bash): they leave its environment before anything runs, and go to the adapter."""
+    print("\nlib/remote.py's own children")
+    prog = r"""
+import json, os, subprocess, sys
+sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2])
+import remote, test_remote
+seen = []
+real_popen = subprocess.Popen.__init__
+def spy(self, args, *a, **k):
+    env = k.get("env")
+    env = os.environ if env is None else env
+    seen.append([str(args[0] if isinstance(args, (list, tuple)) else args), sorted(x for x in env if x.startswith("OCI_"))])
+    return real_popen(self, args, *a, **k)
+subprocess.Popen.__init__ = spy
+api = test_remote.FakeOCI()
+remote.API_FACTORY = lambda: api
+os.environ.pop("MCOMP_LOCK_DIR", None)
+rc = remote.main(["cloud", "setup", "oci", "--json"])
+print(json.dumps({"rc": rc, "seen": seen, "left": sorted(k for k in os.environ if k.startswith("OCI_")),
+                  "creds": sorted(remote.CREDS)}))
+"""
+    env = dict(os.environ, OCI_USER="ocid1.user.synthetic", OCI_API_KEY_PEM="SYNTHETIC-PEM", OCI_TENANCY="t",
+               OCI_FINGERPRINT="f", OCI_REGION="r", OCI_COMPARTMENT="c")
+    r = subprocess.run([PY, "-c", prog, os.path.join(LAB, "lib"), TESTS], env=env, capture_output=True, text=True,
+                       timeout=120)
+    try:
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        out = {}
+    kids = out.get("seen") or []
+    check("a credential-bearing lib/remote.py starts its children (getconf for the lock folder included) without "
+          "OCI_*, keeps none in its own environment, and hands them to the adapter as a value (found by review: "
+          "getconf got OCI_API_KEY_PEM)", out.get("rc") == 0 and kids and all(not k[1] for k in kids)
+          and any(k[0].endswith("getconf") for k in kids) and out.get("left") == []
+          and "OCI_API_KEY_PEM" in (out.get("creds") or []), (out, r.stderr[-400:]))
+
+
+def abort_scoped():
+    """New #1: a failed create can't delete an instance it didn't make. The build names its operation; lib/remote.py
+    abort deletes only what that operation made (reproduced by review: an existing same-named instance was
+    terminated by the clean-up)."""
+    print("\na failed build deletes only what it made")
+    import remote as remote_mod
+    rd = tempfile.mkdtemp(prefix="mcab-")
+    old_ud = remote_mod.user_data
+    try:
+        os.environ["MCOMP_LOCK_DIR"] = os.path.join(rd, "locks")
+        api = FakeOCI()
+        api.make_network()
+        api.make_nsg("box", "internet")
+        api.inst["i-theirs"] = {"id": "i-theirs", "state": "RUNNING", "shape": "x", "name": "box", "ad": "AD-1", "op": "o" * 32}
+        remote_mod.API_FACTORY = lambda: api
+        remote_mod.user_data = lambda s: "#cloud-config\n"
+        settings = {"VM_NAME": "box", "PLACE": "oci", "PROVIDER": "oci", "SIZE": "arm-1x6", "EGRESS": "internet",
+                    "RUN_DIR": rd, "SSH_DIR": rd}
+        op = "a" * 32
+        why = raises(remote_mod.cmd_create, settings, type("A", (), {"op": op})(), kind=Exception)
+        remote_mod.cmd_abort(settings, type("A", (), {"op": op, "keep": False})())
+        check("an instance of the same name this build didn't make (its record here lost): create refuses, and the "
+              "clean-up leaves it, its security group and the network alone",
+              why and api.inst["i-theirs"]["state"] == "RUNNING" and "box" in api.nsgs and api.net is not None, (why, api.inst))
+        # Its own launch: deleted, with the group and the network it made (nothing else uses them).
+        api2 = FakeOCI()
+        remote_mod.API_FACTORY = lambda: api2
+        rd2 = os.path.join(rd, "two")
+        os.makedirs(rd2)
+        s2 = dict(settings, RUN_DIR=rd2, SSH_DIR=rd2)
+        remote_mod.cmd_create(s2, type("A", (), {"op": "b" * 32})())
+        mine = [i for i in api2.inst.values() if i.get("op") == "b" * 32]
+        remote_mod.cmd_abort(s2, type("A", (), {"op": "c" * 32, "keep": False})())
+        check("...abort with another operation's id: nothing deleted", mine and mine[0]["state"] == "RUNNING")
+        remote_mod.cmd_abort(s2, type("A", (), {"op": "b" * 32, "keep": True})())
+        check("...--keep-on-failure: this build's instance stopped, nothing deleted", api2.actions[-1:] == ["STOP"]
+              and mine[0]["state"] == "STOPPED", api2.actions)
+        remote_mod.cmd_abort(s2, type("A", (), {"op": "b" * 32, "keep": False})())
+        check("...its own operation: its instance, its security group and the network it made are deleted",
+              mine[0]["state"] == "TERMINATED" and "box" not in api2.nsgs and api2.net is None, (api2.inst, api2.nsgs))
+    finally:
+        os.environ.pop("MCOMP_LOCK_DIR", None)
+        remote_mod.API_FACTORY = None
+        remote_mod.user_data = old_ud
+        shutil.rmtree(rd, ignore_errors=True)
+    src = open(os.path.join(LAB, "scripts", "remote-build.sh")).read()
+    check("remote-build.sh: the operation is named before the launch and passed to it; the clean-up is abort --op, "
+          "never delete", 'remote_py create --vm "$VM_NAME" --op "$op"' in src and 'remote_py abort --vm "$VM_NAME" --op "$ABORT_OP"' in src
+          and "remote_py delete" not in src.split("cleanup_failed() {")[1].split("\n}\n")[0])
+
+
+def cloud_lock():
+    """New #3: cloud setup and teardown change the shared network under the same lock as a build, and teardown leaves
+    a network a computer is being made in (its group there, no instance yet)."""
+    import remote as remote_mod
+    held = []
+    real = remote_mod.mac_lock
+    import contextlib
+
+    @contextlib.contextmanager
+    def spy(name):
+        held.append(name)
+        yield
+    remote_mod.mac_lock = spy
+    try:
+        api = FakeOCI()
+        remote_mod.API_FACTORY = lambda: api
+        rc = remote_mod.cmd_cloud(type("A", (), {"provider": "oci", "action": "setup", "json": True})())
+        check("cloud setup makes the network under the network lock", rc == 0 and held == ["oci-network"] and api.net, held)
+        api.make_nsg("pending", "internet")             # a build between its group and its launch
+        held.clear()
+        why = raises(remote_mod.cmd_cloud, type("A", (), {"provider": "oci", "action": "teardown", "json": True})(),
+                     kind=remote_mod.Refused)
+        check("cloud teardown while a computer is being made (its group, no instance): refused, under the lock, the "
+              "network kept", why and "being made" in why and held == ["oci-network"] and api.net is not None, (why, held))
+        api.delete_nsg("pending")
+        rc = remote_mod.cmd_cloud(type("A", (), {"provider": "oci", "action": "teardown", "json": True})())
+        check("...and once nothing is made there, it goes", rc == 0 and api.net is None)
+    finally:
+        remote_mod.mac_lock = real
+        remote_mod.API_FACTORY = None
+
+
+def owner_master(td):
+    """New #2: your own server's owner checks can't pass through an SSH connection you already have open (a
+    ControlMaster your ssh config keeps): a real sshd here, a master open to it, then the server stops letting your
+    key in; the build's check after the bootstrap and vm delete's after the removal must both see that."""
+    print("\nyour own server: owner checks with a master connection open")
+    import test_multi_vm as tmv
+    sshd = "/usr/sbin/sshd"
+    if not os.access(sshd, os.X_OK):
+        print("SKIP no sshd here")
+        return
+    d = os.path.join(td, "s")
+    os.makedirs(d)
+    for k in ("hostkey", "userkey"):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", os.path.join(d, k)], check=True)
+    ak = os.path.join(d, "authorized_keys")
+    shutil.copy(os.path.join(d, "userkey.pub"), ak)
+    os.chmod(ak, 0o600)
+    hostkey = " ".join(open(os.path.join(d, "hostkey.pub")).read().split()[:2])
+    # What the server does with each command it's sent (ForceCommand): the bootstrap reports a host key and, like a
+    # setup that locks its owner out, stops taking the owner's key; remote-uninstall all does the same.
+    force = os.path.join(d, "force.sh")
+    with open(force, "w") as f:
+        f.write("#!/bin/sh\n"
+                f'echo "$SSH_ORIGINAL_COMMAND" >> {d}/commands\n'
+                'case "$SSH_ORIGINAL_COMMAND" in\n'
+                '  "dpkg --print-architecture") echo arm64 ;;\n'
+                '  *"tar -xf -"*) cat > /dev/null ;;\n'
+                '  "sudo -n true") exit 0 ;;\n'
+                f'  *bootstrap.sh*) : > {ak}; echo "HOSTKEY {hostkey}" ;;\n'
+                f'  *"remote-uninstall all"*) : > {ak} ;;\n'
+                '  *) exit 0 ;;\nesac\n')
+    os.chmod(force, 0o755)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    with open(os.path.join(d, "sshd_config"), "w") as f:
+        f.write(f"Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hostkey\nAuthorizedKeysFile {ak}\n"
+                f"PasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\n"
+                f"PidFile {d}/sshd.pid\nForceCommand {force}\n")
+    r = subprocess.run([sshd, "-f", os.path.join(d, "sshd_config"), "-E", os.path.join(d, "sshd.log")], capture_output=True)
+    if r.returncode != 0:
+        print("SKIP sshd doesn't start here:", r.stderr[-200:])
+        return
+    try:
+        user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        known = os.path.join(d, "known")
+        server = "192.0.2.50"     # the server's address in its settings (a loopback one is refused): your config maps it here
+        open(known, "w").write(f"[127.0.0.1]:{port} {hostkey}\n[{server}]:{port} {hostkey}\n")
+        # The owner's own ssh config: the server, a key, its known_hosts, and a ControlMaster that keeps a connection
+        # open (only through it would a check reach the server after it stopped taking the key).
+        cfg = os.path.join(d, "config")
+        open(cfg, "w").write(f"Host {server}\n  HostName 127.0.0.1\n"
+                             f"Host *\n  IdentityFile {d}/userkey\n  IdentitiesOnly yes\n  UserKnownHostsFile {known}\n"
+                             f"  ControlMaster auto\n  ControlPath {d}/cm-%C\n  ControlPersist 120\n")
+        wrap = os.path.join(d, "wrap")
+        os.makedirs(wrap)
+        with open(os.path.join(wrap, "ssh"), "w") as f:      # your ssh, reading your config (only -F differs here)
+            f.write(f'#!/bin/sh\nexec /usr/bin/ssh -F {cfg} "$@"\n')
+        os.chmod(os.path.join(wrap, "ssh"), 0o755)
+
+        def open_master():
+            shutil.copy(os.path.join(d, "userkey.pub"), ak)
+            subprocess.run(["/usr/bin/ssh", "-F", cfg, "-o", "BatchMode=yes", "-fN", "-p", str(port), f"{user}@{server}"],
+                           capture_output=True, timeout=30)
+            return subprocess.run(["/usr/bin/ssh", "-F", cfg, "-O", "check", "-p", str(port), f"{user}@{server}"],
+                                  capture_output=True, timeout=10).returncode == 0
+        b = tmv.Box(td, "owner")
+        shutil.copytree(os.path.join(LAB, "provisioning"), os.path.join(b.co, "provisioning"))
+        try:
+            r = b.run("vm", "create", "own2", "--on", "server", "--host", server, "--user", user, "--port", str(port),
+                      "--no-build", "--yes")
+            check("(a server's settings for the check)", r.returncode == 0, r.stderr[-300:])
+            env = b.env(PATH=f"{wrap}:{os.path.dirname(tmv.PY)}:/usr/bin:/bin:/usr/sbin:/sbin", MCOMP_REMOTE_SSH_WAIT="1")
+            master = open_master()
+            r = subprocess.run([b.mc, "--vm", "own2", "build"], env=env, capture_output=True, text=True, timeout=300,
+                               stdin=subprocess.DEVNULL)
+            out = r.stdout + r.stderr
+            check("the build's owner check, with a master connection of yours open: a new connection is tried (it "
+                  "fails: the bootstrap stopped taking your key), so the setup is rolled back and the build stops",
+                  master and r.returncode != 0 and "couldn't sign in afterwards (after the bootstrap)" in out,
+                  (master, out[-500:]))
+            master = open_master()
+            r = subprocess.run([b.mc, "vm", "delete", "own2", "--confirm", "own2", "--remove-from-server"], env=env,
+                               capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+            check("vm delete --remove-from-server with a master open: the check after the removal is a new connection, "
+                  "which fails, so nothing here is deleted", master and r.returncode != 0 and "can't sign in" in r.stderr
+                  and os.path.exists(os.path.join(b.co, "config", "vms", "own2.env")), (master, r.stderr[-400:]))
+        finally:
+            subprocess.run(["/usr/bin/ssh", "-F", cfg, "-O", "exit", "-p", str(port), f"{user}@{server}"],
+                           capture_output=True, timeout=10)
+            b.close()
+    finally:
+        try:
+            os.kill(int(open(os.path.join(d, "sshd.pid")).read().strip()), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+
+
 def network_race():
     """Two creates at once made two networks (found live): the network and a computer's group are made under a lock
     one process on this Mac holds at a time; a delete never removes the network while another computer is being made
@@ -655,9 +951,9 @@ def network_race():
     a.create("box", size="arm-1x6", user_data="#cloud-config\n")
     check("create makes the network (and the computer's group, after it) only while holding the network lock",
           api.network_calls and all(api.network_calls) and not held, api.network_calls)
+    rsrc = open(os.path.join(LAB, "lib", "remote.py")).read()
     check("remote.py gives the OCI adapter that lock (its name: oci-network)",
-          "network_lock" in open(os.path.join(LAB, "lib", "remote.py")).read().split("def adapter_for", 1)[1][:900]
-          and 'mac_lock("oci-network")' in open(os.path.join(LAB, "lib", "remote.py")).read())
+          'kw["network_lock"] = lambda: mac_lock("oci-network")' in rsrc and "**provider_kw(prov))" in rsrc)
     # A delete with --network-too while another computer's group exists (it's being made): the network stays.
     rd = tempfile.mkdtemp(prefix="mcnet-")
     try:
@@ -744,6 +1040,33 @@ def sdk_rules():
     calls.clear()
     sdk.nsg_egress("g1", "off")
     check("...off: its rules removed, none added", not [d for k, d in calls if k == "add"])
+    # The console capture read through to its end: OCI says what's left (opc-bytes-remaining) after each part.
+    parts = ["boot...\n" + "x" * 100 + "\n[ OK ] Reached target multi-user.target\n",
+             "y" * 100 + "\n[ 4109.69] systemd-shutdown[1]: Syncing filesystems\n",
+             "[ 4109.70] reboot: Power down\n"]
+    reads = []
+
+    class Console:
+        def capture_console_history(self, d):
+            return types.SimpleNamespace(data=types.SimpleNamespace(id="h1"))
+
+        def get_console_history(self, hid):
+            return types.SimpleNamespace(data=types.SimpleNamespace(lifecycle_state="SUCCEEDED"))
+
+        def get_console_history_content(self, hid, offset=0, length=None):
+            i = len(reads)
+            reads.append((offset, length))
+            left = sum(len(x) for x in parts[i + 1:])
+            return types.SimpleNamespace(data=parts[i], headers={"opc-bytes-remaining": str(left)})
+
+        def delete_console_history(self, hid):
+            pass
+    sdk.compute = Console()
+    sdk.oci.exceptions = types.SimpleNamespace(ServiceError=type("ServiceError", (Exception,), {}))
+    tail = sdk.console_tail("i1")
+    check("the console's last line is read from the end of the whole capture (every part OCI has, by offset), not "
+          "from its first part (found by review)", tail and tail[-1].endswith("reboot: Power down") and len(reads) == 3
+          and [o for o, _ in reads] == [0, oci.CONSOLE_CHUNK, 2 * oci.CONSOLE_CHUNK], (tail[-1:], reads))
     launched = []
 
     class Compute:
@@ -776,7 +1099,7 @@ def review(td):
         b.run("vm", "create", "own1", "--on", "server", "--host", "192.0.2.10", "--user", "owner", "--no-build", "--yes")
         b.run("vm", "create", "arm1", "--on", "oci", "--size", "arm-1x6", "--no-build", "--yes")
         for part in (review_credentials, review_identity, review_default, review_egress, review_delete_recheck,
-                     review_remove_from_server, review_build_cleanup, review_create_journal):
+                     review_remove_from_server, review_build_cleanup, review_start_owners, review_create_journal):
             if REVIEW_GUARD:
                 REVIEW_GUARD(part.__name__, part, c)
             else:
@@ -930,7 +1253,7 @@ def review_build_cleanup(c):
             "    json.dump({'instance': 'i-fake', 'host': '192.0.2.1', 'provider': 'oci'}, open(os.path.join(rd, 'remote.json'), 'w'))",
             ""]))
     os.chmod(fakepy, 0o755)
-    for keep, want in (([], "delete --vm arm1 --network-too"), (["--keep-on-failure"], "sleep --vm arm1 --force")):
+    for keep, want in (([], "abort --vm arm1 --op"), (["--keep-on-failure"], "abort --vm arm1 --op")):
         if os.path.exists(oplog):
             os.remove(oplog)
         rec = os.path.join(b.co, ".run-vms", "arm1", "remote.json")
@@ -940,9 +1263,13 @@ def review_build_cleanup(c):
                            stdin=subprocess.DEVNULL,
                            env=b.env(OCI_PYTHON=fakepy, OCI_USER="u", OCI_API_KEY_PEM="k", MCOMP_REMOTE_SSH_WAIT="1"))
         ops = open(oplog).read().splitlines() if os.path.exists(oplog) else []
-        check(f"build {' '.join(keep) or '(default)'} that fails after making the instance: {want.split()[0]} it, "
-              "and say what's left billing", r.returncode != 0 and "create --vm arm1" in ops and want in ops
-              and ("nothing of this build is left billing" in r.stdout or "bills its disk" in r.stdout + r.stderr),
+        cr = next((o for o in ops if o.startswith("create --vm arm1 --op ")), "")
+        ab = next((o for o in ops if o.startswith(want)), "")
+        check(f"build {' '.join(keep) or '(default)'} that fails after making the instance: abort with this build's own "
+              "operation id (the one its create was given), " + ("--keep" if keep else "deleting only what it made")
+              + ", and say what's left billing", r.returncode != 0 and cr and ab and ab.split()[4] == cr.split()[4]
+              and ("--keep" in ab) == bool(keep) and not any(o.startswith("delete ") for o in ops)
+              and ("nothing this build made is left billing" in r.stdout or "bills its disk" in r.stdout + r.stderr),
               (ops, r.stdout[-400:], r.stderr[-300:]))
     # Interrupted (found live: bash runs the EXIT trap with the last command's status, often 0): still cleaned up.
     if os.path.exists(oplog):
@@ -961,9 +1288,29 @@ def review_build_cleanup(c):
     pr.send_signal(signal.SIGTERM)
     out, _ = pr.communicate(timeout=120)
     ops = open(oplog).read().splitlines() if os.path.exists(oplog) else []
-    check("a build killed (SIGTERM) after making the instance: deleted, and said",
-          pr.returncode != 0 and "delete --vm arm1 --network-too" in ops and "nothing of this build is left billing" in out,
-          (pr.returncode, ops, out[-300:]))
+    check("a build killed (SIGTERM) after making the instance: what it made deleted, and said",
+          pr.returncode != 0 and any(o.startswith("abort --vm arm1 --op ") and "--keep" not in o for o in ops)
+          and "nothing this build made is left billing" in out, (pr.returncode, ops, out[-300:]))
+
+
+def review_start_owners(c):
+    """Item 8, as re-checked: start may stop a computer elsewhere first (its console shows it powered off), so it
+    checks who has the computer first, as stop does."""
+    b = c["b"]
+    holder = subprocess.Popen(["sleep", "120"])
+    try:
+        od = os.path.join(b.co, ".run-vms", "arm1", "owners")
+        os.makedirs(od, exist_ok=True)
+        f = os.path.join(od, f"{holder.pid}.json")
+        json.dump({"bridge_pid": holder.pid, "claude_pid": holder.pid, "cwd": "/", "started": time.time(),
+                   "last_call": time.time(), "last_tool": "click"}, open(f, "w"))
+        r = b.run("--vm", "arm1", "start")
+        check("start of a computer elsewhere that a session is using: refused before anything is asked of the provider",
+              r.returncode != 0 and "another session is using" in r.stderr, r.stderr[-300:])
+        os.remove(f)
+    finally:
+        holder.kill()
+        holder.wait()
 
 
 def review_create_journal(c=None):
@@ -1209,6 +1556,9 @@ def main():
     firewall()
     oci_driver()
     network_race()
+    credentials_children()
+    abort_scoped()
+    cloud_lock()
     remote_helpers()
     td = tempfile.mkdtemp(prefix="mcremote-")
     try:
@@ -1218,6 +1568,11 @@ def main():
     td = tempfile.mkdtemp(prefix="mcreview-")
     try:
         review(td)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    td = tempfile.mkdtemp(prefix="mcown-", dir="/tmp")     # short: ssh's control socket paths are limited
+    try:
+        owner_master(td)
     finally:
         shutil.rmtree(td, ignore_errors=True)
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed: ' + ', '.join(FAILS)}")

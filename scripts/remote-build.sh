@@ -33,25 +33,27 @@ vm_notice
 BUILD_QUIET_EXIT=0
 KEEP_ON_FAILURE=0
 for a in "$@"; do case "$a" in --keep-on-failure) KEEP_ON_FAILURE=1 ;; *) die "usage: metacomputer --vm NAME build [--keep-on-failure]" ;; esac; done
-CREATED_THIS_RUN=0
+# This build's operation: its launch is tagged with it and journaled under it (lib/remote.py create --op), so a
+# failure deletes only what this operation made (lib/remote.py abort --op), never an instance it found.
+ABORT_OP=""
 # A failed build that made an instance deletes it again (or, with --keep-on-failure, stops it through the provider),
 # and says what's left billing. Your own server's rollback is done where its failure is found (owner_check).
 cleanup_failed() { # RC
-  [ "$1" != 0 ] && [ "$CREATED_THIS_RUN" = 1 ] || return 0
+  [ "$1" != 0 ] && [ -n "$ABORT_OP" ] || return 0
   if [ "$KEEP_ON_FAILURE" = 1 ]; then
-    say "the setup failed; keeping the instance it made (--keep-on-failure), stopped through $WHERE"
-    if remote_py sleep --vm "$VM_NAME" --force >/dev/null; then
-      warn "it's stopped: $WHERE bills its disk until you delete it: metacomputer vm delete $VM_NAME"
+    say "the setup failed; keeping what it made (--keep-on-failure), stopped through $WHERE"
+    if remote_py abort --vm "$VM_NAME" --op "$ABORT_OP" --keep >/dev/null; then
+      warn "an instance this build made is stopped: $WHERE bills its disk until you delete it: metacomputer vm delete $VM_NAME"
     else
-      warn "it couldn't be stopped: it is RUNNING and billing at $WHERE. Stop it (metacomputer --vm $VM_NAME stop --force) or delete it (metacomputer vm delete $VM_NAME)"
+      warn "it couldn't be stopped: an instance this build made may be RUNNING and billing at $WHERE. Stop it (metacomputer --vm $VM_NAME stop --force) or delete it (metacomputer vm delete $VM_NAME)"
     fi
     return 0
   fi
-  say "the setup failed; deleting what it made at $WHERE (an instance bills while it exists)"
-  if remote_py delete --vm "$VM_NAME" --network-too; then
-    ok "deleted at $WHERE: nothing of this build is left billing (metacomputer cloud status oci lists what's there)"
+  say "the setup failed; deleting what this build made at $WHERE (an instance bills while it exists)"
+  if remote_py abort --vm "$VM_NAME" --op "$ABORT_OP"; then
+    ok "nothing this build made is left billing at $WHERE (metacomputer cloud status oci lists what's there)"
   else
-    warn "it could NOT be deleted: an instance of $VM_NAME may still be RUNNING and billing at $WHERE. Delete it: metacomputer vm delete $VM_NAME (or metacomputer cloud status oci, then delete it in Oracle's console)"
+    warn "what this build made could NOT be deleted: an instance of $VM_NAME may still be RUNNING and billing at $WHERE. Delete it: metacomputer vm delete $VM_NAME (or metacomputer cloud status oci, then delete it in Oracle's console)"
   fi
 }
 trap 'rc=$?; trap - ERR; set +e; cleanup_failed $rc
@@ -100,8 +102,10 @@ if [ "$KIND" = made ]; then
     echo "$HK_NAME $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN_HOSTS"
     chmod 600 "$KNOWN_HOSTS" "$SSH_DIR/hostkey"
     say "making the instance on $WHERE"
-    CREATED_THIS_RUN=1       # from here, a failure deletes what this build made (cleanup_failed)
-    remote_py create --vm "$VM_NAME" || die "the instance wasn't made (above); metacomputer --vm $VM_NAME status shows what's there"
+    op="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    [[ "$op" =~ ^[0-9a-f]{32}$ ]] || die "couldn't make an operation id"
+    ABORT_OP="$op"           # from here, a failure deletes what this operation made, and only that (cleanup_failed)
+    remote_py create --vm "$VM_NAME" --op "$op" || die "the instance wasn't made (above); metacomputer --vm $VM_NAME status shows what's there"
     remote_py identity --vm "$VM_NAME" --write >/dev/null || die "couldn't record $VM_NAME's identity"
   else
     say "the instance exists: setting it up again"
@@ -120,8 +124,11 @@ else
   [[ "$SETUP_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "SETUP_USER=$SETUP_USER isn't an account name"
   # Your own SSH (your ssh config, agent and known_hosts: your trust in this server), with a key only: setup turns
   # passwords off. The host key you already trust is the one bootstrap.sh reports and this pins.
-  OWN=(ssh -o BatchMode=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no
-       -o KbdInteractiveAuthentication=no -o ConnectTimeout=15 -p "${SSH_HOST_PORT:-22}" "$SETUP_USER@$SSH_HOST")
+  # Never through a shared connection (ControlMaster/ControlPath in your ssh config): each check is a new process
+  # that authenticates on its own, so what it says is what a new connection of yours gets now.
+  OWN_OPTS=(-o ControlMaster=no -o ControlPath=none -o PreferredAuthentications=publickey -o PasswordAuthentication=no
+            -o KbdInteractiveAuthentication=no -o ConnectTimeout=15 -p "${SSH_HOST_PORT:-22}")
+  OWN=(ssh -o BatchMode=yes "${OWN_OPTS[@]}" "$SETUP_USER@$SSH_HOST")
   "${OWN[@]}" true </dev/null || die "your own SSH to $SETUP_USER@$SSH_HOST (port ${SSH_HOST_PORT:-22}) didn't sign in with a key without asking anything. Sign in once yourself (ssh -p ${SSH_HOST_PORT:-22} $SETUP_USER@$SSH_HOST: check the host key it shows), with a key, then run this again"
   # Your access must survive the setup: checked with a fresh connection after it and after the reboot, and if it
   # doesn't, the setup's SSH settings and firewall come off again (cuaadmin still has the setup's sudo then).
@@ -151,8 +158,7 @@ else
     [ -t 0 ] || die "sudo on $SSH_HOST asks $SETUP_USER for a password: run this in your own terminal, where you can type it"
     # sudo asks on the server's terminal (ssh -tt): its prompt shows here as it comes; the password isn't echoed.
     bs_out="$SOCK_DIR/bootstrap-$TS.out"
-    ssh -tt -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o ConnectTimeout=15 \
-      -p "${SSH_HOST_PORT:-22}" "$SETUP_USER@$SSH_HOST" "sudo bash ~/$rdir/bootstrap.sh ~/$rdir $SETUP_USER ${SSH_HOST_PORT:-22}; rc=\$?; rm -rf ~/$rdir; exit \$rc" \
+    ssh -tt "${OWN_OPTS[@]}" "$SETUP_USER@$SSH_HOST" "sudo bash ~/$rdir/bootstrap.sh ~/$rdir $SETUP_USER ${SSH_HOST_PORT:-22}; rc=\$?; rm -rf ~/$rdir; exit \$rc" \
       | tr -d '\r' | tee "$bs_out" | grep -v '^HOSTKEY ' || true
     out="$(cat "$bs_out")"; rm -f "$bs_out"
   fi
@@ -250,7 +256,17 @@ gssh admin "sudo bash -s $ADMIN_USER '$GUEST_USER'" < "$LAB_ROOT/provisioning/gu
 gssh admin 'sync; test -f /var/lib/metacomputer/finalized && sudo -n -l | grep -q metacomputer-admin && ! sudo -n -l | grep -q "(ALL) NOPASSWD: ALL"' \
   || die "finalize did not take effect"
 ok "finalized: $ADMIN_USER may run only metacomputer-admin with sudo; cloud-init is off"
-CREATED_THIS_RUN=0       # set up: from here nothing is deleted on a failure
+# EGRESS as set, now that the setup's downloads are over: its own firewall, then the provider's rules (open to public
+# addresses while it was set up), each read back. A computer this build made that can't be held to it is deleted.
+want_egress="$(plan egress)"
+got="$(gssh admin 'sudo /usr/local/sbin/metacomputer-admin egress status' 2>/dev/null | tail -1)"
+[ "$got" = "$want_egress" ] || die "its own firewall reads back as '${got:-nothing}', not EGRESS=$want_egress"
+if [ "$KIND" = made ]; then
+  got="$(remote_py egress --vm "$VM_NAME" --set "$want_egress")" || die "$WHERE didn't take EGRESS=$want_egress (above)"
+  [ "$got" = "$want_egress" ] || die "$WHERE's rules read back as '$got', not EGRESS=$want_egress"
+fi
+ok "EGRESS=$want_egress: in force in its own firewall$([ "$KIND" = made ] && echo " and in $WHERE's rules")"
+ABORT_OP=""              # set up: from here nothing is deleted on a failure
 # The computer's private host key now lives only in it; the Mac keeps the public half (known_hosts, the vault).
 rm -f "$SSH_DIR/hostkey"
 printf 'remote=1\nbuild=%s\narch=%s\n' "$TS" "$ARCH" > "$SSH_DIR/guest-features"

@@ -44,13 +44,16 @@ metacomputer vm create work --on server --host 203.0.113.5 --user ubuntu [--port
   `Match` block keeps its own `authorized_keys`) and checks it with `sshd -t` and `sshd -T`; if the new settings would
   lock your account out, it puts the server's own back and stops. After the setup and again after its reboot, a fresh
   connection of yours is checked; if it can't sign in, the setup's SSH settings and firewall are taken back off
-  (`/opt/metacomputer/bin/remote-uninstall rollback`) and the build stops, saying so. Your account keeps its own
+  (`/opt/metacomputer/bin/remote-uninstall rollback`) and the build stops, saying so. A fresh connection is a new ssh
+  process that never shares one you have open (`-o ControlMaster=no -o ControlPath=none` over your own ssh config), so
+  a check can't pass through a connection made before the setup changed anything. Your account keeps its own
   `sudo`.
 - metacomputer never powers your server on or off; `metacomputer --vm work stop` only closes this Mac's connection.
 - `metacomputer vm delete work` removes it here (settings, runtime folder, its identity) and leaves the server as it
   is, saying how to take the setup off. `vm delete work --remove-from-server` does that first, over your own SSH with
   your `sudo`: `/opt/metacomputer/bin/remote-uninstall all` puts your SSH settings back, turns metacomputer's
-  firewall off (its one nftables table and its service; other rules are untouched), turns the idle stop off, removes
+  firewall off (the network's dependency on it first, so stopping it doesn't stop the network; its one nftables table
+  and its service; other rules are untouched), turns the idle stop off, removes
   its sudo rules, and locks its four accounts and removes their key lists (their home folders and the desktop's
   packages stay); then a fresh connection of yours is checked before anything is removed here.
 
@@ -98,7 +101,8 @@ Allow group <group> to inspect compartments in tenancy
 - each computer's own **network security group** (`metacomputer-NAME`), made before its instance and deleted with
   it: with `EGRESS=internet` it lets out every public IPv4 address (103 blocks: everything except the private,
   shared, loopback, link-local, documentation, benchmarking, multicast and reserved ranges the guest firewall also
-  refuses), with `EGRESS=off` nothing. OCI enforces it outside the VM, so nothing in the guest, root included, can
+  refuses), with `EGRESS=off` nothing once the computer is set up (while it's set up, the public addresses, for the
+  packages it installs: OCI's rules can't tell apt from anything else; the guest firewall can, below). OCI enforces it outside the VM, so nothing in the guest, root included, can
   change it;
 - the instance: Canonical's newest Ubuntu 24.04 image for the shape's architecture, a 50 GB boot volume, a public
   address, its security group, the IMDS v2 endpoints only (the legacy v1 ones disabled), the Oracle Cloud Agent's
@@ -119,22 +123,27 @@ an availability domain has no room for the shape ("out of host capacity", common
 the region's other domains once and then stops, saying so: run `metacomputer --vm NAME build` again later. Nothing
 is made until you agree (`vm create` shows the rate and what's kept first; `--yes` agrees).
 
-**Lifecycle**: `start` starts a stopped instance and waits for the desktop. `stop` asks the guest to shut down, then
-OCI stops the instance (a soft stop, which OCI turns into a hard one after 15 minutes; its disk stays); `stop --force`
-stops it at once, like pulling the power. With nothing using it for `IDLE_STOP` minutes (15 by default: no SSH
+**Lifecycle**: `start` starts a stopped instance and waits for the desktop (refused, like `stop`, while a session or a
+handoff has the computer; `--override` goes ahead). `stop` asks the guest to shut down, then OCI stops the instance (a
+soft stop, which OCI turns into a hard one after 15 minutes; metacomputer waits that long and three minutes more; its
+disk stays); `stop --force` stops it at once, like pulling the power. With nothing using it for `IDLE_STOP` minutes (15 by default: no SSH
 connection, which includes the hub's, a recording or the live view's tunnel, and no inner Claude session), the guest
 powers itself off. **OCI doesn't count that as stopped**: the instance stays RUNNING, and a billed size is billed as
 running, until it's stopped through the API: `metacomputer stop` does that (a plain stop once the guest's console
-shows it's off). `start` of an instance that is RUNNING but doesn't answer reads its serial console first: only when
-the guest's last words are its power-off (`reboot: Power down`) does it stop the instance and start it again;
+shows it's off). `start` of an instance that is RUNNING but doesn't answer reads its serial console first (the whole
+capture, through to its end): only when the guest's last words are its power-off (`reboot: Power down`) does it stop
+the instance and start it again;
 otherwise it refuses and stops nothing (the guest may be busy, or just unreachable from here), and `stop --force`
 then `start` restarts it. `status` says when it's RUNNING at OCI but doesn't answer. `vm delete NAME` terminates the
 instance with its boot volume and its security group, and the network once no computer of yours uses it. **A monthly
 limit**: OCI's budgets (with an alert to your email) are set by the tenancy's administrator in the console;
 metacomputer's API user can't set or enforce one, so keep a budget alert there.
 
-**A build that fails** (or is interrupted: Ctrl-C, the terminal closed, killed) after it made the instance deletes it again (instance, boot volume, security group, and the
-network if no other computer uses it) and says nothing of it is left billing, or exactly what could not be deleted.
+**A build that fails** (or is interrupted: Ctrl-C, the terminal closed, killed) after it made the instance deletes what
+that build made, and nothing else: the build names an operation, its launch is tagged and journaled with it, and the
+clean-up (`lib/remote.py abort --op`) deletes the instances tagged with it, then the security group and the network
+only if that operation made them and nothing else uses them. An instance it found (say, one of the same name whose
+record this Mac lost) is left alone. It says nothing of it is left billing, or exactly what could not be deleted.
 `build --keep-on-failure` stops it through the API instead, so its disk can be looked at, and says what still bills
 (its boot volume) and how to delete it. An instance whose record can't be written on the Mac is deleted at once; a
 launch whose answer was lost (the connection dropped) is found by the operation tag it was launched with and deleted
@@ -157,7 +166,8 @@ size, stop or delete it when you're done.
 
 `metacomputer cloud status oci` (instances, network, boot volumes metacomputer made), `cloud doctor oci` (the
 credentials, the network's rules), `cloud setup oci` (makes the network) and `cloud teardown oci` (deletes the
-network when no instance is left).
+network when no instance is left and no computer is being made in it: its security group there without an instance
+yet). Both change the network under the same lock as `vm create`.
 
 ## The setup, wherever it runs
 
@@ -202,11 +212,16 @@ nothing that's already right:
     the DNS resolver (53), the DHCP client (67, 547) and the clock (123); programs in the desktop resolve names
     through the local resolver.
   - **`EGRESS`** (per computer): `internet` (the default) lets the rest of the internet through; `off` lets nothing
-    else out, package downloads included (updates come again with `net egress internet`). There's no allowlist of
-    names here, and `net allow` is refused.
-  - **Fail closed.** The firewall's service runs before the network, and the network requires it (a
-    `systemd-networkd` drop-in): if its rules don't load, an SSH-only fallback does (SSH in, nothing out but replies;
-    `net status` says `fallback`), and if not even that loads, the network stays down. At a provider computer's
+    else out, package downloads included (updates come again with `net egress internet`). A computer made with
+    `EGRESS=off` is still set up: until its setup ends, its own firewall lets out apt's downloads too (the `_apt`
+    account, TCP 80 and 443, public addresses only; `net status` says `setup`), and its provider's rules the public
+    addresses; at the end of the setup both are set to `off` and read back, or the build fails. There's no allowlist
+    of names here, and `net allow` is refused.
+  - **Fail closed.** The firewall's service runs before the network, and the network requires it (a drop-in for
+    `systemd-networkd` and one for `NetworkManager`, the two Ubuntu uses; the setup refuses a server whose network
+    something else manages, putting its own settings back): if its rules don't load, an SSH-only fallback does (SSH
+    in, nothing out but replies, and nothing of the full rules in it; `net status` says `fallback`), and if not even
+    that loads, the network stays down. At a provider computer's
     first boot the network is up before cloud-init runs: `bootstrap.sh` loads the firewall before it makes any
     account, and the provider's rules are in force from the start.
   - **Open connections too.** A tightened rule applies to connections already open: the only packets let out as
@@ -222,9 +237,12 @@ nothing that's already right:
 - **The vault binds the computer, not the name**: its binding of a computer elsewhere names the computer's identity
   (`~/.ssh/metacomputer-NAME/computer-id`: a hash of its provider instance, or your server's setup, and its pinned
   host key). A computer deleted and made again under the same name has another one, and the vault refuses it until
-  it's bound again (`metacomputer secrets bind`).
+  it's bound again (`metacomputer secrets bind`). API tokens are for the computer they were made for: a request on a
+  token whose computer isn't the bound one any more is refused (nothing sent), the token revoked and the tunnel
+  closed; a new binding gets a new tunnel. `vm delete` locks the computer's own vault, which ends its tokens at once.
 - **Provider credentials reach one program.** `bin/metacomputer`, `scripts/lib.sh` and `scripts/remote-build.sh`
-  take `OCI_*` out of the environment before they do anything else; only `lib/remote.py` is started with them.
+  take `OCI_*` out of the environment before they do anything else; only `lib/remote.py` is started with them, and it
+  takes them out of its own environment first, so nothing it starts gets them.
 - **What still differs from the Mac's VM**: the provider runs the hardware, so its screen, disk and what's typed into
   it are on the provider's machines (choose a VM on your Mac for sensitive work); `SSH_AUTH=cert` isn't available
   (its certificates name the Mac's gateway address), and neither are snapshots, volumes or the event watcher's health

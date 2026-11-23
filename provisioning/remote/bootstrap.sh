@@ -31,6 +31,7 @@ case "$OWNER" in ''|"$GUSER"|"$AUSER"|root|mcfill|mcproxy) [ -z "$OWNER" ] || fa
 # The guest firewall, before anything else (provision.sh installs its service, which loads it at every boot).
 install -d -m 0755 /etc/metacomputer /opt/metacomputer/bin /var/lib/metacomputer
 case "$(head -n 1 "$DIR/egress")" in internet|off) head -n 1 "$DIR/egress" > /etc/metacomputer/egress ;; *) fail "egress: internet or off" ;; esac
+date -Is > /etc/metacomputer/setup-egress     # being set up: EGRESS=off lets apt's downloads out until finalize.sh
 { sshd -T 2>/dev/null | awk '$1 == "port" {print $2}'; echo "$PORT"; } | sort -un > /etc/metacomputer/ssh-ports
 install -o root -g root -m 0755 "$DIR/guest-firewall" /opt/metacomputer/bin/guest-firewall
 if ! command -v nft >/dev/null; then

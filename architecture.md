@@ -998,7 +998,8 @@ otherwise).
   Each manifest says what's enforced outside the VM (`outside_egress`) and what a stopped
   computer bills (`billing`). `lib/remote.py` is what the CLI calls for the provider and
   the computer's record (`RUN_DIR/remote.json`, 0600: the instance and the address it was
-  given, and a launch in progress, by its operation tag, so a lost one is found again) and
+  given, and a launch in progress, by its operation tag, so a lost one is found again, and what that operation
+  found there, so a failed build's `abort --op` deletes only what it made) and
   identity (`computer-id`, which the vault's binding names);
   `scripts/remote-build.sh` sets it up the same way wherever it is: a provider's computer
   boots with cloud-init user-data (`lib/cloud/guest.py`: the host key made here, no default

@@ -52,6 +52,10 @@ struct APIToken {
     let host: String
     let header: String
     let prefix: String?
+    // The computer it was made for (a computer elsewhere: its identity, the binding's computer_id; nil for a VM on this
+    // Mac). It works only while the VM's binding and the identity beside its keys still name that computer: deleted or
+    // made again under the same name, its tokens stop at once and its tunnel is closed.
+    let computer: String?
 
     func fits(_ s: Secret) -> Bool {
         s.kind == "api" && secretGen(s) == gen && s.api_host == host && s.api_header == header && s.api_path_prefix == prefix
@@ -85,6 +89,9 @@ final class ProxyListener: @unchecked Sendable {
     let macPort: Int
     let guestPort: Int
     var tunnel: Tunnel?
+    /// What the tunnel was opened to (the computer's identity, address and port): a binding that names another
+    /// computer gets a new tunnel, never the old one.
+    var tunnelFor: String?
     /// This VM's connections at once: each VM has its own, so one VM holding all of its
     /// slots never slows another.
     let slots: DispatchSemaphore
@@ -170,7 +177,7 @@ final class ProxyHub: @unchecked Sendable {
 
     // MARK: tokens
 
-    func issue(name: String, vm: String, ttl: Int, requester who: Requester, secret s: Secret) -> (APIToken, String) {
+    func issue(name: String, vm: String, ttl: Int, requester who: Requester, secret s: Secret, computer: String?) -> (APIToken, String) {
         let raw = "mct_" + base64url(randomBytes(24))
         let now = Date()
         let limit = now.addingTimeInterval(maxLifetime)
@@ -178,7 +185,8 @@ final class ProxyHub: @unchecked Sendable {
                          issued: now, expires: min(now.addingTimeInterval(TimeInterval(ttl)), limit), ttl: ttl, limit: limit, renewals: 0,
                          requester: who.record, ownerClaudePID: who.claudePID, ownerClaudeStart: who.claudeStart,
                          ownerDescribe: who.describe, requests: 0,
-                         gen: secretGen(s), host: s.api_host ?? "", header: s.api_header ?? "", prefix: s.api_path_prefix)
+                         gen: secretGen(s), host: s.api_host ?? "", header: s.api_header ?? "", prefix: s.api_path_prefix,
+                         computer: computer)
         withLock { tokens[t.hash] = t }
         return (t, raw)
     }
@@ -306,11 +314,22 @@ final class ProxyHub: @unchecked Sendable {
             let hub = self
             Thread.detachNewThread { hub.acceptLoop(l) }
         }
-        if l.tunnel?.alive != true {
+        let want = tunnelKey(b)
+        if l.tunnel?.alive != true || withLock({ l.tunnelFor }) != want {
             l.tunnel?.stop()
             l.tunnel = try startTunnel(target, user: user, keyPath: keyPath, guestPort: guestPort, macPort: l.macPort)
+            withLock { l.tunnelFor = want }
         }
         return l
+    }
+
+    /// What a tunnel is opened to: the computer (its identity, for one elsewhere), its address and port.
+    func tunnelKey(_ b: VMBinding) -> String { "\(b.computer_id ?? "-")|\(b.sshDestination)|\(b.ssh_port)" }
+
+    /// Close a VM's tunnel (the computer it went to isn't the bound one any more): nothing more reaches the proxy from it.
+    func closeTunnel(_ l: ProxyListener) {
+        l.tunnel?.stop()
+        withLock { l.tunnelFor = nil }
     }
 
     func openListener(vm: String, guestPort: Int) throws -> ProxyListener {
@@ -529,6 +548,17 @@ final class ProxyHub: @unchecked Sendable {
         guard let raw = presented, let token = check(raw, name: name, vm: l.vm) else {
             respond(c, 401, "no live token for \(name) on this VM (metacomputer secrets token \(name))")
             log(401, 0, nil, host, "no live token")
+            return
+        }
+        // The token covers the computer it was made for: the VM's binding and the identity beside its keys must still
+        // name it (a computer elsewhere deleted, or made again under the same name, is another computer).
+        let bound = p.vms[l.vm]
+        let nowID: String? = bound.flatMap { $0.isRemote ? readComputerID(computerIDPath(opsKey: $0.ops_key_path)) : nil }
+        guard let b = bound, token.computer == b.computer_id, !b.isRemote || (b.computer_id != nil && nowID == b.computer_id) else {
+            _ = revoke(token.id)
+            closeTunnel(l)
+            respond(c, 401, "the computer bound as VM \(l.vm) was deleted or made again since this token was made: nothing was sent")
+            log(401, 0, token, host, "the computer changed since the token was made")
             return
         }
         // The token covers the secret as it was approved: not a newer value, host or scope.

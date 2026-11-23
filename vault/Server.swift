@@ -1682,7 +1682,7 @@ final class UnlockServer {
             return finish("token", fields, failed("cannot start the proxy"), who, approval: approval)
         }
         let ttl = max(1, min(ttlAsked, tokenMaxTTL, remaining()))
-        let (tok, raw) = hub.issue(name: name, vm: vm, ttl: ttl, requester: who, secret: s)
+        let (tok, raw) = hub.issue(name: name, vm: vm, ttl: ttl, requester: who, secret: s, computer: t.binding.computer_id)
         let base = "http://127.0.0.1:\(listener.guestPort)/\(name)/"
         var res: [String: Any] = ["ok": true, "status": "ok", "token_id": tok.id, "ttl_s": ttl]
         res = finish("token", fields, res, who, approval: approval)

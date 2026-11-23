@@ -1743,14 +1743,17 @@ CLAIMS = [
      lambda m: "egress_security_rules=[]))" in raw("lib/cloud/oci.py") and "for cidr in public_v4()]" in raw("lib/cloud/oci.py")
      and "nsg_ids=[nsg_id] if nsg_id else None" in raw("lib/cloud/oci.py")
      and raw("lib/cloud/oci.py").index("nsg = api.make_nsg(name, egress)") < raw("lib/cloud/oci.py").index("iid = api.launch(")),
-    ("SECURITY.md", r"rules that don't load\s+give way to an SSH-only fallback \(nothing out but replies\), and if that doesn't load either, the network stays down",
+    ("SECURITY.md", r"rules that don't\s+load give way to an SSH-only fallback \(nothing out but replies, and nothing of the full rules in it\), and if that\s+doesn't load either, the network stays down",
      lambda m: "render_emergency()" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and "set private" not in subprocess.run(["/bin/sh", os.path.join(LAB, "provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall"),
+                                              "render-emergency", "--ports", "22", "--uids", "network=1"],
+                                             capture_output=True, text=True).stdout
      and "Requires=metacomputer-firewall.service" in raw(
          "provisioning/remote/rootfs/etc/systemd/system/systemd-networkd.service.d/10-metacomputer-firewall.conf")),
     ("SECURITY.md", r"A tightened rule applies to connections already open",
      lambda m: "ct direction reply accept" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
      and "ct state established" not in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall").split("chain output")[1]),
-    ("SECURITY.md", r"checks your account's access before its settings apply and with a fresh connection of yours after\s+the setup and after the reboot",
+    ("SECURITY.md", r"checks your account's access before its settings apply and with a fresh connection of yours after\s+the bootstrap, the setup and the reboot",
      lambda m: 'owner_check "after the setup"' in raw("scripts/remote-build.sh")
      and 'owner_check "after the reboot' in raw("scripts/remote-build.sh")
      and "remote-uninstall rollback" in raw("scripts/remote-build.sh").split("  owner_check() {", 1)[1].split("\n  }\n", 1)[0]
@@ -1769,13 +1772,46 @@ CLAIMS = [
                    ("bin/metacomputer", 'LIB="$(dirname "$SELF")/../scripts/lib.sh"'), ("scripts/lib.sh", "LAB_ROOT="),
                    ("scripts/remote-build.sh", '. "$(dirname "$0")/lib.sh"')))
      and "mc_export_provider_env; exec" in fn_src("scripts/lib.sh", "remote_py")),
-    ("SECURITY.md", r"A build that fails after making an instance deletes it",
-     lambda m: 'remote_py delete --vm "$VM_NAME" --network-too' in fn_src("scripts/remote-build.sh", "cleanup_failed")
-     and "cleanup_failed $rc" in raw("scripts/remote-build.sh")
+    ("SECURITY.md", r"A build that fails or is\s+interrupted after making an instance deletes what that build made, found by the operation it tagged its launch with,\s+and never an instance it found",
+     lambda m: 'remote_py abort --vm "$VM_NAME" --op "$ABORT_OP"' in fn_src("scripts/remote-build.sh", "cleanup_failed")
+     and "remote_py delete" not in fn_src("scripts/remote-build.sh", "cleanup_failed")
+     and "cleanup_failed $rc" in raw("scripts/remote-build.sh") and "trap 'exit 143' TERM" in raw("scripts/remote-build.sh")
+     and 'for i in a.api.instances(s["VM_NAME"], op=op):' in py_top_fn("lib/remote.py", "cmd_abort")
+     and 'if not st.get("had_nsg") and not others:' in py_top_fn("lib/remote.py", "cmd_abort")
      and "raise Refused(" in raw("lib/remote.py") and "deleted again" in raw("lib/remote.py")),
-    ("SECURITY.md", r"`start` never hard-stops a running instance unless its\s+console shows the guest already powered off",
+    ("SECURITY.md", r"`start` checks\s+that no session or handoff has the computer, and never hard-stops a running instance unless its whole console\s+capture ends with the guest's power-off",
      lambda m: "def powered_off(self, name):" in raw("lib/cloud/oci.py") and "Nothing was stopped" in raw("lib/cloud/oci.py")
-     and "reboot: Power down" in raw("lib/cloud/oci.py")),
+     and "reboot: Power down" in raw("lib/cloud/oci.py") and "opc-bytes-remaining" in raw("lib/cloud/oci.py")
+     and "owners_check" in fn_src("bin/metacomputer", "do_start_remote")
+     and "handoff_hold_unless_override" in fn_src("bin/metacomputer", "do_start_remote")),
+    ("SECURITY.md", r"a stop is waited for through OCI's 15-minute shutdown window",
+     lambda m: __import__("cloud.oci").oci.STOP_WAIT_S >= 900 + 60
+     and raw("lib/cloud/oci.py").count('"STOPPED", timeout=STOP_WAIT_S)') >= 3),
+    ("SECURITY.md", r"the shared network\s+is changed only under a lock \(`vm create`, `cloud setup` and `cloud teardown` alike\), and never deleted while a\s+computer is being made in it",
+     lambda m: 'with mac_lock("oci-network"):' in py_top_fn("lib/remote.py", "cmd_cloud")
+     and "pending = a.api.nsg_names()" in py_top_fn("lib/remote.py", "cmd_cloud")
+     and "**provider_kw(args.provider)" in py_top_fn("lib/remote.py", "cmd_cloud")
+     and "with self._network_lock():" in raw("lib/cloud/oci.py")),
+    ("SECURITY.md", r"A fresh connection is never one shared with a connection you have open \(`ControlMaster=no`, `ControlPath=none`\)",
+     lambda m: "OWN_OPTS=(-o ControlMaster=no -o ControlPath=none" in raw("scripts/remote-build.sh")
+     and 'OWN=(ssh -o BatchMode=yes "${OWN_OPTS[@]}"' in raw("scripts/remote-build.sh")
+     and 'ssh -tt "${OWN_OPTS[@]}"' in raw("scripts/remote-build.sh")
+     and "local own=(ssh -o ControlMaster=no -o ControlPath=none" in raw("scripts/vm-commands.sh")),
+    ("SECURITY.md", r"`lib/remote.py`\s+takes them out of its own environment first and hands them to the adapter as a value",
+     lambda m: "    take_credentials()\n    try:" in py_top_fn("lib/remote.py", "main")
+     and "env=child_env()" in py_top_fn("lib/remote.py", "mac_lock")
+     and '{"env": dict(CREDS)}' in py_top_fn("lib/remote.py", "provider_kw")),
+    ("SECURITY.md", r"An API token is for the computer it was made for: each request checks that the\s+binding and the identity beside the computer's keys still name it",
+     lambda m: "token.computer == b.computer_id" in raw("vault/Proxy.swift")
+     and "readComputerID(computerIDPath(opsKey: $0.ops_key_path))" in raw("vault/Proxy.swift")
+     and "closeTunnel(l)" in raw("vault/Proxy.swift") and "withLock({ l.tunnelFor }) != want" in raw("vault/Proxy.swift")
+     and "computer: t.binding.computer_id)" in raw("vault/Server.swift")
+     and 'MCOMP_VAULT_DIR="$own_vault" "$VAULT_BIN" lock' in raw("scripts/vm-commands.sh").split("vm_delete_remote() {", 1)[1]),
+    ("SECURITY.md", r"\(systemd-networkd or\s+NetworkManager, the two Ubuntu uses; a server whose network something else manages is refused\)",
+     lambda m: "Requires=metacomputer-firewall.service" in raw(
+         "provisioning/remote/rootfs/etc/systemd/system/NetworkManager.service.d/10-metacomputer-firewall.conf")
+     and "systemctl is-enabled --quiet NetworkManager.service" in raw("provisioning/guest/provision.sh")
+     and "NetworkManager.service.d/10-metacomputer-firewall.conf" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/remote-uninstall")),
     ("SECURITY.md", r"`vm delete` checks again, under the computer's lock, that no session\s+is using it",
      lambda m: 'RDP_SIG" = "$first"' in raw("scripts/vm-commands.sh") and "lock_fd_take 6" in raw("scripts/vm-commands.sh")),
     ("SECURITY.md", r"one deleted and made again under the same name\s+is refused until it's bound again",

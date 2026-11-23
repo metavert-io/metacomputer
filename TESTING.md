@@ -301,7 +301,7 @@ the CLI checks run in a copy of the checkout with its own HOME and a fake runner
   it, the order of `bootstrap.sh` and `provision.sh` (firewall and SSH settings before accounts and upgrades, the
   server's own SSH settings saved first) and `remote-uninstall`.
 - The OCI driver: sizes, each availability domain tried once when one is full, then a refusal (a launch never
-  retried by the SDK); one network whatever runs at once (the lock across processes, `vm delete` leaving a network
+  retried by the SDK); a stop waited for through OCI's shutdown window; the console capture read to its end; one network whatever runs at once (the lock across processes, `vm delete` leaving a network
   another computer is being made in, the oldest of two used); each computer's
   network security group made before its instance (public addresses only, or none), the SDK facade's rules against a
   recording stand-in; `start` refusing to stop a RUNNING instance whose console shows no power-off, `stop --force`;
@@ -315,7 +315,15 @@ the CLI checks run in a copy of the checkout with its own HOME and a fake runner
   `net egress` changing nothing when it can't be applied, `vm delete` refusing a computer a session uses (its checks
   repeated under the lock), `--remove-from-server`, a failed build deleting (or, with `--keep-on-failure`,
   stopping) what it made, `lib/remote.py create` deleting an instance it can't record and finding a lost launch, and
-  `lib/proxywrap.py` ending a tunnel's leftover children however it ends.
+  `lib/proxywrap.py` ending a tunnel's leftover children however it ends; `start` checking who has the computer.
+- Round three: `lib/remote.py`'s own children (getconf among them) without `OCI_*`; a failed build deleting only
+  what its operation made (an instance of the same name it found is left alone); `cloud setup|teardown` under the
+  network lock, teardown leaving a network a computer is being made in; `remote-uninstall` in a sandbox with a
+  stand-in systemctl (the network manager never stops with the firewall); and your own server's owner checks
+  against a real `sshd` started here, with a ControlMaster connection open: the build's check after the bootstrap
+  and `vm delete --remove-from-server`'s after the removal both see that a new connection is refused (skipped where
+  there's no sshd). The vault's tokens for a computer elsewhere (`tests/test_vault_tokens.py` 6b): refused, revoked
+  and their tunnel closed when the identity beside its keys changes; a new tunnel for a new binding.
 
 The live path (a real VM elsewhere) is run by hand: `metacomputer --vm NAME build`, then the GUI suite and
 `tests/test_vault_vm.py` with `MCOMP_CONFIG=config/vms/NAME.env`; for Oracle Cloud, with its credentials in the

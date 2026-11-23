@@ -36,6 +36,7 @@ case "${1:-}" in
     case "${2:-}" in
       # What's in force: read from the loaded table, never from the setting (the SSH-only fallback, or no table).
       status) if [ -e /run/metacomputer/firewall-fallback ]; then echo fallback
+              elif nft list table inet metacomputer 2>/dev/null | grep -q '"apt downloads, during the setup only"'; then echo setup
               elif nft list table inet metacomputer 2>/dev/null | grep -q '"EGRESS=off"'; then echo off
               elif nft list table inet metacomputer >/dev/null 2>&1; then echo internet
               else echo none; fi ;;

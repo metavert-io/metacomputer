@@ -78,6 +78,13 @@ remote_ssh_and_firewall() {
     done
   fi
   cp -r --preserve=mode,timestamps "$PAYLOAD/remote/rootfs/." /
+  # The network must require the firewall (fail closed): systemd-networkd and NetworkManager have the drop-in; a
+  # server whose network something else manages is refused, with the server's own settings put back.
+  if ! systemctl is-enabled --quiet systemd-networkd.service 2>/dev/null && ! systemctl is-enabled --quiet NetworkManager.service 2>/dev/null; then
+    echo "this server's network isn't managed by systemd-networkd or NetworkManager: the firewall couldn't keep it down when it fails to load; metacomputer sets up only those"
+    /opt/metacomputer/bin/remote-uninstall rollback || true
+    false
+  fi
   # The ports sshd listens on (and the one metacomputer came in on) stay open in the firewall.
   ports="$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}' | tr '\n' ' ') ${MCOMP_SSH_PORT:-22}"
   printf '%s\n' $ports | sort -un > /etc/metacomputer/ssh-ports
@@ -98,6 +105,7 @@ remote_ssh_and_firewall() {
   fi
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
   printf '%s\n' "${MCOMP_EGRESS:-internet}" > /etc/metacomputer/egress
+  date -Is > /etc/metacomputer/setup-egress        # EGRESS=off: apt's downloads until finalize.sh removes this
   printf '127.0.0.1\n' > /etc/metacomputer/vnc-listen
   date -Is > /etc/metacomputer/remote
   chmod 0644 /etc/metacomputer/egress /etc/metacomputer/vnc-listen /etc/metacomputer/remote /etc/metacomputer/ssh-ports

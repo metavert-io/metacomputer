@@ -759,6 +759,59 @@ def run(td, procs):
           and res.get("expires_in_s", 99) <= 15 and rc2 == 2 and "unlock ends" in res2.get("reason", ""), (q, out, text2))
     lock(u)
 
+    # --- 6b. a computer elsewhere: a token is for the computer it was made for, not the name --------------------------
+    # Its binding names its identity (lib/remote.py identity: beside its keys); deleted, or made again under the same
+    # name, it's another computer: the token stops at once, its tunnel is closed, and a new binding gets a new tunnel.
+    ident = os.path.join(sshdir, "computer-id")
+    open(ident, "w").write("c" * 64 + "\n")
+    far = ["--port", "22", "--host", "203.0.113.7", "--host-key-alias", "mcomp-farvm", "--host-key-line", hostkey,
+           "--fill-key", sshdir + "/fill", "--fill-user", "mcfill", "--ops-key", sshdir + "/ops", "--ops-user", "cua",
+           "--proxy-key", sshdir + "/proxy", "--proxy-user", "mcproxy", "--proxy-port", "18766"]
+    rc, out = tty([BIN, "bind", "farvm", *far], [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
+    check("bind a computer elsewhere with its proxy account and identity", rc == 0, out[-300:])
+    u = start_unlock(["--for", "20m"])
+    tokF = js(client("token", "api1", "--vm", "farvm", "--ttl", "10m").stdout)
+    tun_far = [c for c in calls() if c.get("kind") == "proxy:tunnel" and "mcproxy@203.0.113.7" in c["argv"]]
+    proxy_port()
+    st_ok, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF))
+    check("a token for the computer elsewhere works through its tunnel (to its address)", st_ok == 200 and len(tun_far) == 1,
+          (st_ok, len(tun_far)))
+    open(ident, "w").write("d" * 64 + "\n")             # deleted and made again under the same name
+    st_gone, body = vm_request("GET", "/api1/v1/echo", bearer(tokF))
+    alive = lambda pid: subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0
+    tunnel_closed = tvo.wait_for(lambda: not alive(tun_far[0]["pid"]), 10, 0.1) if tun_far else False
+    st_again, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF))
+    check("...the computer made again (another identity beside its keys): the token is refused at once (401, nothing "
+          "sent), revoked, and the tunnel to the old one closed", st_gone == 401 and "made again" in body
+          and tunnel_closed and st_again in (0, 401), (st_gone, body[:200], tunnel_closed, st_again))
+    tokF2 = js(client("token", "api1", "--vm", "farvm", "--ttl", "10m").stdout)
+    check("...and no new token for it until it's bound again", not tokF2.get("token") and "bind" in tokF2.get("reason", ""),
+          tokF2)
+    rc, out = tty([BIN, "bind", "farvm", *far], [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
+    n_tun = len([c for c in calls() if c.get("kind") == "proxy:tunnel"])
+    tokF3 = js(client("token", "api1", "--vm", "farvm", "--ttl", "10m").stdout)
+    tun_new = [c for c in calls() if c.get("kind") == "proxy:tunnel"][n_tun:]
+    proxy_port()
+    st_new, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF3))
+    st_old, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF))
+    check("bound again: a new tunnel for the new computer (never the old one's), its new token works, the old one doesn't",
+          rc == 0 and len(tun_new) == 1 and st_new == 200 and st_old == 401, (rc, len(tun_new), st_new, st_old))
+    # Made again and bound again before anything used the old tunnel: the next token gets a new tunnel, the old one ends.
+    open(ident, "w").write("e" * 64 + "\n")
+    rc, out = tty([BIN, "bind", "farvm", *far], [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
+    n_tun = len([c for c in calls() if c.get("kind") == "proxy:tunnel"])
+    tokF4 = js(client("token", "api1", "--vm", "farvm", "--ttl", "10m").stdout)
+    tun_4 = [c for c in calls() if c.get("kind") == "proxy:tunnel"][n_tun:]
+    old_closed = tvo.wait_for(lambda: not alive(tun_new[0]["pid"]), 10, 0.1) if tun_new else False
+    proxy_port()
+    st_4, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF4))
+    check("re-bound to another computer while the old tunnel was still open: a new tunnel, the old one closed, the new "
+          "token works", rc == 0 and len(tun_4) == 1 and old_closed and st_4 == 200, (rc, len(tun_4), old_closed, st_4))
+    os.remove(ident)                                   # vm delete removes the identity
+    st_del, _ = vm_request("GET", "/api1/v1/echo", bearer(tokF4))
+    check("...deleted (no identity beside its keys): its token stops too", st_del == 401, st_del)
+    lock(u)
+
     # --- 7. a vault this unlock can't open any more fails closed: tokens and answers end, and it locks ---------------
     vfile = os.path.join(vdir, "vault.json")
     u = start_unlock(["--for", "20m"])

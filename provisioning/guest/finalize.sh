@@ -43,5 +43,10 @@ rm -f /var/lib/cloud/instance/user-data.txt /var/lib/cloud/instance/user-data.tx
       /var/lib/cloud/instances/*/user-data.txt /var/lib/cloud/instances/*/user-data.txt.i
 rm -rf /opt/metacomputer-payload
 apt-get -y clean
+# The setup's apt downloads end with it: EGRESS=off is off from now on (guest-firewall).
+if [ -e /etc/metacomputer/remote ]; then
+  rm -f /etc/metacomputer/setup-egress
+  /opt/metacomputer/bin/guest-firewall apply
+fi
 date -Is > /var/lib/metacomputer/finalized
 echo "finalized: sudo narrowed, cloud-init disabled"

@@ -26,9 +26,19 @@ ssh_back() {
   echo "remote-uninstall: SSH settings back to the server's own"
 }
 firewall_off() {
-  systemctl disable --now metacomputer-firewall.service 2>/dev/null || true
-  rm -f /etc/systemd/system/systemd-networkd.service.d/10-metacomputer-firewall.conf
+  # The network's dependency on the firewall goes first: stopping a unit the network still requires stops the
+  # network with it (systemd's Requires=). Whichever network manager runs now runs afterwards too.
+  running=""
+  for u in systemd-networkd.service NetworkManager.service; do
+    systemctl is-active --quiet "$u" 2>/dev/null && running="$running $u"
+  done
+  rm -f /etc/systemd/system/systemd-networkd.service.d/10-metacomputer-firewall.conf \
+        /etc/systemd/system/NetworkManager.service.d/10-metacomputer-firewall.conf
   systemctl daemon-reload
+  systemctl disable --now metacomputer-firewall.service 2>/dev/null || true
+  for u in $running; do
+    systemctl is-active --quiet "$u" 2>/dev/null || systemctl start "$u" || echo "remote-uninstall: $u didn't start again" >&2
+  done
   if nft list table inet metacomputer >/dev/null 2>&1; then nft delete table inet metacomputer; fi
   rm -f /run/metacomputer/firewall-fallback
   echo "remote-uninstall: metacomputer's firewall is off (its table deleted; other rules untouched)"

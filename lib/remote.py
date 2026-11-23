@@ -55,6 +55,31 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
+# --- the provider's credentials ---------------------------------------------------------------------------
+# metacomputer starts this program with them in its environment (scripts/lib.sh remote_py) and nothing else. They
+# leave this process's environment before anything else runs, and go to the provider's adapter as a value: no child
+# this program starts (getconf, the settings resolver's bash, ssh) can inherit them.
+PROVIDER_ENV = ("OCI_USER", "OCI_TENANCY", "OCI_FINGERPRINT", "OCI_REGION", "OCI_API_KEY_PEM", "OCI_COMPARTMENT")
+CREDS = {}
+
+
+def take_credentials(environ=None):
+    environ = os.environ if environ is None else environ
+    for k in PROVIDER_ENV:
+        v = environ.pop(k, None)
+        if v is not None:
+            CREDS[k] = v
+    return CREDS
+
+
+def child_env(extra=None):
+    """The environment of a program this one starts: this one's (the credentials are gone from it already), and never
+    one of the provider's variables even if something put them back."""
+    env = {k: v for k, v in os.environ.items() if k not in PROVIDER_ENV}
+    env.update(extra or {})
+    return env
+
+
 # --- the computer's record ---------------------------------------------------------------------------
 def settings_for(vm):
     """The settings of the computer `vm` (its config/vms/NAME.env), as every helper reads them."""
@@ -128,7 +153,7 @@ def mac_lock(name):
     if not d:
         try:
             t = subprocess.run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True,
-                               timeout=10).stdout.strip().rstrip("/")
+                               timeout=10, env=child_env()).stdout.strip().rstrip("/")
         except (OSError, subprocess.SubprocessError):
             t = ""
         d = os.path.join(t or f"/tmp/mcomp-{os.getuid()}", "metacomputer-locks")
@@ -152,10 +177,17 @@ def adapter_for(s, state=None):
     cls = cloud.ADAPTERS[prov]
     if cls.manifest["place"] != (s.get("PLACE") or ""):
         raise Refused(f"PLACE={s.get('PLACE')} isn't {prov}'s place ({cls.manifest['place']})")
-    extra = {"api": API_FACTORY()} if API_FACTORY is not None and prov == "oci" else {}
-    if prov == "oci":
-        extra["network_lock"] = lambda: mac_lock("oci-network")
-    return cloud.adapter(prov, computers={s["VM_NAME"]: s}, states={s["VM_NAME"]: state or {}}, **extra)
+    return cloud.adapter(prov, computers={s["VM_NAME"]: s}, states={s["VM_NAME"]: state or {}}, **provider_kw(prov))
+
+
+def provider_kw(prov):
+    """What a provider's adapter is made with here: its credentials (a value, not the environment) and the lock its
+    shared network is changed under."""
+    if prov != "oci":
+        return {}
+    kw = {"api": API_FACTORY()} if API_FACTORY is not None else {"env": dict(CREDS)}
+    kw["network_lock"] = lambda: mac_lock("oci-network")
+    return kw
 
 
 # --- what metacomputer does there -----------------------------------------------------------------------
@@ -181,11 +213,18 @@ def user_data(s):
                                  hostname=s.get("VM_HOSTNAME") or "metacomputer", timezone=tz)
 
 
+OP_RE = __import__("re").compile(r"[0-9a-f]{32}")
+
+
 def cmd_create(s, args):
     """Launch the computer's instance. The launch is journaled first (an operation id in the record, the same id as a
     tag on the instance), so an instance whose record was lost is found and deleted by the next try; an instance
-    that can't be recorded is deleted at once. Nothing billed is ever left without a record here."""
+    that can't be recorded is deleted at once. Nothing billed is ever left without a record here. The build names
+    the operation (--op), so a failed build deletes only what that operation made (cmd_abort)."""
     import uuid
+    op = getattr(args, "op", None) or uuid.uuid4().hex
+    if not OP_RE.fullmatch(op):
+        raise Refused("--op must be 32 hex digits")
     rd = run_dir(s)
     st = read_state(rd)
     if st.get("instance"):
@@ -202,13 +241,16 @@ def cmd_create(s, args):
             a.api.wait_state(i["id"], "TERMINATED", timeout=900)
     ud = user_data(s)
     t0 = time.time()
-    op = uuid.uuid4().hex
-    write_state(rd, dict(st, provider=a.name, launching=op))        # the journal, before anything is billed
+    # What exists before this operation is never this operation's to delete: the record says what it found.
+    had_nsg = a.api.nsg(s["VM_NAME"]) is not None
+    had_network = a.api.network() is not None
+    write_state(rd, dict(st, provider=a.name, launching=op, had_nsg=had_nsg, had_network=had_network))
     print(f"metacomputer: making {s['VM_NAME']} on {a.manifest['label']} ({s.get('SIZE') or 'the default size'})",
           file=sys.stderr)
     made = a.create(s["VM_NAME"], size=s.get("SIZE") or None, persist=s.get("PERSIST") or "auto", user_data=ud,
-                    egress=s.get("EGRESS") or "internet", op=op)
-    st = {"provider": a.name, "created": now(), "launch_started": t0, "op": op, "made_by_build": True, **made}
+                    egress="internet", op=op)    # public addresses while it's set up: remote-build.sh sets EGRESS after
+    st = {"provider": a.name, "created": now(), "launch_started": t0, "op": op, "made_by_build": True,
+          "had_nsg": had_nsg, "had_network": had_network, **made}
     try:
         write_state(rd, st)                  # the instance is recorded before anything else can fail
     except OSError as e:
@@ -228,6 +270,61 @@ def cmd_create(s, args):
     st.update(host=host, running_at=time.time())
     write_state(rd, st)
     print(f"  running at {host} after {int(time.time() - t0)} s", file=sys.stderr)
+    return 0
+
+
+def cmd_abort(s, args):
+    """A failed build's clean-up: deletes only what its own operation made (`--op`, the tag its launch carried and
+    the journal kept): the instances tagged with that operation, then the computer's security group and the
+    network only if that operation made them and nothing else uses them. An instance it didn't make, of this name
+    or any other, is never touched. --keep stops this operation's instance instead (its disk stays)."""
+    op = args.op
+    if not OP_RE.fullmatch(op or ""):
+        raise Refused("--op must be 32 hex digits")
+    rd = run_dir(s)
+    st = read_state(rd)
+    a = adapter_for(s, st)
+    if a.manifest["sleep_wake"]["kind"] == "none":
+        return 0
+    mine = st.get("op") == op or st.get("launching") == op
+    if not mine:
+        print(f"metacomputer: nothing of {s['VM_NAME']} was made by this build; nothing deleted", file=sys.stderr)
+        return 0
+    if args.keep:
+        from cloud.oci import STOP_WAIT_S
+        stopped = []
+        for i in a.api.instances(s["VM_NAME"], op=op):
+            a.api.action(i["id"], "STOP")
+            a.api.wait_state(i["id"], "STOPPED", timeout=STOP_WAIT_S)
+            stopped.append(i["id"])
+        print("stopped" if stopped else "nothing to stop")
+        return 0
+    gone = []
+    for i in a.api.instances(s["VM_NAME"], op=op):
+        a.api.terminate(i["id"])
+        a.api.wait_state(i["id"], "TERMINATED", timeout=900)
+        gone.append(i["id"])
+    if gone:
+        print(f"deleted the instance this build made, and its boot volume ({a.manifest['label']})", file=sys.stderr)
+    others = a.api.instances(s["VM_NAME"])
+    if not st.get("had_nsg") and not others:
+        a.api.delete_nsg(s["VM_NAME"])
+    if st.get("instance") in gone or st.get("launching") == op:
+        st = {k: v for k, v in st.items() if k not in ("instance", "launching", "host", "op")}
+        st["aborted"] = now()
+        write_state(rd, st)
+    if not st.get("had_network"):
+        try:
+            with mac_lock("oci-network"):
+                if not a.api.instances() and not a.api.nsg_names() and a.api.delete_network():
+                    print(f"deleted metacomputer's network at {a.manifest['label']} (this build made it; nothing "
+                          "uses it now)", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001  (nothing billed is left: say so, don't fail)
+            print(f"metacomputer's network wasn't deleted ({e}); it costs nothing: metacomputer cloud teardown oci",
+                  file=sys.stderr)
+    if others:
+        print(f"left alone: {len(others)} instance(s) of {s['VM_NAME']} this build didn't make "
+              "(metacomputer cloud status oci)", file=sys.stderr)
     return 0
 
 
@@ -414,7 +511,7 @@ def cmd_user_data(s, args):
 def cmd_cloud(args):
     if args.provider not in cloud.ADAPTERS or args.provider in ("local-lume", "fake"):
         raise Refused(f"no provider called {args.provider} ({', '.join(sorted(cloud.providers().values()))})")
-    a = cloud.adapter(args.provider)
+    a = cloud.adapter(args.provider, **provider_kw(args.provider))
     if args.action == "status":
         if a.name == "ubuntu-vm":
             out = {"provider": a.name, "note": "your own servers are listed by metacomputer list --on server"}
@@ -425,14 +522,22 @@ def cmd_cloud(args):
         out = {"provider": a.name, "checks": a.doctor()}
     elif args.action == "setup":
         out = a.setup()
-    else:   # teardown: the network, only when no instance of metacomputer's is left
+    else:   # teardown: the network, only when no computer of metacomputer's has it, or is being made in it
         if a.name == "ubuntu-vm":
             raise Refused("nothing to tear down for your own servers")
-        left = a.list()
-        if left:
-            raise Refused(f"{a.manifest['label']} still has metacomputer's instances: "
-                          f"{', '.join(i['name'] for i in left)} (metacomputer vm delete NAME first)")
-        out = {"provider": a.name, "network_deleted": a.api.delete_network()}
+        # Under the lock a build makes the network and its computer's group with: a group without an instance yet
+        # is a computer being made (or one whose setup was cut off), and the network stays for it.
+        with mac_lock("oci-network"):
+            left = a.list()
+            if left:
+                raise Refused(f"{a.manifest['label']} still has metacomputer's instances: "
+                              f"{', '.join(i['name'] for i in left)} (metacomputer vm delete NAME first)")
+            pending = a.api.nsg_names()
+            if pending:
+                raise Refused(f"a computer is being made in metacomputer's network at {a.manifest['label']} (its "
+                              f"security group is there): {', '.join(sorted(pending))}. When its build has ended, or "
+                              "if it was cut off: metacomputer vm delete NAME, then this again")
+            out = {"provider": a.name, "network_deleted": a.api.delete_network()}
     print(json.dumps(out, indent=None if args.json else 2, sort_keys=True, default=str))
     return 0
 
@@ -566,10 +671,14 @@ def main(argv=None):
     p = sub.add_parser("key-lists")
     p.add_argument("--vm", required=True)
     p.add_argument("--dir", required=True)
-    for name in ("create", "wake", "sleep", "delete", "status", "state", "rates", "user-data", "plan"):
+    for name in ("create", "wake", "sleep", "delete", "status", "state", "rates", "user-data", "plan", "abort"):
         p = sub.add_parser(name)
         p.add_argument("--vm", required=True)
         p.add_argument("--json", action="store_true")
+        if name in ("create", "abort"):
+            p.add_argument("--op", required=name == "abort")
+        if name == "abort":
+            p.add_argument("--keep", action="store_true")
         if name == "status":
             p.add_argument("--offline", action="store_true", help="the record only: the provider isn't asked")
         if name == "delete":
@@ -581,6 +690,7 @@ def main(argv=None):
     p.add_argument("provider")
     p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
+    take_credentials()
     try:
         if a.cmd == "target":
             return cmd_target(a)
@@ -591,7 +701,7 @@ def main(argv=None):
         if a.cmd == "cloud":
             return cmd_cloud(a)
         s = settings_for(a.vm)
-        return {"create": cmd_create, "wake": cmd_wake, "sleep": cmd_sleep, "delete": cmd_delete,
+        return {"create": cmd_create, "abort": cmd_abort, "wake": cmd_wake, "sleep": cmd_sleep, "delete": cmd_delete,
                 "status": cmd_status, "state": cmd_state, "rates": cmd_rates, "user-data": cmd_user_data,
                 "plan": cmd_plan, "key-lists": cmd_key_lists, "egress": cmd_egress,
                 "identity": cmd_identity}[a.cmd](s, a)
