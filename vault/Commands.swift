@@ -106,6 +106,8 @@ func runMain(_ argv: [String]) -> Int32 {
     let paths = Paths.current()
     guard let cmd = argv.first else { oprint(usageText); return Exit.ok }
     let rest = Array(argv.dropFirst())
+    // ssh's ProxyCommand for a provider's tunnel (a binding's tunnel_program): it touches no vault.
+    if cmd == "_tunnel" { return runTunnel(rest) }
     #if MCOMP_VAULT_TESTING
     // A test build never touches a real vault: it needs its own folder, outside ~/Library.
     if !["selftest", "version", "help", "-h", "--help"].contains(cmd) {
@@ -444,9 +446,9 @@ func checkKeyFile(_ raw: String, _ flag: String) throws -> String {
 }
 
 func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let usage = "usage: bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U [--proxy-key PATH --proxy-user U --proxy-port N] (--gateway PATH | --host ADDRESS --host-key-alias mcomp-VM)"
+    let usage = "usage: bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U [--proxy-key PATH --proxy-user U --proxy-port N] (--gateway PATH | --host ADDRESS --host-key-alias mcomp-VM [--tunnel PROGRAM [--tunnel-arg=ARG ...]])"
     let a = try parseArgs(argv, values: ["port", "host-key-line", "fill-key", "fill-user", "ops-key", "ops-user", "proxy-key", "proxy-user",
-                                         "proxy-port", "gateway", "host", "host-key-alias"])
+                                         "proxy-port", "gateway", "host", "host-key-alias", "tunnel", "tunnel-arg"])
     guard a.positional.count == 1, validName(a.positional[0]) else { throw usageError(usage) }
     let vm = a.positional[0]
     // A computer reached over SSH elsewhere (docs/remote.md): its address and the name its host key is pinned under,
@@ -458,6 +460,27 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard a.last("gateway") == nil else { throw usageError("--gateway is for a VM on this Mac; a computer at --host has none") }
         host = h
         alias = al
+    }
+    // A provider's tunnel (Fly Sprites: sprite proxy -W :22), ssh's ProxyCommand: its program pinned by contents, as
+    // the gateway's is, and its arguments as they are now.
+    var tunnelProgram: String?, tunnelSHA: String?, tunnelArgs: [String]?
+    if let t = a.last("tunnel") {
+        guard host != nil else { throw usageError("--tunnel is for a computer at --host (its provider's tunnel carries SSH there)") }
+        try checkPrintablePath(absolutePath(t), "tunnel")
+        let tp = URL(fileURLWithPath: absolutePath(t)).resolvingSymlinksInPath().path
+        try checkPrintablePath(tp, "tunnel")
+        guard matches(tp, "^/[A-Za-z0-9._/+@_-]{1,400}$") else { throw usageError("--tunnel: a program's absolute path, without spaces or quotes") }
+        guard access(tp, X_OK) == 0 else { throw VaultError("no tunnel program at \(tp)") }
+        guard let sha = fileSHA256(tp) else { throw VaultError("cannot read the tunnel program at \(tp)") }
+        let targs = a.values["tunnel-arg"] ?? []
+        guard targs.count <= 16, targs.allSatisfy(validTunnelArg) else {
+            throw usageError("--tunnel-arg: at most 16 words of letters, digits and ._:/@=+_- each")
+        }
+        tunnelProgram = tp
+        tunnelSHA = sha
+        tunnelArgs = targs
+    } else if a.values["tunnel-arg"] != nil {
+        throw usageError("--tunnel-arg goes with --tunnel")
     }
     guard let ps = a.last("port"), let port = Int(ps), port >= 1, port <= 65535 else { throw usageError("--port: the VM's SSH port (on 127.0.0.1, or at --host)") }
     guard let hkl = a.last("host-key-line"), let hostKey = normalizeHostKey(hkl) else {
@@ -502,7 +525,7 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let fp = hostKeyFingerprint(hostKey)
     oprint("""
     About to pin VM \(vm):
-      SSH           \(host.map { "\($0):\(port), a computer reached over SSH (its host key pinned as \(alias ?? ""))" } ?? "127.0.0.1:\(port)")\(computerID.map { "\n  computer      \(String($0.prefix(16)))... (made again under this name, it has another: bind again then)" } ?? "")
+      SSH           \(host.map { "\($0):\(port), a computer reached over SSH (its host key pinned as \(alias ?? ""))" } ?? "127.0.0.1:\(port)")\(computerID.map { "\n  computer      \(String($0.prefix(16)))... (made again under this name, it has another: bind again then)" } ?? "")\(tunnelProgram.map { "\n  tunnel        \($0) \((tunnelArgs ?? []).joined(separator: " ")) (sha256 \(String((tunnelSHA ?? "").prefix(16)))...), run by this vault as ssh's ProxyCommand and ended when ssh goes" } ?? "")
       host key      \(fp) (\(hostKey.split(separator: " ").first ?? ""))
       fills         as \(fillUser), key \(fillKey)
       sessions      as \(opsUser), key \(opsKey)
@@ -520,10 +543,10 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let b = VMBinding(ssh_port: port, host_key_line: hostKey, ops_key_path: opsKey, guest_user: opsUser,
                       fill_key_path: fillKey, fill_user: fillUser, proxy_key_path: proxyKey, proxy_user: proxyUser, proxy_port: proxyPort,
                       gateway_path: gateway, gateway_sha256: gwSHA, bound: isoTime(), ssh_host: host, host_key_alias: alias,
-                      computer_id: computerID)
+                      computer_id: computerID, tunnel_program: tunnelProgram, tunnel_sha256: tunnelSHA, tunnel_args: tunnelArgs)
     try updateVault(paths, key) { p in p.vms[vm] = b }
     audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway ?? "none",
-                  "remote": host != nil, "proxy": proxyUser != nil], macKey: vaultAuditKey(paths, key))
+                  "remote": host != nil, "proxy": proxyUser != nil, "tunnel": tunnelProgram != nil], macKey: vaultAuditKey(paths, key))
     oprint("Bound VM \(vm): \(host ?? "127.0.0.1"):\(port), host key \(fp), fills as \(fillUser), sessions as \(opsUser)"
            + (proxyUser.map { ", api tokens as \($0)" } ?? "") + (gateway.map { ", gateway \($0)" } ?? ", no gateway (reached over SSH)"))
     return Exit.ok

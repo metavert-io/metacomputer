@@ -65,13 +65,24 @@ struct VMBinding: Codable {
     // computer-id file beside its keys said when it was bound. A computer deleted, or made again under the same
     // name, has another: the binding then refuses until it's bound again.
     var computer_id: String? = nil
+    // A computer with no address of its own (Fly Sprites): the program that carries its SSH (sprite proxy -W :22), its
+    // contents pinned at bind like the gateway's, and its arguments. ssh runs it as its ProxyCommand through the vault
+    // itself (`mcomp-vault _tunnel`), which ends it when ssh goes. nil: ssh connects straight to ssh_host.
+    var tunnel_program: String? = nil
+    var tunnel_sha256: String? = nil
+    var tunnel_args: [String]? = nil
 }
 
 extension VMBinding {
     /// Where ssh connects: the computer's own address, or this Mac's loopback (the gateway's forward).
     var sshDestination: String { ssh_host ?? "127.0.0.1" }
     var isRemote: Bool { ssh_host != nil }
+    var hasTunnel: Bool { tunnel_program != nil }
 }
+
+/// One argument of a tunnel program, as pinned: nothing a shell or ssh's ProxyCommand would read as anything but the
+/// word itself (no spaces, quotes, `%`, `$` or other specials).
+func validTunnelArg(_ s: String) -> Bool { matches(s, "^[A-Za-z0-9._:/@=+_-]{1,200}$") }
 
 /// A computer's address for a binding: an IPv4 or IPv6 address or a DNS name, nothing that could be an option or a
 /// user@ (it goes on ssh's command line after `user@`).

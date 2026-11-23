@@ -221,6 +221,8 @@ final class GuestRunner {
             guard let a = t.binding.host_key_alias, validHostKeyAlias(a), validHost(t.binding.sshDestination) else {
                 return ("the binding of VM \(t.vm) names an address without its host key's name: bind it again", true)
             }
+            // Its provider's tunnel: the program pinned at bind, unchanged (as the gateway's is checked).
+            if let why = tunnelProblem(t.binding) { return (why, true) }
             // The computer it was bound to must still be the one of that name: deleted, or made again, it isn't,
             // and the old server (which may still exist, and accept these keys) must get nothing.
             guard let want = t.binding.computer_id,
@@ -242,7 +244,10 @@ final class GuestRunner {
         guard let pin = pinnedHostKeyOptions(binding: b) else {
             throw VaultError("the pinned host key for VM \(t.vm) is damaged: bind it again", code: Exit.error)
         }
-        let args = sshBaseOptions(key: key, port: b.ssh_port, remote: b.isRemote) + pin
+        guard let proxy = proxyCommand(b) else {
+            throw VaultError("the tunnel pinned for VM \(t.vm) can't be run: bind it again", code: Exit.error)
+        }
+        let args = sshBaseOptions(key: key, port: b.ssh_port, remote: b.isRemote, proxy: proxy) + pin
             + ["-T", "-o", "ClearAllForwardings=yes", "-o", "LogLevel=ERROR", "\(user)@\(b.sshDestination)", remote]
         return runProcess(sshPath, args, env: helperEnv(), stdin: input, timeout: max(1, timeout), maxStdout: maxStdout)
     }
@@ -455,12 +460,115 @@ func containsString(_ v: Any, _ needle: String) -> Bool {
 }
 
 /// ssh options every vault connection uses: no config file (not ~/.ssh/config, not the system's),
-/// no agent, only the given key, no password prompts.
-func sshBaseOptions(key: String, port: Int, remote: Bool = false) -> [String] {
+/// no agent, only the given key, no password prompts. ProxyCommand is none, or a binding's pinned tunnel (proxyCommand).
+func sshBaseOptions(key: String, port: Int, remote: Bool = false, proxy: String = "none") -> [String] {
     ["-F", "none", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityFile=\(key)", "-o", "IdentityAgent=none",
      "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
      "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no", "-o", "ConnectTimeout=\(remote ? 15 : 5)",
-     "-o", "ProxyCommand=none", "-o", "ProxyJump=none", "-o", "PermitLocalCommand=no", "-p", "\(port)"]
+     "-o", "ProxyCommand=\(proxy)", "-o", "ProxyJump=none", "-o", "PermitLocalCommand=no", "-p", "\(port)"]
+}
+
+/// What's wrong with a binding's tunnel now, or nil: its program must be the one pinned at bind (path and contents),
+/// its arguments words the ProxyCommand passes as they are. A binding without one has nothing to check.
+func tunnelProblem(_ b: VMBinding) -> String? {
+    guard let prog = b.tunnel_program else {
+        return b.tunnel_sha256 == nil && b.tunnel_args == nil ? nil : "the binding's tunnel is incomplete: bind it again"
+    }
+    guard matches(prog, "^/[A-Za-z0-9._/+@_-]{1,400}$"), let want = b.tunnel_sha256, (b.tunnel_args ?? []).allSatisfy(validTunnelArg) else {
+        return "the binding's tunnel isn't one this vault runs: bind it again"
+    }
+    guard let have = fileSHA256(prog), have == want else {
+        return "the tunnel program \(clean(prog, max: 200)) isn't the one pinned at bind (its contents changed, or it's gone): "
+            + "nothing was sent. If you updated it, run `metacomputer secrets bind` again"
+    }
+    return nil
+}
+
+/// ssh's ProxyCommand for a binding: "none" (straight to its address), or its pinned tunnel run through this vault
+/// (`mcomp-vault _tunnel -- PROGRAM ARGS...`, which ends the tunnel when ssh goes); nil when it can't be said safely.
+/// ssh hands the line to /bin/sh (helperEnv has no SHELL) after its own %-expansion: every word is single-quoted, and
+/// none may hold a quote or a %.
+func proxyCommand(_ b: VMBinding) -> String? {
+    guard let prog = b.tunnel_program else { return "none" }
+    guard tunnelProblem(b) == nil, let me = processPath(getpid()),
+          !me.contains("'"), !me.contains("%"), me.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f }) else { return nil }
+    return ([me, "_tunnel", "--", prog] + (b.tunnel_args ?? [])).map { "'\($0)'" }.joined(separator: " ")
+}
+
+// MARK: - the tunnel wrapper (ssh's ProxyCommand)
+
+nonisolated(unsafe) var tunnelStop: Int32 = 0
+
+/// `mcomp-vault _tunnel -- PROGRAM [ARGS...]`: run a provider's tunnel on ssh's standard input and output, and end it,
+/// and everything it started, when ssh goes. ssh sends its ProxyCommand SIGHUP when it exits, and a tunnel that
+/// ignores SIGHUP (Fly's `sprite proxy -W` does) would stay, keeping the computer awake and billing. So the program
+/// runs in a session of its own; when this process gets SIGHUP, SIGTERM or SIGINT, or its parent (ssh) is gone, or the
+/// program exits, the whole session's group gets SIGTERM, then SIGKILL after 3 s. Its exit status is the program's.
+/// It leaves ssh's process group and session first, so a group kill aimed at ssh can't end it before the tunnel.
+/// The same as lib/proxywrap.py, for the vault's own connections: no interpreter in between.
+func runTunnel(_ argv: [String]) -> Int32 {
+    guard argv.count >= 2, argv[0] == "--", argv[1].hasPrefix("/") else {
+        eprint("usage: mcomp-vault _tunnel -- PROGRAM [ARGS...]")
+        return 2
+    }
+    let prog = argv[1]
+    let parent = getppid()
+    // Out of ssh's process group and session first: whoever ends ssh's connection may SIGKILL that whole group at
+    // once (runProcess on a timeout, Tunnel.stop), and this process must outlive ssh long enough to end the tunnel,
+    // which isn't in that group. A process that already leads its group can't (EPERM), and stays.
+    _ = setsid()
+    for s in [SIGHUP, SIGTERM, SIGINT] { signal(s) { _ in tunnelStop = 1 } }
+    var attr: posix_spawnattr_t?
+    posix_spawnattr_init(&attr)
+    defer { posix_spawnattr_destroy(&attr) }
+    posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+    var defaults = sigset_t()
+    sigemptyset(&defaults)
+    for s in [SIGINT, SIGTERM, SIGHUP, SIGPIPE, SIGQUIT] { sigaddset(&defaults, s) }
+    posix_spawnattr_setsigdefault(&attr, &defaults)
+    var mask = sigset_t()
+    sigemptyset(&mask)
+    posix_spawnattr_setsigmask(&attr, &mask)
+    let cargv = argv.dropFirst().map { strdup($0) } + [nil]
+    defer { for p in cargv { free(p) } }
+    var pid: pid_t = 0
+    let rc = posix_spawn(&pid, prog, nil, &attr, cargv, environ)
+    guard rc == 0 else {
+        eprint("mcomp-vault _tunnel: cannot run \(clean(prog, max: 200)): \(String(cString: strerror(rc)))")
+        return 127
+    }
+    var status: Int32 = 0
+    var result: Int32 = 1
+    var reaped = false
+    while true {
+        let r = waitpid(pid, &status, WNOHANG)
+        if r == pid {
+            reaped = true
+            result = (status & 0x7F) == 0 ? (status >> 8) & 0xFF : 128 + (status & 0x7F)
+            break
+        }
+        if tunnelStop != 0 || getppid() != parent { break }
+        usleep(200_000)
+    }
+    endTunnelGroup(pid, leaderReaped: reaped)
+    return result
+}
+
+/// SIGTERM to the tunnel's whole group, SIGKILL to whatever is left after 3 s; returns once the group is empty (the
+/// leader reaped as it goes, so its zombie doesn't count).
+func endTunnelGroup(_ pgid: pid_t, leaderReaped: Bool) {
+    var reaped = leaderReaped
+    var st: Int32 = 0
+    for (sig, wait) in [(SIGTERM, 3.0), (SIGKILL, 1.0)] {
+        if kill(-pgid, sig) != 0 && errno == ESRCH { break }
+        let deadline = Date().addingTimeInterval(wait)
+        while Date() < deadline {
+            if !reaped && waitpid(pgid, &st, WNOHANG) == pgid { reaped = true }
+            if kill(-pgid, 0) != 0 && errno == ESRCH { return }
+            usleep(50_000)
+        }
+    }
+    if !reaped { _ = waitpid(pgid, &st, 0) }
 }
 
 /// The pinned host key, given to ssh without any file a process of this user could change in

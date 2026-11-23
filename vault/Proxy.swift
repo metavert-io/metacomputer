@@ -74,6 +74,10 @@ final class Tunnel: @unchecked Sendable {
         return waitpid(pid, &st, WNOHANG) == 0
     }
     func stop() {
+        // ssh's process group (ssh alone: a provider's tunnel wrapper leaves it, and ends its tunnel when ssh goes),
+        // only while ssh is unreaped, so the group's id is still its own.
+        var st0: Int32 = 0
+        if waitpid(pid, &st0, WNOHANG) == 0 { kill(-pid, SIGTERM) }
         kill(pid, SIGTERM)
         var st: Int32 = 0
         for _ in 0..<20 where waitpid(pid, &st, WNOHANG) == 0 { usleep(50_000) }
@@ -343,7 +347,9 @@ final class ProxyHub: @unchecked Sendable {
     }
 
     /// What a tunnel is opened to: the computer (its identity, for one elsewhere), its address and port.
-    func tunnelKey(_ b: VMBinding) -> String { "\(b.computer_id ?? "-")|\(b.sshDestination)|\(b.ssh_port)" }
+    func tunnelKey(_ b: VMBinding) -> String {
+        "\(b.computer_id ?? "-")|\(b.sshDestination)|\(b.ssh_port)|\(b.tunnel_program ?? "-")|\(b.tunnel_sha256 ?? "-")|\((b.tunnel_args ?? []).joined(separator: " "))"
+    }
 
     /// Close a VM's tunnel (the computer it went to isn't the bound one any more): nothing more reaches the proxy from it.
     func closeTunnel(_ l: ProxyListener) {
@@ -379,7 +385,11 @@ final class ProxyHub: @unchecked Sendable {
             rmdir(dir)
             throw VaultError("the pinned host key for VM \(t.vm) is damaged: bind it again", code: Exit.error)
         }
-        let args = sshBaseOptions(key: keyPath, port: t.binding.ssh_port, remote: t.binding.isRemote) + pin
+        guard let proxy = proxyCommand(t.binding) else {
+            rmdir(dir)
+            throw VaultError("the tunnel pinned for VM \(t.vm) can't be run: bind it again", code: Exit.error)
+        }
+        let args = sshBaseOptions(key: keyPath, port: t.binding.ssh_port, remote: t.binding.isRemote, proxy: proxy) + pin
             + ["-N", "-T", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
                "-o", "LogLevel=DEBUG1", "-R", "127.0.0.1:\(guestPort):127.0.0.1:\(macPort)", "\(user)@\(t.binding.sshDestination)"]
         let errFD = open(errPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o600)
