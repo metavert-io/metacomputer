@@ -9,10 +9,10 @@
 # metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
 # exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
 # refused (exit 2), and nothing is done.
-mc_usage="finalize.sh [ADMIN]"
+mc_usage="finalize.sh [ADMIN [GUEST_USER]]"
 case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
 for mc_a in "$@"; do case "$mc_a" in -*) echo "finalize.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
-case "$#:${1:-}" in 0:|1:*) ;; *) echo "finalize.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+case "$#:${1:-}" in 0:|1:*|2:*) ;; *) echo "finalize.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
 set -Eeuo pipefail
 ADMIN="${1:-cuaadmin}"
 GUSER="${2:-cua}"

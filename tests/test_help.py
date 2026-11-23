@@ -915,7 +915,7 @@ ENTRY = {
     "lib/vm_shell.py": E("py", ["--transport", "1", "ssh", "-c", "true"], "--json", ("--cwd", "w")),
     "lib/vm_shell_guest.py": E("py", []),
     "lib/vms.py": E("py", ["all-known"]),
-    "provisioning/guest/finalize.sh": E("bash", ["cuaadmin"]),
+    "provisioning/guest/finalize.sh": E("bash", ["cuaadmin", "cua"]),
     "provisioning/guest/provision.sh": E("bash", ["/opt/p"]),
     "provisioning/remote/bootstrap.sh": E("bash", ["d", "o", "22"]),
     "provisioning/sprite/bootstrap.sh": E("bash", ["d"]),
@@ -1018,6 +1018,65 @@ def run_entry(lab, key, args, timeout=60):
     return rc, out, err, called, changed
 
 
+# The forms the VM's programs are run with, by their callers (build-vm.sh and remote-build.sh, the cloud-init they
+# write, bin/metacomputer, the vault, lib/*.py, the Sprite's services): each program's own command-line guard (the
+# lines after "metacomputer's command-line rules", run alone, never the rest) must take every one of them. Found on a
+# test VM: finalize.sh took one word, build-vm.sh gives it two (ADMIN GUEST_USER), and the build stopped.
+GUEST_CALLER_FORMS = {
+    "provisioning/guest/finalize.sh": [["cuaadmin", "cua"], ["cuaadmin"], []],
+    "provisioning/guest/provision.sh": [["/opt/metacomputer-payload"], []],
+    "provisioning/remote/bootstrap.sh": [["/run/metacomputer-bootstrap", "", "22"], ["/tmp/d", "owner", "2222"], ["/tmp/d"]],
+    "provisioning/sprite/bootstrap.sh": [["/tmp/d"]],
+    G + "desktop-record": [["start", "n", "20", "standard", "off"], ["stream", "n", "20", "high", "auto"], ["stop"], ["status"]],
+    "provisioning/guest/rootfs/usr/local/sbin/metacomputer-admin": [
+        [v] for v in ("restart-desktop", "reboot", "poweroff", "status", "logs", "provision-log", "updates", "firewall", "idle")
+    ] + [["logs", "400"], ["egress", "status"], ["egress", "off"], ["idle", "15"], ["ssh-auth", "cert"], ["ssh-auth", "key"],
+         ["ssh-auth", "status"], ["driver-policy", "bounded"], ["driver-policy", "status"], ["storage", "attach"]],
+    G + "input-reset": [[], ["--check"]],
+    G + "session-run": [["import", "-window", "root", "png:-"], ["sh", "-c", "x"], ["wmctrl", "-ic", "0x1"]],
+    G + "driver-mcp": [[]],
+    G + "session-init": [[]],
+    R + "guest-firewall": [["apply"], ["mark-setup"], ["end-setup"], ["status"], ["render-emergency"],
+                           ["render", "--egress", "off", "--ports", "22", "--uids", "1"]],
+    R + "idle-stop": [[], ["check"], ["status"]],
+    R + "remote-uninstall": [["rollback"], ["all"]],
+    S + "services": [["sshd"], ["desktop"], ["status"]],
+    S + "in-session": [["runuser", "-u", "cua", "--", "env", "-i"], ["/usr/sbin/sshd", "-D", "-e"]],
+    S + "hide-sprite-api": [["/usr/bin/tini", "--", "/usr/bin/sleep", "infinity"]],
+    S + "svc-desktop": [[]], S + "svc-session": [[]], S + "svc-sshd": [[]], S + "svc-xvfb": [[]], S + "xvfb-inner": [[]],
+    "bench/guest/calc-overlay.sh": [["/tmp/debs"]],
+    "lib/vm_claude_guest.sh": [["start", "claude", "--model", "x"], ["keys", "s", "Enter"], ["status", "s"], ["probe", "s"]],
+}
+
+
+def guard_of(rel):
+    """The command-line guard of a program the VM runs: the lines after its "metacomputer's command-line rules"
+    note, up to the first that isn't part of it."""
+    lines = open(os.path.join(LAB, rel)).read().split("\n")
+    i = next(n for n, ln in enumerate(lines) if ln.startswith("# metacomputer's command-line rules"))
+    while i < len(lines) and lines[i].startswith("#"):
+        i += 1
+    out = []
+    while i < len(lines) and lines[i].startswith(("mc_usage=", "case ", "for mc_a", "  ")):
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def guest_caller_checks():
+    bad = []
+    for rel, forms in sorted(GUEST_CALLER_FORMS.items()):
+        guard = guard_of(rel)
+        shell = "/bin/bash" if "bash" in open(os.path.join(LAB, rel)).readline() else "/bin/sh"
+        for args in forms:
+            r = subprocess.run([shell, "-c", guard + "\necho GUARD-PASSED", os.path.basename(rel), *args],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode != 0 or "GUARD-PASSED" not in r.stdout:
+                bad.append((rel, args, r.returncode, r.stderr[-160:]))
+    check(f"the VM's programs take every form their callers give them ({sum(map(len, GUEST_CALLER_FORMS.values()))} "
+          "forms, each program's guard run alone)", not bad, bad[:6])
+
+
 def entry_point_checks():
     found = entry_points()
     covered = {k.split("#")[0] for k in ENTRY}
@@ -1076,6 +1135,7 @@ def main():
         value_option_checks()
         setup_options_check()
         entry_point_checks()
+        guest_caller_checks()
         own_parser_checks(td)
         checkpoint_p1_checks(td)
 
