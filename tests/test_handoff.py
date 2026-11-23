@@ -1327,12 +1327,16 @@ def view_setup(name="view"):
 
 
 def view(vd, stub, lume, ssh, *args, store="file", extra_cfg="", stdin=None, **extra):
+    """bin/metacomputer view without a terminal. `clear` (MCOMP_VIEW_CLIPBOARD_S) is 0 unless a check asks for the
+    clipboard to be cleared: a detached clearer runs `osascript ... clear` that many seconds later, into the stand-ins'
+    shared argv log, and on a busy machine it lands in a later check's window (which then sees an osascript call that
+    isn't its command's). A check that asks for one waits for it (wait_file)."""
     cfg = os.path.join(vd, "test.env")
     open(cfg, "w").write(f'VM_NAME=hvtest\nBASELINE_NAME=hvtest-baseline\nSSH_DIR="{ssh}"\nSSH_PORT=59872\n'
                          f'VNC_PORT=59871\nRUN_DIR="{vd}/run"\nLOG_DIR="{vd}/logs"\nLUME="{lume}"\n'
                          f'VNC_PASSWORD_STORE={store}\n{extra_cfg}')
     e = env(MCOMP_CONFIG=cfg, STUB=stub, PATH=stub + os.pathsep + os.environ.get("PATH", ""),
-            MCOMP_VIEW_CLIPBOARD_S=extra.pop("clear", 1), **extra)
+            MCOMP_VIEW_CLIPBOARD_S=extra.pop("clear", 0), **extra)
     for k in ("MCOMP_RUN_DIR", "MCOMP_LOG_DIR", "MCOMP_SSH_DIR", "MCOMP_VM_NAME"):
         e.pop(k, None)
     return subprocess.run([os.path.join(LAB, "bin", "metacomputer"), "view"] + list(args), env=e, stdin=stdin,
@@ -1373,7 +1377,7 @@ def view_checks():
         return
     open(os.path.join(ssh, "vnc-pass"), "w").write(VNC_PW + "\n")
     os.chmod(os.path.join(ssh, "vnc-pass"), 0o600)
-    r = view(vd, stub, lume, ssh, "--open")
+    r = view(vd, stub, lume, ssh, "--open", clear=1)
     check("the file store: the password reaches the clipboard", r.returncode == 0 and read(clip) == VNC_PW,
           (r.returncode, r.stdout, r.stderr))
     check("it says so: on the clipboard, paste with Cmd+V, not the Mac's password, cleared in 1 s",
@@ -1677,7 +1681,8 @@ def remember_checks():
     open(argv, "w").close()
     rc, out, asked = view_tty(vd, stub, lume, ssh, SSH_CONNECTION="10.0.0.2 5000 10.0.0.1 22")
     check("plain view over SSH, even at a terminal: how to connect, nothing opened or asked", rc == 0 and not asked
-          and "ssh -N -L 59871:127.0.0.1:59871" in out and not lines("open ") and not lines("osascript "), out)
+          and "ssh -N -L 59871:127.0.0.1:59871" in out and not lines("open ") and not lines("osascript "),
+          (rc, asked, lines("open "), [x[:60] for x in lines("osascript ")], out[-250:]))
     r = view(vd, stub, lume, ssh, "--print")
     check("view --print: how to connect, nothing opened", r.returncode == 0 and "ssh -N -L 59871" in r.stdout
           and not lines("open "), r.stdout)
