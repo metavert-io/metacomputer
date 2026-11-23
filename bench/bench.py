@@ -310,6 +310,8 @@ commandPrefix = %s
 decision = "allow"
 priority = 900
 """
+# Hermes Agent's administrator-managed scope: its .env and config.yaml apply to every Hermes run on the Mac.
+HERMES_MANAGED = "/etc/hermes"
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
 
 
@@ -422,12 +424,14 @@ def isolate_session(agent, sw, work, cfg, home, prog, env):
                 shell commands that start with metacomputer's command, and nothing more: every other tool keeps Gemini
                 CLI's default rule, and what that asks for a headless session refuses (--approval-mode default, no
                 yolo); folder trust and telemetry off in the throwaway settings; only metacomputer's server allowed
-      hermes    a Hermes home of the session's own (HERMES_HOME: its own default profile and gateway, so concurrent
-                runs never share one) holding only metacomputer's server (Hermes runs a configured server's tools
-                without asking) with tool search off, and the skill; only the terminal, skills and metacomputer
-                toolsets (-t); no --yolo: approvals manual and a single-query session's dangerous commands refused.
-                Hermes has no allowlist for its terminal: commands it doesn't rate dangerous run without asking, so the
-                throwaway HOME and the --pass-env variables are what such a command can reach
+      hermes    refused while Hermes would load settings or keys from outside its home (refuse_hermes_outside_files:
+                its installation's .env, the administrator-managed /etc/hermes); a Hermes home of the session's own
+                (HERMES_HOME: its own default profile and gateway, so concurrent runs never share one) holding only
+                metacomputer's server (Hermes runs a configured server's tools without asking) with tool search off,
+                and the skill; only the terminal, skills and metacomputer toolsets (-t); no --yolo: approvals manual
+                and a single-query session's dangerous commands refused. Hermes has no allowlist for its terminal:
+                even with manual approvals, a command it doesn't rate dangerous runs without asking, as you, on this
+                Mac (the throwaway HOME keeps Hermes's own settings out, it isn't a sandbox)
       openclaw  a state folder and a config file of the session's own (OPENCLAW_STATE_DIR, OPENCLAW_CONFIG_PATH: none
                 of yours applies): the minimal tool profile plus metacomputer's tools, `exec`, reading files in the
                 work folder and its skills, nothing else; exec in allowlist mode (misses refused, never asked) with an
@@ -451,6 +455,7 @@ def isolate_session(agent, sw, work, cfg, home, prog, env):
         hh = os.path.join(home, ".hermes")
         os.makedirs(os.path.join(hh, "skills"), 0o700)
         env = dict(env, HERMES_HOME=hh)
+        refuse_hermes_outside_files(prog, env, home)
         # The first command in a new home can take a while: with Hermes's own installer, Hermes prepares the
         # dependencies of each new home the first time (here, before the session's clock starts).
         for i, (key, value) in enumerate(HERMES_SETTINGS + (("mcp_servers.metacomputer",
@@ -479,6 +484,44 @@ def isolate_session(agent, sw, work, cfg, home, prog, env):
     args = ["agent", "exec", prompt, "--json", "--cwd", work, "--state-dir", state, "--auth-env-only",
             "--timeout", str(int(sw["_task"].get("timeout_s", 600)))]
     return args + (["--model", own_model(sw)] if own_model(sw) else []), env
+
+
+def hermes_outside_files(prog, env, cwd):
+    """The files outside a Hermes Agent home that Hermes loads into every run, whatever its home: its installation's own
+    .env (hermes_cli/main.py loads PROJECT_ROOT/.env, the folder `hermes --version` names as its install directory,
+    over the environment when the home has no .env: a source or editable install's keys) and the
+    administrator-managed scope (HERMES_MANAGED: its .env, loaded last over everything, and its config.yaml). Returns
+    (the ones that are there, or that can't be looked at), or raises SystemExit when the install directory can't be
+    told."""
+    try:
+        r = subprocess.run([prog, "--version"], capture_output=True, text=True, env=env, timeout=300,
+                           stdin=subprocess.DEVNULL, cwd=cwd)
+        out = r.stdout if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    m = re.search(r"^Install directory: (/.+?)\s*$", out, re.M)
+    if not m:
+        raise SystemExit("couldn't tell where Hermes Agent is installed (`hermes --version` names no install directory), "
+                         "so not whether it would load a .env of its installation into the session: not running it")
+    there = []
+    for f in (os.path.join(m[1], ".env"), os.path.join(HERMES_MANAGED, ".env"), os.path.join(HERMES_MANAGED, "config.yaml")):
+        try:
+            os.lstat(f)
+            there.append(f)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError:
+            there.append(f)                     # can't be looked at: it may be there
+    return there
+
+
+def refuse_hermes_outside_files(prog, env, cwd):
+    """Stop the run when Hermes Agent would bring settings or keys of yours into a session (hermes_outside_files)."""
+    there = hermes_outside_files(prog, env, cwd)
+    if there:
+        raise SystemExit(f"{there[0]} is there (or can't be looked at), and Hermes Agent loads it into every session "
+                         "whatever its home, so a benchmark session would carry its settings or keys: not running Hermes "
+                         "Agent. Move it away for the run (or use a Hermes Agent installed without one), then run again.")
 
 
 def end_isolated(agent, prog, home):
@@ -1021,6 +1064,13 @@ def cmd_run(a):
     vc = require_config(a.allow_main_vm)
     sw = switches_from(a)
     tasks = load_tasks(a.tasks)
+    if sw["agent"] == "hermes":            # before any VM is reset: refused now rather than at the first session
+        home = tempfile.mkdtemp(prefix="mcomp-bench-home-")
+        try:
+            env = dict(session_env(sw, home), HERMES_HOME=os.path.join(home, ".hermes"))
+            refuse_hermes_outside_files(trusted_claude(None, "hermes"), env, home)
+        finally:
+            safedelete.rmtree(home, quiet=True)
     run_id = a.run_id or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     rdir = os.path.join(RESULTS, run_id)
     os.makedirs(rdir, exist_ok=True)

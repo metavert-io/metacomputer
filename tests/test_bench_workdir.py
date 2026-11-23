@@ -118,7 +118,12 @@ HERMES_STUB = STUB_HEAD + """
 w, hh = a, os.environ.get("HERMES_HOME") or os.path.join(d, "hermes-default-home")
 if a[:1] == ["-p"]:                 # a named profile (what the benchmark used before its sessions had homes of their own)
     w, hh = a[2:], os.path.join(d, "hermes-home", "profiles", a[1])
-if a == ["--version"]: print("Hermes Agent v0.23.3"); sys.exit(0)
+if a == ["--version"]:
+    inst = os.path.join(d, "hermes-install")
+    named = os.path.join(d, "hermes-install-says")
+    print("Hermes Agent v0.23.3 (2026.9.24)")
+    print(open(named).read() if os.path.isfile(named) else f"Install directory: {inst}")
+    sys.exit(0)
 if w[:2] == ["profile", "create"]:
     log(snap()); os.makedirs(os.path.join(d, "hermes-home", "profiles", w[2]), exist_ok=True); sys.exit(0)
 if w == ["config", "path"]:
@@ -323,6 +328,40 @@ def other_agents(td):
         check("hermes: its events as the Claude ones (terminal as Bash, errors kept), the result with tokens, no cost",
               [u["name"] for u in uses] == ["mcp__metacomputer__click", "Bash"] and [r["is_error"] for r in res] == [False, True]
               and fin and fin[0]["usage"]["output_tokens"] == 40 and fin[0]["total_cost_usd"] is None, (uses, res, fin))
+        # Hermes Agent loads its installation's .env and the administrator-managed /etc/hermes into every run, whatever
+        # its home (Codex's second re-check): while one is there the session doesn't start, and the file is named.
+        inst = os.path.join(td, "hermes-install")
+        managed = os.path.join(td, "etc-hermes")
+        os.makedirs(inst, exist_ok=True)
+        os.makedirs(managed, exist_ok=True)
+        old_managed = getattr(bench, "HERMES_MANAGED", None)
+        bench.HERMES_MANAGED = managed
+        refused = {}
+        try:
+            for label, path, says in (("its installation's .env", os.path.join(inst, ".env"), None),
+                                      ("the managed .env", os.path.join(managed, ".env"), None),
+                                      ("the managed config.yaml", os.path.join(managed, "config.yaml"), None),
+                                      ("an install directory it doesn't name", None, "Install directory unknown")):
+                if path:
+                    open(path, "w").write("OPENAI_API_KEY=from-the-install\n")
+                if says:
+                    open(os.path.join(td, "hermes-install-says"), "w").write(says)
+                n0 = len([r for r in records(td, "hermes") if "chat" in r["argv"]])
+                try:
+                    bench.run_session(task, sw, work, cfg, shim, tdir)
+                    why = None
+                except SystemExit as e:
+                    why = str(e)
+                ran = len([r for r in records(td, "hermes") if "chat" in r["argv"]]) > n0
+                refused[label] = bool(why) and not ran and (path is None or path in why)
+                for f in (path, os.path.join(td, "hermes-install-says")):
+                    if f and os.path.exists(f):
+                        os.remove(f)
+        finally:
+            bench.HERMES_MANAGED = old_managed
+        check("hermes: a .env in Hermes's installation, a managed /etc/hermes .env or config.yaml (Hermes loads them "
+              "whatever its home), or an install directory `hermes --version` doesn't name: no session starts, and the "
+              "file is named", all(refused.values()) and len(refused) == 4, refused)
         shutil.rmtree(work, ignore_errors=True)
         # Two Hermes runs at once, each with its own test VM settings: each session sees its own server, never the other's.
         runs = []

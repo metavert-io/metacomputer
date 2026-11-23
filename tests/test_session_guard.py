@@ -1259,7 +1259,8 @@ def other_agents_checks():
     under it. And look-alikes don't count: node or python running something else, OpenClaw's own helper processes."""
     print("the other agents: OpenClaw, Hermes Agent, Gemini CLI")
     node, python = userterm.fake_interpreter("node"), userterm.fake_interpreter("python3")
-    if not node or not python:
+    native = userterm.fake_interpreter("gemini")           # a native executable named gemini (Gemini CLI's standalone)
+    if not node or not python or not native:
         check("a C compiler to build the stand-in interpreters (cc)", False, "no /usr/bin/cc")
         return
     clear_records()
@@ -1268,16 +1269,26 @@ def other_agents_checks():
     A = comp("alpha", 2401)
     lib = os.path.join(LAB, "lib")
     run = [PY, path, lib, json.dumps(A)]
-    cases = (("Gemini CLI", [node, "/x/lib/node_modules/@google/gemini-cli/bundle/gemini.js", "--", *run], None),
-             ("Gemini CLI", [node, "--max-old-space-size=2048", "/opt/homebrew/bin/gemini", "--", *run], None),
+    S = lambda rel: os.path.join(TD, "scripts", rel)          # noqa: E731  (the scripts the stand-ins "run")
+    for rel in ("lib/node_modules/@google/gemini-cli/bundle/gemini.js", "opt/homebrew/bin/gemini", "x/preload.js",
+                "My Tools/bin/gemini"):
+        write(S(rel), "")
+    os.makedirs(S("alias"), exist_ok=True)
+    if not os.path.lexists(S("alias/gm")):
+        os.symlink(S("lib/node_modules/@google/gemini-cli/bundle/gemini.js"), S("alias/gm"))
+    cases = (("Gemini CLI", [node, S("lib/node_modules/@google/gemini-cli/bundle/gemini.js"), "--", *run], None, None),
+             ("Gemini CLI", [node, "--max-old-space-size=2048", S("opt/homebrew/bin/gemini"), "--", *run], None, None),
              ("Hermes Agent", [python, "-I", "-m", "hermes_cli.main", "--profile", "default", "gateway", "run", "--quiet",
-                               "--", *run], None),
-             ("Hermes Agent", ["hermes", "--", *run], python),
-             ("Gemini CLI", [node, "--require", "/x/preload.js", "/Volumes/My Tools/bin/gemini", "--", *run], None),
-             ("OpenClaw", ["openclaw-gateway", "--", *run], node),
-             ("OpenClaw", ["openclaw", "--", *run], node))
-    for name, argv, exe in cases:
-        r = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=120, env=dict(os.environ))
+                               "--", *run], None, None),
+             ("Hermes Agent", ["hermes", "--", *run], python, None),
+             ("Gemini CLI", [node, "--require", S("x/preload.js"), S("My Tools/bin/gemini"), "--", *run], None, None),
+             ("Gemini CLI", [native, "--", *run], None, None),
+             ("Gemini CLI", [node, "./gm", "--", *run], None, S("alias")),
+             ("OpenClaw", ["openclaw-gateway", "--", *run], node, None),
+             ("OpenClaw", ["openclaw", "--", *run], node, None))
+    for name, argv, exe, cwd in cases:
+        r = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=120, env=dict(os.environ),
+                           cwd=cwd)
         try:
             got = json.loads(r.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -1301,12 +1312,14 @@ def other_agents_checks():
         cases = agent_argv_cases.load(links)
     except OSError:
         cases = []
-    wrong = [(c["why"], owners.agent_of(7, owners.ProcTable({7: (1, c["name"])}, argvs={7: c["argv"]})))
-             for c in cases if owners.agent_of(7, owners.ProcTable({7: (1, c["name"])}, argvs={7: c["argv"]})) != c["agent"]]
+    got = [(c["why"], owners.agent_of(7, agent_argv_cases.table(owners, c))) for c in cases]
     shutil.rmtree(links, ignore_errors=True)
-    check(f"each agent is told from its exact arguments, every one looked at (no option tables), a link by what it "
-          f"resolves to, and when in doubt an agent; look-alikes aren't ({len(cases)} shared cases)", cases and not wrong,
-          wrong)
+    wrong = [(why, g) for (why, g), c in zip(got, cases) if g != c["agent"]]
+    check(f"each agent is told by what the process executes: its executable (a native gemini, through a link too), an "
+          f"interpreter's script (relative ones from its own working folder, links by what they resolve to; no option "
+          f"tables), -m module or -c program, its title; other arguments (a file an editor opens) never; it can't be "
+          f"told only when its arguments or working folder can't be read or its script isn't there "
+          f"({len(cases)} shared cases)", cases and not wrong, wrong)
     t = {30: (1, "node")}
     check("a plain process table (the tests' known processes) reads no arguments: an interpreter there isn't an agent",
           owners.agent_of(30, t) is None)
@@ -1317,29 +1330,54 @@ def other_agents_checks():
     check("an interpreter whose arguments can't be read counts as an agent session (unidentified), never as none",
           owners.agent_of(500, t) == owners.UNKNOWN_AGENT and owners.claude_of(me, t) == 500, owners.claude_of(me, t))
     real = (owners.ps_table, owners.os.isatty)
+    files = tempfile.mkdtemp(prefix="mcomp-argv-")
+    for f in ("opt/bin/gemini", "x/server.js", "tools/editor.js", "work/gemini", "tools/devshell.py", "w/bundle/gemini.js"):
+        os.makedirs(os.path.dirname(os.path.join(files, f)), exist_ok=True)
+        open(os.path.join(files, f), "w").close()
+    os.symlink(os.path.join(files, "w", "bundle", "gemini.js"), os.path.join(files, "w", "gm"))
+    F = lambda rel: os.path.join(files, rel)          # noqa: E731
     try:
         owners.ps_table = lambda strict=False: t
         owners.os.isatty = lambda fd: True
         refused = owners.at_user_terminal((0,)) is False
-        t.argvs[500] = ["/opt/homebrew/bin/node", "/x/server.js"]
+        t.argvs[500] = ["/opt/homebrew/bin/node", F("x/server.js")]
         passed = owners.at_user_terminal((0,)) is True
-    finally:
-        owners.ps_table, owners.os.isatty = real
-    check("...so commands only the user runs refuse under it (at_user_terminal), and pass once it's known to be another "
-          "program", refused and passed, (refused, passed))
-    # Gemini CLI started with node options no table lists (Codex's re-check): still Gemini, so user-only commands refuse.
-    try:
-        owners.ps_table = lambda strict=False: t
-        owners.os.isatty = lambda fd: True
+        # Gemini CLI started with node options no table lists: still Gemini, so user-only commands refuse.
         under = {}
         for opts in (["--dns-result-order", "ipv4first"], ["--disable-proto", "throw"], ["--stack-size", "4000"]):
-            t.argvs[500] = ["/opt/homebrew/bin/node", *opts, "/opt/bin/gemini", "-p", "hi"]
+            t.argvs[500] = ["/opt/homebrew/bin/node", *opts, F("opt/bin/gemini"), "-p", "hi"]
+            t.cwds[500] = files
             under[opts[0]] = (owners.agent_of(500, t), owners.at_user_terminal((0,)))
+        # Codex's second re-check: a native gemini, and a relative alias (no relaunch) told from the working folder;
+        # an editor and a dev shell whose arguments only mention an agent are the user's own terminal.
+        seen = {}
+        for label, comm, exe, argv, cwd in (
+                ("native gemini", "/opt/tools/gemini", "/opt/tools/gemini", ["gemini"], None),
+                ("native gemini through a link", "/opt/tools/gm", F("opt/bin/gemini"), ["gm"], None),
+                ("relative alias", "/opt/homebrew/bin/node", None, ["node", "./gm"], F("w")),
+                ("relative alias, working folder unreadable", "/opt/homebrew/bin/node", None, ["node", "./gm"], None),
+                ("editor", "/opt/homebrew/bin/node", None, ["node", F("tools/editor.js"), F("work/gemini")], files),
+                ("dev shell", "/opt/homebrew/bin/python3", None,
+                 ["python3", F("tools/devshell.py"), "--project", "hermes_cli"], files)):
+            t[500] = (400, comm)
+            t.argvs[500], t.exes[500], t.cwds[500] = argv, exe, cwd
+            seen[label] = (owners.agent_of(500, t), owners.at_user_terminal((0,)))
+        t[500] = (400, "/opt/homebrew/bin/node")
     finally:
         owners.ps_table, owners.os.isatty = real
+        shutil.rmtree(files, ignore_errors=True)
+    check("...so commands only the user runs refuse under it (at_user_terminal), and pass once it's known to be another "
+          "program", refused and passed, (refused, passed))
     check("...and Gemini CLI started with node options that take a value (--dns-result-order, --disable-proto, "
           "--stack-size) is still Gemini CLI: commands only the user runs refuse under it",
           all(v == ("Gemini CLI", False) for v in under.values()), under)
+    check("...and so do a native gemini (by its executable, through a link too) and a relative alias of Gemini CLI's "
+          "script (from the process's own working folder; unidentified when that can't be read), while an editor "
+          "opening a file named gemini and a dev shell naming a project hermes_cli above a terminal are the user's own",
+          seen == {"native gemini": ("Gemini CLI", False), "native gemini through a link": ("Gemini CLI", False),
+                   "relative alias": ("Gemini CLI", False),
+                   "relative alias, working folder unreadable": (owners.UNKNOWN_AGENT, False),
+                   "editor": (None, True), "dev shell": (None, True)}, seen)
     check("...and the live table reads arguments exactly (proc_argv: this process's own, spaces kept)",
           owners.proc_argv(os.getpid()) is not None and owners.ps_table().argv(os.getpid()) == owners.proc_argv(os.getpid())
           and owners.proc_argv(2 ** 22 + 7) is None)

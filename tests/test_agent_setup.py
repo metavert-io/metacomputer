@@ -661,6 +661,38 @@ def no_cli_cases():
         check("...a configuration larger than the 16 MB read, naming the command past it: the links stay, said, exit 1",
               p.returncode != 0 and os.path.islink(b.link) and "larger than 16 MB" in p.stdout,
               (p.returncode, p.stdout[-400:]))
+        os.remove(oc)
+        # A folder on the way that can't be searched or listed (Codex's second re-check): what's behind it wasn't looked
+        # at, so the links stay, with Python and without.
+        ocdir = os.path.join(b.home, ".openclaw")
+        write(oc, '{"mcp": {"servers": {"metacomputer": {"command": "' + b.link + '", "args": ["mcp-lazy"]}}}}')
+        prof = os.path.join(b.home, ".hermes", "profiles")
+        write(os.path.join(prof, "work", "config.yaml"), "mcp_servers:\n  metacomputer:\n    command: " + b.link + "\n")
+        seen = {}
+        for label, folder, mode, said in (("OpenClaw's folder can't be searched", ocdir, 0o000, "can't be looked at"),
+                                          ("Hermes Agent's profiles folder can't be listed", prof, 0o300,
+                                           "can't be listed")):
+            os.chmod(folder, mode)
+            try:
+                p = b.install("--uninstall")
+                p2 = b.install("--uninstall", MCOMP_BREW_PYTHON="/nonexistent", PATH="/usr/bin:/bin")
+            finally:
+                os.chmod(folder, 0o700)
+            seen[label] = (p.returncode != 0 and os.path.islink(b.link) and said in p.stdout
+                           and f"kept {b.link}" in p.stdout, p2.returncode != 0 and os.path.islink(b.link)
+                           and f"kept {b.link}" in p2.stdout)
+            shutil.rmtree(folder)
+        check("a configuration folder that can't be searched (OpenClaw's) or listed (Hermes Agent's profiles) may hold "
+              "an entry that runs the command: the links stay, said, exit 1, with Python and without",
+              seen and all(all(v) for v in seen.values()), seen)
+        # Gemini CLI's settings.json past the 4 MB its reader takes: what's beyond wasn't read, so the links stay.
+        gs = os.path.join(b.home, ".gemini", "settings.json")
+        write(gs, " " * (4 << 20) + '{"mcpServers": {"metacomputer": {"command": "' + b.link + '", "args": ["mcp-lazy"]}}}')
+        p = b.install("--uninstall")
+        check("Gemini CLI's settings.json larger than the 4 MB read, its entry past it: not taken for absent; the links "
+              "stay, said, exit 1", p.returncode != 0 and os.path.islink(b.link) and "larger than 4 MB" in p.stdout
+              and f"kept {b.link}" in p.stdout, (p.returncode, p.stdout[-400:]))
+        os.remove(gs)
         write(oc, '{"mcp": {"servers": {}}}')
         p = b.install("--uninstall")
         check("a configuration that doesn't name the command doesn't hold the links back", p.returncode == 0

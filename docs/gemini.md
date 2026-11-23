@@ -94,7 +94,8 @@ in Terminal, iTerm or an SSH session, not through an agent.
 
 - **One controller at a time** counts each Gemini CLI session as one session: its process is `node` running its
   `gemini` script (it starts itself again as a second node process, the parent of its shell commands and MCP servers;
-  `lib/owners.py` recognizes both by the script they run).
+  `lib/owners.py` recognizes both by the script they run, a relative one from the process's own folder), or Gemini
+  CLI's standalone `gemini` executable (by the executable the process runs).
 - **The vault** recognizes Gemini CLI sessions as it does Claude Code's: "for this session" answers, unattended rules for
   a project folder, and tokens tied to the session that asked for them.
 - **`metacomputer learn`** reads Gemini CLI's sessions (`~/.gemini/tmp/<project>/chats/session-*.jsonl`), with the same

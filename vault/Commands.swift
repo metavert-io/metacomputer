@@ -199,7 +199,8 @@ func unlockKey(_ paths: Paths) throws -> (VaultKey, Payload) {
 
 #if MCOMP_VAULT_TESTING
 /// Test builds only: the agent each case is (agentKindOf), one line each ("-" for none), for the cases lib/owners.py is
-/// checked against too (tests/fixtures/agent_argv.json: [{"name": kernel name, "argv": [...] or null}]).
+/// checked against too (tests/fixtures/agent_argv.json, as tests/agent_argv_cases.py makes them: [{"name": kernel name,
+/// "exe": its executable or absent, "argv": [...] or null, "cwd": its working folder or null}]).
 func testAgentKind(_ argv: [String]) throws -> Int32 {
     guard argv.count == 1, let data = FileManager.default.contents(atPath: argv[0]),
           let cases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
@@ -208,7 +209,8 @@ func testAgentKind(_ argv: [String]) throws -> Int32 {
     for c in cases {
         let name = c["name"] as? String ?? ""
         let args = c["argv"] as? [String]
-        oprint(agentKindOf(name, args) ?? "-")
+        let exe = c["exe"] as? String, cwd = c["cwd"] as? String
+        oprint(agentKindOf(name, exe: exe, args: { args }, cwd: { cwd }) ?? "-")
     }
     return Exit.ok
 }

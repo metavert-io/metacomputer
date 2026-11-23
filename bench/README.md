@@ -204,6 +204,19 @@ or fails:
   which has no allowlist for its terminal, the terminal, skills and
   metacomputer toolsets only, approvals manual and its dangerous commands
   refused. None runs with a yolo or approve-everything mode.
+- **Hermes Agent: what manual approvals still allow.** Hermes asks only
+  before commands it rates dangerous; with approvals manual, every other
+  terminal command still runs without asking, as you, on this Mac. That's a
+  limit of Hermes Agent, not something the benchmark can close: run it with a
+  test VM's settings only (it refuses the main VM), and on a Mac whose files
+  you'd let such a command read.
+- **Hermes Agent: nothing loaded from outside its home.** Hermes loads its
+  installation's own `.env` (the folder `hermes --version` calls its install
+  directory) and the administrator-managed `/etc/hermes` (`.env`,
+  `config.yaml`) into every run, whatever its home. While any of them is
+  there (or can't be looked at), the run stops before it starts, naming the
+  file: move it away for the run, or use a Hermes Agent installed without
+  one.
 - metacomputer itself, the system under test, keeps your HOME (its settings,
   SSH keys and vault are there): the server's entry says so, and the
   session's `metacomputer` and `mcomp` commands are launchers in the work

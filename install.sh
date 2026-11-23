@@ -828,16 +828,23 @@ agent_step() { # NAME: openclaw, hermes or gemini
 # before its removal, and checked after), and the skill links that point here. One that stays and runs
 # ~/.local/bin/metacomputer or mcomp keeps those links (KEEP_CMD).
 agent_config_mentions() { # NAME: 0 when a file of the agent's configuration may run metacomputer's command (it names
-  # metacomputer or mcomp, can't be read, or includes other files: $include, !include): read without Python, for an
-  # uninstall that can't run agent_setup.py
-  local f g
+  # metacomputer or mcomp, can't be read or looked at, or includes other files: $include, !include): read without
+  # Python, for an uninstall that can't run agent_setup.py
+  local f g d
   case "$1" in
     gemini) set -- "${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json" ;;
     hermes) set -- "${HERMES_HOME:-$HOME/.hermes}/config.yaml" "$HOME/.hermes/config.yaml" "$HOME"/.hermes/profiles/*/config.yaml ;;
     openclaw) set -- "${OPENCLAW_CONFIG_PATH:-${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/openclaw.json}" "$HOME"/.openclaw-*/openclaw.json ;;
   esac
   for f in "$@"; do
-    [ -e "$f" ] || [ -L "$f" ] || continue
+    if ! [ -e "$f" ] && ! [ -L "$f" ]; then
+      # Not there, or behind a folder that can't be searched or listed (a profiles/* pattern left as it was): the
+      # nearest folder on its way that exists must be both, else it may be there.
+      d="${f%/*}"
+      while [ -n "$d" ] && ! [ -e "$d" ] && ! [ -L "$d" ]; do d="${d%/*}"; done
+      [ -z "$d" ] || { [ -x "$d" ] && [ -r "$d" ]; } || return 0
+      continue
+    fi
     [ -r "$f" ] || return 0
     g=0; grep -q -F -e metacomputer -e mcomp -e '$include' -e '!include' "$f" 2>/dev/null || g=$?
     [ "$g" = 1 ] || return 0      # found, or grep couldn't read it all (2): may run it

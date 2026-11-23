@@ -94,7 +94,8 @@ iTerm or an SSH session, not through an agent.
 
 - **One controller at a time:** every Hermes Agent conversation runs in its gateway (`hermes chat`, `-z` and the TUI
   are its clients), one process per profile, so its conversations count as one session and don't wait for each other.
-  `lib/owners.py` recognizes it as `python` with `hermes_cli` in its arguments (or its `hermes` script). As with Codex's app server, when two conversations
+  `lib/owners.py` recognizes it as `python` running `hermes_cli` (`-m`, a `-c` program that loads it, a script in it)
+  or its `hermes` script. As with Codex's app server, when two conversations
   have their tools on different computers, a command from either that names no computer refuses: name it with `--vm`.
 - **The vault** treats requests from under the gateway like those from Codex's app server: its conversations share one
   process, so nothing tells one from another, and "for this session" answers, project rules and session tokens don't
@@ -117,8 +118,15 @@ for that home is stopped (`hermes gateway stop`) and the home is deleted.
 **What it may do without asking:** Hermes runs a configured server's tools without asking, and has no allowlist for its
 terminal: commands it doesn't rate dangerous run without asking. The session gets only the terminal, skills and
 metacomputer toolsets (no file writing, web, browser or code tools), no `--yolo`, approvals set to `manual` and a `-q`
-session's dangerous commands refused (`approvals.single_query_mode: deny`). What a terminal command can still reach is
-what any program you run can: the throwaway HOME keeps Hermes's own settings and keys out, but it isn't a sandbox.
+session's dangerous commands refused (`approvals.single_query_mode: deny`). Manual approvals still let every terminal
+command Hermes doesn't rate dangerous run without asking, as you, on this Mac: that's a limit of Hermes, so run the
+benchmark with a test VM's settings only. The throwaway HOME keeps Hermes's own settings and keys out, but it isn't a
+sandbox.
+
+**Nothing from outside its home:** Hermes loads its installation's own `.env` (the folder `hermes --version` names as
+its install directory) and the administrator-managed `/etc/hermes` (`.env`, `config.yaml`) into every run, whatever its
+home. While any of them is there, or can't be looked at, the benchmark doesn't run Hermes and names the file: move it
+away for the run, or use a Hermes installed without one.
 
 A pip-installed Hermes (in a venv) works in any Hermes home at once (checked). With Hermes's own installer, Hermes says
 a new home gets its own copy of Hermes's dependencies the first time Hermes runs there; the benchmark does that before

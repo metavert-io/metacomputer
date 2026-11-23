@@ -30,8 +30,10 @@ Skill links are metacomputer's only when they point into this checkout's own ski
 a relative target is read from the link's folder): only those are ever replaced or removed. A skill that can't be linked
 (something else there, or an error), or that OpenClaw doesn't offer, leaves the step unfinished. Hermes Agent's profile is
 resolved once (`hermes config path`) and every command and the skills folder use it. Uninstall keeps
-~/.local/bin/metacomputer and mcomp whenever an agent's configuration can't be read and may still run them (its CLI
-missing or refused: Gemini CLI's settings.json is read directly; the others' files are looked through for the names). The step's output, one line each, for install.sh: "ok TEXT", "warn TEXT", "say TEXT", and for --uninstall
+~/.local/bin/metacomputer and mcomp whenever an agent's configuration can't be inspected in full and may still run them
+(its CLI missing or refused: Gemini CLI's settings.json is read directly, all of it or it counts as maybe; the others'
+files are looked through for the names, and a file that includes others, is past the read, can't be read, or sits
+behind a folder that can't be searched or listed counts as maybe too), and on any unexpected error. The step's output, one line each, for install.sh: "ok TEXT", "warn TEXT", "say TEXT", and for --uninstall
 "keep" when an entry that stays runs ~/.local/bin/metacomputer (or mcomp), so those stay too. Exit status: 0 finished,
 1 unfinished (install.sh records that in installed.json's "incomplete", so `metacomputer update` runs the step again),
 2 usage. Nothing printed holds a value from the agent's configuration but metacomputer's own command.
@@ -134,6 +136,10 @@ class Agent:
         """The files that may hold its MCP servers, for an uninstall that can't run its CLI."""
         return []
 
+    def config_dirs(self, env):
+        """The folders config_files lists to find some of them (profiles): one that can't be listed hides what's in it."""
+        return []
+
     def skills_dir(self, env):
         return os.path.join(home(env), ".agents", "skills")
 
@@ -190,11 +196,13 @@ class Gemini(Agent):
         path = self.settings(env)
         try:
             with open(path, encoding="utf-8") as f:
-                text = f.read(4 << 20)
-        except FileNotFoundError:
+                text = f.read(SETTINGS_CAP + 1)
+        except (FileNotFoundError, NotADirectoryError):
             return {"kind": "absent"}
         except (OSError, UnicodeDecodeError):
             return {"kind": "error", "why": "its settings.json couldn't be read"}
+        if len(text) > SETTINGS_CAP:          # what's past the read could be anything, metacomputer's entry included
+            return {"kind": "error", "why": "its settings.json is larger than 4 MB, so it wasn't read in full"}
         if not text.strip():
             return {"kind": "absent"}
         try:
@@ -262,6 +270,9 @@ class Hermes(Agent):
         return ([os.path.join(env["HERMES_HOME"], "config.yaml")] if env.get("HERMES_HOME") else []) + \
             [os.path.join(root, "config.yaml")] + sorted(glob.glob(os.path.join(root, "profiles", "*", "config.yaml")))
 
+    def config_dirs(self, env):
+        return [os.path.join(home(env), ".hermes", "profiles")]
+
     def cli(self):
         return f"hermes -p {self.profile}" if self.profile else "hermes"
 
@@ -310,6 +321,9 @@ class OpenClaw(Agent):
         state = env.get("OPENCLAW_STATE_DIR") or os.path.join(home(env), ".openclaw")
         return [os.path.join(state, "openclaw.json")] + sorted(glob.glob(os.path.join(home(env), ".openclaw-*",
                                                                                          "openclaw.json")))
+
+    def config_dirs(self, env):
+        return [] if env.get("OPENCLAW_CONFIG_PATH") else [home(env)]
 
     def read(self, prog, env):
         rc, out, err = self.run([prog, "mcp", "show", NAME, "--json"], env)
@@ -470,15 +484,23 @@ def agent_lock(name, env):
 
 
 MENTIONS_CAP = 16 << 20
+SETTINGS_CAP = 4 << 20          # Gemini CLI's settings.json, read whole
 # What makes a configuration file pull in others, which an uninstall without the agent's CLI doesn't follow: OpenClaw's
 # `$include` (JSON5), and YAML's `!include` tag.
 INCLUDES = (b"$include", b"!include")
 
 
 def mentions(path):
-    """Why a configuration file may run metacomputer's command, or None when it plainly doesn't. Anything not read in
-    full counts as maybe: "names it" (metacomputer or mcomp), "can't be read", "is larger than 16 MB" (only the start
-    was read) or "includes other files" (INCLUDES: what they hold wasn't read)."""
+    """Why a configuration file may run metacomputer's command, or None when it plainly doesn't (it isn't there, its
+    folder included). Anything not inspected in full counts as maybe: "names it" (metacomputer or mcomp), "can't be
+    looked at" (a folder on its way can't be searched: it may be there), "can't be read", "is larger than 16 MB" (only
+    the start was read) or "includes other files" (INCLUDES: what they hold wasn't read)."""
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        return "can't be looked at"
     try:
         with open(path, "rb") as f:
             data = f.read(MENTIONS_CAP + 1)
@@ -492,6 +514,17 @@ def mentions(path):
         return "is larger than 16 MB"
     if any(i in data for i in INCLUDES):
         return "includes other files"
+    return None
+
+
+def unlisted(folder):
+    """Why a folder searched for configuration files (profiles) may hide one, or None: "can't be listed"."""
+    try:
+        os.listdir(folder)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        return "can't be listed"
     return None
 
 
@@ -592,7 +625,8 @@ def install(agent, root, link, env, out):
 def _unregister(agent, prog, root, link, env, out):
     """The MCP server, under the agent's lock: True when it finished. prog None: the agent's CLI isn't available."""
     if prog is None and not agent.reads_files:
-        files = [(f, mentions(f)) for f in agent.config_files(env) if os.path.lexists(f)]
+        files = [(f, mentions(f)) for f in agent.config_files(env)] + \
+            [(d, unlisted(d)) for d in agent.config_dirs(env)]
         files = [(f, why) for f, why in files if why]
         if files:
             out("warn", f"{agent.label}'s {agent.prog} command isn't available, so its configuration couldn't be checked "

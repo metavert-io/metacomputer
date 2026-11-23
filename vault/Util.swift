@@ -638,73 +638,182 @@ let unknownAgent = "unidentified agent"
 /// The agent session a process is, if any: "Claude Code" (a process named claude, node running a script named
 /// claude*, or the native installer's version file) or "Codex" (its native binary, named codex; npm and Homebrew start
 /// it from a node launcher, and the IDE extensions and the desktop app run `codex app-server`, one process for all of
-/// their conversations); for an interpreter (node, python), what it runs (interpreterAgent): "OpenClaw", "Hermes
-/// Agent" or "Gemini CLI".
+/// their conversations); else what it executes (agentKindOf): "OpenClaw", "Hermes Agent", "Gemini CLI" or
+/// unknownAgent.
 func agentKind(_ p: pid_t, _ e: ProcEntry) -> String? {
     if e.name == "claude"
-        || (e.name == "node" && procArgs(p).dropFirst().prefix(2).contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("claude") })
-        || (processPath(p).map { matches($0, "/claude/versions/[0-9]+\\.[0-9]+\\.[0-9]+[^/]*$") } ?? false) {
+        || (e.name == "node" && procArgs(p).dropFirst().prefix(2).contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("claude") }) {
         return "Claude Code"
     }
-    if e.name == "codex" { return "Codex" }
-    var args: [String]? = isInterpreter(e.name) ? procArgsOrNil(p) : []
+    var unreadable = false
     #if MCOMP_VAULT_TESTING
     // tests/test_vault_ops.py: a stand-in interpreter of this name whose arguments can't be read
-    if ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_UNREADABLE_ARGS"] == e.name { args = nil }
+    unreadable = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_UNREADABLE_ARGS"] == e.name
     #endif
-    return agentKindOf(e.name, args)
+    return agentKindOf(e.name, exe: processPath(p), args: { unreadable ? nil : procArgsOrNil(p) }, cwd: { procCwd(p) })
 }
 
-/// The agent a process is, from the kernel's name for it and, for an interpreter, its arguments (nil: they couldn't be
-/// read, which counts as an agent: unknownAgent). As lib/owners.py agent_kind and agent_of.
-func agentKindOf(_ name: String, _ args: [String]?) -> String? {
-    if name == "codex" { return "Codex" }
-    if name == "openclaw" || name == "openclaw-gateway" { return "OpenClaw" }
-    if name == "hermes" { return "Hermes Agent" }
-    guard isInterpreter(name) else { return nil }
-    guard let args = args else { return unknownAgent }
-    return interpreterAgent(args)
+/// os.path.basename: what follows the last "/".
+func pathBase(_ s: String) -> String {
+    return s.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? s
+}
+
+/// The agents' programs by file name, a folder in a script's path, python -m modules, words in a -c or -e program, and
+/// bun's commands: lib/owners.py AGENT_NAMES, AGENT_PATH_WORDS, AGENT_MODULES, AGENT_CODE_WORDS, BUN_COMMANDS.
+let agentNames: [String: String] = [
+    "gemini": "Gemini CLI", "gemini.js": "Gemini CLI", "openclaw": "OpenClaw", "openclaw.mjs": "OpenClaw",
+    "openclaw-gateway": "OpenClaw", "hermes": "Hermes Agent", "hermes-agent": "Hermes Agent", "hermes-acp": "Hermes Agent"]
+let agentPathWords: [(String, String)] = [("/@google/gemini-cli/", "Gemini CLI"), ("hermes_cli", "Hermes Agent")]
+let agentModules: [String: String] = ["hermes_cli": "Hermes Agent", "hermes_agent": "Hermes Agent"]
+let agentCodeWords: [(String, String)] = [("@google/gemini-cli", "Gemini CLI"), ("openclaw.mjs", "OpenClaw"),
+                                          ("hermes_cli", "Hermes Agent")]
+let bunCommands: Set<String> = ["run", "x", "exec", "test", "build", "install", "i", "add", "remove", "rm", "update",
+                                "create", "init", "pm", "link", "unlink", "upgrade", "repl", "outdated", "publish", "patch"]
+
+/// The agent a process is by a name (its kernel name or its executable's path), as lib/owners.py agent_kind.
+func nameKind(_ s: String) -> String? {
+    let base = pathBase(s)
+    if base == "claude" || matches(s, "/claude/versions/[0-9]+\\.[0-9]+\\.[0-9]+[^/]*$") { return "Claude Code" }
+    if base == "codex" { return "Codex" }
+    return agentNames[base]
+}
+
+func pathAgent(_ path: String) -> String? {
+    if let a = agentNames[pathBase(path)] { return a }
+    return agentPathWords.first(where: { path.contains($0.0) })?.1
+}
+
+func fileAgent(_ path: String) -> String? {
+    if let a = pathAgent(path) { return a }
+    guard let r = realpath(path, nil) else { return nil }
+    let real = String(cString: r)
+    free(r)
+    return pathAgent(real)
+}
+
+/// The agent a process is, from what it executes, as lib/owners.py process_agent: its kernel name, then its executable
+/// (the realpath of its text image: a native gemini, a single-file build), then for an interpreter (by either) the
+/// program it runs (interpreterAgent; args() nil: they can't be read, which counts as an agent: unknownAgent).
+func agentKindOf(_ name: String, exe: String?, args: () -> [String]?, cwd: @escaping () -> String?) -> String? {
+    if let k = nameKind(name) { return k }
+    if let x = exe, let k = nameKind(x) { return k }
+    let interp: String? = isInterpreter(name) ? name : (exe.map(pathBase).flatMap { isInterpreter($0) ? $0 : nil })
+    guard let interp = interp else { return nil }
+    guard let a = args() else { return unknownAgent }
+    let kind = interp.lowercased().hasPrefix("python") ? "python" : (interp == "bun" ? "bun" : "node")
+    return interpreterAgent(a, cwd: cwd, kind: kind)
 }
 
 /// A process the kernel names after an interpreter (node, bun, python): the agent is told by what it runs.
 func isInterpreter(_ name: String) -> Bool {
-    return name == "node" || name == "nodejs" || name == "bun" || name == "Python" || matches(name, "^python[0-9.]*$")
+    let n = pathBase(name)
+    return n == "node" || n == "nodejs" || n == "bun" || n == "Python" || matches(n, "^python[0-9.]*$")
 }
 
-/// The agents' entry points, as an interpreter's argument names them (lib/owners.py AGENT_SCRIPTS): a script by its file
-/// name, and words found anywhere in an argument (Gemini CLI's package folder, Hermes Agent's package name).
-let agentScripts: [(String, Set<String>, [String])] = [
-    ("Gemini CLI", ["gemini", "gemini.js"], ["/@google/gemini-cli/"]),
-    ("OpenClaw", ["openclaw", "openclaw.mjs", "openclaw-gateway"], []),
-    ("Hermes Agent", ["hermes", "hermes-agent", "hermes-acp"], ["hermes_cli"])]
+/// What an interpreter's argument names, resolved against the process's working folder (lib/owners.py _resolve).
+enum Resolved { case file(String), missing, unreadable }
 
-/// The agent whose entry point an argument (or an option's `=value`) names, else nil.
-func entryAgent(_ value: String) -> String? {
-    let base = value.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? value   // os.path.basename
-    for (agent, names, words) in agentScripts where names.contains(base) || words.contains(where: { value.contains($0) }) {
-        return agent
+func resolveArg(_ arg: String, cwd: () -> String?, kind: String) -> Resolved {
+    var path = arg
+    if !arg.hasPrefix("/") {
+        guard let w = cwd(), !w.isEmpty else { return .unreadable }
+        path = w.hasSuffix("/") ? w + arg : w + "/" + arg
     }
-    return nil
+    for p in [path] + (kind == "python" ? [] : [path + ".js", path + ".mjs", path + ".cjs"])
+    where FileManager.default.fileExists(atPath: p) {
+        return .file(p)
+    }
+    return .missing
 }
 
-/// The agent an interpreter's arguments (exactly) run, else nil, as lib/owners.py script_agent: every argument looked
-/// at, argv[0] (a process's title: `openclaw`, `openclaw-gateway`, `hermes`) included, never an option table: an
-/// argument, or the value after an option's `=`, naming an agent's entry point, as written or, for an absolute path,
-/// as it resolves (a link to it). When in doubt it's an agent; the first argument that names one decides.
-func interpreterAgent(_ args: [String]) -> String? {
-    for a in args {
-        var values = [a]
-        if let eq = a.firstIndex(of: "=") { values.append(String(a[a.index(after: eq)...])) }
-        for v in values where !v.isEmpty {
-            if let got = entryAgent(v) { return got }
-            if v.hasPrefix("/"), let r = realpath(v, nil) {
-                let real = String(cString: r)
-                free(r)
-                if real != v, let got = entryAgent(real) { return got }
+/// The agent an interpreter's exact arguments run, else nil, or unknownAgent when it can't be told: as lib/owners.py
+/// script_agent, step for step. Its title (argv[0]); a -c or -e program or python's -m module; else its script, the
+/// first argument naming a file or folder that exists (relative ones from the process's own working folder), with the
+/// next one too when an option comes right before it, and files given as an option's `=value`. Other arguments are
+/// never looked at. Unknown when the script's place holds no file, the program comes from standard input, or the
+/// working folder can't be read for a relative one.
+func interpreterAgent(_ argv: [String], cwd: @escaping () -> String?, kind: String) -> String? {
+    guard let first0 = argv.first else { return nil }
+    if let t = agentNames[pathBase(first0)] { return t }
+    var found: [String] = []
+    func first(_ more: String? = nil) -> String? {
+        for p in found + (more.map { [$0] } ?? []) {
+            if let a = fileAgent(p) { return a }
+        }
+        return nil
+    }
+    var afterOpt = false, bunCmd = false
+    var i = 1
+    let n = argv.count
+    while i < n {
+        let a = argv[i]
+        if a == "--" || a == "-" {
+            if a == "-" || i + 1 >= n { return first() ?? unknownAgent }
+            switch resolveArg(argv[i + 1], cwd: cwd, kind: kind) {
+            case .unreadable: return unknownAgent
+            case .file(let p): return first(p)
+            case .missing: return first() ?? unknownAgent
             }
         }
+        if a.hasPrefix("-") {
+            var prog: (Character, String)? = nil
+            if kind == "python" && !a.hasPrefix("--") {
+                let chars = Array(a)
+                var j = 1
+                while j < chars.count {
+                    if chars[j] == "W" || chars[j] == "X" { break }
+                    if chars[j] == "c" || chars[j] == "m" {
+                        let rest = String(chars[(j + 1)...])
+                        prog = (chars[j], !rest.isEmpty ? rest : (i + 1 < n ? argv[i + 1] : ""))
+                        break
+                    }
+                    j += 1
+                }
+            } else if kind != "python" {
+                if ["-e", "--eval", "-p", "--print"].contains(a) {
+                    prog = ("c", i + 1 < n ? argv[i + 1] : "")
+                } else if a.hasPrefix("--eval=") || a.hasPrefix("--print=") {
+                    prog = ("c", String(a[a.index(after: a.firstIndex(of: "=")!)...]))
+                }
+            }
+            if let (which, v) = prog {
+                if which == "m" {
+                    return first() ?? agentModules[v.components(separatedBy: ".").first ?? ""]
+                }
+                return first() ?? agentCodeWords.first(where: { v.contains($0.0) })?.1
+            }
+            afterOpt = !a.contains("=")
+            let value = a.firstIndex(of: "=").map { String(a[a.index(after: $0)...]) } ?? ""
+            if value.contains("/") {
+                switch resolveArg(value, cwd: cwd, kind: kind) {
+                case .unreadable: return unknownAgent
+                case .file(let p): found.append(p)
+                case .missing: break
+                }
+            }
+            i += 1
+            continue
+        }
+        if kind == "bun" && !bunCmd && found.isEmpty && bunCommands.contains(a) {
+            bunCmd = true
+            if a != "run" { return first() }
+            afterOpt = false
+            i += 1
+            continue
+        }
+        switch resolveArg(a, cwd: cwd, kind: kind) {
+        case .unreadable:
+            return unknownAgent
+        case .file(let p):
+            if !afterOpt { return first(p) }
+            found.append(p)
+        case .missing:
+            if !afterOpt { return first() ?? unknownAgent }
+        }
+        afterOpt = false
+        i += 1
     }
-    return nil
+    return first()
 }
 
 /// An agent process that runs all of its conversations, whose requests therefore name no one session: Codex's app

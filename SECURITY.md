@@ -3255,10 +3255,12 @@ something waits for you:
   The terminal requirement keeps values off pipes and command lines. A terminal inside an agent session doesn't
   count: commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above
   them in the process tree, since Codex's command tool (and Gemini CLI's) can give a command a terminal of its own, and
-  also when a node or python process above them has arguments that can't be read (it may be one of those agents).
-  Such a process is told by every one of its arguments, not by a list of the interpreter's options (which can't be
-  complete): any argument that names an agent's entry point (its script, by name or by what a link resolves to; Hermes
-  Agent's `hermes_cli` anywhere) makes it that agent, so a program that only mentions one counts as one too. It isn't a barrier against your own account,
+  also when a node or python process above them can't be told (it may be one of those agents). A process is told by
+  what it executes: its executable (a native `gemini`, through a link of another name too) and, for node, bun or
+  python, the program it runs (its script, the first argument naming a file that exists, relative ones from the
+  process's own working folder and links by what they resolve to; a `-m` module or a `-c` program), never by its other
+  arguments, so an editor opening a file named `gemini` is no agent. It can't be told when its arguments or working
+  folder can't be read or its script isn't there. It isn't a barrier against your own account,
   since a program can open a pseudo-terminal outside an agent's process tree.
 - **One-time codes from inside the VM are only as trustworthy as the page they're read from.** A relay reads a
   mailbox signed in inside the VM, and anything signed in there is reachable by a misbehaving agent with a shell (it

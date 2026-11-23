@@ -1204,7 +1204,10 @@ def run(td, procs):
         os.makedirs(os.path.dirname(path))
         open(path + ".c", "w").write(FAKE_INTERP_C)
         subprocess.run(["cc", "-o", path, path + ".c"], capture_output=True, text=True)
-    p, outs = as_agent([fnode, "/x/lib/node_modules/@google/gemini-cli/bundle/gemini.js"], proj1,
+    bundle = os.path.join(td, "scripts", "lib", "node_modules", "@google", "gemini-cli", "bundle", "gemini.js")
+    os.makedirs(os.path.dirname(bundle))
+    open(bundle, "w").close()
+    p, outs = as_agent([fnode, bundle], proj1,
                        ["fill", "web-each", "--vm", "opsvm", "--field", "password"],
                        ["fill", "web-each", "--vm", "opsvm", "--field", "password"])
     u.expect(f"Asked by Gemini CLI in {proj1} (pid {p.pid})")
@@ -1217,6 +1220,25 @@ def run(td, procs):
           "covers its next use", [x[0] for x in res] == [0, 0] and u.text().count("Type web-each to allow") == n0
           and recs[-1].get("approval") == "grant:session" and recs[-1].get("requester", {}).get("agent") == "Gemini CLI",
           (res, recs[-1:]))
+    # Gemini CLI's standalone executable (the kernel's name for it), and node running a relative link to its script
+    # from the folder it runs in (no relaunch): Gemini CLI sessions too (Codex's second re-check).
+    fgemini = os.path.join(td, "fakeinterp4", "gemini")
+    os.makedirs(os.path.dirname(fgemini))
+    open(fgemini + ".c", "w").write(FAKE_INTERP_C)
+    subprocess.run(["cc", "-o", fgemini, fgemini + ".c"], capture_output=True, text=True)
+    proj3 = os.path.realpath(os.path.join(td, "proj3"))
+    os.makedirs(proj3)
+    os.symlink(bundle, os.path.join(proj3, "gm"))
+    for argv0, label in (([fgemini, "-p"], "Gemini CLI's own executable"), ([fnode, "./gm"], "node running ./gm")):
+        p, outs = as_agent(argv0, proj3, ["fill", "web-each", "--vm", "opsvm", "--field", "password"])
+        u.expect(f"Asked by Gemini CLI in {proj3} (pid {p.pid})")
+        u.expect("Type web-each to allow")
+        u.send("web-each\n")
+        res = claude_results(p, outs)
+        recs = [x for x in audit_recs() if x.get("op") == "fill" and x.get("name") == "web-each"]
+        check(f"{label} is a Gemini CLI session: named in the question and the record", [x[0] for x in res] == [0]
+              and recs[-1].get("requester", {}).get("agent") == "Gemini CLI"
+              and recs[-1].get("requester", {}).get("claude_pid") == p.pid, (res, recs[-1:]))
     for argv0, exe, said, label in ((["openclaw-gateway", "run"], fnode, "under OpenClaw's gateway", "OpenClaw gateway"),
                                     ([fpython, "-mhermes_cli.main"], None, "under Hermes Agent's gateway",
                                      "Hermes Agent gateway")):

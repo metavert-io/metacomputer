@@ -708,22 +708,26 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
-    ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above\s+them in the process tree.*?and\s+also when a node or python process above them has arguments that can't be read.*?Such a process is told by every one of its arguments, not by a list of the interpreter's options",
+    ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above\s+them in the process tree.*?and\s+also when a node or python process above them can't be told.*?A process is told by\s+what it executes: its executable \(a native `gemini`.*?never by its other\s+arguments.*?It can't be told when its arguments or working\s+folder can't be read or its script isn't there",
      lambda m: "def at_user_terminal(fds=(0,)):" in raw("lib/owners.py")
      and "return ancestry_complete(os.getpid(), table) and claude_of(os.getpid(), table) is None" in raw("lib/owners.py")
      and 'return "Claude Code"' in function_src("lib/owners.py", "agent_kind")
      and 'return "Codex"' in function_src("lib/owners.py", "agent_kind")
-     and 'if base in ("openclaw", "openclaw-gateway"):' in function_src("lib/owners.py", "agent_kind")
-     and 'return script_agent(argv) if argv and is_interpreter(comm) else None' in function_src("lib/owners.py", "agent_kind")
-     and "for a in argv or ():" in function_src("lib/owners.py", "script_agent")
-     and 'got = _entry_agent(real) if real != v and os.path.exists(real) else None' in function_src("lib/owners.py", "script_agent")
-     and '("Hermes Agent", ("hermes", "hermes-agent", "hermes-acp"), ("hermes_cli",))' in raw("lib/owners.py")
+     and "got = name_agent(comm)" in function_src("lib/owners.py", "agent_kind")
+     and "got = agent_kind(comm) or (agent_kind(exe) if exe else None)" in function_src("lib/owners.py", "process_agent")
+     and "if args is None:\n        return UNKNOWN_AGENT" in function_src("lib/owners.py", "process_agent")
+     and "return process_agent(comm, table.exe(pid), lambda: table.argv(pid), lambda: table.cwd(pid))"
+     in function_src("lib/owners.py", "agent_of")
+     and "return first() or UNKNOWN_AGENT        # the script's place, and no such file: can't tell"
+     in function_src("lib/owners.py", "script_agent")
+     and "if not where:\n            return _UNREADABLE" in function_src("lib/owners.py", "_resolve")
+     and '"gemini": "Gemini CLI"' in raw("lib/owners.py") and "proc_pidpath" in function_src("lib/owners.py", "proc_exe")
      and "NODE_VALUE_OPTIONS" not in raw("lib/owners.py") and "nodeValueOptions" not in raw("vault/Util.swift")
-     and "for a in args {" in raw("vault/Util.swift") and "realpath(v, nil)" in raw("vault/Util.swift")
-     and "return UNKNOWN_AGENT if argv is None else agent_kind(comm, argv)" in function_src("lib/owners.py", "agent_of")
-     and "guard let args = args else { return unknownAgent }" in raw("vault/Util.swift")
+     and "if let x = exe, let k = nameKind(x) { return k }" in raw("vault/Util.swift")
+     and "guard let w = cwd(), !w.isEmpty else { return .unreadable }" in raw("vault/Util.swift")
+     and "guard let a = args() else { return unknownAgent }" in raw("vault/Util.swift")
      and 'case unknownAgent:\n        return "an unidentified agent\'s process"' in raw("vault/Util.swift")
-     and all(f'("{a}", (' in raw("lib/owners.py") for a in ("Gemini CLI", "OpenClaw", "Hermes Agent"))
+     and all(f': "{a}"' in raw("lib/owners.py") for a in ("Gemini CLI", "OpenClaw", "Hermes Agent"))
      and "if agent_of(p, table):" in function_src("lib/owners.py", "claude_of")
      and "owners.at_user_terminal((0, 2))" in raw("lib/netpolicy.py") and "owners.at_user_terminal((0,))" in raw("lib/learn.py")
      and "return owners.at_user_terminal((0,))" in raw("lib/handoff.py")
@@ -731,8 +735,8 @@ CLAIMS = [
      and "user_tty || die" in raw("bin/metacomputer")
      and "guard atUserTerminal() else {" in raw("vault/TTY.swift")
      and "return agentAbove(getpid()) == false" in raw("vault/TTY.swift")
-     and 'if e.name == "codex" { return "Codex" }' in raw("vault/Util.swift")
-     and "return interpreterAgent(args)" in raw("vault/Util.swift")),
+     and 'if base == "codex" { return "Codex" }' in raw("vault/Util.swift")
+     and "return interpreterAgent(a, cwd: cwd, kind: kind)" in raw("vault/Util.swift")),
     ("docs/codex.md", r"a `metacomputer` command stops at once\s+with exit status (77)",
      lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("bin/metacomputer")
      and f"exit {m[1]} ;;" in raw("bin/metacomputer")),
@@ -748,6 +752,14 @@ CLAIMS = [
      and '"--approval-mode", "default"' in function_src("bench/bench.py", "isolate_session")
      and '"exec": {"mode": "allowlist"}' in function_src("bench/bench.py", "isolate_session")
      and '("approvals.mode", "manual")' in raw("bench/bench.py")),
+    ("bench/README.md", r"\*\*Hermes Agent: nothing loaded from outside its home.\*\* Hermes loads its\s+installation's own `.env`"
+                        r".*?the administrator-managed `/etc/hermes` \(`.env`,\s+`config.yaml`\).*?the run stops before it "
+                        r"starts, naming the\s+file",
+     lambda m: 'HERMES_MANAGED = "/etc/hermes"' in raw("bench/bench.py")
+     and 'for f in (os.path.join(m[1], ".env"), os.path.join(HERMES_MANAGED, ".env"), os.path.join(HERMES_MANAGED, "config.yaml")):'
+     in function_src("bench/bench.py", "hermes_outside_files")
+     and "refuse_hermes_outside_files(prog, env, home)" in function_src("bench/bench.py", "isolate_session")
+     and "refuse_hermes_outside_files(trusted_claude(None, \"hermes\"), env, home)" in function_src("bench/bench.py", "cmd_run")),
     ("bench/README.md", r"`--pass-env NAME\[,NAME...\]` \| `BENCH_PASS_ENV` \| none \| `gemini`, `hermes`, `openclaw`: the only variables of yours their sessions get",
      lambda m: '"pass_env": ""' in raw("bench/bench.py")
      and "for n in pass_env_names(sw):" in function_src("bench/bench.py", "session_env")
