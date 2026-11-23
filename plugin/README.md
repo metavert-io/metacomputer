@@ -47,10 +47,13 @@ before doing anything. The installer:
   after a restart, or `/mcp` in an open session. A server of that name that isn't metacomputer's is never changed,
   and the installer says how to remove it yourself;
 - if you also use OpenAI's Codex, adds metacomputer to Codex: its MCP server, its skills, and rules that let
-  metacomputer's everyday commands run outside Codex's sandbox (`--no-codex` leaves Codex alone).
+  metacomputer's everyday commands run outside Codex's sandbox (`--no-codex` leaves Codex alone);
+- likewise for OpenClaw, Hermes Agent and Gemini CLI, when they're installed: metacomputer's MCP server in each one's
+  configuration, through its own CLI, and the skills where it reads them (`--no-openclaw`, `--no-hermes`,
+  `--no-gemini` leave one alone).
 
 It changes no Claude Code permission settings. `~/metacomputer/install.sh --uninstall` removes the command, the plugin,
-the MCP server and the Codex setup.
+the MCP server and the other agents' setup.
 
 Until v0.4.4 this plugin brought the MCP server itself. If you update the plugin while metacomputer on your Mac is
 v0.4.4 or earlier, run `metacomputer update`, then restart Claude Code: the newer installer adds the server, and
