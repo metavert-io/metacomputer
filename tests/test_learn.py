@@ -28,7 +28,7 @@ STORE = os.path.join(TD, "store")
 CONF = os.path.join(TD, "claude")
 REAL_STORE = os.path.join(os.path.expanduser("~"), ".local", "share", "metacomputer", "lessons")
 REAL_STORE_EXISTED = os.path.exists(REAL_STORE)
-os.environ.update(CLAUDE_CONFIG_DIR=CONF, CODEX_HOME=os.path.join(TD, "codex"), MCOMP_LESSONS_DIR=STORE, MCOMP_LESSONS="on",
+os.environ.update(CLAUDE_CONFIG_DIR=CONF, CODEX_HOME=os.path.join(TD, "codex"), GEMINI_CLI_HOME=os.path.join(TD, "gemini"), MCOMP_LESSONS_DIR=STORE, MCOMP_LESSONS="on",
                   MCOMP_LOG_DIR=os.path.join(TD, "logs"), MCOMP_EVENTS_DIR=os.path.join(TD, "events"),
                   MCOMP_EVENTS_SPOOL=os.path.join(TD, "spool"), MCOMP_RUN_DIR=os.path.join(TD, "run"),
                   BENCH_RESULTS=os.path.join(TD, "bench"), MCOMP_VM_NAME="learntest",
@@ -267,6 +267,72 @@ def test_codex_sessions():
           and learn_mine.mine(env, since="7d", project=os.path.join(TD, "projB"), log_dirs=[], bench_dirs=[])["sessions"] == 0)
     props = learn.build_proposals(rep, min_count=2)
     check("proposals from a Codex session hold no text from it (no injection)",
+          props and not clean_of_injection(json.dumps(props)) and not clean_of_injection(json.dumps(rep)),
+          (clean_of_injection(json.dumps(props)), clean_of_injection(json.dumps(rep))))
+
+
+def gemini_session(sid, t0, calls):
+    """A Gemini CLI session file (chats/session-*.jsonl): its first line, the user's message, then each call in a
+    "gemini" message written twice, scheduled and then finished (as Gemini CLI writes it again), its MCP tools named
+    mcp_<server>_<tool> and run_shell_command for tool None."""
+    out = [{"sessionId": sid, "projectHash": "h" * 64, "startTime": _iso(t0), "lastUpdated": _iso(t0), "kind": "main"},
+           {"id": "u1", "timestamp": _iso(t0), "type": "user", "content": [{"text": "Do the task. " + INJECT}]},
+           {"$set": {"lastUpdated": _iso(t0)}}]
+    t = t0
+    for i, (server, tool, inp, text, err) in enumerate(calls):
+        t += 2
+        name = "run_shell_command" if tool is None else f"mcp_{server}_{tool}"
+        args = {"command": inp} if tool is None else inp
+        out_text = ("Output: " + text) if tool is None else "<untrusted_context>\n" + text + "\n</untrusted_context>"
+        tc = {"id": f"call-{i}", "name": name, "args": args, "timestamp": _iso(t)}
+        out.append({"id": f"g{i}", "timestamp": _iso(t), "type": "gemini", "content": "",
+                    "toolCalls": [dict(tc, status="scheduled")]})
+        done = dict(tc, status="error" if err else "success",
+                    result=[{"functionResponse": {"id": f"call-{i}", "name": name,
+                                                  "response": {"error" if err else "output": out_text}}}])
+        out.append({"id": f"g{i}", "timestamp": _iso(t + 0.5), "type": "gemini", "content": "", "toolCalls": [done]})
+        out.append({"id": f"g{i}", "timestamp": _iso(t + 0.6), "type": "gemini", "content": "", "toolCalls": [done]})
+    return out
+
+
+def test_gemini_sessions():
+    print("Gemini CLI sessions (~/.gemini/tmp/<project>/chats)")
+    home, conf = os.path.join(TD, "gemini2"), os.path.join(TD, "claude-empty")
+    os.makedirs(conf, exist_ok=True)
+    now = time.time()
+    proj = os.path.join(TD, "gemproj")
+    os.makedirs(proj, exist_ok=True)
+    os.makedirs(os.path.join(home, ".gemini"), exist_ok=True)
+    with open(os.path.join(home, ".gemini", "projects.json"), "w") as f:
+        json.dump({"projects": {proj: "gemproj"}}, f)
+    chats = os.path.join(home, ".gemini", "tmp", "gemproj", "chats")
+    write_jsonl(os.path.join(chats, "session-2026-11-22T10-00-aaaa1111.jsonl"), gemini_session(
+        "aaaa1111-session", now - 1200, [
+            ("metacomputer", "list_windows", {}, LW, False),
+            ("metacomputer", "click", {"pid": 50, "window_id": 11, "x": 10, "y": 10}, NOFRAME, True),
+            ("metacomputer", "click", {"pid": 50, "window_id": 11, "x": 10, "y": 10}, NOFRAME, True),
+            ("other", "click", {}, INJECT, True),
+            (None, None, "~/.local/bin/metacomputer sh -c 'ls ~/Documents'", INJECT, False),
+            ("metacomputer", "not_a_driver_tool_" + "x" * 5, {"note": INJECT}, INJECT, True)]))
+    # a session that never called metacomputer, and Gemini CLI's other files beside the chats: only scanned
+    write_jsonl(os.path.join(chats, "session-2026-11-22T11-00-bbbb2222.jsonl"), gemini_session(
+        "bbbb2222-session", now - 900, [(None, None, "git status", INJECT, False)]))
+    write_jsonl(os.path.join(home, ".gemini", "tmp", "gemproj", "tool-outputs", "x.jsonl"),
+                [{"name": "mcp_metacomputer_click", "note": INJECT}])
+    env = dict(os.environ, GEMINI_CLI_HOME=home, CLAUDE_CONFIG_DIR=conf, CODEX_HOME=os.path.join(TD, "nocodex"))
+    rep = learn_mine.mine(env, since="7d", log_dirs=[], bench_dirs=[])
+    check("a Gemini CLI session with metacomputer calls is mined, one without (and its other files) left out",
+          rep["sessions"] == 1 and rep["sources"].get("gemini_sessions") == 1 and rep["sources"]["claude_code_sessions"] == 0,
+          rep["sources"])
+    check("its calls count like Claude Code's, each once though Gemini CLI writes a message again: driver calls, the "
+          "no-frame class (inside its <untrusted_context> wrapper), another server's call left out",
+          rep["driver_calls"] == 4 and rep["failures_by_tool"].get("click:no_frame") == 2
+          and rep["failed_calls"] == 3, (rep["driver_calls"], rep["failures_by_tool"], rep["failed_calls"]))
+    check("--project: the session's folder (from projects.json beside tmp/) decides",
+          learn_mine.mine(env, since="7d", project=proj, log_dirs=[], bench_dirs=[])["sessions"] == 1
+          and learn_mine.mine(env, since="7d", project=os.path.join(TD, "projB"), log_dirs=[], bench_dirs=[])["sessions"] == 0)
+    props = learn.build_proposals(rep, min_count=2)
+    check("proposals from a Gemini CLI session hold no text from it (no injection)",
           props and not clean_of_injection(json.dumps(props)) and not clean_of_injection(json.dumps(rep)),
           (clean_of_injection(json.dumps(props)), clean_of_injection(json.dumps(rep))))
 
@@ -1200,6 +1266,7 @@ def main():
         test_classes()
         rep = test_mining(shot)
         test_codex_sessions()
+        test_gemini_sessions()
         test_approval_flow.rep = rep
         test_proposals_and_injection(rep, shot)
         test_drafts(shot)

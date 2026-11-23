@@ -158,6 +158,7 @@ func runMain(_ argv: [String]) -> Int32 {
         case "selftest": return rest == ["--local-auth"] ? localAuthSelftest() : selftest()
         #if MCOMP_VAULT_TESTING
         case "test-legacy-totp-link": return try testLegacyTOTPLink(paths, rest)
+        case "test-agent-kind": return try testAgentKind(rest)
         #endif
         case "version": return cmdVersion(rest)
         case "help", "-h", "--help": oprint(usageText); return Exit.ok
@@ -197,6 +198,23 @@ func unlockKey(_ paths: Paths) throws -> (VaultKey, Payload) {
 }
 
 #if MCOMP_VAULT_TESTING
+/// Test builds only: the agent each case is (agentKindOf), one line each ("-" for none), for the cases lib/owners.py is
+/// checked against too (tests/fixtures/agent_argv.json, as tests/agent_argv_cases.py makes them: [{"name": kernel name,
+/// "exe": its executable or absent, "argv": [...] or null, "cwd": its working folder or null}]).
+func testAgentKind(_ argv: [String]) throws -> Int32 {
+    guard argv.count == 1, let data = FileManager.default.contents(atPath: argv[0]),
+          let cases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        throw usageError("usage: test-agent-kind CASES.json")
+    }
+    for c in cases {
+        let name = c["name"] as? String ?? ""
+        let args = c["argv"] as? [String]
+        let exe = c["exe"] as? String, cwd = c["cwd"] as? String
+        oprint(agentKindOf(name, exe: exe, args: { args }, cwd: { cwd }) ?? "-")
+    }
+    return Exit.ok
+}
+
 /// Test builds only: tie a 2FA code to a login by name, as an earlier build did (tests/test_vault_import.py).
 func testLegacyTOTPLink(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let noID = argv.count == 3 && argv[2] == "--no-id"

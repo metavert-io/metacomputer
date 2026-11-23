@@ -832,7 +832,8 @@ allows metacomputer to show dialogs on this Mac that wait for you; off, nothing
 pops up on your screen by itself, since Claude may run commands while you're
 away, and a handoff tells you through its notice, its output and the events.
 With it on, a handoff Claude opens also shows a dialog on the Mac's screen:
-"Claude needs you: " ("Codex needs you: " for a handoff a Codex session opened) and the `--say` text (cleaned like an event, at most 240
+"Claude needs you: " ("Codex needs you: " for a handoff a Codex session opened, and likewise "OpenClaw", "Hermes" or
+"Gemini" for those agents' sessions) and the `--say` text (cleaned like an event, at most 240
 characters), with **Open live view** (it runs `metacomputer view --open`) and
 **Later**. The text reaches osascript as an argument of a fixed AppleScript,
 never as part of one, so nothing in it runs. A detached helper shows it, so
@@ -3252,9 +3253,23 @@ something waits for you:
       so this only raises the bar.
 
   The terminal requirement keeps values off pipes and command lines. A terminal inside an agent session doesn't
-  count: commands only you run also refuse when Claude Code or Codex is above them in the process tree, since
-  Codex's command tool can give a command a terminal of its own. It isn't a barrier against your own account,
-  since a program can open a pseudo-terminal outside an agent's process tree.
+  count: commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above
+  them in the process tree, since Codex's command tool (and Gemini CLI's) can give a command a terminal of its own, and
+  also when a node, bun, deno or python process above them can't be told (it may be one of those agents). A process
+  is told by what it executes: its executable (a native `gemini`, through a link of another name too) and, for an
+  interpreter, the program it runs (its script, the first argument that isn't an option or the value of an option known
+  to take one, relative ones from the process's own working folder and links by what they resolve to; a preload; a
+  `-m` module), plus any of its arguments naming an agent's package by an identifier of its own (`@google/gemini-cli`,
+  a `gemini-cli` or `openclaw` folder, `hermes_cli`, `hermes-agent`; as written, or what a file argument resolves to),
+  which catches code like `node -pe "import('@google/gemini-cli')"`. A file merely named `gemini` is no agent. It can't
+  be told when its arguments or working folder can't be read or its script isn't there. It isn't a barrier against
+  your own account, since a program can open a pseudo-terminal outside an agent's process tree.
+
+  **Recognising agent sessions is best-effort defense in depth.** It's read from the process table, which any
+  program running as you can arrange (a renamed interpreter, a process started outside the agent's tree), and it
+  can't know every way an agent may be started. So it is never what an approval that matters rests on: those also
+  need you present, Touch ID (or macOS's login-password dialog) in presence mode, or the confirmation typed at the
+  terminal where you unlocked the vault.
 - **One-time codes from inside the VM are only as trustworthy as the page they're read from.** A relay reads a
   mailbox signed in inside the VM, and anything signed in there is reachable by a misbehaving agent with a shell (it
   can read the mail itself, and ask for codes). Use a dedicated automation mailbox that only receives sign-in mail.

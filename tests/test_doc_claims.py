@@ -708,21 +708,71 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
-    ("SECURITY.md", r"commands only you run also refuse when Claude Code or Codex is above them in the process tree",
+    ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above\s+them in the process tree.*?and\s+also when a node, bun, deno or python process above them can't be told.*?A process\s+is told by what it executes: its executable \(a native `gemini`.*?the first argument that isn't an option or the value of an option known\s+to take one.*?plus any of its arguments naming an agent's package by an identifier of its own \(`@google/gemini-cli`,.*?A file merely named `gemini` is no agent. It can't\s+be told when its arguments or working folder can't be read or its script isn't there",
      lambda m: "def at_user_terminal(fds=(0,)):" in raw("lib/owners.py")
      and "return ancestry_complete(os.getpid(), table) and claude_of(os.getpid(), table) is None" in raw("lib/owners.py")
-     and 'return "Claude Code" if is_claude(comm) else "Codex" if is_codex(comm) else None' in raw("lib/owners.py")
+     and 'return "Claude Code"' in function_src("lib/owners.py", "agent_kind")
+     and 'return "Codex"' in function_src("lib/owners.py", "agent_kind")
+     and "got = name_agent(comm)" in function_src("lib/owners.py", "agent_kind")
+     and "got = agent_kind(comm) or (agent_kind(exe) if exe else None)" in function_src("lib/owners.py", "process_agent")
+     and "if args is None:\n        return UNKNOWN_AGENT" in function_src("lib/owners.py", "process_agent")
+     and "return process_agent(comm, table.exe(pid), lambda: table.argv(pid), lambda: table.cwd(pid))"
+     in function_src("lib/owners.py", "agent_of")
+     and "return UNKNOWN_AGENT                    # the script's place, and no file there (or no way to look): can't tell"
+     in function_src("lib/owners.py", "_script_at")
+     and "got = _package_rule(argv[1:], where)" in function_src("lib/owners.py", "script_agent")
+     and '("@google/gemini-cli", "Gemini CLI")' in raw("lib/owners.py") and '("hermes-agent", "Hermes Agent")' in raw("lib/owners.py")
+     and 'if not eq and (flag in (DENO_VALUE_FLAGS if kind == "deno" else NODE_VALUE_FLAGS)):' in function_src("lib/owners.py", "script_agent")
+     and "if let got = packageRule(argv.dropFirst(), cwd: cwd) { return got }" in raw("vault/Util.swift")
+     and "if not where:\n            return _UNREADABLE" in function_src("lib/owners.py", "_resolve")
+     and '"gemini": "Gemini CLI"' in raw("lib/owners.py") and "proc_pidpath" in function_src("lib/owners.py", "proc_exe")
+     and "NODE_VALUE_OPTIONS" not in raw("lib/owners.py") and "nodeValueOptions" not in raw("vault/Util.swift")
+     and "if let x = exe, let k = nameKind(x) { return k }" in raw("vault/Util.swift")
+     and "guard let w = cwd(), !w.isEmpty else { return .unreadable }" in raw("vault/Util.swift")
+     and "guard let a = args() else { return unknownAgent }" in raw("vault/Util.swift")
+     and 'case unknownAgent:\n        return "an unidentified agent\'s process"' in raw("vault/Util.swift")
+     and all(f': "{a}"' in raw("lib/owners.py") for a in ("Gemini CLI", "OpenClaw", "Hermes Agent"))
+     and "if agent_of(p, table):" in function_src("lib/owners.py", "claude_of")
      and "owners.at_user_terminal((0, 2))" in raw("lib/netpolicy.py") and "owners.at_user_terminal((0,))" in raw("lib/learn.py")
      and "return owners.at_user_terminal((0,))" in raw("lib/handoff.py")
      and "owners.at_user_terminal((0,))" in raw("lib/storage.py") and "owners.at_user_terminal((0,))" in raw("lib/liveview.py")
      and "user_tty || die" in raw("bin/metacomputer")
      and "guard atUserTerminal() else {" in raw("vault/TTY.swift")
      and "return agentAbove(getpid()) == false" in raw("vault/TTY.swift")
-     and 'if e.name == "codex" { return "Codex" }' in raw("vault/Util.swift")),
+     and 'if base == "codex" { return "Codex" }' in raw("vault/Util.swift")
+     and "return interpreterAgent(a, cwd: cwd, kind: kind)" in raw("vault/Util.swift")),
     ("docs/codex.md", r"a `metacomputer` command stops at once\s+with exit status (77)",
      lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("bin/metacomputer")
      and f"exit {m[1]} ;;" in raw("bin/metacomputer")),
     ("docs/codex.md", r"with `tool_timeout_sec = (\d+)`", lambda m: f"CODEX_TOOL_TIMEOUT={m[1]}" in raw("install.sh")),
+    ("SECURITY.md", r"\*\*Recognising agent sessions is best-effort defense in depth.\*\*.*?So it is never what an approval that "
+                    r"matters rests on: those also\s+need you present, Touch ID \(or macOS's login-password dialog\) in "
+                    r"presence mode, or the confirmation typed at the\s+terminal where you unlocked the vault",
+     lambda m: "deviceOwnerAuthentication" in raw("vault/Approvals.swift")
+     and "Type \\(name) to allow (\\(name) session / \\(name) unlock); anything else refuses" in raw("vault/Server.swift")),
+    ("bench/README.md", r"Gemini CLI, Hermes Agent and OpenClaw sessions each run in a throwaway HOME,\s+made for that session.*?"
+                        r"deleted\s+afterwards through `lib/safedelete.py`, whether the session ends, times out\s+or fails"
+                        r".*?None runs with a yolo or approve-everything mode",
+     lambda m: 'ISOLATED = ("gemini", "hermes", "openclaw")' in raw("bench/bench.py")
+     and 'home = tempfile.mkdtemp(prefix="mcomp-bench-home-")' in function_src("bench/bench.py", "run_session")
+     and "finally:\n        end_isolated(agent, claude, home)" in function_src("bench/bench.py", "run_session")
+     and "safedelete.rmtree(home, quiet=True)" in function_src("bench/bench.py", "end_isolated")
+     and "yolo" not in function_src("bench/bench.py", "isolate_session").split('"""')[2]
+     and '"--approval-mode", "default"' in function_src("bench/bench.py", "isolate_session")
+     and '"exec": {"mode": "allowlist"}' in function_src("bench/bench.py", "isolate_session")
+     and '("approvals.mode", "manual")' in raw("bench/bench.py")),
+    ("bench/README.md", r"\*\*Hermes Agent: nothing loaded from outside its home.\*\* Hermes loads its\s+installation's own `.env`"
+                        r".*?the administrator-managed `/etc/hermes` \(`.env`,\s+`config.yaml`\).*?the run stops before it "
+                        r"starts, naming the\s+file",
+     lambda m: 'HERMES_MANAGED = "/etc/hermes"' in raw("bench/bench.py")
+     and 'for f in (os.path.join(m[1], ".env"), os.path.join(HERMES_MANAGED, ".env"), os.path.join(HERMES_MANAGED, "config.yaml")):'
+     in function_src("bench/bench.py", "hermes_outside_files")
+     and "refuse_hermes_outside_files(prog, env, home)" in function_src("bench/bench.py", "isolate_session")
+     and "refuse_hermes_outside_files(trusted_claude(None, \"hermes\"), env, home)" in function_src("bench/bench.py", "cmd_run")),
+    ("bench/README.md", r"`--pass-env NAME\[,NAME...\]` \| `BENCH_PASS_ENV` \| none \| `gemini`, `hermes`, `openclaw`: the only variables of yours their sessions get",
+     lambda m: '"pass_env": ""' in raw("bench/bench.py")
+     and "for n in pass_env_names(sw):" in function_src("bench/bench.py", "session_env")
+     and "env = {k: os.environ[k] for k in SESSION_ENV_KEEP if k in os.environ}" in function_src("bench/bench.py", "session_env")),
     ("SECURITY.md", r"A window named by app or title is resolved against the live window list by the driver's own rules",
      lambda m: "def resolve_named(self, spec, every=False):" in raw("lib/mcp_hub.py") and "every=strict)" in raw("lib/mcp_hub.py")
      and "return (True, None) if strict else (False, None)" in raw("lib/mcp_hub.py")
@@ -1351,10 +1401,11 @@ CLAIMS = [
     ("SECURITY.md", r"\*\*A dialog on the Mac \(`INTERACTIVE_PROMPTS`, `(\w+)` by default\)\.\*\* That setting allows "
                     r"metacomputer to show dialogs on this Mac that wait for you",
      lambda m: m[1] == D["INTERACTIVE_PROMPTS"] == "off" and dialog_default_off()),
-    ("SECURITY.md", r"\"Claude needs you: \" \(\"Codex needs you: \" for a handoff a Codex session opened\) and the "
+    ("SECURITY.md", r"\"Claude needs you: \" \(\"Codex needs you: \" for a handoff a Codex session opened, and likewise "
+                    r"\"OpenClaw\", \"Hermes\" or\s+\"Gemini\" for those agents' sessions\) and the "
                     r"`--say` text \(cleaned like an event, at most (\d+) characters\)",
      lambda m: int(m[1]) == handoff.DIALOG_TEXT_MAX and 'who & " needs you: " & msg' in handoff.DIALOG_SCRIPT
-     and 'return "Codex" if isinstance(rec, dict) and rec.get("agent") == "Codex" else "Claude"' in raw("lib/handoff.py")
+     and 'return AGENT_NAMES.get(rec.get("agent"), "Claude") if isinstance(rec, dict) else "Claude"' in raw("lib/handoff.py")
      and "t = clean_text(say)" in raw("lib/handoff.py")),
     ("SECURITY.md", r"The text reaches osascript as an argument of a fixed AppleScript, never as part of one",
      lambda m: dialog_text_is_data()),
@@ -2113,7 +2164,9 @@ CLAIMS = [
      and not os.path.exists(os.path.join(LAB, "plugin", ".mcp.json"))
      and not os.path.exists(os.path.join(LAB, "plugin", "hooks"))),
     ("plugin/README.md", r"It changes no Claude Code permission settings",
-     lambda m: not re.search(r"permission|settings\.json|allowedTools", raw("install.sh"), re.I)),
+     lambda m: not re.search(r"permission|(?<!\.gemini/)settings\.json|allowedTools", raw("install.sh"), re.I)
+     and raw("install.sh").count(".gemini/settings.json")                     # read only, by agent_config_mentions
+     == sh_function("install.sh", "agent_config_mentions").count(".gemini/settings.json") >= 1),
     ("plugin/README.md", r"metacomputer's MCP server for every project \(user scope, named `metacomputer`, running `~/\.local/bin/metacomputer mcp-lazy`",
      lambda m: 'claude mcp add -s user metacomputer "$CMD_LINK" mcp-lazy' in raw("install.sh")
      and 'CMD_LINK="$HOME/.local/bin/metacomputer"' in raw("install.sh")),
@@ -2175,10 +2228,21 @@ CLAIMS = [
      and '{ [ "$CLAUDE_TRIED" = 0 ] && stamp_incomplete claude; }' in sh_function("install.sh", "install_incomplete")
      and '{ [ "$CODEX_TRIED" = 0 ] && stamp_incomplete codex; }' in sh_function("install.sh", "install_incomplete")
      and 'incomplete="$(install_incomplete)"' in raw("install.sh")
-     and len(re.findall(r"^\s*agent_record ", raw("install.sh"), re.M)) == 2),
-    ("docs/commands.md", r"`--uninstall` removes metacomputer's server before the command it runs, and keeps the command \(`~/\.local/bin/metacomputer` and `mcomp`\) while any MCP server that stays, Claude Code's or Codex's, metacomputer's or not, runs it",
+     and re.search(r'\n  agent_record "\$1" "\$\(agent_var "\$\{up\}_TRIED"\)" "\$\(agent_var "\$\{up\}_FAILED"\)"\n}\n',
+                   sh_function("install.sh", "agent_step")) is not None
+     and 'eval "${up}_TRIED=1"' in sh_function("install.sh", "agent_step")
+     and '[ "$(agent_var "${up}_TRIED")" = 0 ] && stamp_incomplete "$a"; }' in sh_function("install.sh", "install_incomplete")
+     and len(re.findall(r"^\s*agent_record ", raw("install.sh"), re.M)) == 3),
+    ("docs/commands.md", r"`--uninstall` removes metacomputer's server before the command it runs, and keeps the command \(`~/\.local/bin/metacomputer` and `mcomp`\) while any MCP server that stays, any agent's \(Claude Code's, Codex's, OpenClaw's, Hermes Agent's or Gemini CLI's\), metacomputer's or not, runs it, or\s+may: an agent's configuration that can't be read \(its CLI missing, or no Python to read it\) keeps them too",
      lambda m: raw("install.sh").index('if [ "$srv_ours" = 1 ] && ! entry_unchanged metacomputer "$srv_sum"; then')
-     < raw("install.sh").index("  codex_server_remove\n") < raw("install.sh").index('  for l in "$CMD_LINK" "$ALIAS_LINK"; do')
+     < raw("install.sh").index("  codex_server_remove\n") < raw("install.sh").index('  for a in $MORE_AGENTS; do agent_uninstall "$a"; done\n')
+     < raw("install.sh").index('  for l in "$CMD_LINK" "$ALIAS_LINK"; do')
+     and 'keep) keep_cmd_for "$text" ;;' in sh_function("install.sh", "agent_lines")
+     and 'out("keep", f"{agent.label}\'s")' in function_src("lib/agent_setup.py", "uninstall")
+     and function_src("lib/agent_setup.py", "_unregister").count('out("keep", f"{agent.label}\'s")') == 6
+     and "if claude_mcp.linked(res, link):" in function_src("lib/agent_setup.py", "_unregister")
+     and "if prog is None and not agent.reads_files:" in function_src("lib/agent_setup.py", "_unregister")
+     and 'keep_cmd_for "$label\'s"; UNINSTALL_FAILED=1' in sh_function("install.sh", "agent_uninstall")
      and raw("install.sh").count('UNINSTALL_FAILED=1; keep_cmd_for "Claude Code\'s"') == 2
      and '[ "$srv_linked" != link ] || { keep_cmd_for "Claude Code\'s"; }' in raw("install.sh")
      and '[ "$lnk" != link ] || { keep_cmd_for "Codex\'s"; }' in raw("install.sh")

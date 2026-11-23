@@ -18,7 +18,8 @@ nonisolated(unsafe) var waitHook: (() -> Void)? = nil
 nonisolated(unsafe) var savedTermios = termios()
 nonisolated(unsafe) var termiosSaved: Int32 = 0
 
-/// The user's own terminal: stdin is a terminal and no agent session (Claude Code or Codex) is above this process.
+/// The user's own terminal: stdin is a terminal and no agent session (Claude Code, Codex, OpenClaw, Hermes Agent or
+/// Gemini CLI) is above this process.
 /// Codex's command tool can give a command a pseudo-terminal of its own, so a terminal alone doesn't tell the user from
 /// an agent. Like the terminal check itself, this keeps an agent from passing by accident; a program running as you
 /// can still start a command outside the agent's process tree.
@@ -31,7 +32,8 @@ func atUserTerminal() -> Bool {
     return agentAbove(getpid()) == false
 }
 
-/// Is an agent session (Claude Code, or Codex, its app server included) above pid? nil when the walk can't reach
+/// Is an agent session (Claude Code, Codex with its app server, OpenClaw or Hermes Agent with their gateways, Gemini CLI)
+/// above pid? nil when the walk can't reach
 /// launchd (a process it can't read, more than 256 steps): unknown, which never counts as the user's terminal.
 func agentAbove(_ pid: pid_t) -> Bool? {
     var p = pid

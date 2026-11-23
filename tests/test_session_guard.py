@@ -188,6 +188,7 @@ FORMS = [
     ("secrets", ["session", "policy", "n"], "act"), ("secrets", ["session", "delete", "n"], "act"),
     ("secrets", ["revoke", "--all"], "act"), ("secrets", ["disconnect", "--vm", "x"], "act"), ("secrets", ["audit-sink", "add", "s"], "act"),
     ("secrets", ["audit-sink", "remove", "s"], "act"), ("secrets", ["test-legacy-totp-link"], "act"),
+    ("secrets", ["test-agent-kind", "cases.json"], "act"),       # test builds only: what lib/owners.py is checked against
 ]
 ORDER_FREE = sessionvm.READS | {"security", "recordings", "view"}
 
@@ -1219,12 +1220,188 @@ def end_to_end(fake):
         b.close()
 
 
+# --- the other agents: OpenClaw, Hermes Agent, Gemini CLI -------------------------------------------------------
+OTHER_DRIVER = r'''
+import json, os, subprocess, sys, time
+sys.path.insert(0, sys.argv[1])
+import owners, sessionvm
+comp = json.loads(sys.argv[2])
+t = owners.ps_table()
+agent = owners.claude_of(os.getpid(), t)
+out = {"agent_pid": agent, "agent": owners.agent_of(agent, t) if agent else None, "name": owners.agent_name(agent)}
+bridge = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+try:
+    time.sleep(0.2)
+    out["noted"] = bool(sessionvm.note_bridge(agent, bridge.pid, comp, agent=out["agent"]))
+    guard = [sys.executable, os.path.join(sys.argv[1], "sessionvm.py"), "guard", "--vm", "beta", "--ssh-port", "2402",
+             "--chosen", "main", "--settings", "config/local.env", "--", "stop"]
+    r = subprocess.run(guard, capture_output=True, text=True, timeout=60)
+    out["other"] = [r.returncode, r.stderr]
+    guard[guard.index("beta")], guard[guard.index("2402")] = comp["vm"], comp["ssh_port"]
+    r = subprocess.run(guard, capture_output=True, text=True, timeout=60)
+    out["own"] = [r.returncode, r.stderr]
+    r = subprocess.run([sys.executable, os.path.join(sys.argv[1], "owners.py"), "at-terminal"], capture_output=True,
+                       text=True, timeout=60)
+    out["at_terminal"] = r.returncode
+finally:
+    sessionvm.drop_bridge(agent, bridge.pid)          # the bridge's own record, while it still runs (as mcp_lazy does)
+    bridge.kill()
+    bridge.wait()
+print(json.dumps(out))
+'''
+
+
+def other_agents_checks():
+    """OpenClaw, Hermes Agent and Gemini CLI count as agent sessions as Codex does (lib/owners.py agent_kind): a stand-in
+    for each, as `ps` shows the real one (Gemini CLI: node running its gemini script; Hermes Agent: python running
+    hermes_cli's gateway; OpenClaw: a process named openclaw-gateway), holds a computer through a bridge under it, and
+    a command from it that names no computer is refused on another computer, with the agent's name; at-terminal refuses
+    under it. And look-alikes don't count: node or python running something else, OpenClaw's own helper processes."""
+    print("the other agents: OpenClaw, Hermes Agent, Gemini CLI")
+    node, python = userterm.fake_interpreter("node"), userterm.fake_interpreter("python3")
+    native = userterm.fake_interpreter("gemini")           # a native executable named gemini (Gemini CLI's standalone)
+    if not node or not python or not native:
+        check("a C compiler to build the stand-in interpreters (cc)", False, "no /usr/bin/cc")
+        return
+    clear_records()
+    path = os.path.join(TD, "other_driver.py")
+    write(path, OTHER_DRIVER)
+    A = comp("alpha", 2401)
+    lib = os.path.join(LAB, "lib")
+    run = [PY, path, lib, json.dumps(A)]
+    S = lambda rel: os.path.join(TD, "scripts", rel)          # noqa: E731  (the scripts the stand-ins "run")
+    for rel in ("lib/node_modules/@google/gemini-cli/bundle/gemini.js", "opt/homebrew/bin/gemini", "x/preload.js",
+                "My Tools/bin/gemini"):
+        write(S(rel), "")
+    os.makedirs(S("alias"), exist_ok=True)
+    if not os.path.lexists(S("alias/gm")):
+        os.symlink(S("lib/node_modules/@google/gemini-cli/bundle/gemini.js"), S("alias/gm"))
+    cases = (("Gemini CLI", [node, S("lib/node_modules/@google/gemini-cli/bundle/gemini.js"), "--", *run], None, None),
+             ("Gemini CLI", [node, "--max-old-space-size=2048", S("opt/homebrew/bin/gemini"), "--", *run], None, None),
+             ("Hermes Agent", [python, "-I", "-m", "hermes_cli.main", "--profile", "default", "gateway", "run", "--quiet",
+                               "--", *run], None, None),
+             ("Hermes Agent", ["hermes", "--", *run], python, None),
+             ("Gemini CLI", [node, "--require", S("x/preload.js"), S("My Tools/bin/gemini"), "--", *run], None, None),
+             ("Gemini CLI", [native, "--", *run], None, None),
+             ("Gemini CLI", [node, "./gm", "--", *run], None, S("alias")),
+             ("OpenClaw", ["openclaw-gateway", "--", *run], node, None),
+             ("OpenClaw", ["openclaw", "--", *run], node, None))
+    for name, argv, exe, cwd in cases:
+        r = subprocess.run(argv, executable=exe, capture_output=True, text=True, timeout=120, env=dict(os.environ),
+                           cwd=cwd)
+        try:
+            got = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            check(f"{name} stand-in ({os.path.basename(argv[0])} ...) ran", False, (r.stdout[-300:], r.stderr[-500:]))
+            continue
+        shown = os.path.basename(argv[0]) + (" " + argv[1] if exe is None else "")
+        check(f"{name} ({shown}): its process is the agent session above a command (owners.claude_of, agent_of, "
+              "agent_name)", got.get("agent") == name and got.get("name") == name and got.get("noted"), got)
+        check(f"...a command that names no computer is refused on another computer than its bridge's, naming {name}",
+              got.get("other", [0])[0] == sessionvm.REFUSED and f"this {name} session" in got["other"][1]
+              and REFUSED_WORDS in got["other"][1], got.get("other"))
+        check("...and goes ahead on its own computer", got.get("own", [1])[0] == 0, got.get("own"))
+        check("...and owners.py at-terminal (the user-only commands' check) refuses under it",
+              got.get("at_terminal") not in (0, None), got.get("at_terminal"))
+    check("no record is left behind", rec_files() == [], rec_files())
+    # The argument cases the vault is checked against too (tests/test_vault_ops.py, its test-agent-kind): exact argv,
+    # options and their values, paths with spaces, -c and -m, titles, unreadable arguments.
+    import agent_argv_cases
+    links = tempfile.mkdtemp(prefix="mcomp-argv-")
+    try:
+        cases = agent_argv_cases.load(links)
+    except OSError:
+        cases = []
+    got = [(c["why"], owners.agent_of(7, agent_argv_cases.table(owners, c))) for c in cases]
+    shutil.rmtree(links, ignore_errors=True)
+    wrong = [(why, g) for (why, g), c in zip(got, cases) if g != c["agent"]]
+    check(f"each agent is told by what the process executes: its executable (a native gemini, through a link too), an "
+          f"interpreter's script (relative ones from its own working folder, links by what they resolve to; only "
+          f"options known to take a value move its place), a preload, -m module, its title, and an agent's package "
+          f"named anywhere in its arguments (-pe code, --import, a folder, a link into it); a file merely named gemini "
+          f"never; it can't be told only when its arguments or working folder can't be read or its script isn't there "
+          f"({len(cases)} shared cases)", cases and not wrong, wrong)
+    t = {30: (1, "node")}
+    check("a plain process table (the tests' known processes) reads no arguments: an interpreter there isn't an agent",
+          owners.agent_of(30, t) is None)
+    # Fail closed: an interpreter above a command whose arguments can't be read may be an agent.
+    me = os.getpid()
+    t = owners.ProcTable({me: (500, "/bin/zsh"), 500: (400, "/opt/homebrew/bin/node"), 400: (1, "/bin/zsh")},
+                         argvs={500: None})
+    check("an interpreter whose arguments can't be read counts as an agent session (unidentified), never as none",
+          owners.agent_of(500, t) == owners.UNKNOWN_AGENT and owners.claude_of(me, t) == 500, owners.claude_of(me, t))
+    real = (owners.ps_table, owners.os.isatty)
+    files = tempfile.mkdtemp(prefix="mcomp-argv-")
+    for f in ("opt/bin/gemini", "x/server.js", "tools/editor.js", "work/gemini", "tools/devshell.py", "w/bundle/gemini.js"):
+        os.makedirs(os.path.dirname(os.path.join(files, f)), exist_ok=True)
+        open(os.path.join(files, f), "w").close()
+    os.symlink(os.path.join(files, "w", "bundle", "gemini.js"), os.path.join(files, "w", "gm"))
+    F = lambda rel: os.path.join(files, rel)          # noqa: E731
+    try:
+        owners.ps_table = lambda strict=False: t
+        owners.os.isatty = lambda fd: True
+        refused = owners.at_user_terminal((0,)) is False
+        t.argvs[500] = ["/opt/homebrew/bin/node", F("x/server.js")]
+        passed = owners.at_user_terminal((0,)) is True
+        # Gemini CLI started with node options no table lists: still Gemini, so user-only commands refuse.
+        under = {}
+        for opts in (["--dns-result-order", "ipv4first"], ["--disable-proto", "throw"], ["--stack-size", "4000"]):
+            t.argvs[500] = ["/opt/homebrew/bin/node", *opts, F("opt/bin/gemini"), "-p", "hi"]
+            t.cwds[500] = files
+            under[opts[0]] = (owners.agent_of(500, t), owners.at_user_terminal((0,)))
+        # Codex's second re-check: a native gemini, and a relative alias (no relaunch) told from the working folder;
+        # an editor and a dev shell whose arguments only mention an agent are the user's own terminal.
+        seen = {}
+        for label, comm, exe, argv, cwd in (
+                ("native gemini", "/opt/tools/gemini", "/opt/tools/gemini", ["gemini"], None),
+                ("native gemini through a link", "/opt/tools/gm", F("opt/bin/gemini"), ["gm"], None),
+                ("relative alias", "/opt/homebrew/bin/node", None, ["node", "./gm"], F("w")),
+                ("relative alias, working folder unreadable", "/opt/homebrew/bin/node", None, ["node", "./gm"], None),
+                ("editor", "/opt/homebrew/bin/node", None, ["node", F("tools/editor.js"), F("work/gemini")], files),
+                ("dev shell", "/opt/homebrew/bin/python3", None, ["python3", F("tools/devshell.py"), "bash"], files),
+                # Codex's third re-check: code and preloads that load Gemini CLI's package; boolean flags before a
+                # script never move the script's place.
+                ("node -pe", "/opt/homebrew/bin/node", None, ["node", "-pe", "import('@google/gemini-cli')"], files),
+                ("a package preload", "/opt/homebrew/bin/node", None,
+                 ["node", "--import", "@google/gemini-cli", "--eval", "0"], files),
+                ("python -u before a dev shell", "/opt/homebrew/bin/python3", None,
+                 ["python3", "-u", F("tools/devshell.py"), "bash"], files),
+                ("node --no-warnings before an editor", "/opt/homebrew/bin/node", None,
+                 ["node", "--no-warnings", F("tools/editor.js"), F("work/gemini")], files)):
+            t[500] = (400, comm)
+            t.argvs[500], t.exes[500], t.cwds[500] = argv, exe, cwd
+            seen[label] = (owners.agent_of(500, t), owners.at_user_terminal((0,)))
+        t[500] = (400, "/opt/homebrew/bin/node")
+    finally:
+        owners.ps_table, owners.os.isatty = real
+        shutil.rmtree(files, ignore_errors=True)
+    check("...so commands only the user runs refuse under it (at_user_terminal), and pass once it's known to be another "
+          "program", refused and passed, (refused, passed))
+    check("...and Gemini CLI started with node options that take a value (--dns-result-order, --disable-proto, "
+          "--stack-size) is still Gemini CLI: commands only the user runs refuse under it",
+          all(v == ("Gemini CLI", False) for v in under.values()), under)
+    check("...and so do a native gemini (by its executable, through a link too), a relative alias of Gemini CLI's "
+          "script (from the process's own working folder; unidentified when that can't be read), `node -pe` and a "
+          "preload that load Gemini CLI's package, while an editor opening a file named gemini and a dev shell above a "
+          "terminal are the user's own, boolean flags before them (python -u, node --no-warnings) included",
+          seen == {"native gemini": ("Gemini CLI", False), "native gemini through a link": ("Gemini CLI", False),
+                   "relative alias": ("Gemini CLI", False),
+                   "relative alias, working folder unreadable": (owners.UNKNOWN_AGENT, False),
+                   "editor": (None, True), "dev shell": (None, True), "node -pe": ("Gemini CLI", False),
+                   "a package preload": ("Gemini CLI", False), "python -u before a dev shell": (None, True),
+                   "node --no-warnings before an editor": (None, True)}, seen)
+    check("...and the live table reads arguments exactly (proc_argv: this process's own, spaces kept)",
+          owners.proc_argv(os.getpid()) is not None and owners.ps_table().argv(os.getpid()) == owners.proc_argv(os.getpid())
+          and owners.proc_argv(2 ** 22 + 7) is None)
+
+
 def main():
     try:
         classification_checks()
         record_checks()
         hub_claim_checks()
         bridge_unit_checks()
+        other_agents_checks()
         fake = userterm.fake_agent("codex")
         if fake:
             end_to_end(fake)

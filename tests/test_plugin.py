@@ -322,6 +322,9 @@ def test_setup():
         p = run([cached, "setup", "--yes", "--no-chrome", "--no-build", "--dir", "/tmp/x y", "--dry-run"], env)
         check("setup passes --yes --no-chrome --no-build --dir DIR --dry-run through, after --confirm",
               args() == ["--confirm", "--yes", "--no-chrome", "--no-build", "--dir", "/tmp/x y", "--dry-run"], (p.stderr, args()))
+        p = run([cached, "setup", "--no-codex", "--no-openclaw", "--no-hermes", "--no-gemini"], env)
+        check("...and each agent's --no-AGENT (get.sh passes them on to install.sh)",
+              args() == ["--confirm", "--no-codex", "--no-openclaw", "--no-hermes", "--no-gemini"], (p.stderr, args()))
         for bad in (["--repo", "https://example.com/other.git"], ["--ref", "main"], ["--repo=x"], ["anything"]):
             fresh()
             p = run([cached, "setup", *bad], env)
@@ -1554,18 +1557,27 @@ def test_incomplete_marker():
         def fn(name):
             i = src.index(f"\n{name}() {{")
             return src[i:src.index("\n}\n", i) + 3]
-        script = ("set -Eeuo pipefail\ntrap 'echo ERR-TRAP >&2' ERR\n" + fn("stamp_incomplete") + fn("install_incomplete")
-                  + 'printf "[%s]" "$(install_incomplete)"\n')
-        # (CLAUDE_FAILED, CLAUDE_TRIED, CODEX_FAILED, CODEX_TRIED): each agent by the same rule
-        for recorded, state, want in ((["claude"], (0, 0, 0, 1), "claude"), (["claude"], (0, 1, 0, 1), ""),
-                                      ([], (1, 1, 0, 1), "claude"), ([], (0, 0, 0, 0), ""), (["codex"], (0, 1, 0, 0), "codex"),
-                                      (["codex"], (0, 1, 0, 1), ""), ([], (1, 1, 1, 1), "claude,codex"),
-                                      (["claude", "codex"], (0, 0, 0, 0), "claude,codex")):
+        more = src[src.index("\nMORE_AGENTS="):].split("\n", 2)[1] + "\n"
+        script = ("set -Eeuo pipefail\ntrap 'echo ERR-TRAP >&2' ERR\n" + more + fn("agent_upper") + fn("agent_var")
+                  + fn("stamp_incomplete") + fn("install_incomplete") + 'printf "[%s]" "$(install_incomplete)"\n')
+        # (CLAUDE_FAILED, CLAUDE_TRIED, CODEX_FAILED, CODEX_TRIED), and the other agents' (FAILED, TRIED): each agent by
+        # the same rule
+        for recorded, state, others, want in (
+                (["claude"], (0, 0, 0, 1), {}, "claude"), (["claude"], (0, 1, 0, 1), {}, ""),
+                ([], (1, 1, 0, 1), {}, "claude"), ([], (0, 0, 0, 0), {}, ""), (["codex"], (0, 1, 0, 0), {}, "codex"),
+                (["codex"], (0, 1, 0, 1), {}, ""), ([], (1, 1, 1, 1), {}, "claude,codex"),
+                (["claude", "codex"], (0, 0, 0, 0), {}, "claude,codex"),
+                (["gemini"], (0, 1, 0, 1), {}, "gemini"), (["gemini"], (0, 1, 0, 1), {"GEMINI": (0, 1)}, ""),
+                ([], (0, 1, 0, 1), {"OPENCLAW": (1, 1), "HERMES": (0, 1)}, "openclaw"),
+                (["hermes", "codex"], (0, 1, 0, 0), {"GEMINI": (1, 1)}, "codex,hermes,gemini")):
             write(stamp, json.dumps(dict(base, incomplete=recorded)))
-            r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=60,
-                               env=dict({"HOME": b.home, "PATH": noclaude["PATH"]},
-                                        **dict(zip(("CLAUDE_FAILED", "CLAUDE_TRIED", "CODEX_FAILED", "CODEX_TRIED"), map(str, state)))))
-            check(f"full install's record: earlier {recorded}, this run {state} -> {want or 'nothing'}",
+            env = dict({"HOME": b.home, "PATH": noclaude["PATH"]},
+                       **dict(zip(("CLAUDE_FAILED", "CLAUDE_TRIED", "CODEX_FAILED", "CODEX_TRIED"), map(str, state))))
+            for a in ("OPENCLAW", "HERMES", "GEMINI"):
+                f, t = others.get(a, (0, 0))
+                env.update({f"{a}_FAILED": str(f), f"{a}_TRIED": str(t)})
+            r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=60, env=env)
+            check(f"full install's record: earlier {recorded}, this run {state} {others} -> {want or 'nothing'}",
                   r.stdout == f"[{want}]" and "ERR-TRAP" not in r.stderr, (r.stdout, r.stderr))
         check("…and the full install records what install_incomplete says", 'incomplete="$(install_incomplete)"' in src
               and 'MCOMP_INSTALL_INCOMPLETE="$incomplete"' in src)

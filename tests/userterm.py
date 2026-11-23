@@ -1,6 +1,6 @@
 """Run a command as at the user's own terminal, for tests of commands only the user may run.
 
-Those commands want a terminal with no agent session (Claude Code or Codex) above them (lib/owners.py,
+Those commands want a terminal with no agent session (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI) above them (lib/owners.py,
 at_user_terminal), and the test suites are often run by an agent. `spawn` runs the command in a process that launchd
 (pid 1) has adopted, so whatever runs the suite isn't above it; its standard streams are whatever the test passes
 (usually a pty's slave end). No setting in the code under test is involved: the process tree is the real one.
@@ -31,6 +31,26 @@ def fake_agent(name="codex"):
         subprocess.run(["/usr/bin/cc", "-o", out, src], capture_output=True)
         _AGENTS[name] = out if os.path.exists(out) else None
     return _AGENTS[name]
+
+
+def fake_interpreter(name="node"):
+    """A small program named `name` (node, python3) that runs what follows `--` in its arguments as its child and exits
+    with its status: stands in for an agent that runs on an interpreter, whose arguments before `--` say which program
+    it runs (Gemini CLI's `node .../bin/gemini`, Hermes Agent's `python3 -m hermes_cli.main gateway run`). Started
+    with another argv[0] (subprocess's executable=), it stands in for a process that names itself (OpenClaw's
+    `openclaw-gateway`). None without a C compiler."""
+    key = "interp:" + name
+    if key not in _AGENTS:
+        d = tempfile.mkdtemp(prefix="mcomp-interp-")
+        src, out = os.path.join(d, name + ".c"), os.path.join(d, name)
+        with open(src, "w") as f:
+            f.write("#include <string.h>\n#include <unistd.h>\n#include <sys/wait.h>\nint main(int c, char **v) { int i = 1; "
+                    "while (i < c && strcmp(v[i], \"--\") != 0) i++; if (i + 1 >= c) return 111; pid_t p = fork(); "
+                    "if (p == 0) { execv(v[i + 1], v + i + 1); _exit(127); } int st = 0; waitpid(p, &st, 0); "
+                    "return WIFEXITED(st) ? WEXITSTATUS(st) : 126; }\n")
+        subprocess.run(["/usr/bin/cc", "-o", out, src], capture_output=True)
+        _AGENTS[key] = out if os.path.exists(out) else None
+    return _AGENTS[key]
 
 
 class Detached:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The computer an agent session holds, and the guard that keeps the session's commands on it.
 
-An agent session (Claude Code or Codex: lib/owners.py claude_of) reaches a computer two ways: through its MCP tools,
+An agent session (Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI: lib/owners.py claude_of) reaches a computer two ways: through its MCP tools,
 which act on the computer its bridge (`metacomputer mcp-lazy`, lib/mcp_lazy.py) started on, or the one it chose with
 `select_computer`; and through the commands it runs in a shell. Each command picks its computer for itself: `--vm
 NAME`, MCOMP_VM, MCOMP_CONFIG, else the default computer (config/default-vm), else config/local.env's VM. So a session
@@ -661,7 +661,7 @@ def guard(argv):
     clash = conflicts(target, recs)
     if not clash:
         return 0
-    name = owners.agent_kind(table.get(agent, (0, ""))[1])
+    name = owners.agent_of(agent, table)
     if action == "read":
         print(note(clash, target, cmd, chosen, settings, name), file=sys.stderr)
         return 0
@@ -681,12 +681,12 @@ def show(argv):
         print(json.dumps({"agent_pid": agent, "records": recs, "folder": sessions_dir()}, indent=2))
         return 0
     if not agent:
-        print("Not run from an agent session (Claude Code or Codex).")
+        print("Not run from an agent session (Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI).")
         return 0
     if not recs:
         print("This agent session holds no computer yet.")
         return 0
-    name = owners.agent_kind(table.get(agent, (0, ""))[1])
+    name = owners.agent_of(agent, table)
     for part in ([r for r in recs if r["kind"] == "mcp"], [r for r in recs if r["kind"] == "claim"]):
         if part:
             text = holding(part, name)

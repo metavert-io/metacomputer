@@ -73,6 +73,12 @@ type the answers (see "Tampering" below).
 
 - **Claude Code's session files**, `$CLAUDE_CONFIG_DIR/projects/**/*.jsonl`
   (else `~/.claude/projects`), including subagent files.
+- **Codex's sessions**, `$CODEX_HOME/sessions/**/rollout-*.jsonl` (else `~/.codex`; [codex.md](codex.md)).
+- **Gemini CLI's sessions**, `~/.gemini/tmp/<project>/chats/*.jsonl` (`$GEMINI_CLI_HOME/.gemini`;
+  [gemini.md](gemini.md)): its MCP calls (`mcp_metacomputer_*`) and shell commands. OpenClaw's and Hermes Agent's
+  sessions aren't read yet: they're kept in SQLite databases, and their tool search records the MCP calls inside
+  calls of its own ([openclaw.md](openclaw.md), [hermes.md](hermes.md)). Their calls reach `learn` through the action
+  log below (`ACTION_LOG=on`), as every client's do.
 - **Saved headless transcripts** (`claude -p --output-format stream-json`), from
   each `--transcripts DIR`. When a session exists both ways, the headless copy is
   used and the other is skipped.
@@ -83,7 +89,7 @@ type the answers (see "Tampering" below).
 
 Only sessions that called a metacomputer tool are read, under either prefix
 (`mcp__metacomputer__*`, or `mcp__plugin_metacomputer_metacomputer__*` in sessions from
-when the plugin brought the server itself). Every
+when the plugin brought the server itself; Gemini CLI's `mcp_metacomputer_*`). Every
 transcript file changed within `--since` is scanned for that tool call's marker,
 and nothing else is kept from files that don't have it. `--since` takes `7d`
 (the default), `12h`, `2w` or a date; `--project PATH` keeps only sessions that

@@ -27,12 +27,24 @@ baseline before every task). Switches (flag or environment variable):
   --reset / BENCH_RESET            each | none    (reset the VM before each task)
   --lessons / BENCH_LESSONS        off | on       (the lessons approved with `metacomputer learn`, from
                                                    MCOMP_LESSONS_DIR or the default store; default off)
-  --agent / BENCH_AGENT            claude | codex (default claude). codex: `codex exec` with the work folder's
-                                   project config (the skill in .agents/skills, metacomputer's rules in
-                                   .codex/rules), Codex's default sandbox and model unless --model names a GPT
-                                   model; --budget, --cap and --effort don't apply: Codex reports tokens, not a
-                                   cost, so a Codex run counts nothing against the cap (each task still has its
-                                   timeout)
+  --agent / BENCH_AGENT            claude | codex | gemini | hermes | openclaw (default claude). codex: `codex
+                                   exec` with the work folder's project config (the skill in .agents/skills,
+                                   metacomputer's rules in .codex/rules), Codex's default sandbox and model unless
+                                   --model names a GPT model. gemini, hermes, openclaw: each session runs in a
+                                   throwaway HOME made for it (isolate_session: none of your agent configuration,
+                                   overrides or credentials; deleted afterwards through lib/safedelete.py), with
+                                   approval only for metacomputer's own tools and command: gemini `gemini -p ... -o
+                                   stream-json` (the server trusted, `metacomputer` shell commands allowed, nothing
+                                   else; no yolo); hermes `hermes chat -q ... --format stream-json` in a Hermes home
+                                   of the session's own (its server, tool search off; no --yolo); openclaw `openclaw
+                                   agent exec ... --json` with a state folder of its own whose exec allowlist holds
+                                   only metacomputer's command (it reports a summary, not each call). An agent's own
+                                   default model unless --model names one. For all but claude, --budget, --cap and
+                                   --effort don't apply: they report tokens, not a cost, so their runs count nothing
+                                   against the cap (each task still has its timeout)
+  --pass-env / BENCH_PASS_ENV      NAME[,NAME...]: for gemini, hermes and openclaw, the only variables of yours their
+                                   sessions get (a model key, say), by name: set them for this command only (from your
+                                   secrets manager); nothing else of your environment is passed
 """
 import argparse
 import datetime
@@ -42,6 +54,8 @@ import hashlib
 import json
 import math
 import os
+import re
+import shlex
 import shutil
 import signal
 import stat
@@ -63,6 +77,8 @@ CLI = os.path.join(LAB, "bin", "metacomputer")
 sys.path.insert(0, BENCH)
 import metrics  # noqa: E402
 import report  # noqa: E402
+sys.path.insert(0, os.path.join(LAB, "lib"))
+import safedelete  # noqa: E402  (the throwaway HOME of a session goes through it)
 
 RESULTS = os.environ.get("BENCH_RESULTS") or os.path.join(LAB, "results", "bench")
 TASKS = os.path.join(BENCH, "tasks")
@@ -77,7 +93,7 @@ SHELL_FORBID = ("\n\nDon't use a shell inside the virtual computer for this (no 
                 "`metacomputer sh`): work through its desktop.")
 DEFAULTS = {"model": "claude-opus-5-5", "skill": os.path.join(LAB, "skills", "metacomputer"), "shell": "allow",
             "coord_guard": "off", "hub": "", "screen": "", "effort": "", "budget": "3", "cap": "60", "reset": "each",
-            "lessons": "off", "agent": "claude"}
+            "lessons": "off", "agent": "claude", "pass_env": ""}
 
 
 def log(msg):
@@ -260,6 +276,50 @@ def trusted_claude(path=None, name="claude"):
     return real
 
 
+AGENTS = ("claude", "codex", "gemini", "hermes", "openclaw")
+SKILL_HOME = {"codex": ".agents", "gemini": ".agents", "openclaw": "", "hermes": ".agents"}   # else .claude
+ISOLATED = ("gemini", "hermes", "openclaw")        # each session in a throwaway HOME (isolate_session)
+# What of your environment an isolated session keeps: what a program needs to run, nothing that configures an agent
+# or holds a credential. Variables named with --pass-env come on top.
+SESSION_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "USER", "LOGNAME", "SHELL")
+# metacomputer's own settings its command reads (which test VM, and the guards that hold a session to it); never one
+# that holds a credential.
+SESSION_MCOMP_KEEP = ("MCOMP_CONFIG", "MCOMP_EXPECT_VM", "MCOMP_EXPECT_BASELINE", "MCOMP_EXPECT_CONFIG_SHA",
+                      "MCOMP_EXPECT_SSH_PORT", "MCOMP_EXPECT_HOSTKEY", "MCOMP_LESSONS_DIR")
+# An isolated OpenClaw session's tools, on top of the minimal profile: metacomputer's, exec (allowlisted to its
+# command), reading files in the work folder (tools.fs.workspaceOnly) and the skill tools.
+OPENCLAW_TOOLS = ["metacomputer__*", "exec", "read", "skills_search", "skills_read"]
+# An isolated Hermes session's toolsets and settings: the terminal (for metacomputer's command), skills and
+# metacomputer's server; approvals asked for (never auto-approved by its guardian model) and refused in a -q session;
+# the gateway the session starts for its home ends a minute after it goes idle.
+HERMES_TOOLSETS = "terminal,skills,metacomputer"
+HERMES_SETTINGS = (("tools.tool_search.enabled", "off"), ("approvals.mode", "manual"),
+                   ("approvals.single_query_mode", "deny"), ("gateway.unmanaged_idle_exit_seconds", "60"))
+# An isolated Gemini CLI session's policy (~/.gemini/policies in its throwaway HOME): metacomputer's tools and its
+# command (toolName "*" with mcpName: every tool of that server); the rest keeps Gemini CLI's defaults.
+GEMINI_POLICY = """# metacomputer's benchmark session: its tools and its command, without asking.
+[[rule]]
+mcpName = "metacomputer"
+toolName = "*"
+decision = "allow"
+priority = 900
+
+[[rule]]
+toolName = "run_shell_command"
+commandPrefix = %s
+decision = "allow"
+priority = 900
+"""
+# Hermes Agent's administrator-managed scope: its .env and config.yaml apply to every Hermes run on the Mac.
+HERMES_MANAGED = "/etc/hermes"
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
+
+
+def tokens_only(agent):
+    """An agent that reports tokens, never a cost (every one but Claude Code): no budget, no cap, cost n/a."""
+    return (agent or "claude") != "claude"
+
+
 def prepare_workdir(run_id, sw):
     """A fresh private folder (mkdtemp: 0700, yours, an unpredictable name in your own
     temporary folder) outside any repository (so no CLAUDE.md is picked up), with the
@@ -270,7 +330,7 @@ def prepare_workdir(run_id, sw):
     st = os.lstat(work)
     if not os.path.isdir(work) or os.path.islink(work) or st.st_uid != os.getuid() or st.st_mode & 0o077:
         sys.exit(f"refusing the work folder {work}: not a private folder of yours")
-    skill_dst = os.path.join(work, ".agents" if sw.get("agent") == "codex" else ".claude", "skills", "metacomputer")
+    skill_dst = os.path.join(work, SKILL_HOME.get(sw.get("agent"), ".claude"), "skills", "metacomputer")
     shutil.copytree(sw["skill"], skill_dst)
     # The skill names the installed launcher; point the copy at the checkout under test.
     for p in glob.glob(os.path.join(skill_dst, "**", "*.md"), recursive=True):
@@ -297,7 +357,291 @@ def prepare_workdir(run_id, sw):
         os.makedirs(os.path.join(work, ".codex", "rules"))
         open(os.path.join(work, ".codex", "rules", "metacomputer.rules"), "w").write(
             rules.replace("@COMMANDS@", json.dumps(names)))
+    if sw.get("agent") in ISOLATED:
+        # An isolated session's HOME is a throwaway one; metacomputer, the system under test, keeps yours (its settings,
+        # SSH keys and vault are there): its commands for those sessions (metacomputer, mcomp) are launchers that run
+        # this checkout's with your HOME, first on the session's PATH; the skill names the first, and they are the only
+        # commands the sessions' approvals allow.
+        os.makedirs(os.path.join(work, "agent-bin"), 0o700)
+        for launcher in agent_launchers(work):
+            with open(launcher, "w") as f:
+                f.write(f"#!/bin/sh\nHOME={shlex.quote(os.path.expanduser('~'))}; export HOME\n"
+                        f"exec {shlex.quote(CLI)} \"$@\"\n")
+            os.chmod(launcher, 0o700)
+        for p in glob.glob(os.path.join(skill_dst, "**", "*.md"), recursive=True):
+            t = open(p).read()
+            open(p, "w").write(t.replace(CLI, agent_launcher(work)))
     return work, cfg, shim
+
+
+def agent_launchers(work):
+    return [os.path.join(work, "agent-bin", n) for n in ("metacomputer", "mcomp")]
+
+
+def agent_launcher(work):
+    return agent_launchers(work)[0]
+
+
+def agent_server(cfg, timeout_key, timeout):
+    """The session's MCP server (command, args, env) as the Claude sessions get it, for another agent's config; it runs
+    with your HOME (metacomputer's state is there), whatever HOME the agent has."""
+    srv = json.load(open(cfg))["mcpServers"]["metacomputer"]
+    return {"command": srv["command"], "args": ["mcp-lazy"], "env": dict(srv["env"], HOME=os.path.expanduser("~")),
+            timeout_key: timeout}
+
+
+def prompt_of(t, sw):
+    return PREFIX + t["prompt"].strip() + (SHELL_FORBID if sw["shell"] == "forbid" else "")
+
+
+def own_model(sw):
+    """The model to name, or None for the agent's own default (switches_from sets AGENT-default)."""
+    return None if sw["model"].endswith("-default") else sw["model"]
+
+
+def pass_env_names(sw):
+    return [n for n in (sw.get("pass_env") or "").replace(" ", "").split(",") if n]
+
+
+def session_env(sw, home):
+    """An isolated session's environment: only what a program needs (SESSION_ENV_KEEP), the throwaway HOME, the
+    metacomputer settings its server and command read, and the variables named with --pass-env."""
+    env = {k: os.environ[k] for k in SESSION_ENV_KEEP if k in os.environ}
+    env["HOME"] = home
+    for k in SESSION_MCOMP_KEEP:
+        if k in os.environ:
+            env[k] = os.environ[k]
+    for n in pass_env_names(sw):
+        if n in os.environ:
+            env[n] = os.environ[n]
+    return env
+
+
+def isolate_session(agent, sw, work, cfg, home, prog, env):
+    """Set up an isolated session's throwaway HOME for one agent; returns its command line (after the program) and the
+    environment. Approval goes to metacomputer only, as far as each agent can scope it:
+      gemini    a policy file (Gemini CLI's policy engine, user tier) that allows metacomputer's server's tools and
+                shell commands that start with metacomputer's command, and nothing more: every other tool keeps Gemini
+                CLI's default rule, and what that asks for a headless session refuses (--approval-mode default, no
+                yolo); folder trust and telemetry off in the throwaway settings; only metacomputer's server allowed
+      hermes    refused while Hermes would load settings or keys from outside its home (refuse_hermes_outside_files:
+                its installation's .env, the administrator-managed /etc/hermes); a Hermes home of the session's own
+                (HERMES_HOME: its own default profile and gateway, so concurrent runs never share one) holding only
+                metacomputer's server (Hermes runs a configured server's tools without asking) with tool search off,
+                and the skill; only the terminal, skills and metacomputer toolsets (-t); no --yolo: approvals manual
+                and a single-query session's dangerous commands refused. Hermes has no allowlist for its terminal:
+                even with manual approvals, a command it doesn't rate dangerous runs without asking, as you, on this
+                Mac (the throwaway HOME keeps Hermes's own settings out, it isn't a sandbox)
+      openclaw  a state folder and a config file of the session's own (OPENCLAW_STATE_DIR, OPENCLAW_CONFIG_PATH: none
+                of yours applies): the minimal tool profile plus metacomputer's tools, `exec`, reading files in the
+                work folder and its skills, nothing else; exec in allowlist mode (misses refused, never asked) with an
+                allowlist that holds only metacomputer's command; tool search off; model credentials from the
+                environment only (--auth-env-only: no stored or other CLIs' credentials, as from the keychain)"""
+    prompt = prompt_of(sw.get("_task"), sw)
+    if agent == "gemini":
+        os.makedirs(os.path.join(home, ".gemini"), 0o700)
+        settings = {"privacy": {"usageStatisticsEnabled": False}, "telemetry": {"enabled": False},
+                    "general": {"enableAutoUpdate": False, "enableAutoUpdateNotification": False},
+                    "security": {"folderTrust": {"enabled": False}},
+                    "mcpServers": {"metacomputer": dict(agent_server(cfg, "timeout", 600000), trust=True)}}
+        json.dump(settings, open(os.path.join(home, ".gemini", "settings.json"), "w"), indent=2)
+        os.makedirs(os.path.join(home, ".gemini", "policies"), 0o700)
+        with open(os.path.join(home, ".gemini", "policies", "metacomputer-bench.toml"), "w") as f:
+            f.write(GEMINI_POLICY % json.dumps([*agent_launchers(work), "metacomputer", "mcomp"]))
+        args = ["-p", prompt, "-o", "stream-json", "--approval-mode", "default", "--skip-trust",
+                "--allowed-mcp-server-names", "metacomputer"]
+        return args + (["-m", own_model(sw)] if own_model(sw) else []), env
+    if agent == "hermes":
+        hh = os.path.join(home, ".hermes")
+        os.makedirs(os.path.join(hh, "skills"), 0o700)
+        env = dict(env, HERMES_HOME=hh)
+        refuse_hermes_outside_files(prog, env, home)
+        # The first command in a new home can take a while: with Hermes's own installer, Hermes prepares the
+        # dependencies of each new home the first time (here, before the session's clock starts).
+        for i, (key, value) in enumerate(HERMES_SETTINGS + (("mcp_servers.metacomputer",
+                                                               json.dumps(agent_server(cfg, "timeout", 600))),)):
+            r = subprocess.run([prog, "config", "set", key, value], capture_output=True, text=True, env=env,
+                               timeout=900 if i == 0 else 120, stdin=subprocess.DEVNULL, cwd=home)
+            if r.returncode != 0:
+                raise RuntimeError(f"couldn't set {key} in the session's Hermes home")
+        os.symlink(os.path.join(work, ".agents", "skills", "metacomputer"), os.path.join(hh, "skills", "metacomputer"))
+        args = ["chat", "-q", prompt, "-Q", "--format", "stream-json", "-t", HERMES_TOOLSETS, "--max-turns",
+                str(int(sw["_task"].get("max_turns", 60))), "--source", "tool"]
+        return args + (["-m", own_model(sw)] if own_model(sw) else []), env
+    state = os.path.join(home, ".openclaw")
+    os.makedirs(state, 0o700)
+    conf = os.path.join(state, "openclaw.json")
+    env = dict(env, OPENCLAW_STATE_DIR=state, OPENCLAW_CONFIG_PATH=conf, OPENCLAW_NO_AUTO_UPDATE="1")
+    json.dump({"mcp": {"servers": {"metacomputer": agent_server(cfg, "requestTimeoutMs", 600000)}},
+               "tools": {"profile": "minimal", "alsoAllow": OPENCLAW_TOOLS, "toolSearch": False,
+                         "fs": {"workspaceOnly": True}, "exec": {"mode": "allowlist"}}},
+              open(conf, "w"), indent=2)
+    for launcher in agent_launchers(work):
+        r = subprocess.run([prog, "approvals", "allowlist", "add", "--agent", "*", launcher], capture_output=True,
+                           text=True, env=env, timeout=120, stdin=subprocess.DEVNULL, cwd=home)
+        if r.returncode != 0:
+            raise RuntimeError("couldn't allow metacomputer's command in the session's OpenClaw state folder")
+    args = ["agent", "exec", prompt, "--json", "--cwd", work, "--state-dir", state, "--auth-env-only",
+            "--timeout", str(int(sw["_task"].get("timeout_s", 600)))]
+    return args + (["--model", own_model(sw)] if own_model(sw) else []), env
+
+
+def hermes_outside_files(prog, env, cwd):
+    """The files outside a Hermes Agent home that Hermes loads into every run, whatever its home: its installation's own
+    .env (hermes_cli/main.py loads PROJECT_ROOT/.env, the folder `hermes --version` names as its install directory,
+    over the environment when the home has no .env: a source or editable install's keys) and the
+    administrator-managed scope (HERMES_MANAGED: its .env, loaded last over everything, and its config.yaml). Returns
+    (the ones that are there, or that can't be looked at), or raises SystemExit when the install directory can't be
+    told."""
+    try:
+        r = subprocess.run([prog, "--version"], capture_output=True, text=True, env=env, timeout=300,
+                           stdin=subprocess.DEVNULL, cwd=cwd)
+        out = r.stdout if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    m = re.search(r"^Install directory: (/.+?)\s*$", out, re.M)
+    if not m:
+        raise SystemExit("couldn't tell where Hermes Agent is installed (`hermes --version` names no install directory), "
+                         "so not whether it would load a .env of its installation into the session: not running it")
+    there = []
+    for f in (os.path.join(m[1], ".env"), os.path.join(HERMES_MANAGED, ".env"), os.path.join(HERMES_MANAGED, "config.yaml")):
+        try:
+            os.lstat(f)
+            there.append(f)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError:
+            there.append(f)                     # can't be looked at: it may be there
+    return there
+
+
+def refuse_hermes_outside_files(prog, env, cwd):
+    """Stop the run when Hermes Agent would bring settings or keys of yours into a session (hermes_outside_files)."""
+    there = hermes_outside_files(prog, env, cwd)
+    if there:
+        raise SystemExit(f"{there[0]} is there (or can't be looked at), and Hermes Agent loads it into every session "
+                         "whatever its home, so a benchmark session would carry its settings or keys: not running Hermes "
+                         "Agent. Move it away for the run (or use a Hermes Agent installed without one), then run again.")
+
+
+def end_isolated(agent, prog, home):
+    """After an isolated session, however it ended: Hermes's gateway for the session's home stopped (a -q session
+    starts one, which would otherwise stay up until it has been idle a minute), then the throwaway HOME deleted
+    through safedelete."""
+    if agent == "hermes" and os.path.isdir(os.path.join(home, ".hermes")):
+        env = {k: os.environ[k] for k in ("PATH", "LANG", "TMPDIR") if k in os.environ}
+        env.update(HOME=home, HERMES_HOME=os.path.join(home, ".hermes"))
+        try:
+            subprocess.run([prog, "gateway", "stop"], capture_output=True, text=True, env=env, timeout=120,
+                           stdin=subprocess.DEVNULL, cwd=home)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    safedelete.rmtree(home, quiet=True)
+
+
+def _call(state, name, inp, content, is_err, cid=None):
+    """One finished tool call as the stream-json pair metrics.py and transcripts.py read."""
+    state["calls"] = state.get("calls", 0) + 1
+    cid = cid or f"call_{state['calls']}"
+    return [{"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": cid, "name": name, "input": inp}]}, "session_id": state.get("sid")},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": cid, "content": content, "is_error": bool(is_err)}]},
+             "session_id": state.get("sid")}]
+
+
+def _shell_or_mcp(name, inp):
+    """A tool's name as the Claude events name it: the agent's shell tool as Bash, metacomputer's as mcp__metacomputer__*."""
+    if name in ("run_shell_command", "terminal", "exec"):
+        return "Bash", {"command": (inp or {}).get("command") or ""}
+    if name.startswith("mcp_metacomputer_"):
+        return "mcp__metacomputer__" + name[len("mcp_metacomputer_"):], inp
+    return name, inp
+
+
+def gemini_events(ev, state):
+    """One `gemini -o stream-json` event as stream-json events: init; a tool_use is held until its tool_result (by
+    tool_id) and both become a finished call; assistant text; the result (tokens, no cost)."""
+    t = ev.get("type")
+    if t == "init":
+        state["sid"] = ev.get("session_id")
+        return [{"type": "system", "subtype": "init", "session_id": ev.get("session_id"), "model": ev.get("model"),
+                 "cwd": state.get("cwd"), "tools": []}]
+    if t == "message" and ev.get("role") == "assistant":
+        return [{"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": ev.get("content") or ""}]}}]
+    if t == "tool_use":
+        state.setdefault("pending", {})[ev.get("tool_id")] = (ev.get("tool_name") or "",
+                                                               ev.get("parameters") if isinstance(ev.get("parameters"), dict) else {})
+        return []
+    if t == "tool_result":
+        name, inp = state.get("pending", {}).pop(ev.get("tool_id"), ("unknown", {}))
+        name, inp = _shell_or_mcp(name, inp)
+        text = ev.get("output") if isinstance(ev.get("output"), str) else ""
+        if not text and isinstance(ev.get("error"), dict):
+            text = str(ev["error"].get("message") or "")
+        return _call(state, name, inp, [{"type": "text", "text": text[:20000]}], ev.get("status") == "error",
+                     f"gemini_{ev.get('tool_id')}")
+    if t == "result":
+        st = ev.get("stats") or {}
+        ok = ev.get("status") == "success"
+        return [{"type": "result", "subtype": "success" if ok else "error", "is_error": not ok,
+                 "num_turns": state.get("calls", 0), "total_cost_usd": None, "session_id": state.get("sid"),
+                 "usage": {"input_tokens": st.get("input_tokens"), "output_tokens": st.get("output_tokens"),
+                           "cache_read_input_tokens": st.get("cached")}}]
+    return []
+
+
+def hermes_events(ev, state):
+    """One `hermes chat --format stream-json` event as stream-json events: init; a tool_use is held until its
+    tool_result (by tool_call_id, else name) and both become a finished call (terminal as Bash); text; the result
+    (tokens, no cost)."""
+    t = ev.get("type")
+    if t == "system" and ev.get("subtype") == "init":
+        state["sid"] = ev.get("session_id")
+        return [{"type": "system", "subtype": "init", "session_id": ev.get("session_id"), "model": ev.get("model"),
+                 "cwd": state.get("cwd"), "tools": []}]
+    if t == "text":
+        return [{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": ev.get("text") or ""}]}}]
+    if t == "tool_use":
+        state.setdefault("pending", {})[ev.get("tool_call_id") or ev.get("name")] = (
+            ev.get("name") or "", ev.get("input") if isinstance(ev.get("input"), dict) else {})
+        return []
+    if t == "tool_result":
+        key = ev.get("tool_call_id") or ev.get("name")
+        name, inp = state.get("pending", {}).pop(key, (ev.get("name") or "unknown", {}))
+        name, inp = _shell_or_mcp(name, inp)
+        return _call(state, name, inp, [{"type": "text", "text": str(ev.get("output") or "")[:20000]}],
+                     ev.get("is_error"), f"hermes_{key}" if ev.get("tool_call_id") else None)
+    if t == "result":
+        tok = ev.get("tokens") or {}
+        ok = ev.get("exit_code") == 0 and not ev.get("error")
+        return [{"type": "result", "subtype": "success" if ok else "error", "is_error": not ok,
+                 "num_turns": state.get("calls", 0), "total_cost_usd": None, "session_id": ev.get("session_id") or state.get("sid"),
+                 "usage": {"input_tokens": tok.get("input"), "output_tokens": tok.get("output"),
+                           "cache_read_input_tokens": tok.get("cache_read")}}]
+    return []
+
+
+def openclaw_events(env_obj, state):
+    """`openclaw agent exec --json`'s one envelope as stream-json events: init and the result (tokens, no cost). It
+    reports a summary of the tool calls, not each one, so the per-call metrics of these runs are empty."""
+    if not isinstance(env_obj, dict):
+        return []
+    u = env_obj.get("usage") if isinstance(env_obj.get("usage"), dict) else {}
+    ok = env_obj.get("ok") is True and env_obj.get("status") == "ok"
+    summary = env_obj.get("toolSummary") if isinstance(env_obj.get("toolSummary"), dict) else {}
+    return [{"type": "system", "subtype": "init", "session_id": env_obj.get("sessionId"), "model": env_obj.get("model"),
+             "cwd": state.get("cwd"), "tools": []},
+            {"type": "result", "subtype": "success" if ok else "error", "is_error": not ok,
+             "num_turns": env_obj.get("assistantTurns"), "total_cost_usd": None, "session_id": env_obj.get("sessionId"),
+             "tool_summary_calls": summary.get("calls"),
+             "usage": {"input_tokens": u.get("input") if "input" in u else u.get("inputTokens"),
+                       "output_tokens": u.get("output") if "output" in u else u.get("outputTokens")}}]
+
+
+SESSION_ARGS = {"codex": "codex_session_args"}
+EVENTS = {"codex": "codex_events", "gemini": "gemini_events", "hermes": "hermes_events"}
 
 
 def codex_session_args(t, sw, cfg):
@@ -457,12 +801,30 @@ def undo_codex_trust(before, work, path=None):
 
 
 def run_session(t, sw, work, cfg, shim, tdir, claude=None):
-    codex = sw.get("agent") == "codex"
+    agent = sw.get("agent") or "claude"
+    claude = claude or trusted_claude(os.environ.get("PATH", ""), agent)   # before the shim goes first
+    if agent not in ISOLATED:
+        return _session(t, sw, work, cfg, shim, tdir, claude, None)
+    home = tempfile.mkdtemp(prefix="mcomp-bench-home-")      # private (0700), removed when the session ends
+    try:
+        return _session(t, sw, work, cfg, shim, tdir, claude, home)
+    finally:
+        end_isolated(agent, claude, home)
+
+
+def _session(t, sw, work, cfg, shim, tdir, claude, home):
+    agent = sw.get("agent") or "claude"
+    codex = agent == "codex"
     codex_before = read_or_none(codex_config_path()) if codex else None
-    args, budget = codex_session_args(t, sw, cfg) if codex else session_args(t, sw, cfg)
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    claude = claude or trusted_claude(env.get("PATH", ""), "codex" if codex else "claude")   # before the shim goes first
-    env["PATH"] = shim + os.pathsep + env.get("PATH", "")
+    if home:
+        args, env = isolate_session(agent, dict(sw, _task=t), work, cfg, home, claude, session_env(sw, home))
+        env["PATH"] = os.path.dirname(agent_launcher(work)) + os.pathsep + env.get("PATH", "")
+        budget = None
+    else:
+        args, budget = globals()[SESSION_ARGS[agent]](t, sw, cfg) if agent in SESSION_ARGS else session_args(t, sw, cfg)
+    if not home:
+        env["PATH"] = shim + os.pathsep + env.get("PATH", "")
     env["MCOMP_COORD_GUARD"] = sw["coord_guard"]
     if sw.get("hub"):
         env["MCOMP_MCP_HUB"] = sw.get("hub")
@@ -476,14 +838,19 @@ def run_session(t, sw, work, cfg, shim, tdir, claude=None):
                             stdout=subprocess.PIPE, stderr=err, text=True, start_new_session=True)
 
     state = {"cwd": work, "calls": 0}
+    mapper = globals()[EVENTS[agent]] if agent in EVENTS else None
+    whole = []                     # openclaw: one JSON envelope, possibly over several lines
 
     def reader():
         for line in proc.stdout:
+            if agent == "openclaw":
+                whole.append(line)
+                continue
             try:
                 ev = json.loads(line)
             except ValueError:
                 continue
-            for e in (codex_events(ev, state) if codex else [ev]):
+            for e in (mapper(ev, state) if mapper else [ev]):
                 small = metrics.compact(e)
                 dt = round(time.time() - t0, 2)
                 events.append(small)
@@ -509,6 +876,17 @@ def run_session(t, sw, work, cfg, shim, tdir, claude=None):
             except subprocess.TimeoutExpired:
                 continue
     th.join(timeout=10)
+    if agent == "openclaw":
+        try:
+            envelope = json.loads("".join(whole))
+        except ValueError:
+            envelope = None
+        for e in openclaw_events(envelope, state):
+            small = metrics.compact(e)
+            dt = round(time.time() - t0, 2)
+            events.append(small)
+            times.append(dt)
+            tr.write(json.dumps({"t": dt, **small}) + "\n")
     tr.close()
     err.close()
     if codex:
@@ -541,11 +919,15 @@ def switches_from(a):
         sw[k] = v if v not in (None, "") else os.environ.get("BENCH_" + k.upper(), d)
     sw["skill"] = os.path.abspath(os.path.expanduser(sw["skill"]))
     if sw["shell"] not in ("allow", "forbid") or sw["coord_guard"] not in ("on", "off") or sw["reset"] not in ("each", "none") \
-            or sw["hub"] not in ("", "on", "off") or sw["lessons"] not in ("on", "off") or sw["agent"] not in ("claude", "codex"):
+            or sw["hub"] not in ("", "on", "off") or sw["lessons"] not in ("on", "off") or sw["agent"] not in AGENTS:
         sys.exit("bad switch value (shell allow|forbid, coord-guard on|off, hub on|off, reset each|none, lessons on|off, "
-                 "agent claude|codex)")
+                 "agent claude|codex|gemini|hermes|openclaw)")
     if sw["agent"] == "codex" and not sw["model"].startswith(("gpt", "o")):
         sw["model"] = "codex-default"          # Codex runs its own default model unless --model names a GPT one
+    if any(not ENV_NAME.fullmatch(n) for n in pass_env_names(sw)):
+        sys.exit("--pass-env takes variable names (NAME[,NAME...]), never values")
+    if sw["agent"] in ("gemini", "hermes", "openclaw") and sw["model"] == DEFAULTS["model"]:
+        sw["model"] = sw["agent"] + "-default"  # the agent's own default model unless --model names one
     if not os.path.isfile(os.path.join(sw["skill"], "SKILL.md")):
         sys.exit(f"no SKILL.md in {sw['skill']}")
     for k in ("budget", "cap"):
@@ -682,12 +1064,19 @@ def cmd_run(a):
     vc = require_config(a.allow_main_vm)
     sw = switches_from(a)
     tasks = load_tasks(a.tasks)
+    if sw["agent"] == "hermes":            # before any VM is reset: refused now rather than at the first session
+        home = tempfile.mkdtemp(prefix="mcomp-bench-home-")
+        try:
+            env = dict(session_env(sw, home), HERMES_HOME=os.path.join(home, ".hermes"))
+            refuse_hermes_outside_files(trusted_claude(None, "hermes"), env, home)
+        finally:
+            safedelete.rmtree(home, quiet=True)
     run_id = a.run_id or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     rdir = os.path.join(RESULTS, run_id)
     os.makedirs(rdir, exist_ok=True)
-    codex = sw["agent"] == "codex"
-    agent_v = subprocess.run([trusted_claude(None, "codex" if codex else "claude"), "--version"],
-                             capture_output=True, text=True).stdout.strip()
+    codex = tokens_only(sw["agent"])          # every agent but Claude Code: tokens, no dollars (the name is older)
+    agent_v = (subprocess.run([trusted_claude(None, sw["agent"]), "--version"],
+                              capture_output=True, text=True).stdout.strip().splitlines() or [""])[0]
     meta = {"run_id": run_id, "started": datetime.datetime.now().isoformat(timespec="seconds"),
             "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "agent_version": agent_v,
             **({} if codex else {"claude_code": agent_v}),
@@ -723,8 +1112,8 @@ def cmd_run(a):
             if t["id"] in done:
                 log(f"[{i}/{len(tasks)}] {t['id']}: already in this run, skipped")
                 continue
-            budget = 0.0 if codex else float(t.get("budget_usd") or sw["budget"])   # Codex: no dollars to count
-            if not codex and spent + budget > cap:        # Codex runs (older ones charged budgets) aren't capped
+            budget = 0.0 if codex else float(t.get("budget_usd") or sw["budget"])   # no dollars to count but Claude's
+            if not codex and spent + budget > cap:        # those runs (older Codex ones charged budgets) aren't capped
                 log(f"stopping: ${spent:.2f} spent, the next task could take ${budget:.2f}, cap ${cap:.2f}")
                 meta["stopped"] = f"cap: ${spent:.2f} spent before {t['id']}"
                 break

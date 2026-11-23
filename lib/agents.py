@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""The coding agents metacomputer is set up for on this Mac: Claude Code and Codex (docs/codex.md).
+"""The coding agents metacomputer is set up for on this Mac: Claude Code, Codex (docs/codex.md), OpenClaw
+(docs/openclaw.md), Hermes Agent (docs/hermes.md) and Gemini CLI (docs/gemini.md).
 
   metacomputer agents [--json]          each agent: installed (and its version), how it's set up, your choice
-                                        (install.sh --no-claude / --no-codex, remembered for later runs). For
+                                        (install.sh --no-claude, --no-codex, ..., remembered for later runs). For
                                         Claude Code: the skills (the plugin, or a skill link with --no-plugin) and
                                         the tools (the user-scope MCP server metacomputer, read as install.sh reads
                                         it, lib/claude_mcp.py: its command and exact arguments checked; the plugin
                                         declares none, and an older copy of it that still brings its own is
-                                        reported), and this checkout's command that adds them
+                                        reported), and this checkout's command that adds them. For OpenClaw,
+                                        Hermes Agent and Gemini CLI: the MCP server metacomputer as each keeps it
+                                        (lib/agent_setup.py, read by the agent's own CLI, or Gemini CLI's
+                                        settings.json) and the skill links
   metacomputer agents check [--json]    what metacomputer relies on in this Mac's Codex, checked without a model and
                                         without touching your Codex settings (a throwaway CODEX_HOME): its rules
                                         checker, the sandbox's marker, `codex mcp` and the two settings install.sh
@@ -69,7 +73,7 @@ def run(argv, env=None, timeout=TIMEOUT, cwd=None):
 def choices():
     try:
         d = json.load(open(AGENTS_FILE))
-        return {k: d.get(k) for k in ("claude", "codex") if d.get(k) in ("on", "off")}
+        return {k: d.get(k) for k in ("claude", "codex", "openclaw", "hermes", "gemini") if d.get(k) in ("on", "off")}
     except (OSError, ValueError):
         return {}
 
@@ -432,7 +436,11 @@ def main(argv):
                 print(f"{ver or 'This Codex'} changed something metacomputer relies on: see docs/codex.md "
                       "(\"If something doesn't work\"), and please report it.")
         return 1 if failed else 0
+    import agent_setup
     st = {"claude_code": claude_status(), "codex": codex_status()}
+    more = agent_setup.AGENTS
+    for name, ag in more.items():
+        st[name] = agent_setup.status(ag, LAB, os.path.expanduser("~/.local/bin/metacomputer"), dict(os.environ))
     if a.json:
         print(json.dumps(st, indent=2))
         return 0
@@ -459,7 +467,30 @@ def main(argv):
         else:
             how = f"{s['version'] or 'installed'}: not set up; ./install.sh --only-agents sets it up"
         print(f"{label:<12} {how}")
+    for name, ag in more.items():
+        print(f"{ag.label:<12} {more_line(name, ag, st[name])}")
     return 0
+
+
+def more_line(name, ag, s):
+    """One line for OpenClaw, Hermes Agent or Gemini CLI (lib/agent_setup.py status)."""
+    if s.get("untrusted"):
+        return s["untrusted"]
+    if not s["installed"]:
+        return "isn't installed" + ("; you chose to leave it alone" if s.get("choice") == "off" else
+                                    "; once it is: ./install.sh --only-agents (or metacomputer update)")
+    ver = s.get("version") or "installed"
+    if s.get("choice") == "off":
+        return f"{ver}: left alone (--no-{name}; --{name} sets it up)"
+    skills = all(s.get("skills", {}).values())
+    if s.get("set_up"):
+        return f"{ver}: set up (MCP server, {'skills' if skills else 'skills missing'}; tools {ag.tools})"
+    if s.get("mcp_error"):
+        return f"{ver}: its MCP server metacomputer couldn't be read ({s['mcp_error']})"
+    if s.get("mcp_server"):
+        return (f"{ver}: its MCP server metacomputer runs {s['mcp_server']}, not ~/.local/bin/metacomputer mcp-lazy (no "
+                f"metacomputer tools); {os.path.join(LAB, 'install.sh')} --only-{name} says how to replace it")
+    return f"{ver}: not set up; ./install.sh --only-{name} sets it up"
 
 
 if __name__ == "__main__":

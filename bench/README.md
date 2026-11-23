@@ -152,7 +152,8 @@ version and the model.
 | `--cap USD` | `BENCH_CAP` | `60` | The whole run's cap: a task doesn't start if its budget could take the total over |
 | `--reset each\|none` | `BENCH_RESET` | `each` | Reset the VM to its baseline before every task |
 | `--lessons on\|off` | `BENCH_LESSONS` | `off` | `on`: the sessions' MCP instructions carry the lessons approved with `metacomputer learn` (from `MCOMP_LESSONS_DIR`, else the default store), passed as `MCOMP_LESSONS`; `run.json` records how many and a hash of the exact text (`lessons_count`, `lessons_hash`). `metacomputer learn bench` runs off, then on, and compares them (docs/learn.md) |
-| `--agent claude\|codex` | `BENCH_AGENT` | `claude` | `codex`: each task runs in `codex exec` with the work folder's project config (the skill in `.agents/skills`, metacomputer's rules in `.codex/rules`), the MCP server set up as an install sets it up, Codex's default sandbox, and its default model unless `--model` names a GPT model. `--budget`, `--cap` and `--effort` don't apply: Codex reports tokens, not a cost, so a Codex run counts nothing against `--cap` (each task keeps its timeout) and its reports show cost as n/a. Codex reads your own `~/.codex/AGENTS.md` too, and saves the work folder's trust into your `config.toml` when a session starts; the benchmark puts that file back as it was when that's the only change. Runs: [the standard set](runs/codex-std-2026-11-21.json) 20/20, [the lessons set](runs/codex-lessons-2026-11-21.json) 8/8, [the six browser tasks](runs/codex-browser-2026-11-21.json) 6/6 (docs/codex.md compares them with Claude Code's) |
+| `--agent claude\|codex\|gemini\|hermes\|openclaw` | `BENCH_AGENT` | `claude` | `codex`: each task runs in `codex exec` with the work folder's project config (the skill in `.agents/skills`, metacomputer's rules in `.codex/rules`), the MCP server set up as an install sets it up, Codex's default sandbox, and its default model unless `--model` names a GPT model. `--budget`, `--cap` and `--effort` don't apply: Codex reports tokens, not a cost, so a Codex run counts nothing against `--cap` (each task keeps its timeout) and its reports show cost as n/a. Codex reads your own `~/.codex/AGENTS.md` too, and saves the work folder's trust into your `config.toml` when a session starts; the benchmark puts that file back as it was when that's the only change. Runs: [the standard set](runs/codex-std-2026-11-21.json) 20/20, [the lessons set](runs/codex-lessons-2026-11-21.json) 8/8, [the six browser tasks](runs/codex-browser-2026-11-21.json) 6/6 (docs/codex.md compares them with Claude Code's). `gemini`, `hermes`, `openclaw`: each session in a throwaway HOME of its own ("Isolated sessions" below; docs/gemini.md, docs/hermes.md and docs/openclaw.md, "A benchmark run", give each agent's command line and what it may do without asking; `openclaw agent exec` reports a summary of the calls, not each one); each agent's own default model unless `--model` names one; tokens, not a cost, as for Codex. No runs of those yet: they need your own model keys. |
+| `--pass-env NAME[,NAME...]` | `BENCH_PASS_ENV` | none | `gemini`, `hermes`, `openclaw`: the only variables of yours their sessions get, a model key say, by name (a value is refused). Set them for that command only, from your secrets manager, so the key is never typed or saved |
 
 On screen size: the VM's display device offers many modes (from 1280x800 up to
 4096x2160), and `xrandr` switches between them while the VM runs. The desktop
@@ -178,6 +179,52 @@ The skill text names the installed launcher (`~/.local/bin/metacomputer`).
 The copy given to the session names this checkout's `bin/metacomputer`
 instead, so a branch is tested with its own CLI. `metacomputer` and `mcomp`
 on the session's PATH point there too.
+
+### Isolated sessions
+
+Gemini CLI, Hermes Agent and OpenClaw sessions each run in a throwaway HOME,
+made for that session (`mkdtemp`: private, a new name each time) and deleted
+afterwards through `lib/safedelete.py`, whether the session ends, times out
+or fails:
+- **None of your agent configuration:** the agent's settings, profiles,
+  sign-ins and keys are in your HOME, which the session doesn't have; its own
+  config in the throwaway HOME holds only the run's metacomputer server (and,
+  for OpenClaw, its own state folder and config file, named by
+  `OPENCLAW_STATE_DIR` and `OPENCLAW_CONFIG_PATH`; for Hermes Agent, its own
+  `HERMES_HOME`, so two runs at once never share one).
+- **None of your environment** beyond what a program needs to run (`PATH`,
+  `LANG`, `TERM`, `TMPDIR`, `USER`, `LOGNAME`, `SHELL`), metacomputer's own
+  settings for the test VM (`MCOMP_CONFIG` and the guards that hold a session
+  to that VM), and the variables named with `--pass-env`.
+- **Approval for metacomputer only, as far as each agent can scope it:**
+  Gemini CLI, a policy file that allows metacomputer's tools and its command
+  and nothing else (what Gemini CLI would ask about is refused headless);
+  OpenClaw, the minimal tool profile plus metacomputer's tools, with `exec`
+  limited to an allowlist holding only metacomputer's command; Hermes Agent,
+  which has no allowlist for its terminal, the terminal, skills and
+  metacomputer toolsets only, approvals manual and its dangerous commands
+  refused. None runs with a yolo or approve-everything mode.
+- **Hermes Agent: what manual approvals still allow.** Hermes asks only
+  before commands it rates dangerous; with approvals manual, every other
+  terminal command still runs without asking, as you, on this Mac. That's a
+  limit of Hermes Agent, not something the benchmark can close: run it with a
+  test VM's settings only (it refuses the main VM), and on a Mac whose files
+  you'd let such a command read.
+- **Hermes Agent: nothing loaded from outside its home.** Hermes loads its
+  installation's own `.env` (the folder `hermes --version` calls its install
+  directory) and the administrator-managed `/etc/hermes` (`.env`,
+  `config.yaml`) into every run, whatever its home. While any of them is
+  there (or can't be looked at), the run stops before it starts, naming the
+  file: move it away for the run, or use a Hermes Agent installed without
+  one.
+- metacomputer itself, the system under test, keeps your HOME (its settings,
+  SSH keys and vault are there): the server's entry says so, and the
+  session's `metacomputer` and `mcomp` commands are launchers in the work
+  folder that do the same, first on its PATH; the skill copy names the first.
+
+A throwaway HOME is not a sandbox: a command an agent may run still runs as
+you. That's why what each agent may do without asking is kept to
+metacomputer.
 
 Every prompt starts with the same line:
 

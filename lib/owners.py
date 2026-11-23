@@ -33,8 +33,9 @@ the driver: until they end or the driver connection closes, at most the activity
 window. It isn't another controller to that client's process or its Claude Code
 session.
 
-"Self" is the caller's own agent session (its nearest `claude` or `codex` ancestor:
-Claude Code or Codex), or a shell it runs under, so a session never blocks itself.
+"Self" is the caller's own agent session (its nearest agent ancestor: Claude Code, Codex,
+OpenClaw, Hermes Agent or Gemini CLI; agent_of), or a shell it runs under, so a session never
+blocks itself.
 
 A handoff (lib/handoff.py, `metacomputer handoff`) gives the computer to the user:
 while one is open, others() lists it for every caller, its own session included,
@@ -92,13 +93,13 @@ def cli():
 
 
 def ps_table(strict=False):
-    """{pid: (ppid, comm)} for every process. strict: OSError when ps fails or lists nothing, instead of a table
+    """{pid: (ppid, comm)} for every process (a ProcTable: an interpreter's arguments on request). strict: OSError when ps fails or lists nothing, instead of a table
     that would look like one without agents."""
     r = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True)
     out = r.stdout
     if strict and (r.returncode != 0 or not out.strip()):
         raise OSError(f"ps failed (exit {r.returncode})")
-    table = {}
+    table = ProcTable(live=True)
     for line in out.splitlines():
         parts = line.split(None, 2)
         if len(parts) >= 2:
@@ -107,7 +108,136 @@ def ps_table(strict=False):
 
 
 def full_command(pid):
-    return subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["/bin/ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+
+_CTL_KERN, _KERN_PROCARGS2 = 1, 49            # sysctl(3): a process's exact arguments, as the kernel keeps them
+
+
+def proc_argv(pid):
+    """A process's arguments, exactly (argv, one string each: spaces inside an argument stay inside it), or None when
+    they can't be read (no such process, another account's, a zombie). macOS: sysctl KERN_PROCARGS2, which holds what
+    the process left there, so a program that renamed itself (node's process.title, setproctitle) shows its new name as
+    argv[0]; Linux: /proc/PID/cmdline."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    if sys.platform == "darwin":
+        try:
+            import ctypes
+            import ctypes.util
+            import struct
+            libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+            mib = (ctypes.c_int * 3)(_CTL_KERN, _KERN_PROCARGS2, pid)
+            size = ctypes.c_size_t(0)
+            if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or size.value < 8:
+                return None
+            buf = ctypes.create_string_buffer(size.value)
+            if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0 or size.value < 8:
+                return None
+            raw = buf.raw[:size.value]
+            argc = struct.unpack_from("<i", raw, 0)[0]
+        except (OSError, AttributeError, ValueError, struct.error):
+            return None
+        i = raw.find(b"\0", 4)                    # the executable's path, then padding
+        if i < 0 or argc <= 0:
+            return None
+        while i < len(raw) and raw[i] == 0:
+            i += 1
+        out = []
+        while len(out) < argc and i < len(raw):
+            j = raw.find(b"\0", i)
+            j = len(raw) if j < 0 else j
+            out.append(raw[i:j].decode("utf-8", "replace"))
+            i = j + 1
+        return out or None
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            parts = f.read().split(b"\0")
+    except OSError:
+        return None
+    if parts and parts[-1] == b"":
+        parts.pop()
+    return [x.decode("utf-8", "replace") for x in parts] or None
+
+
+def _libproc():
+    import ctypes
+    return ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+
+
+def proc_exe(pid):
+    """The realpath of a process's executable (its text image: macOS proc_pidpath, Linux /proc/PID/exe), or None."""
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return None
+        if sys.platform == "darwin":
+            import ctypes
+            buf = ctypes.create_string_buffer(4096)
+            n = _libproc().proc_pidpath(pid, buf, 4096)
+            return buf.value.decode("utf-8", "replace") if n > 0 else None
+        return os.readlink(f"/proc/{pid}/exe")
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+
+
+_PROC_PIDVNODEPATHINFO, _VNODE_INFO_SIZE, _MAXPATHLEN = 9, 152, 1024    # <sys/proc_info.h>
+
+
+def proc_cwd(pid):
+    """A process's working folder (macOS proc_pidinfo PROC_PIDVNODEPATHINFO, Linux /proc/PID/cwd), or None when it
+    can't be read (another account's process, no such process)."""
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return None
+        if sys.platform == "darwin":
+            import ctypes
+            size = 2 * (_VNODE_INFO_SIZE + _MAXPATHLEN)        # struct proc_vnodepathinfo: pvi_cdir, pvi_rdir
+            buf = ctypes.create_string_buffer(size)
+            n = _libproc().proc_pidinfo(pid, _PROC_PIDVNODEPATHINFO, ctypes.c_uint64(0), buf, size)
+            if n != size:
+                return None
+            path = buf.raw[_VNODE_INFO_SIZE:_VNODE_INFO_SIZE + _MAXPATHLEN].split(b"\0", 1)[0]
+            return path.decode("utf-8", "replace") or None
+        return os.readlink(f"/proc/{pid}/cwd")
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+
+
+class ProcTable(dict):
+    """ps_table's {pid: (ppid, comm)}, and what agent_of reads of a process when asked, kept with the table: its
+    executable (exe(): the realpath of its text image), its arguments (argv()) and its working folder (cwd()). An agent
+    that runs natively (Gemini CLI's standalone build) is told by its executable; one that runs on an interpreter
+    (Gemini CLI, Hermes Agent, OpenClaw's launcher) by the program it runs. live: read what isn't known yet from the
+    process itself (ps_table's tables; None when it can't be read); a table made of known parts (the tests') never does:
+    argvs, exes and cwds map a pid to what's known, None for what couldn't be read (an argv not given is [], an exe or
+    cwd not given None)."""
+
+    def __init__(self, *args, argvs=None, exes=None, cwds=None, live=False, **kw):
+        super().__init__(*args, **kw)
+        self.argvs = dict(argvs or {})
+        self.exes = dict(exes or {})
+        self.cwds = dict(cwds or {})
+        self.live = live
+
+    def _get(self, cache, pid, read, missing):
+        if pid not in cache:
+            cache[pid] = read(pid) if self.live and pid in self else (None if self.live else missing)
+        return cache[pid]
+
+    def argv(self, pid):
+        return self._get(self.argvs, pid, proc_argv, [])
+
+    def exe(self, pid):
+        return self._get(self.exes, pid, proc_exe, None)
+
+    def cwd(self, pid):
+        return self._get(self.cwds, pid, proc_cwd, None)
 
 
 def ancestors(pid, table):
@@ -139,16 +269,289 @@ def is_codex(comm):
     return os.path.basename(comm or "") == "codex"
 
 
-def agent_kind(comm):
-    """"Claude Code", "Codex" or None for a process table command."""
-    return "Claude Code" if is_claude(comm) else "Codex" if is_codex(comm) else None
+# Every agent session metacomputer knows, by the name its messages, claims, events and handoffs use. UNKNOWN_AGENT is an
+# interpreter (node, python) that can't be told: its arguments or its working folder couldn't be read, or the script it
+# runs can't be found. It may be an agent, so it counts as one (fail closed): commands only the user runs refuse under
+# it, and the session guard, claims and the vault treat it as a session.
+UNKNOWN_AGENT = "unidentified agent"
+AGENTS = ("Claude Code", "Codex", "OpenClaw", "Hermes Agent", "Gemini CLI", UNKNOWN_AGENT)
+# An interpreter's process (ps comm= is its program, often by its full path): the agent is told by what it runs.
+_INTERPRETER = re.compile(r"(node|nodejs|bun|deno|python[0-9.]*|Python)")
+# The agents' programs, by file name: a native executable (Gemini CLI's standalone `gemini`), the name a process gives
+# itself (OpenClaw's `openclaw-gateway`, a titled Hermes Agent's `hermes`), or the script an interpreter runs.
+AGENT_NAMES = {"gemini": "Gemini CLI", "gemini.js": "Gemini CLI", "openclaw": "OpenClaw", "openclaw.mjs": "OpenClaw",
+               "openclaw-gateway": "OpenClaw", "hermes": "Hermes Agent", "hermes-agent": "Hermes Agent",
+               "hermes-acp": "Hermes Agent"}
+# ...and by a folder in a script's path: Gemini CLI's package, Hermes Agent's.
+AGENT_PATH_WORDS = (("/@google/gemini-cli/", "Gemini CLI"), ("hermes_cli", "Hermes Agent"))
+# python -m: the module's package.
+AGENT_MODULES = {"hermes_cli": "Hermes Agent", "hermes_agent": "Hermes Agent"}
+# The agents' packages, by identifiers specific to them (never a bare name like `gemini`): found in any argument of an
+# interpreter, or in what an argument naming an existing file resolves to, they make it that agent (package_agent).
+AGENT_PACKAGE_WORDS = (("@google/gemini-cli", "Gemini CLI"), ("gemini-cli-core", "Gemini CLI"),
+                       ("openclaw.mjs", "OpenClaw"), ("hermes_cli", "Hermes Agent"), ("hermes-agent", "Hermes Agent"))
+AGENT_PACKAGE_FOLDERS = (("gemini-cli", "Gemini CLI"), ("openclaw", "OpenClaw"))      # a folder of that name in a path
+# A package a preload names (node --require/--import PKG): its name.
+AGENT_PACKAGES = {"@google/gemini-cli": "Gemini CLI", "@google/gemini-cli-core": "Gemini CLI", "openclaw": "OpenClaw",
+                  "hermes-agent": "Hermes Agent"}
+# OpenClaw's own helpers, which only relay between its gateway and a child it runs (an MCP server): the gateway above
+# them is the session, so they aren't one (openclaw/dist/process/supervisor/service-child-*.js).
+OPENCLAW_HELPERS = ("dist", "process", "supervisor")
+# The interpreters' options that take the next argument as their value (an unknown option takes none: it never moves
+# the script's place), those that preload a module, and those whose value is the program.
+NODE_VALUE_FLAGS = frozenset((
+    "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--title",
+    "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--secure-heap", "--secure-heap-min",
+    "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-directory", "--report-filename",
+    "--report-signal", "--cpu-prof-dir", "--cpu-prof-name", "--cpu-prof-interval", "--heap-prof-dir",
+    "--heap-prof-name", "--heap-prof-interval", "--disable-warning", "--experimental-config-file", "--inspect-port",
+    "--debug-port", "--max-http-header-size", "--experimental-sea-config", "--test-name-pattern", "--test-reporter",
+    "--test-reporter-destination", "--localstorage-file", "--trace-event-categories", "--trace-event-file-pattern",
+    "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--watch-kill-signal", "--dns-result-order",
+    "--disable-proto", "--unhandled-rejections", "--experimental-default-type", "--stack-size", "--max-old-space-size",
+    "--max-semi-space-size",
+    # bun
+    "--preload", "--cwd", "--config", "--tsconfig-override", "-d", "--define", "-l", "--main-fields", "--extension-order"))
+NODE_PRELOAD_FLAGS = frozenset(("-r", "--require", "--import", "--loader", "--experimental-loader", "--preload"))
+NODE_CODE_FLAGS = frozenset(("-e", "--eval", "-p", "--print", "--run"))      # --run: a package.json script, by name
+DENO_VALUE_FLAGS = frozenset(("-c", "--config", "--import-map", "--location", "--seed", "--cert", "--lock", "--ext",
+                              "-L", "--log-level"))
+PYTHON_VALUE_FLAGS = frozenset(("--check-hash-based-pycs",))
+# bun's and deno's commands: after these comes the script (deno eval: code); any other runs no script of the agents'.
+BUN_COMMANDS = frozenset(("run", "x", "exec", "test", "build", "install", "i", "add", "remove", "rm", "update",
+                          "create", "init", "pm", "link", "unlink", "upgrade", "repl", "outdated", "publish", "patch"))
+DENO_COMMANDS = frozenset(("run", "serve", "test", "bench", "check", "compile", "eval", "repl", "task", "install",
+                           "uninstall", "fmt", "lint", "info", "doc", "upgrade", "types", "completions", "coverage",
+                           "init", "jupyter", "publish", "add", "remove", "outdated", "clean", "lsp", "vendor"))
+SCRIPT_COMMANDS = frozenset(("run", "serve", "test", "bench", "check", "compile"))
+
+
+def is_interpreter(comm):
+    return bool(_INTERPRETER.fullmatch(os.path.basename(comm or "").strip("()")))
+
+
+def _interp_kind(name):
+    base = os.path.basename(name or "").strip("()").lower()
+    return "python" if base.startswith("python") else (base if base in ("bun", "deno") else "node")
+
+
+def name_agent(path):
+    """The agent a program is by its file name (AGENT_NAMES), else None."""
+    return AGENT_NAMES.get(os.path.basename(path or ""))
+
+
+def path_agent(path):
+    """The agent whose entry point a script's path is: by its file name, or a folder in it (AGENT_PATH_WORDS)."""
+    return name_agent(path) or next((a for w, a in AGENT_PATH_WORDS if w in (path or "")), None)
+
+
+def package_agent(text, folder=False):
+    """The agent whose package a text names, else None: an identifier of AGENT_PACKAGE_WORDS anywhere in it, or a folder
+    of AGENT_PACKAGE_FOLDERS in it as a path (a part followed by `/`; the last part too when folder: the text is a
+    folder's path), except a path to OpenClaw's own helpers (OPENCLAW_HELPERS under an openclaw folder: wherever
+    OpenClaw is installed, even under another folder of that name)."""
+    text = text or ""
+    for w, a in AGENT_PACKAGE_WORDS:
+        if w in text:
+            return a
+    parts = text.split("/")
+    folders = parts if folder else parts[:-1]
+    helper = any(p == "openclaw" and tuple(parts[i + 1:i + 4]) == OPENCLAW_HELPERS for i, p in enumerate(parts))
+    for name, a in AGENT_PACKAGE_FOLDERS:
+        if name in folders and not (a == "OpenClaw" and helper):
+            return a
+    return None
+
+
+_UNREADABLE = object()          # a relative path, and the process's working folder couldn't be read
+
+
+def _resolve(arg, cwd, kind):
+    """The file an interpreter's argument names, resolved against the process's own working folder: its path, None
+    when there's none (node and bun also try .js, .mjs and .cjs, as node does), or _UNREADABLE."""
+    if arg.startswith("/"):
+        path = arg
+    else:
+        where = cwd()
+        if not where:
+            return _UNREADABLE
+        path = os.path.join(where, arg)
+    for p in (path,) + (() if kind in ("python", "exact") else (path + ".js", path + ".mjs", path + ".cjs")):
+        try:
+            if os.path.exists(p):
+                return p
+        except (OSError, ValueError):
+            return _UNREADABLE
+    return None
+
+
+def _real(path):
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        return path
+
+
+def _file_agent(path):
+    """The agent a script file is, as written and as it resolves (a link to it)."""
+    real = _real(path)
+    return path_agent(path) or path_agent(real) or package_agent(real, os.path.isdir(real))
+
+
+def _package_rule(args, cwd):
+    """An interpreter's arguments (and the values after an option's `=`) naming an agent's package, as written or as
+    what one naming an existing file resolves to (against the process's working folder; none when it can't be read)."""
+    for a in args:
+        for v in (a, a.partition("=")[2]) if "=" in a else (a,):
+            if not v:
+                continue
+            got = package_agent(v)
+            if got:
+                return got
+            if v.startswith("-") or len(v) > 4096:
+                continue
+            res = _resolve(v, cwd, "exact")
+            if res and res is not _UNREADABLE:
+                real = _real(res)
+                got = package_agent(real, os.path.isdir(real))
+                if got:
+                    return got
+    return None
+
+
+def _preload_agent(spec, cwd, kind):
+    """A preload (node --require/--import SPEC): a file it names (an agent's script), or a package (AGENT_PACKAGES)."""
+    res = _resolve(spec, cwd, kind) if spec.startswith((".", "/")) else None
+    if res and res is not _UNREADABLE:
+        return _file_agent(res)
+    parts = spec.split("/")
+    return AGENT_PACKAGES.get("/".join(parts[:2]) if spec.startswith("@") else parts[0])
+
+
+def _script_at(arg, cwd, kind):
+    res = _resolve(arg, cwd, kind)
+    if res is _UNREADABLE or res is None:
+        return UNKNOWN_AGENT                    # the script's place, and no file there (or no way to look): can't tell
+    return _file_agent(res)
+
+
+def script_agent(argv, cwd=None, kind="node"):
+    """The agent an interpreter's exact arguments run, else None, or UNKNOWN_AGENT when it can't be told:
+      - its title, argv[0] (OpenClaw's `openclaw` and `openclaw-gateway`, a titled Hermes Agent's `hermes`);
+      - an agent's package named by any argument, or by what one naming an existing file resolves to (relative ones
+        from the process's own working folder: cwd(), its path or None when it can't be read): AGENT_PACKAGE_WORDS
+        and AGENT_PACKAGE_FOLDERS, specific identifiers, never a bare name (so `node -pe "import('@google/gemini-cli')"`
+        and `--import @google/gemini-cli` are Gemini CLI, and an editor opening a file named gemini isn't);
+      - the program in its place: a preload (--require/--import: a file or a package, AGENT_PACKAGES), python's -m
+        module, or the script, the first argument that isn't an option or an option's value (only options known to take
+        one: NODE_VALUE_FLAGS, DENO_VALUE_FLAGS, python's -W, -X; any other option takes none), checked as written and
+        as it resolves against AGENT_NAMES and AGENT_PATH_WORDS. Code (-c, -e, -p and clusters like -pe) is no script:
+        the package rule has read it.
+    UNKNOWN_AGENT when the script's place names no file, the working folder can't be read for a relative one, or the
+    program comes from standard input (`-`). No program but options (a REPL) is no agent."""
+    if not argv:
+        return None
+    where = cwd if callable(cwd) else (lambda: cwd)
+    title = name_agent(argv[0])
+    if title:
+        return title
+    got = _package_rule(argv[1:], where)
+    if got:
+        return got
+    i, n, command = 1, len(argv), False
+    while i < n:
+        a = argv[i]
+        if a == "-":
+            return UNKNOWN_AGENT
+        if a == "--":
+            return _script_at(argv[i + 1], where, kind) if i + 1 < n else None
+        if a.startswith("-"):
+            flag, eq, value = a.partition("=")
+            if kind == "python":
+                if not a.startswith("--"):
+                    for j in range(1, len(a)):
+                        if a[j] in "WX":
+                            i += 0 if a[j + 1:] else 1        # -W ignore: the next argument is its value
+                            break
+                        if a[j] in "cm":
+                            v = a[j + 1:] or (argv[i + 1] if i + 1 < n else "")
+                            return AGENT_MODULES.get(v.split(".")[0]) if a[j] == "m" else None
+                elif flag in PYTHON_VALUE_FLAGS and not eq:
+                    i += 1
+            else:
+                if flag in NODE_CODE_FLAGS or (not a.startswith("--") and kind != "deno"
+                                               and len(a) > 2 and ("e" in a[1:] or "p" in a[1:])):
+                    return None                       # code (or a package script), which the package rule read
+                if flag in NODE_PRELOAD_FLAGS and kind != "deno":
+                    spec = value if eq else (argv[i + 1] if i + 1 < n else "")
+                    got = _preload_agent(spec, where, kind) if spec else None
+                    if got:
+                        return got
+                if not eq and (flag in (DENO_VALUE_FLAGS if kind == "deno" else NODE_VALUE_FLAGS)):
+                    i += 1
+            i += 1
+            continue
+        if kind in ("bun", "deno") and not command and a in (BUN_COMMANDS if kind == "bun" else DENO_COMMANDS):
+            command = True
+            if a not in SCRIPT_COMMANDS:
+                return None                           # no script file of its own (deno eval: code, read above)
+            i += 1
+            continue
+        return _script_at(a, where, kind)
+    return None
+
+
+def agent_kind(comm, argv=None):
+    """The agent session a process is (one of AGENTS), or None, by its name: its process table command (ps comm=) or
+    its executable. Claude Code and Codex by theirs; OpenClaw names its processes `openclaw` (a command it runs, an
+    `agent exec` turn) and `openclaw-gateway` (the gateway that runs every conversation); Hermes Agent's is `hermes`
+    where setproctitle is installed; Gemini CLI's standalone executable is `gemini` (AGENT_NAMES). argv: an
+    interpreter's arguments, read by script_agent (here without a working folder)."""
+    if is_claude(comm):
+        return "Claude Code"
+    if is_codex(comm):
+        return "Codex"
+    got = name_agent(comm)
+    if got:
+        return got
+    return script_agent(argv, None, _interp_kind(comm)) if argv and is_interpreter(comm) else None
+
+
+def process_agent(comm, exe, argv, cwd):
+    """The agent session a process is, from what it executes: (a) its name (agent_kind) and its executable, the
+    realpath of its text image (exe: None when it can't be read; a native `gemini`, a node or bun single-file build
+    named after an agent); (b) for an interpreter (by either), the program it runs (script_agent: argv() its exact
+    arguments, None when they can't be read, which is UNKNOWN_AGENT; cwd() its working folder)."""
+    got = agent_kind(comm) or (agent_kind(exe) if exe else None)
+    if got:
+        return got
+    interp = comm if is_interpreter(comm) else (exe if exe and is_interpreter(exe) else None)
+    if not interp:
+        return None
+    args = argv()
+    if args is None:
+        return UNKNOWN_AGENT
+    return script_agent(args, cwd, _interp_kind(interp))
+
+
+def agent_of(pid, table):
+    """The agent session process pid is, in table (one of AGENTS), or None. A process's executable, arguments and
+    working folder are read only when the table is ps_table's (ProcTable; the tests' ProcTable gives them); a plain
+    dict (the tests' tables of known processes) has only names: an interpreter there isn't an agent."""
+    if pid not in table:
+        return None
+    comm = table[pid][1]
+    if not isinstance(table, ProcTable):
+        return agent_kind(comm)
+    return process_agent(comm, table.exe(pid), lambda: table.argv(pid), lambda: table.cwd(pid))
 
 
 def claude_of(pid, table):
-    """Nearest agent session process above pid: Claude Code or Codex (None outside both). The name is older than
-    Codex support; claims, events and the vault still call this process claude_pid."""
+    """Nearest agent session process above pid: Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI (None outside
+    them all). The name is older than the other agents' support; claims, events and the vault still call this process
+    claude_pid."""
     for p in ancestors(pid, table)[1:]:
-        if agent_kind(table[p][1]):
+        if agent_of(p, table):
             return p
     return None
 
@@ -157,7 +560,7 @@ _AGENT_NAMES = {}
 
 
 def agent_name(pid):
-    """"Claude Code" or "Codex" for a live agent session process (cached per pid), else None."""
+    """The agent (one of AGENTS) a live agent session process is (cached per pid), else None."""
     if not pid:
         return None
     if pid not in _AGENT_NAMES:
@@ -166,13 +569,13 @@ def agent_name(pid):
                                   timeout=5).stdout.strip()
         except (OSError, ValueError, subprocess.SubprocessError):
             return None
-        _AGENT_NAMES[pid] = agent_kind(comm)
+        _AGENT_NAMES[pid] = process_agent(comm, proc_exe(pid), lambda: proc_argv(pid), lambda: proc_cwd(pid))
     return _AGENT_NAMES[pid]
 
 
 def at_user_terminal(fds=(0,)):
-    """The bar for commands only the user runs: every fd in fds is a terminal and no agent session (Claude Code or
-    Codex) is above this process. A terminal alone doesn't tell the user from an agent: Codex's command tool can
+    """The bar for commands only the user runs: every fd in fds is a terminal and no agent session (Claude Code, Codex,
+    OpenClaw, Hermes Agent or Gemini CLI) is above this process. A terminal alone doesn't tell the user from an agent: Codex's command tool can
     give a command a pseudo-terminal of its own. Fails closed when the process table can't be read. Like every
     check against your own account, this stops an agent from passing by accident, not a program that sets out to
     (it can start a command outside the agent's process tree)."""
@@ -200,16 +603,8 @@ def ancestry_complete(pid, table):
     return pid == 1
 
 
-AT_TERMINAL_HINT = ("in your own terminal (Terminal, iTerm or an SSH session), not through Claude Code, Codex, a "
-                    "script or a pipe")
-
-
-def proc_cwd(pid):
-    out = subprocess.run(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True).stdout
-    for line in out.splitlines():
-        if line.startswith("n"):
-            return line[1:]
-    return None
+AT_TERMINAL_HINT = ("in your own terminal (Terminal, iTerm or an SSH session), not through an agent (Claude Code, "
+                    "Codex, OpenClaw, Hermes Agent, Gemini CLI), a script or a pipe")
 
 
 def alive(pid):
@@ -466,7 +861,7 @@ def handoff_valid(rec):
             and rec.get("why") in HANDOFF_WHY and _finite(rec.get("opened")) and _finite(rec.get("deadline"))
             and 0 < rec["deadline"] - rec["opened"] <= HANDOFF_MAX_S + 1    # + 1: float rounding of a 2 h limit
             and opt("say", str) and opt("cwd", str) and opt("note", str) and opt("ended_from", str)
-            and opt("claude_pid", int) and rec.get("agent") in (None, "Claude Code", "Codex")
+            and opt("claude_pid", int) and rec.get("agent") in (None, *AGENTS)
             and (rec.get("ended") is None or _finite(rec.get("ended"))))
 
 
@@ -731,7 +1126,7 @@ def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, si
 
 
 def _agent(o):
-    return o.get("agent") if o.get("agent") in ("Claude Code", "Codex") else "Claude Code"
+    return o.get("agent") if o.get("agent") in AGENTS else "Claude Code"
 
 
 def describe(o):

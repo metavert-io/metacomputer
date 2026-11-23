@@ -101,7 +101,7 @@ computer ([More than one VM](#more-than-one-vm)).
 | `ssh [ops\|admin] [CMD...]` | A raw SSH shell in the VM (`ops` is the desktop user); prefer `sh` |
 | `logs [N]` | The last lines of the Lume, gateway and VM logs |
 | `where` | Project, config, skill, docs and results folders; VM names |
-| `mcp-lazy` / `mcp` | The MCP bridge Claude Code and Codex use, through the hub (`mcp` with `MCOMP_DIRECT_BRIDGE=1` is the hub's own connection; only the transport tests open it otherwise). Besides the driver's tools it has two of its own, `list_computers` and `select_computer` ([An agent session's computer](#an-agent-sessions-computer)) |
+| `mcp-lazy` / `mcp` | The MCP bridge the agents use (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI), through the hub (`mcp` with `MCOMP_DIRECT_BRIDGE=1` is the hub's own connection; only the transport tests open it otherwise). Besides the driver's tools it has two of its own, `list_computers` and `select_computer` ([An agent session's computer](#an-agent-sessions-computer)) |
 | `call [--session NAME] TOOL 'JSON'` / `hub [status\|stop [--if-idle]]` | One tool call through the hub (with `--session`, tokens and driver state carry over between calls); the hub's pid, clients and idle time; `stop --if-idle` stops it only when no client is connected, no call or recording is running and no handoff is open (exit 3 otherwise) |
 
 `stop`, `reset`, `restore`, `baseline`, `test`, `desktop-restart`, `sh` and
@@ -225,7 +225,7 @@ Refused rather than guessed (nothing runs):
 
 ### An agent session's computer
 
-An agent session (Claude Code or Codex) reaches a computer two ways: through the metacomputer MCP tools, and through
+An agent session (Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI) reaches a computer two ways: through the metacomputer MCP tools, and through
 the commands it runs in a shell. The tools act on the computer the session's MCP server started on (your default
 computer at that moment), or on the one the session chose with `select_computer`. Each command picks its own: `--vm`,
 `MCOMP_VM`, `MCOMP_CONFIG`, else the default computer as it is now. The two can differ: the default changed after the
@@ -471,7 +471,11 @@ says plainly that new Claude Code sessions have no metacomputer tools until that
 fixed, gives the line that fixes it, and says that `metacomputer update` tries again.
 `--uninstall` removes metacomputer's server before the command it runs, and keeps the
 command (`~/.local/bin/metacomputer` and `mcomp`) while any MCP server that stays,
-Claude Code's or Codex's, metacomputer's or not, runs it.
+any agent's (Claude Code's, Codex's, OpenClaw's, Hermes Agent's or Gemini CLI's), metacomputer's or not, runs it, or
+may: an agent's configuration that can't be read (its CLI missing, or no Python to read it) keeps them too, and says so.
+Every profile and configuration location of each agent is checked, not just the one its CLI has selected (Hermes
+Agent's profiles, OpenClaw's `~/.openclaw` and every `~/.openclaw-NAME`, Gemini CLI's settings with and without
+`GEMINI_CLI_HOME`): metacomputer set up in another profile keeps the command until it's removed there too.
 
 **Tool names.** `mcp__metacomputer__*`, the same as in Codex. Through v0.4.4 the plugin
 brought the server itself and the tools were `mcp__plugin_metacomputer_metacomputer__*`:
@@ -516,3 +520,48 @@ server instead.
 Claude Code's setup as it is: it adds no MCP server then (after `claude plugin enable
 metacomputer@metacomputer`, `./install.sh --only-claude` adds it). `metacomputer agents`
 says which parts are there.
+
+## The other agents
+
+`./install.sh` sets up each other coding agent installed on the Mac the same way, and `metacomputer agents` reports
+every one (`--json` for a program):
+
+| Agent | MCP server metacomputer, registered with | Skills | Its tools | More |
+| --- | --- | --- | --- | --- |
+| Codex | `codex mcp add` (`$CODEX_HOME/config.toml`), with a 600 s tool timeout and its tools approved, and rules for its sandbox | `~/.agents/skills` | `mcp__metacomputer__*` | [codex.md](codex.md) |
+| OpenClaw | `openclaw mcp add --no-probe` (`~/.openclaw/openclaw.json`), with a 600 s request timeout | `~/.agents/skills` | `metacomputer__*` | [openclaw.md](openclaw.md) |
+| Hermes Agent | `hermes config set` (`$HERMES_HOME/config.yaml`), with a 600 s timeout | `$HERMES_HOME/skills` | `mcp__metacomputer__*` | [hermes.md](hermes.md) |
+| Gemini CLI | `gemini mcp add -s user --trust` (`~/.gemini/settings.json`) | `~/.agents/skills` | `mcp_metacomputer_*` | [gemini.md](gemini.md) |
+
+Each registers `~/.local/bin/metacomputer mcp-lazy` (Codex: the checkout's `bin/metacomputer`), and follows the rule
+Claude Code's does: only metacomputer's own entry (a local command, exactly `~/.local/bin/metacomputer` or the checkout's
+launcher, with exactly `mcp-lazy`) is ever changed or removed, read again right before; anything else is named by its
+program and how many arguments it has, the install says how to remove it yourself, and the step counts as unfinished
+(exit status 1, recorded in installed.json so `metacomputer update` runs it again). Each read, change and read-back
+runs under a lock of the agent's own, so two metacomputer installs never interleave.
+
+What that leaves: these agents' CLIs have no compare-and-swap, and the lock binds only metacomputer. So another program
+(the agent itself, an editor, another tool) that writes an entry named `metacomputer` in the moment between the
+install's last read and the agent CLI's own write (one CLI call) isn't seen. In an install, the add then replaces that
+entry (Gemini CLI's `mcp add`, Hermes Agent's `config set`; OpenClaw's `mcp add` refuses a name that's there, so its
+add fails instead), and the read-back after it reports what won. In an uninstall, the removal, which these CLIs make
+by name only, removes it. A skill link swapped for someone else's between the check and the removal is removed the
+same way. Nothing else is in that window: entries with other names, other files, and any change made before the last
+read or after the CLI's write are seen.
+
+A skill link is metacomputer's only when it points into this checkout's own skill
+folders; anything else there is left, and the step counts as unfinished, as it does when a skill can't be linked.
+`--no-NAME` (`--no-codex`,
+`--no-openclaw`, `--no-hermes`, `--no-gemini`) leaves one alone in this run and later ones, until `--NAME`;
+`--only-NAME` runs only that agent's step. The agents' sessions count as agent sessions for the one-controller rule,
+the vault, handoffs and [an agent session's computer](#an-agent-sessions-computer); OpenClaw's and Hermes Agent's
+gateways, like Codex's app server, run all their conversations in one process, so the vault's session answers don't
+apply there.
+
+A session is recognised by what its process executes: its executable (Gemini CLI's standalone `gemini` too), and for
+node, bun, deno or python the program it runs (its script, a preload, a `-m` module) or any argument naming an agent's
+package (`@google/gemini-cli`, a `gemini-cli` or `openclaw` folder, `hermes_cli`, `hermes-agent`); a process it can't
+tell counts as an agent. This is best-effort defense in depth, not a boundary: anything running as you can arrange the
+process table, and an agent can be started in ways no list knows. Approvals that matter also need you present: Touch
+ID (or macOS's login-password dialog) in the vault's presence mode, or the confirmation typed at the terminal where you
+unlocked it (SECURITY.md, "Approving from elsewhere").

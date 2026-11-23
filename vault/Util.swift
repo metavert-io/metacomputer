@@ -605,12 +605,19 @@ func procCwd(_ pid: pid_t) -> String? {
 }
 
 func procArgs(_ pid: pid_t) -> [String] {
+    return procArgsOrNil(pid) ?? []
+}
+
+/// A process's arguments, exactly (KERN_PROCARGS2: what the process left there, so a program that renamed itself shows
+/// its new name first), or nil when they can't be read (another account's process, a zombie, no such process).
+func procArgsOrNil(_ pid: pid_t) -> [String]? {
     var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
     var size = 0
-    guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return [] }
+    guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return nil }
     var buf = [UInt8](repeating: 0, count: size)
-    guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > 4 else { return [] }
+    guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > 4 else { return nil }
     let argc = Int(buf.withUnsafeBytes { $0.load(as: Int32.self) })
+    guard argc > 0 else { return nil }
     var i = 4
     while i < size && buf[i] != 0 { i += 1 }
     while i < size && buf[i] == 0 { i += 1 }
@@ -621,25 +628,279 @@ func procArgs(_ pid: pid_t) -> [String] {
         out.append(String(decoding: buf[a..<i], as: UTF8.self))
         i += 1
     }
-    return out
+    return out.isEmpty ? nil : out
 }
+
+/// An interpreter whose arguments couldn't be read: it may be an agent, so it counts as one, and as no single session
+/// (lib/owners.py UNKNOWN_AGENT).
+let unknownAgent = "unidentified agent"
 
 /// The agent session a process is, if any: "Claude Code" (a process named claude, node running a script named
 /// claude*, or the native installer's version file) or "Codex" (its native binary, named codex; npm and Homebrew start
 /// it from a node launcher, and the IDE extensions and the desktop app run `codex app-server`, one process for all of
-/// their conversations).
+/// their conversations); else what it executes (agentKindOf): "OpenClaw", "Hermes Agent", "Gemini CLI" or
+/// unknownAgent.
 func agentKind(_ p: pid_t, _ e: ProcEntry) -> String? {
     if e.name == "claude"
-        || (e.name == "node" && procArgs(p).dropFirst().prefix(2).contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("claude") })
-        || (processPath(p).map { matches($0, "/claude/versions/[0-9]+\\.[0-9]+\\.[0-9]+[^/]*$") } ?? false) {
+        || (e.name == "node" && procArgs(p).dropFirst().prefix(2).contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("claude") }) {
         return "Claude Code"
     }
-    if e.name == "codex" { return "Codex" }
+    var unreadable = false
+    #if MCOMP_VAULT_TESTING
+    // tests/test_vault_ops.py: a stand-in interpreter of this name whose arguments can't be read
+    unreadable = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_UNREADABLE_ARGS"] == e.name
+    #endif
+    return agentKindOf(e.name, exe: processPath(p), args: { unreadable ? nil : procArgsOrNil(p) }, cwd: { procCwd(p) })
+}
+
+/// os.path.basename: what follows the last "/".
+func pathBase(_ s: String) -> String {
+    return s.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? s
+}
+
+/// The agents' programs by file name, a folder in a script's path, python -m modules, their packages' identifiers,
+/// the interpreters' options that take a value, preload or carry code, and bun's and deno's commands: lib/owners.py
+/// AGENT_NAMES, AGENT_PATH_WORDS, AGENT_MODULES, AGENT_PACKAGE_WORDS, AGENT_PACKAGE_FOLDERS, AGENT_PACKAGES,
+/// OPENCLAW_HELPERS, NODE_VALUE_FLAGS, NODE_PRELOAD_FLAGS, NODE_CODE_FLAGS, DENO_VALUE_FLAGS, PYTHON_VALUE_FLAGS,
+/// BUN_COMMANDS, DENO_COMMANDS, SCRIPT_COMMANDS.
+let agentNames: [String: String] = [
+    "gemini": "Gemini CLI", "gemini.js": "Gemini CLI", "openclaw": "OpenClaw", "openclaw.mjs": "OpenClaw",
+    "openclaw-gateway": "OpenClaw", "hermes": "Hermes Agent", "hermes-agent": "Hermes Agent", "hermes-acp": "Hermes Agent"]
+let agentPathWords: [(String, String)] = [("/@google/gemini-cli/", "Gemini CLI"), ("hermes_cli", "Hermes Agent")]
+let agentModules: [String: String] = ["hermes_cli": "Hermes Agent", "hermes_agent": "Hermes Agent"]
+let agentPackageWords: [(String, String)] = [
+    ("@google/gemini-cli", "Gemini CLI"), ("gemini-cli-core", "Gemini CLI"), ("openclaw.mjs", "OpenClaw"),
+    ("hermes_cli", "Hermes Agent"), ("hermes-agent", "Hermes Agent")]
+let agentPackageFolders: [(String, String)] = [("gemini-cli", "Gemini CLI"), ("openclaw", "OpenClaw")]
+let agentPackages: [String: String] = [
+    "@google/gemini-cli": "Gemini CLI", "@google/gemini-cli-core": "Gemini CLI", "openclaw": "OpenClaw",
+    "hermes-agent": "Hermes Agent"]
+let openclawHelpers = ["dist", "process", "supervisor"]
+let nodeValueFlags: Set<String> = [
+    "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--title",
+    "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--secure-heap", "--secure-heap-min",
+    "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-directory", "--report-filename",
+    "--report-signal", "--cpu-prof-dir", "--cpu-prof-name", "--cpu-prof-interval", "--heap-prof-dir",
+    "--heap-prof-name", "--heap-prof-interval", "--disable-warning", "--experimental-config-file", "--inspect-port",
+    "--debug-port", "--max-http-header-size", "--experimental-sea-config", "--test-name-pattern", "--test-reporter",
+    "--test-reporter-destination", "--localstorage-file", "--trace-event-categories", "--trace-event-file-pattern",
+    "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--watch-kill-signal", "--dns-result-order",
+    "--disable-proto", "--unhandled-rejections", "--experimental-default-type", "--stack-size", "--max-old-space-size",
+    "--max-semi-space-size",
+    "--preload", "--cwd", "--config", "--tsconfig-override", "-d", "--define", "-l", "--main-fields", "--extension-order"]
+let nodePreloadFlags: Set<String> = ["-r", "--require", "--import", "--loader", "--experimental-loader", "--preload"]
+let nodeCodeFlags: Set<String> = ["-e", "--eval", "-p", "--print", "--run"]
+let denoValueFlags: Set<String> = ["-c", "--config", "--import-map", "--location", "--seed", "--cert", "--lock", "--ext",
+                                   "-L", "--log-level"]
+let pythonValueFlags: Set<String> = ["--check-hash-based-pycs"]
+let bunCommands: Set<String> = ["run", "x", "exec", "test", "build", "install", "i", "add", "remove", "rm", "update",
+                                "create", "init", "pm", "link", "unlink", "upgrade", "repl", "outdated", "publish", "patch"]
+let denoCommands: Set<String> = ["run", "serve", "test", "bench", "check", "compile", "eval", "repl", "task", "install",
+                                 "uninstall", "fmt", "lint", "info", "doc", "upgrade", "types", "completions", "coverage",
+                                 "init", "jupyter", "publish", "add", "remove", "outdated", "clean", "lsp", "vendor"]
+let scriptCommands: Set<String> = ["run", "serve", "test", "bench", "check", "compile"]
+
+/// The agent a process is by a name (its kernel name or its executable's path), as lib/owners.py agent_kind.
+func nameKind(_ s: String) -> String? {
+    let base = pathBase(s)
+    if base == "claude" || matches(s, "/claude/versions/[0-9]+\\.[0-9]+\\.[0-9]+[^/]*$") { return "Claude Code" }
+    if base == "codex" { return "Codex" }
+    return agentNames[base]
+}
+
+func pathAgent(_ path: String) -> String? {
+    if let a = agentNames[pathBase(path)] { return a }
+    return agentPathWords.first(where: { path.contains($0.0) })?.1
+}
+
+/// The agent whose package a text names, as lib/owners.py package_agent.
+func packageAgent(_ text: String, folder: Bool = false) -> String? {
+    if let w = agentPackageWords.first(where: { text.contains($0.0) }) { return w.1 }
+    let parts = text.components(separatedBy: "/")
+    let folders = folder ? parts : Array(parts.dropLast())
+    let helper = parts.indices.contains { i in
+        parts[i] == "openclaw" && Array(parts[min(i + 1, parts.count)..<min(i + 4, parts.count)]) == openclawHelpers
+    }
+    for (name, agent) in agentPackageFolders where folders.contains(name) && !(agent == "OpenClaw" && helper) {
+        return agent
+    }
     return nil
 }
 
-/// Who sent a request: the client process and the nearest agent session process above it (Claude Code or Codex;
-/// agentKind), with its start time and working folder (the project). The fields keep their older names (claudePID):
+func realOrSelf(_ path: String) -> String {
+    guard let r = realpath(path, nil) else { return path }
+    defer { free(r) }
+    return String(cString: r)
+}
+
+func isDirectory(_ path: String) -> Bool {
+    var dir: ObjCBool = false
+    return FileManager.default.fileExists(atPath: path, isDirectory: &dir) && dir.boolValue
+}
+
+func fileAgent(_ path: String) -> String? {
+    let real = realOrSelf(path)
+    return pathAgent(path) ?? pathAgent(real) ?? packageAgent(real, folder: isDirectory(real))
+}
+
+/// The agent a process is, from what it executes, as lib/owners.py process_agent: its kernel name, then its executable
+/// (the realpath of its text image: a native gemini, a single-file build), then for an interpreter (by either) the
+/// program it runs (interpreterAgent; args() nil: they can't be read, which counts as an agent: unknownAgent).
+func agentKindOf(_ name: String, exe: String?, args: () -> [String]?, cwd: @escaping () -> String?) -> String? {
+    if let k = nameKind(name) { return k }
+    if let x = exe, let k = nameKind(x) { return k }
+    let interp: String? = isInterpreter(name) ? name : (exe.map(pathBase).flatMap { isInterpreter($0) ? $0 : nil })
+    guard let interp = interp else { return nil }
+    guard let a = args() else { return unknownAgent }
+    let low = interp.lowercased()
+    let kind = low.hasPrefix("python") ? "python" : (low == "bun" || low == "deno" ? low : "node")
+    return interpreterAgent(a, cwd: cwd, kind: kind)
+}
+
+/// A process the kernel names after an interpreter (node, bun, python): the agent is told by what it runs.
+func isInterpreter(_ name: String) -> Bool {
+    let n = pathBase(name)
+    return n == "node" || n == "nodejs" || n == "bun" || n == "deno" || n == "Python" || matches(n, "^python[0-9.]*$")
+}
+
+/// What an interpreter's argument names, resolved against the process's working folder (lib/owners.py _resolve).
+enum Resolved { case file(String), missing, unreadable }
+
+func resolveArg(_ arg: String, cwd: () -> String?, kind: String) -> Resolved {
+    var path = arg
+    if !arg.hasPrefix("/") {
+        guard let w = cwd(), !w.isEmpty else { return .unreadable }
+        path = w.hasSuffix("/") ? w + arg : w + "/" + arg
+    }
+    for p in [path] + (kind == "python" || kind == "exact" ? [] : [path + ".js", path + ".mjs", path + ".cjs"])
+    where FileManager.default.fileExists(atPath: p) {
+        return .file(p)
+    }
+    return .missing
+}
+
+/// lib/owners.py _package_rule: an agent's package named by any argument, or by what one naming a file resolves to.
+func packageRule(_ args: ArraySlice<String>, cwd: () -> String?) -> String? {
+    for a in args {
+        var values = [a]
+        if let eq = a.firstIndex(of: "=") { values.append(String(a[a.index(after: eq)...])) }
+        for v in values where !v.isEmpty {
+            if let got = packageAgent(v) { return got }
+            if v.hasPrefix("-") || v.utf8.count > 4096 { continue }
+            if case .file(let p) = resolveArg(v, cwd: cwd, kind: "exact") {
+                let real = realOrSelf(p)
+                if let got = packageAgent(real, folder: isDirectory(real)) { return got }
+            }
+        }
+    }
+    return nil
+}
+
+/// lib/owners.py _preload_agent: a file a preload names, or its package.
+func preloadAgent(_ spec: String, cwd: () -> String?, kind: String) -> String? {
+    if spec.hasPrefix(".") || spec.hasPrefix("/"), case .file(let p) = resolveArg(spec, cwd: cwd, kind: kind) {
+        return fileAgent(p)
+    }
+    let parts = spec.components(separatedBy: "/")
+    let key = spec.hasPrefix("@") ? parts.prefix(2).joined(separator: "/") : (parts.first ?? "")
+    return agentPackages[key]
+}
+
+func scriptAt(_ arg: String, cwd: () -> String?, kind: String) -> String? {
+    guard case .file(let p) = resolveArg(arg, cwd: cwd, kind: kind) else { return unknownAgent }
+    return fileAgent(p)
+}
+
+/// The agent an interpreter's exact arguments run, else nil, or unknownAgent when it can't be told: as lib/owners.py
+/// script_agent, step for step. Its title (argv[0]); an agent's package named by any argument or by what one naming
+/// an existing file resolves to; then the program in its place: a preload, python's -m module, or the script (the first
+/// argument that isn't an option or the value of an option known to take one). Code is no script. Unknown when the
+/// script's place names no file, the working folder can't be read for a relative one, or the program is standard input.
+func interpreterAgent(_ argv: [String], cwd: @escaping () -> String?, kind: String) -> String? {
+    guard let first0 = argv.first else { return nil }
+    if let t = agentNames[pathBase(first0)] { return t }
+    if let got = packageRule(argv.dropFirst(), cwd: cwd) { return got }
+    var i = 1, command = false
+    let n = argv.count
+    while i < n {
+        let a = argv[i]
+        if a == "-" { return unknownAgent }
+        if a == "--" { return i + 1 < n ? scriptAt(argv[i + 1], cwd: cwd, kind: kind) : nil }
+        if a.hasPrefix("-") {
+            let eqIndex = a.firstIndex(of: "=")
+            let flag = eqIndex.map { String(a[..<$0]) } ?? a
+            let value = eqIndex.map { String(a[a.index(after: $0)...]) } ?? ""
+            if kind == "python" {
+                if !a.hasPrefix("--") {
+                    let chars = Array(a)
+                    var j = 1
+                    while j < chars.count {
+                        if chars[j] == "W" || chars[j] == "X" {
+                            if j + 1 >= chars.count { i += 1 }
+                            break
+                        }
+                        if chars[j] == "c" || chars[j] == "m" {
+                            let rest = String(chars[(j + 1)...])
+                            let v = !rest.isEmpty ? rest : (i + 1 < n ? argv[i + 1] : "")
+                            return chars[j] == "m" ? agentModules[v.components(separatedBy: ".").first ?? ""] : nil
+                        }
+                        j += 1
+                    }
+                } else if pythonValueFlags.contains(flag) && eqIndex == nil {
+                    i += 1
+                }
+            } else {
+                let body = a.dropFirst()
+                if nodeCodeFlags.contains(flag)
+                    || (!a.hasPrefix("--") && kind != "deno" && a.count > 2 && (body.contains("e") || body.contains("p"))) {
+                    return nil
+                }
+                if nodePreloadFlags.contains(flag) && kind != "deno" {
+                    let spec = eqIndex != nil ? value : (i + 1 < n ? argv[i + 1] : "")
+                    if !spec.isEmpty, let got = preloadAgent(spec, cwd: cwd, kind: kind) { return got }
+                }
+                if eqIndex == nil && (kind == "deno" ? denoValueFlags : nodeValueFlags).contains(flag) { i += 1 }
+            }
+            i += 1
+            continue
+        }
+        if (kind == "bun" || kind == "deno") && !command && (kind == "bun" ? bunCommands : denoCommands).contains(a) {
+            command = true
+            if !scriptCommands.contains(a) { return nil }
+            i += 1
+            continue
+        }
+        return scriptAt(a, cwd: cwd, kind: kind)
+    }
+    return nil
+}
+
+/// An agent process that runs all of its conversations, whose requests therefore name no one session: Codex's app
+/// server (`codex app-server`: the IDE extension, the desktop app, the terminal app's background server), OpenClaw's
+/// gateway (`openclaw-gateway`, or `openclaw gateway ...`) and Hermes Agent's gateway (every Hermes conversation's tools
+/// run there; its own CLI and TUI are clients of it). Arguments that can't be read count as shared: unknown never
+/// names a session. The label it returns names the process in the vault's question and records.
+func sharedAgentProcess(_ kind: String, _ p: pid_t) -> String? {
+    switch kind {
+    case "Codex":
+        let args = procArgs(p)
+        return args.isEmpty || args.dropFirst().contains("app-server") ? "Codex app server" : nil
+    case "OpenClaw":
+        let args = procArgs(p)
+        let title = args.first.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+        return args.isEmpty || title == "openclaw-gateway" || args.dropFirst().prefix(3).contains("gateway")
+            ? "OpenClaw gateway" : nil
+    case "Hermes Agent":
+        return "Hermes Agent gateway"
+    case unknownAgent:
+        return "an unidentified agent's process"
+    default:
+        return nil
+    }
+}
+
+/// Who sent a request: the client process and the nearest agent session process above it (Claude Code, Codex,
+/// OpenClaw, Hermes Agent or Gemini CLI; agentKind), with its start time and working folder (the project). The fields keep their older names (claudePID):
 /// they mean that agent session. Attribution only: any process running as you can arrange the same ancestry.
 struct Requester {
     let clientPID: pid_t
@@ -647,7 +908,8 @@ struct Requester {
     let claudePID: pid_t?
     let claudeStart: Double?
     let project: String?
-    var agent: String? = nil        // "Claude Code" or "Codex": what claudePID is
+    var agent: String? = nil        // "Claude Code", "Codex", "OpenClaw", "Hermes Agent", "Gemini CLI": what claudePID is;
+                                    // with no claudePID, the shared process it came from ("Codex app server", ...)
     // What the client says about whom it asks for (`--on-behalf-pid`): the Claude Code process it names.
     // Shown and recorded, never used to decide anything (project limits, rules and grants use the fields above).
     var claimedClaudePID: pid_t? = nil
@@ -661,13 +923,13 @@ struct Requester {
             guard p > 1, let e = procEntry(p) else { break }
             // Claude Code from the native installer runs as its version file (.../claude/versions/2.1.325).
             if p != pid, let kind = agentKind(p, e) {
-                let args = kind == "Codex" ? procArgs(p) : []
-                if kind == "Codex" && (args.isEmpty || args.dropFirst().contains("app-server")) {
-                    // Codex's IDE extension and desktop app run every conversation in this one process: it names no
-                    // single session, so it gets none of a session's answers, project rules or tokens (each use asks).
-                    // Arguments that can't be read count the same way: unknown never names a session.
+                if let shared = sharedAgentProcess(kind, p) {
+                    // Codex's app server, OpenClaw's and Hermes Agent's gateways run every conversation in this one
+                    // process: it names no single session, so it gets none of a session's answers, project rules or
+                    // tokens (each use asks). Arguments that can't be read count the same way: unknown never names a
+                    // session.
                     return Requester(clientPID: pid, clientExe: exe, claudePID: nil, claudeStart: nil, project: nil,
-                                     agent: "Codex app server")
+                                     agent: shared)
                 }
                 let cwd = procCwd(p).map { realPath($0) ?? $0 }
                 return Requester(clientPID: pid, clientExe: exe, claudePID: p, claudeStart: e.start, project: cwd, agent: kind)
@@ -721,7 +983,16 @@ struct Requester {
             return clean("\(clientExe) (pid \(clientPID)) under Codex's app server, whose conversations share one process"
                          + " (no session's answers apply)" + claim, max: 300)
         }
-        return clean("\(clientExe) (pid \(clientPID)), not from Claude Code or Codex" + claim, max: 300)
+        if agent == "an unidentified agent's process" {
+            return clean("\(clientExe) (pid \(clientPID)) under an interpreter whose arguments couldn't be read, counted as an"
+                         + " agent (no session's answers apply)" + claim, max: 300)
+        }
+        if let a = agent, a.hasSuffix(" gateway") {
+            return clean("\(clientExe) (pid \(clientPID)) under \(a.dropLast(" gateway".count))'s gateway, whose conversations"
+                         + " share one process (no session's answers apply)" + claim, max: 300)
+        }
+        return clean("\(clientExe) (pid \(clientPID)), not from Claude Code, Codex, OpenClaw, Hermes Agent"
+                     + " or Gemini CLI" + claim, max: 300)
     }
 }
 

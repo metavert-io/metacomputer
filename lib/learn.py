@@ -451,6 +451,7 @@ def print_report(rep, out=sys.stdout):
     p(f"Sessions with the metacomputer tools: {rep['sessions']} ({_window(rep)}; since {esc(rep['since'])}"
       + (f"; project {esc(rep['project'])}" if rep.get("project") else "") + ")")
     p(f"  sources: {src['claude_code_sessions']} Claude Code sessions, {src.get('codex_sessions', 0)} Codex sessions, "
+      f"{src.get('gemini_sessions', 0)} Gemini CLI sessions, "
       f"{src['headless_transcripts']} headless transcripts, "
       f"{src['benchmark_sessions']} benchmark sessions ({src['scanned_files']} recent transcript files looked at, "
       f"{src['duplicates_skipped']} duplicate copies skipped"

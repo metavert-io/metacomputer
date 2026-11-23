@@ -2,7 +2,7 @@
 
 **Agentic coding plus a real desktop, with the controls you'd want around it.**
 
-metacomputer gives your coding agent, Claude Code or Codex, a disposable Ubuntu
+metacomputer gives your coding agent (Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI) a disposable Ubuntu
 computer of its own: a virtual machine on your Mac. The agent operates it the way a person would: it
 reads the screen through the accessibility tree, clicks and types, uses
 Firefox and Chrome, and records video of what it did. It also works in it the
@@ -10,8 +10,9 @@ way a programmer would, with a shell, Python, LibreOffice, ImageMagick and
 ffmpeg. The VM is kept away from your files, your accounts, your Mac and your
 network, and what the agent does there can be logged, limited and approved.
 
-Both agents get the same tools, skill and protections: Claude Code through its plugin and MCP server, Codex through
-its MCP server, skills and sandbox rules ([docs/codex.md](docs/codex.md)). Install once and whichever you have is set up.
+Every agent gets the same tools, skill and protections: Claude Code through its plugin and MCP server, the others
+through their MCP servers and skills ([Codex](docs/codex.md), with rules for its sandbox; [OpenClaw](docs/openclaw.md);
+[Hermes Agent](docs/hermes.md); [Gemini CLI](docs/gemini.md)). Install once and whichever you have is set up.
 
 https://github.com/user-attachments/assets/9465c66c-88fd-4e58-845e-a430c61ddf1a
 
@@ -25,13 +26,14 @@ curl -fsSL https://raw.githubusercontent.com/metavert-io/metacomputer/main/get.s
 ```
 
 That's the whole install. There's no VM for you to set up: the script builds
-it, sets it up for Claude Code and Codex (whichever you have), and checks that everything works. On a Mac
+it, sets it up for each coding agent you have (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI), and checks
+that everything works. On a Mac
 that already has Homebrew and Apple's Command Line Tools it takes about 5 minutes
 and asks you nothing; on a new Mac it offers to install those first.
 
 ## Try it
 
-Start a new Claude Code or Codex session (restart open Claude Code sessions, so
+Start a new session of your agent (restart open Claude Code sessions, so
 they load the plugin and the tools), then ask:
 
 > Get yourself a virtual computer and tell me what's on its screen.
@@ -59,7 +61,7 @@ More ideas:
 3. It clones metacomputer into `~/metacomputer` and runs `./install.sh --yes`, which
    adds Go, GnuPG and ffmpeg from Homebrew if they're missing, builds the VM runner
    (mcomp-vm) and the secrets vault from source, writes this Mac's settings, installs
-   metacomputer for Claude Code and Codex (whichever is installed), and builds the VM: about 1.5 GB of downloads (Ubuntu's
+   metacomputer for each coding agent installed, and builds the VM: about 1.5 GB of downloads (Ubuntu's
    cloud image and packages, Cua Driver, the Go and Swift code the build needs),
    unattended provisioning, then a clean snapshot.
 4. It starts the VM, runs `metacomputer status` and a short self-test, and prints
@@ -158,7 +160,7 @@ and GUI apps and signed-in sites to the screen ([docs/shell.md](docs/shell.md)).
 The hub and the benchmark follow the same study.
 
 **`metacomputer learn`: it learns your apps without being told.** It reads
-your agent's own past sessions (Claude Code's and Codex's), finds where it stumbled (refused calls, pixel clicks
+your agent's own past sessions (Claude Code's, Codex's and Gemini CLI's), finds where it stumbled (refused calls, pixel clicks
 without a fresh screenshot, repeated mistakes, the apps where the time went) and
 proposes short lessons with the evidence. You approve the ones you want, and every
 new session starts with them, as part of the instructions sent to the model: you
@@ -541,8 +543,8 @@ fifty, from office work and games to research and teaching it a new app.
 
 ```text
 Your Mac                                                         The VM: Ubuntu 24.04, XFCE
-Claude Code or Codex
- └─ metacomputer's skill + MCP tools (the plugin and an MCP server; for Codex, its config)
+Your coding agent: Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI
+ └─ metacomputer's skill + MCP tools (Claude Code: the plugin and an MCP server; the others: their config)
      └─ the hub: one per VM, every guard ───────────── SSH ──▶ Cua Driver ──▶ the desktop's apps
  metacomputer sh ───────────────────────────────────── SSH ──▶ bash, as the desktop user
  the secrets vault, unlocked in your terminal ──────── SSH ──▶ locked fill and proxy accounts
@@ -551,11 +553,11 @@ Claude Code or Codex
  mcomp-vm: runs the VM on Apple's Virtualization framework
 ```
 
-Install gives your agent the `metacomputer` skill (Claude Code's plugin; Codex's skills folder), which says when a task
+Install gives your agent the `metacomputer` skill (Claude Code's plugin; the others' skills folders), which says when a task
 belongs on the VM and how to drive this desktop, and an MCP server (in Claude Code, at user scope, beside the plugin)
 whose tools are Cua Driver's, running inside the VM. Every call goes through the hub, which
-holds the only connection to the driver and applies the same guards to Claude
-Code, Codex, `metacomputer call` and scripts. Files go over the shell channel, and
+holds the only connection to the driver and applies the same guards to every
+agent, `metacomputer call` and scripts. Files go over the shell channel, and
 sign-ins and API keys through the vault. Each part exists on its own, mostly from
 Cua; metacomputer builds them from pinned, verified sources with one command and
 teaches the agent this particular desktop. [architecture.md](architecture.md) has
@@ -582,7 +584,7 @@ through the vault rather than the chat.
 - **The VM is treated as hostile.** What comes back is bounded and checked, files
   arrive as plain files, and its text is escaped before your terminal shows it.
 - **Every guard on every path.** One session at a time, real input for Chrome, and
-  bounded mode's limits, for Claude Code, Codex, `metacomputer call` and scripts alike.
+  bounded mode's limits, for every agent, `metacomputer call` and scripts alike.
   The coordinate guard refuses a pixel click after certain window-layout changes
   since its screenshot (the window resized, or covered by a dialog or another
   app); it compares window geometry, not content. A refusal is reported to you,
@@ -633,8 +635,11 @@ detail.
 - Homebrew and Apple's Command Line Tools; the install offers both when they're missing.
 - Python 3.11 or later on the Mac. Apple's own `python3` is 3.9, so where that's the only one, the install
   adds Homebrew's.
-- A coding agent: [Claude Code](https://claude.com/claude-code) (the plugin) or
-  [Codex](https://github.com/openai/codex) ([docs/codex.md](docs/codex.md)), or both.
+- A coding agent: [Claude Code](https://claude.com/claude-code) (the plugin),
+  [Codex](https://github.com/openai/codex) ([docs/codex.md](docs/codex.md)),
+  [OpenClaw](https://github.com/openclaw/openclaw) ([docs/openclaw.md](docs/openclaw.md)),
+  [Hermes Agent](https://github.com/NousResearch/hermes-agent) ([docs/hermes.md](docs/hermes.md)) or
+  [Gemini CLI](https://github.com/google-gemini/gemini-cli) ([docs/gemini.md](docs/gemini.md)), or several.
 - Optional: Google Chrome in the VM, which means accepting
   [Google's terms](https://www.google.com/chrome/terms/).
 
@@ -703,7 +708,7 @@ ports; its SSH keys, runtime folders, vault folder and event spool are fixed by 
 name, beside the main VM's, so `--vm NAME` needs nothing else. A bare `metacomputer` means your default computer:
 `config/local.env`'s VM unless `metacomputer default NAME` chose another (a default that doesn't resolve refuses,
 never another VM), and `MCOMP_CONFIG=FILE` still works; since v0.3.1 a file for another VM must set its own
-`SSH_DIR`, `RUN_DIR` and `LOG_DIR`, or building, resetting or deleting that VM is refused. From Claude Code or Codex, a command that names no computer refuses when it would act on another one than the session's MCP tools (the agent names it with `--vm`, or moves its tools with the MCP tool `select_computer`; [commands](docs/commands.md#an-agent-sessions-computer)). Commands that change a VM say which one first,
+`SSH_DIR`, `RUN_DIR` and `LOG_DIR`, or building, resetting or deleting that VM is refused. From an agent session, a command that names no computer refuses when it would act on another one than the session's MCP tools (the agent names it with `--vm`, or moves its tools with the MCP tool `select_computer`; [commands](docs/commands.md#an-agent-sessions-computer)). Commands that change a VM say which one first,
 and anything unclear is refused rather than guessed: a checkout with no settings of
 its own, with other VMs in the runner, makes you say which with `--vm`. `vm delete`
 never takes the VM in use without `--force`, and keeps volumes and the vault folder
@@ -735,6 +740,7 @@ metacomputer vm create work --on sprites --org YOUR-ORG                   # afte
 | `metacomputer status` shows a ✗ | Read that line. `metacomputer logs` shows the logs; `metacomputer restart` stops the VM and starts it again. |
 | A Claude Code session has no metacomputer tools | Run `/mcp` and reconnect `metacomputer`, or restart Claude Code. `metacomputer agents` says what's set up; `./install.sh --only-claude` sets it up again. |
 | A Codex session has no metacomputer tools, or a `metacomputer` command exits 77 | `./install.sh --only-codex`, then a new Codex session ([docs/codex.md](docs/codex.md#if-something-doesnt-work)). |
+| An OpenClaw, Hermes Agent or Gemini CLI session has no metacomputer tools | `metacomputer agents` says what's set up; `./install.sh --only-openclaw` (`--only-hermes`, `--only-gemini`) sets it up again. Gemini CLI starts MCP servers only in folders you trust ([OpenClaw](docs/openclaw.md#if-something-doesnt-work), [Hermes Agent](docs/hermes.md#if-something-doesnt-work), [Gemini CLI](docs/gemini.md#if-something-doesnt-work)). |
 | "Another session is using the virtual computer" | `metacomputer who` shows which. Ask before taking over, then `metacomputer release`. |
 | "Paused: the user has the computer" | Your agent handed you a step (`metacomputer handoff status`). Do it in the live view, then run `metacomputer handoff done` (or `handoff cancel`). |
 | Screen Sharing rejects your password | It wants the live-view password, not your Mac's: `metacomputer view --open` brings the one Screen Sharing remembers up to date; `view --open --no-remember` puts it on the clipboard instead (paste with Cmd+V). |
@@ -755,7 +761,8 @@ metacomputer update          # --check: only say what's new
 ```
 
 It moves your checkout to the latest release, sets metacomputer up for each agent installed (Claude Code, Codex,
-including one you installed since; `--no-claude` / `--no-codex` at install keep one out), rebuilds only what changed, restarts
+OpenClaw, Hermes Agent, Gemini CLI, including one you installed since; `--no-claude`, `--no-codex` and the like at
+install keep one out), rebuilds only what changed, restarts
 what runs older code (it asks before restarting a VM) and tells you what's left:
 a `secrets bind` when the gateway changed, or what a VM rebuild would add
 (`metacomputer build --replace`, when you're ready; it never rebuilds on its own).
@@ -770,7 +777,7 @@ on its own, over an installer from v0.4.4 or earlier, leaves Claude Code without
 
 ```bash
 metacomputer stop
-~/metacomputer/install.sh --uninstall   # the command, Claude Code's plugin and MCP server, Codex's setup and the vault program
+~/metacomputer/install.sh --uninstall   # the command, Claude Code's plugin and MCP server, the other agents' setup and the vault program
 ```
 
 It then prints the commands that remove the VM and its keys. Your vault, event
@@ -790,6 +797,8 @@ sinks and volumes stay until you delete them
 - [docs/events.md](docs/events.md): the event stream, every event, wire formats and receivers.
 - [docs/learn.md](docs/learn.md): lessons from your own sessions.
 - [docs/codex.md](docs/codex.md): using it from Codex: setup, its sandbox and the rules, and where it differs.
+- [docs/openclaw.md](docs/openclaw.md), [docs/hermes.md](docs/hermes.md), [docs/gemini.md](docs/gemini.md): using it
+  from OpenClaw, Hermes Agent and Gemini CLI, and their packages (the Agent Plugins package, the Gemini CLI extension).
 - [docs/moving-from-spaces.md](docs/moving-from-spaces.md): coming from Cua Spaces' Keyvault.
 - [bench/README.md](bench/README.md): the benchmark, with each cited run's records in [bench/runs/](bench/runs/).
 - [TESTING.md](TESTING.md): every test and how to run it.

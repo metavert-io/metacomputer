@@ -37,14 +37,14 @@ import safedelete  # noqa: E402  (every recursive delete: never a folder a VM us
 DROP = {"MACOS.md", "WINDOWS.md", "EMBEDDING.md"}
 NOTES = "../../../skills/metacomputer/DESKTOP.md"   # relative to DEST
 
-DESCRIPTION = (
-    "description: Detailed Cua Driver {ver} guidance for operating the virtual computer (the metacomputer project, an Ubuntu "
+DESCRIPTION = (   # one YAML double-quoted string: strict YAML readers (Hermes Agent's) refuse a plain one with ": " in it
+    "description: \"Detailed Cua Driver {ver} guidance for operating the virtual computer (the metacomputer project, an Ubuntu "
     "24.04 XFCE VM) through the metacomputer MCP tools (mcp__metacomputer__*, or mcp__plugin_metacomputer_metacomputer__* "
     "from an older copy of the plugin), i.e. Cua Driver running inside the "
     "VM: snapshot accessibility trees, act through element tokens, menu paths or pixel coordinates, batch "
     "known steps with run_steps, record, and verify from fresh state. Use for GUI work in that VM; the "
     "metacomputer skill decides when the VM is the right tool. Never install or run cua-driver on the "
-    "Mac, and never use these tools for the user's own computer."
+    "Mac, and never use these tools for the user's own computer.\""
 )
 LAB_NOTE = """> **metacomputer's copy of the official Cua Driver {ver} skill pack** (Linux guide only; this
 > file, README.md and RUNTIME.md are edited, the other guides are unchanged; Cua's license is
@@ -83,6 +83,10 @@ EDITS = [
      "- Current host: [LINUX.md](LINUX.md). The macOS, Windows and embedding guides are not included in this "
      "Linux-only copy."),
     (r"^- \[EMBEDDING\.md\]\(EMBEDDING\.md\):.*\n", ""),
+    # The frontmatter's OpenClaw block: it asks for a cua-driver command on the host's PATH (and the variables of an
+    # embedding host app), and here the driver runs only in the VM, so OpenClaw would never offer the skill on the Mac.
+    # Agent Plugins skills (Hermes Agent) take only plain strings in metadata, too (scripts/sync-plugin.py).
+    (r"^  openclaw:\n(?: {4}.*\n)+", ""),
 ]
 
 # README.md and RUNTIME.md. Cua's text tells a person to install the driver on their own

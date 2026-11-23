@@ -403,6 +403,19 @@ copy's VMs (off) and are stopped at the end.
   are classified the same in every order; nested and default forms (`record`, `record moments`, `browser profiles`,
   `input-reset --check`, `secrets rule list`, `secrets audit-sink list`); the shell's list of commands it skips is
   Python's.
+- The other agents: stand-ins built with `cc` (`userterm.fake_interpreter`) for each as `ps` shows it (Gemini CLI's
+  node running its gemini script, Hermes Agent's python running `hermes_cli`'s gateway, OpenClaw's processes named
+  `openclaw-gateway` and `openclaw`) are each the agent session above a command, hold a computer through a bridge
+  under them, refuse a command that names no computer on another computer (naming the agent), and make `at-terminal`
+  refuse; look-alikes (OpenClaw's relay and anchor helpers, other node and python programs) aren't agents, and a
+  plain process table never reads a command line. A process is told by what it executes, no option tables: Gemini CLI
+  started with node options that take a value (`--dns-result-order`, `--disable-proto`, `--stack-size`), a native
+  `gemini` (by its executable, through a link of another name too), node running a relative link to its script
+  (from the process's own working folder, read live from a stand-in that changed folder), `node -pe
+  "import('@google/gemini-cli')"` and a preload of Gemini CLI's package make `at_user_terminal` refuse, while an
+  editor opening a file named gemini and a dev shell above a terminal are the user's own, with boolean flags before
+  them (`python3 -u`, `node --no-warnings`) too; a relative script whose working folder can't be read is an
+  unidentified agent.
 - Records (process start times stood in for). A claim kept from before start times were kept never counts, and renewing
   it doesn't give it the current process's; a lease refreshed after its session ended (owners' and the hub's own) keeps
   that session's start time, so the process that has its pid now holds nothing; every write checks the folder again (one
@@ -503,7 +516,11 @@ a folder there, both files populated, a byte-order mark), with a temporary `HOME
   (unfinished); a program elsewhere in the checkout, a moved checkout's launcher and the launcher with other arguments
   are left byte for byte, named without their arguments (a synthetic token never printed), with the command to remove
   them yourself and exit 1, and `--uninstall` leaves them; a Codex entry of yours that runs
-  `~/.local/bin/metacomputer --vm other mcp-lazy` keeps that link and `mcomp` at `--uninstall`.
+  `~/.local/bin/metacomputer --vm other mcp-lazy` keeps that link and `mcomp` at `--uninstall`. Its skill links in
+  `~/.agents/skills` follow the other agents' rule: someone else's broken link, a relative one that works from its own
+  folder, one into another folder of the same name and a relative one that only looks like the checkout's from where
+  install.sh runs are left as they are, named by their path only (exit 1, recorded as unfinished); a link into this
+  checkout's own skill folders, the wrong skill or relative, is put right.
 - `install.sh --only-claude`: a fresh install adds the checkout as the marketplace,
   installs the plugin at user scope and registers the user-scope MCP server
   `metacomputer` (`claude mcp add -s user metacomputer ~/.local/bin/metacomputer
@@ -1226,6 +1243,35 @@ Each of these needs no VM and takes seconds.
   real codex: set up, `--no-codex` remembered across runs, `--codex` again, `--no-claude` keeping Claude Code's old
   skill link, a run with both agents left alone still asking before it moves the command from another checkout, and
   neither agent on PATH.
+- `python3 tests/test_agent_setup.py`: install.sh's steps for OpenClaw, Hermes Agent and Gemini CLI against stand-in
+  `openclaw`, `hermes` and `gemini` commands (each answering the parts of its CLI the step uses, as the real one does)
+  in a temporary HOME: the MCP server registered with the agent's own command and read back, the skills linked, the
+  choice remembered and an earlier unfinished step cleared, a second run changing nothing; an entry that isn't
+  metacomputer's (another program, `~/.local/bin/metacomputer` with other arguments) left byte for byte and named by its
+  program only, a lookup that fails, an entry that appears between the read and the add, and an add that doesn't take,
+  each ending with exit 1 and the step recorded as unfinished; `--uninstall` removing only metacomputer's own and
+  keeping the command links an entry that stays runs; `--no-NAME` remembered until `--NAME`; nothing printed holding a
+  configured value; `agents --json` for each; Gemini CLI's settings read as it reads them (comments, no trailing
+  commas) and `GEMINI_CLI_HOME`; and the packages: agent-plugin/'s manifests, skills (names, quoted descriptions, links
+  inside the package) and launcher (it runs only an installed checkout's command), and gemini-extension.json; skill
+  links of someone else's (a broken one, a relative one that works from its own folder) left alone and the step
+  unfinished, one into this checkout put right, a skill that can't be linked or that OpenClaw doesn't offer leaving the
+  step unfinished, and one that can't be removed the uninstall; every read and change of an agent's configuration made
+  under its lock, and nothing changed while another run holds it; Hermes Agent's sticky profile getting both the server
+  and the skills, a switch during the run changing nothing; an uninstall without an agent's CLI (Gemini CLI's
+  settings.json read directly, Hermes Agent's config.yaml looked through, no Python at all) keeping the command, and so
+  does a configuration it can't read in full (OpenClaw's `$include` of another file, a file past the 16 MB read,
+  OpenClaw's folder that can't be searched and Hermes Agent's profiles folder that can't be listed, and one profile
+  folder among others that can't be looked into (a Hermes profile, an OpenClaw ~/.openclaw-NAME), with Python and
+  without; Gemini CLI's settings.json past the 4 MB its reader takes); metacomputer set up in another profile than
+  the one selected (Hermes Agent's `work` with its unconfigured default selected, OpenClaw's ~/.openclaw-work) keeping
+  the command, that profile left as it was, with the agent's CLI there, without it, and without Python; and an
+  unexpected error in an agent's uninstall step (its lock file a link, its lock folder not
+  writable) keeping the command too, said, until a run that works removes it. The
+  recognition of their sessions is test_session_guard's (stand-in processes as `ps` shows each agent, a titled Hermes,
+  a path with spaces, the shared cases in tests/fixtures/agent_argv.json, and an interpreter whose arguments can't be
+  read counting as an agent) and test_vault_ops's (Gemini CLI a session; OpenClaw's and Hermes Agent's gateways, a
+  titled Hermes and an unreadable interpreter none; the same shared cases through the test build).
 - Tests of commands only the user runs type at a pty in a process launchd has adopted
   (`tests/userterm.py`), so an agent running the suite isn't above it; `userterm.fake_agent`
   builds a small program named `codex` to stand for one. The vault suites use the TEST
@@ -1234,7 +1280,17 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_bench_workdir.py` (12 checks): the benchmark's work folder is a
   fresh private one, and a `claude` planted in the old shared path, the shim folder or a
   relative PATH entry is never run; after a Codex session, the trust table Codex saved for the
-  run's folder is undone (the file put back exactly, its mode kept) only when it's the only change.
+  run's folder is undone (the file put back exactly, its mode kept) only when it's the only change. `--agent gemini`,
+  `hermes` and `openclaw` against stand-ins that record their environment and what their HOME holds: each session in a
+  throwaway HOME (none of the test's planted credentials or agent overrides, only the `--pass-env` variable; a value
+  given to `--pass-env` refused), that HOME's config holding only the run's server, approval for metacomputer only
+  (Gemini CLI's policy file, OpenClaw's minimal profile and exec allowlist, Hermes Agent's toolsets and approvals; no
+  yolo anywhere), the command line each runs, Hermes Agent's gateway stopped and every throwaway HOME deleted afterwards,
+  two Hermes Agent runs at once each with a home of its own holding its own test VM's server, no Hermes session while
+  a .env in Hermes's installation or the managed /etc/hermes (.env, config.yaml) is there or `hermes --version` names
+  no install directory (the file named), and their events read as
+  Claude's (names, Bash for their shells, errors, tokens with no cost). The session's `metacomputer` and `mcomp`
+  launchers run this checkout's command with your HOME, and the skill names them.
 - `python3 tests/test_bench_checks.py` (96 checks, a few seconds): the benchmark's check
   readers on made-up ODF and OOXML files (what shows in bold, sheets by name, a chart
   frame's size from LibreOffice's inches, a chart object that doesn't parse, `.xlsx`
