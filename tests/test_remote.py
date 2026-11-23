@@ -3670,6 +3670,74 @@ def cli(td):
         b.close()
 
 
+VT_STUBS = r'''
+set -u
+die() { echo "DIE: $*" >&2; exit 1; }
+ok() { echo "OK: $*"; }; warn() { echo "WARN: $*" >&2; }; say() { echo "SAY: $*"; }
+vm_running() { return 0; }; ssh_base() { SSH_ARGS=(-p 2222 box); }; mc_tilde() { printf '%s' "$1"; }
+MC_REMOTE=1 TRANSPORT=ssh VM_NAME=box VNC_PORT=$PORT
+'''
+
+
+def view_tunnel_pipes():
+    """`view --tunnel` to a computer reached over SSH, its output read through pipes by a program (an agent's tool call,
+    a script): it returns as soon as the tunnel is up, not when the tunnel closes. `ssh -f` stays in the background with
+    the descriptors it started with; a stand-in ssh does the same (its background half holds them for 15 s)."""
+    import re as _re
+    import socket as _socket
+    import time as _time
+    src = open(os.path.join(LAB, "bin", "metacomputer")).read()
+    m = _re.search(r"^view_tunnel\(\) \{.*?^\}$", src, _re.S | _re.M)
+    if not m:
+        check("view --tunnel: view_tunnel() found in bin/metacomputer", False)
+        return
+    td = tempfile.mkdtemp(prefix="mcvt-", dir="/tmp")
+    try:
+        bindir, logdir = os.path.join(td, "bin"), os.path.join(td, "logs")
+        os.makedirs(bindir)
+        os.makedirs(logdir)
+        with open(os.path.join(bindir, "ssh"), "w") as f:
+            f.write('#!/bin/bash\n'
+                    'echo "ssh $*" >> "$CALLS"\n'
+                    'printf "Warning: the tunnel \\033[31msays\\033[0m this\\n" >&2\n'
+                    'if [ "${SSH_FAILS:-0}" = 1 ]; then echo "Permission denied (publickey)." >&2; exit 255; fi\n'
+                    '( sleep 15 ) &\n'           # the background half: keeps stdout and stderr as they were given
+                    'exit 0\n')
+        os.chmod(os.path.join(bindir, "ssh"), 0o755)
+        with _socket.socket() as so:            # a port nothing listens on
+            so.bind(("127.0.0.1", 0))
+            port = so.getsockname()[1]
+        res = {}
+        for case, fails in (("up", "0"), ("refused", "1")):
+            calls = os.path.join(td, f"calls-{case}.log")
+            env = dict(os.environ, PATH=bindir + ":" + os.environ.get("PATH", ""), CALLS=calls, SSH_FAILS=fails,
+                       PORT=str(port), LOG_DIR=logdir, LAB_ROOT=LAB, PY=sys.executable)
+            t0 = _time.monotonic()
+            try:
+                r = subprocess.run(["bash", "-c", VT_STUBS + m.group(0) + "\nview_tunnel"], capture_output=True,
+                                   text=True, env=env, timeout=10)
+                res[case] = (r.returncode, r.stdout, r.stderr, round(_time.monotonic() - t0, 1),
+                             open(calls).read() if os.path.exists(calls) else "")
+            except subprocess.TimeoutExpired:
+                res[case] = ("timeout", "", "", round(_time.monotonic() - t0, 1), "")
+        rc, out, err, secs, calls = res["up"]
+        check("view --tunnel, its output read through pipes: it returns once the tunnel is up (not when the background "
+              "ssh ends)", rc == 0 and secs < 6 and "ssh -f -T -L" in calls and "live view tunnel" in out, res["up"])
+        log = os.path.join(logdir, "view-tunnel.log")
+        check("...what ssh said while it connected is still shown, on stderr, escaped (termsafe), and kept in its log",
+              "Warning: the tunnel" in err and "\x1b[31m" not in err
+              and "Warning: the tunnel" in (open(log).read() if os.path.exists(log) else ""), (err, os.path.exists(log)))
+        rc, out, err, secs, calls = res["refused"]
+        check("...a tunnel that can't open: refused promptly, saying what ssh said and where its log is",
+              rc == 1 and secs < 6 and "Permission denied" in err and "view-tunnel.log" in err
+              and "couldn't open the live view's SSH tunnel" in err, res["refused"])
+        check("...a provider's tunnel (Fly Sprites) still runs ssh in the background through daemonize (lib/proxywrap.py "
+              "ends it with ssh), never `ssh -f`",
+              'daemonize "$LOG_DIR/view-tunnel.log" ssh -T -o ExitOnForwardFailure=yes' in m.group(0))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def main():
     transports()
     proxywrap()
@@ -3686,6 +3754,7 @@ def main():
     abort_scoped()
     cloud_lock()
     remote_helpers()
+    view_tunnel_pipes()
     td = tempfile.mkdtemp(prefix="mcremote-")
     try:
         cli(td)

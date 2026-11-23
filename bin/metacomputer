@@ -767,9 +767,16 @@ view_tunnel() { # a computer elsewhere: an SSH tunnel from 127.0.0.1:VNC_PORT he
     lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | grep -qx ssh \
       || die "couldn't open the live view's SSH tunnel to $VM_NAME (its log: $(mc_tilde "$LOG_DIR")/view-tunnel.log)"
   else
-  # The command ("view") is only what ssh needs to go to the background: the key's forced command runs instead.
-  ssh -f -T -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" "${SSH_ARGS[@]}" view </dev/null 2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 65536 >&2) \
-    || die "couldn't open the live view's SSH tunnel to $VM_NAME"
+  # The command ("view") is only what ssh needs to go to the background: the key's forced command runs instead. What
+  # ssh says goes to its log, never to this command's own output: `ssh -f` stays in the background with the
+  # descriptors it was started with, and a program reading this command's output through a pipe would wait until the
+  # tunnel closes (the key's 20 s, or the viewer) before it saw the command end. What it said while it connected is
+  # shown here once it's up (or has failed), escaped, as before.
+  local tlog="$LOG_DIR/view-tunnel.log" trc=0
+  : 2>/dev/null > "$tlog" || true
+  ssh -f -T -L "127.0.0.1:$VNC_PORT:127.0.0.1:5900" "${SSH_ARGS[@]}" view </dev/null >>"$tlog" 2>&1 || trc=$?
+  if [ -s "$tlog" ]; then "$PY" "$LAB_ROOT/lib/termsafe.py" --max 65536 < "$tlog" >&2 || true; fi
+  [ "$trc" = 0 ] || die "couldn't open the live view's SSH tunnel to $VM_NAME (its log: $(mc_tilde "$LOG_DIR")/view-tunnel.log)"
   fi
   ok "live view tunnel: 127.0.0.1:$VNC_PORT -> $VM_NAME's 127.0.0.1:5900, over SSH (connect within 20 s; it closes when the viewer does)"
 }

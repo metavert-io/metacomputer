@@ -324,7 +324,9 @@ nothing that's already right:
   computer it makes. The live view's VNC server listens on the computer's own `127.0.0.1:5900` only; `metacomputer
   view --open` (or `view --tunnel`, for another VNC client) opens an SSH tunnel to it from `127.0.0.1:VNC_PORT` on
   your Mac with the `view` key, which may open that one forward and nothing else; the tunnel closes when the viewer
-  does. There's no public port for it, and `view --tailnet` is refused.
+  does. The command returns once the tunnel is up (what SSH says goes to `view-tunnel.log` in its log folder, shown once it
+  connects), so a program that reads its output doesn't wait for the tunnel to close. There's no public port for it,
+  and `view --tailnet` is refused.
 - **Out, in two layers**, each said for what it is:
   - **Outside the VM, where the provider enforces it.** On Oracle Cloud, the computer's own network security group
     (above): public addresses only with `EGRESS=internet`, nothing with `EGRESS=off`. Nothing in the guest can change
