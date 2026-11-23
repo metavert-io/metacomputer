@@ -10,6 +10,11 @@
 # payload over SSH and runs this, then reboots it) changes only what such a VM needs: a display in memory (Xorg's
 # dummy driver), its own firewall instead of the Mac's gateway (provisioning/remote/), the live view on 127.0.0.1,
 # arm64 or amd64, and no storage modules. Run again, it changes nothing that's already right.
+# MCOMP_TARGET=sprite (a Fly Sprite, docs/sprites.md: provisioning/sprite/bootstrap.sh made the accounts and sshd,
+# through Fly's own channel) differs again: no systemd, cloud-init, display manager or kernel modules, so the display
+# is Xvfb and the desktop runs as Sprites services (provisioning/sprite/rootfs/opt/metacomputer/sprite/), Ubuntu
+# 26.04 on amd64, no full upgrade of Fly's image, no guest firewall (Fly's network policy is the boundary, outside the
+# VM), browsers' own DNS-over-HTTPS locked off (it would bypass that policy's names), and the setup doesn't reboot.
 set -Eeuo pipefail
 PAYLOAD="${1:-/opt/metacomputer-payload}"
 LOG=/var/log/metacomputer-provision.log
@@ -35,8 +40,8 @@ TARGET="${MCOMP_TARGET:-lume}"
 ARCH="$(dpkg --print-architecture)"
 case "$TARGET" in
   lume) ;;
-  remote) [ "$ARCH" = "${MCOMP_GUEST_ARCH:-$ARCH}" ] || { echo "the payload is for ${MCOMP_GUEST_ARCH}, this is $ARCH"; false; } ;;
-  *) echo "MCOMP_TARGET must be lume or remote, not $TARGET"; false ;;
+  remote|sprite) [ "$ARCH" = "${MCOMP_GUEST_ARCH:-$ARCH}" ] || { echo "the payload is for ${MCOMP_GUEST_ARCH}, this is $ARCH"; false; } ;;
+  *) echo "MCOMP_TARGET must be lume, remote or sprite, not $TARGET"; false ;;
 esac
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 # Cua Driver: no telemetry, no update checks - for every process in this
@@ -129,6 +134,22 @@ if [ "$TARGET" = remote ]; then
 fi
 cp -r --preserve=mode,timestamps "$PAYLOAD/rootfs/." /
 if [ "$TARGET" = remote ]; then remote_ssh_and_firewall; fi
+# A Fly Sprite: the setup's own SSH settings replace the bootstrap's (the live view's forward from the remote tree),
+# checked, then sshd (the Sprites service, its master process) reloads them. No firewall in the guest: Fly's network
+# policy, outside the VM, is the boundary.
+sprite_ssh() {
+  step "SSH settings (Fly Sprite: sshd on the Sprite's loopback, /.sprite hidden from its sessions)"
+  install -m 0644 "$PAYLOAD/remote/rootfs/etc/ssh/sshd_config.d/17-metacomputer-view.conf" /etc/ssh/sshd_config.d/
+  install -m 0644 "$PAYLOAD/sprite/rootfs/etc/ssh/sshd_config.d/05-metacomputer-sprite.conf" /etc/ssh/sshd_config.d/
+  rm -f /etc/ssh/sshd_config.d/09-metacomputer-bootstrap.conf
+  sshd -t
+  pkill -HUP -x sshd || true
+  printf '127.0.0.1\n' > /etc/metacomputer/vnc-listen
+  printf 'GUEST_USER=%s\nDISPLAY_NUM=0\nSCREEN=%s\n' "$GUSER" "${MCOMP_SCREEN:-1920x1080}" > /etc/metacomputer/sprite.env
+  printf '%s\n' "${MCOMP_EGRESS:-internet}" > /etc/metacomputer/egress
+  chmod 0644 /etc/metacomputer/vnc-listen /etc/metacomputer/sprite.env /etc/metacomputer/egress
+}
+if [ "$TARGET" = sprite ]; then sprite_ssh; fi
 chown -R "$GUSER:$GUSER" "/home/$GUSER"
 install -d -m 0755 /etc/apt/keyrings
 # Only the pinned key (scripts/pin-gpg-key.sh on the Mac); mozilla.sources names it in Signed-By.
@@ -141,9 +162,14 @@ if [ "$TARGET" = remote ] && [ "$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" 
   grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
+if [ "$TARGET" = sprite ]; then
+  step "apt: update (Fly's image is Fly's: it isn't upgraded whole here; the packages below are the newest)"
+  "${APT[@]}" update
+else
 step "apt: update + full upgrade"
 "${APT[@]}" update
 "${APT[@]}" full-upgrade
+fi
 
 step "apt: desktop, accessibility, apps, recording"
 PKGS=(
@@ -176,6 +202,13 @@ PKGS=(
 )
 # A VM with no display of its own draws into memory; its own firewall is nftables (guest-firewall).
 if [ "$TARGET" = remote ]; then PKGS+=(xserver-xorg-video-dummy nftables); fi
+# A Fly Sprite: Xvfb (no display manager, no systemd to run one), its own D-Bus session and sshd; nothing that needs
+# systemd to do its job (LightDM, ufw, unattended-upgrades). libatk-bridge2.0-0 is only a virtual name on 26.04.
+if [ "$TARGET" = sprite ]; then
+  drop=" xserver-xorg-core xserver-xorg-input-libinput xserver-xorg-legacy xinit lightdm lightdm-gtk-greeter unattended-upgrades ufw libatk-bridge2.0-0 "
+  kept=(); for p in "${PKGS[@]}"; do case "$drop" in *" $p "*) ;; *) kept+=("$p") ;; esac; done
+  PKGS=("${kept[@]}" xvfb dbus dbus-x11 libatk-bridge2.0-0t64 libglib2.0-bin openssh-server)
+fi
 "${APT[@]}" install --no-install-recommends "${PKGS[@]}"
 # Nothing that locks the screen or syncs the host clipboard may be present.
 purge_unwanted() {
@@ -184,7 +217,19 @@ purge_unwanted() {
 }
 purge_unwanted
 firefox --version || true
-dpkg-query -W -f='${Package} ${Version}\n' firefox libreoffice-core libreoffice-calc gnome-calculator xserver-xorg-core xfce4-session lightdm ffmpeg python3-openpyxl | tee "$STATE/package-versions.txt"
+XPKGS="xserver-xorg-core lightdm"; [ "$TARGET" != sprite ] || XPKGS="xvfb openssh-server"
+dpkg-query -W -f='${Package} ${Version}\n' firefox libreoffice-core libreoffice-calc gnome-calculator $XPKGS xfce4-session ffmpeg python3-openpyxl | tee "$STATE/package-versions.txt"
+if [ "$TARGET" = sprite ]; then
+  # Fly's network policy is a list of DNS names, enforced outside the VM: a browser that resolves names itself
+  # (DNS over HTTPS) would bypass it, and its addresses would be refused as raw IPs. Off, and locked off.
+  pol=/etc/firefox/policies/policies.json
+  jq '.policies.DNSOverHTTPS = {"Enabled": false, "Locked": true}' < "$pol" > "$pol.new" && mv "$pol.new" "$pol"
+  chmod 0644 "$pol"
+  if [ -d /etc/opt/chrome/policies/managed ]; then
+    printf '{"DnsOverHttpsMode": "off"}\n' > /etc/opt/chrome/policies/managed/metacomputer-dns.json
+    chmod 0644 /etc/opt/chrome/policies/managed/metacomputer-dns.json
+  fi
+fi
 
 # After Chrome's install, and after a run of its daily job (the same code), APT may
 # reach Google's repo only through our entry and the pinned key.
@@ -387,7 +432,7 @@ step "storage: volumes, Mac folders and reference disks (metacomputer-admin stor
 # (/opt/metacomputer/bin/storage-helper); nothing mounts them otherwise (udev rule 61).
 printf 'desktop_user=%s\n' "$GUSER" > /etc/metacomputer/storage.conf
 chmod 0644 /etc/metacomputer/storage.conf
-if [ "$TARGET" = remote ]; then
+if [ "$TARGET" != lume ]; then
   echo "a VM reached over the internet has no volumes from the Mac yet: no storage modules"
 else
 # ext4 is built in; folders need virtiofs, reference disks ISO 9660 or UDF (virtio or USB).
@@ -416,27 +461,36 @@ FR=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
 WP_TEXT="metacomputer  |  Ubuntu 24.04 ARM64 VM  |  not the user's Mac"
 if [ "$TARGET" = remote ]; then
   WP_TEXT="metacomputer  |  Ubuntu 24.04 $(echo "$ARCH" | tr a-z A-Z) cloud VM  |  not the user's computer"
+elif [ "$TARGET" = sprite ]; then
+  WP_TEXT="metacomputer  |  Ubuntu $(. /etc/os-release; echo "$VERSION_ID") x86_64 on Fly Sprites  |  not the user's computer"
 fi
-convert -size 1920x1080 xc:'#17324d' -gravity center \
+IM=convert; command -v magick >/dev/null 2>&1 && IM=magick      # ImageMagick 7 (26.04) is `magick`
+"$IM" -size 1920x1080 xc:'#17324d' -gravity center \
     -font "$FB" -pointsize 112 -fill '#ffffff' -annotate +0-70 'VIRTUAL COMPUTER' \
     -font "$FR" -pointsize 38 -fill '#bcd4ea' -annotate +0+55 "$WP_TEXT" \
-    "$WP" || convert -size 1920x1080 xc:'#17324d' "$WP"
+    "$WP" || "$IM" -size 1920x1080 xc:'#17324d' "$WP"
 chmod 0644 "$WP"
 
 step "accessibility defaults (dconf system db)"
 dconf update
 
+if [ "$TARGET" = sprite ]; then
+  step "the desktop: Sprites services (xvfb, desktop), made when the setup has checked it (scripts/remote-build.sh)"
+else
 step "display manager: LightDM autologin into XFCE on Xorg"
 systemctl set-default graphical.target
 systemctl enable lightdm.service
 # Ubuntu's lightdm package expects this file to name the active DM.
 echo /usr/sbin/lightdm > /etc/X11/default-display-manager
+fi
 
 step "uinput for the driver's X11 virtual-pointer route"
 udevadm control --reload-rules || true
 modprobe uinput || true
 
-if [ "$TARGET" = remote ]; then
+if [ "$TARGET" = sprite ]; then
+  step "egress: Fly's network policy, outside the VM (set from the Mac: EGRESS=${MCOMP_EGRESS:-internet}); no guest firewall"
+elif [ "$TARGET" = remote ]; then
   step "the guest firewall, as the setup leaves it (it was put in place before anything was upgraded)"
   /opt/metacomputer/bin/guest-firewall apply
   /opt/metacomputer/bin/guest-firewall status | head -40
@@ -457,6 +511,9 @@ ufw --force enable
 ufw status verbose
 fi
 
+if [ "$TARGET" = sprite ]; then
+  step "no systemd here: services to trim and update timers don't apply (updates: a new computer, or apt over sh)"
+else
 step "trim services the lab doesn't need"
 for unit in multipathd.service multipathd.socket ModemManager.service apport.service \
             motd-news.timer ua-timer.timer esm-cache.service; do
@@ -469,6 +526,7 @@ update-initramfs -u 2>/dev/null || true
 step "automatic security updates (no automatic reboots)"
 systemctl enable unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer
 unattended-upgrade --dry-run 2>&1 | tail -3 || true
+fi
 
 step "locale + versions"
 mkdir -p /etc/metacomputer
@@ -484,4 +542,4 @@ update-locale LANG=en_US.UTF-8
 chmod 0644 /etc/metacomputer/versions
 
 date -Is > "$STATE/provisioned"
-step "provisioning complete; cloud-init will reboot into the desktop"
+step "provisioning complete; $([ "$TARGET" = sprite ] && echo "the desktop starts as Sprites services" || echo "cloud-init will reboot into the desktop")"

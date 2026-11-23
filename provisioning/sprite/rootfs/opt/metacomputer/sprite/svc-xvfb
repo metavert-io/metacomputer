@@ -1,0 +1,22 @@
+#!/bin/bash
+# metacomputer on Fly Sprites: the Sprites service "xvfb" (root, through sudo; services run as `sprite`).
+# The X server in memory (Xvfb: there's no GPU, and Xorg's dummy driver would add nothing without /dev/uinput), as the
+# desktop user, in a private mount namespace with /.sprite hidden (hide-sprite-api). Before it: /dev/shm made large
+# enough for Firefox (64 MB on a Sprite), the desktop user's runtime folder, a stale X lock removed (/tmp is on the
+# disk and in checkpoints, so a restore brings one back), and the X cookie.
+set -eu
+. /etc/metacomputer/sprite.env
+U="${GUEST_USER:-cua}"; UID_="$(id -u "$U")"; D="${DISPLAY_NUM:-0}"; G="${SCREEN:-1920x1080}"
+mount -o remount,size=2g /dev/shm 2>/dev/null || echo "svc-xvfb: could not enlarge /dev/shm" >&2
+install -d -o "$U" -g "$U" -m 0700 "/run/user/$UID_"
+install -d -m 1777 /tmp/.X11-unix
+if [ -e "/tmp/.X$D-lock" ] && ! kill -0 "$(tr -d ' ' < "/tmp/.X$D-lock" 2>/dev/null)" 2>/dev/null; then
+  echo "svc-xvfb: removing a stale /tmp/.X$D-lock" >&2
+  rm -f "/tmp/.X$D-lock" "/tmp/.X11-unix/X$D"
+fi
+XA="/home/$U/.Xauthority"
+if ! runuser -u "$U" -- xauth -f "$XA" list ":$D" 2>/dev/null | grep -q MIT-MAGIC-COOKIE-1; then
+  runuser -u "$U" -- xauth -f "$XA" add ":$D" MIT-MAGIC-COOKIE-1 "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+fi
+exec unshare -m --propagation private -- /opt/metacomputer/sprite/hide-sprite-api \
+  runuser -u "$U" -- /usr/bin/Xvfb ":$D" -screen 0 "${G}x24" -dpi 96 -nolisten tcp -nolisten local -auth "$XA" +extension RANDR

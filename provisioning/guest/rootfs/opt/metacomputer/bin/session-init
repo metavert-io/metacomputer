@@ -28,10 +28,12 @@ tmp="$RUN/session.env.tmp"
   echo "XDG_SESSION_ID=${XDG_SESSION_ID:-}"
 } > "$tmp" && mv "$tmp" "$RUN/session.env"
 
-LISTEN=0.0.0.0
-[ "$(head -n 1 /etc/metacomputer/vnc-listen 2>/dev/null)" = 127.0.0.1 ] && LISTEN=127.0.0.1
+LISTEN=0.0.0.0 V6=""
+# On loopback only: x11vnc also opens an IPv6 listener on every address ([::]:5900) despite -noipv6 (found on a Fly
+# Sprite); -rfbportv6 -1 turns it off.
+[ "$(head -n 1 /etc/metacomputer/vnc-listen 2>/dev/null)" = 127.0.0.1 ] && LISTEN=127.0.0.1 V6="-rfbportv6 -1"
 if [ -s "$HOME/.config/metacomputer/vnc-pass" ] && ! pgrep -u "$(id -u)" -x x11vnc >/dev/null; then
-  x11vnc -display "${DISPLAY:-:0}" -rfbport 5900 -listen "$LISTEN" -noipv6 \
+  x11vnc -display "${DISPLAY:-:0}" -rfbport 5900 -listen "$LISTEN" -noipv6 $V6 \
     -forever -shared -repeat -noxdamage -quiet \
     -passwdfile "$HOME/.config/metacomputer/vnc-pass" \
     -o "$HOME/.cache/metacomputer/x11vnc.log" -bg >/dev/null 2>&1 || true

@@ -1,0 +1,10 @@
+#!/bin/bash
+# metacomputer on Fly Sprites: the Sprites service "sshd" (root, through sudo). sshd in a private mount namespace with
+# /.sprite hidden (hide-sprite-api), so no SSH session (the desktop user's, the vault's accounts', the maintenance
+# account's) reaches the Sprite's management API. It listens on the Sprite's own loopback only
+# (05-metacomputer-sprite.conf), reached from the Mac through Fly's tunnel (sprite proxy -W :22).
+set -eu
+[ -s /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key
+install -d -m 0755 /run/sshd
+/usr/sbin/sshd -t
+exec unshare -m --propagation private -- /opt/metacomputer/sprite/hide-sprite-api /usr/sbin/sshd -D -e

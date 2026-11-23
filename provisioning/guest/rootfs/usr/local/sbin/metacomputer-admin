@@ -18,6 +18,21 @@ reload_sshd() { # validate first; on failure undo with $1 and stop
   systemctl reload ssh
 }
 
+# A Fly Sprite (/etc/metacomputer/sprite): no systemd. Its desktop and sshd are Sprites services, which only Fly's own
+# channel reaches (the Mac's `sprite exec`: metacomputer desktop-restart, logs); its egress is Fly's network policy.
+if [ -e /etc/metacomputer/sprite ]; then
+  case "${1:-}" in
+    restart-desktop|reboot|poweroff|updates)
+      echo "$1: on a Fly Sprite this is done from the Mac (metacomputer desktop-restart, logs; a new computer for updates)" >&2; exit 2 ;;
+    status) echo "a Fly Sprite: the desktop and sshd are Sprites services (metacomputer logs on the Mac)"; exit 0 ;;
+    logs) N="${2:-200}"; case "$N" in ''|*[!0-9]*) echo "logs: N must be a number" >&2; exit 2 ;; esac
+          tail -n "$N" /var/log/metacomputer-provision.log 2>/dev/null; exit 0 ;;
+    firewall) echo "none in the guest: Fly's network policy, outside the VM (metacomputer net status on the Mac)"; exit 0 ;;
+    egress) [ "${2:-}" = status ] && { echo provider; exit 0; }
+            echo "egress: Fly's network policy, set from the Mac (metacomputer net egress)" >&2; exit 2 ;;
+    idle) echo "idle: a Sprite sleeps by itself when nothing is connected" >&2; exit 2 ;;
+  esac
+fi
 case "${1:-}" in
   restart-desktop) systemctl restart lightdm ;;
   reboot)          systemctl reboot ;;
