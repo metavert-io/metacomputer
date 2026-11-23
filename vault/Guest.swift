@@ -221,6 +221,14 @@ final class GuestRunner {
             guard let a = t.binding.host_key_alias, validHostKeyAlias(a), validHost(t.binding.sshDestination) else {
                 return ("the binding of VM \(t.vm) names an address without its host key's name: bind it again", true)
             }
+            // The computer it was bound to must still be the one of that name: deleted, or made again, it isn't,
+            // and the old server (which may still exist, and accept these keys) must get nothing.
+            guard let want = t.binding.computer_id,
+                  readComputerID(computerIDPath(opsKey: t.binding.ops_key_path)) == want else {
+                return ("the computer bound as VM \(t.vm) was deleted or made again since it was bound (its identity "
+                        + "changed): nothing was sent. If this is the computer you mean, run `metacomputer secrets bind` "
+                        + "again", true)
+            }
             return nil
         }
         return checkListener(port: t.binding.ssh_port, gatewayPath: t.binding.gateway_path, gatewaySHA256: t.binding.gateway_sha256,

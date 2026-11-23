@@ -8,21 +8,58 @@
 #      the key lists) uploaded over SSH as cuaadmin, and provision.sh run (MCOMP_TARGET=remote);
 #   3. a reboot into the desktop, the live-view password, the desktop checked, then finalize.sh (cuaadmin's sudo
 #      narrowed to metacomputer-admin, cloud-init off).
-# Run by `metacomputer --vm NAME build` (bin/metacomputer). Your own server can be set up again this way (your account
+# A build that fails after making an instance deletes it again (it bills while it exists), unless --keep-on-failure:
+# then it's stopped through the provider, and what still bills (its disk) and how to delete it are said. Your own
+# server is checked with a fresh connection of your own after the setup and after the reboot; if your account can't
+# sign in, the setup's SSH settings and firewall are taken back off (remote-uninstall rollback) and the build stops.
+#
+# Run by `metacomputer --vm NAME build [--keep-on-failure]` (bin/metacomputer). Your own server can be set up again
+# this way (your account
 # runs bootstrap.sh with your sudo again, then the same steps, each leaving what's right as it is). A provider's
 # instance is made only when there's none, and one that's set up isn't set up again (cuaadmin's sudo is narrowed by
 # then, and there's no other account): delete it and make a new one, as for a VM on the Mac.
 #
-#   scripts/remote-build.sh
+#   scripts/remote-build.sh [--keep-on-failure]
 set -Eeuo pipefail
+# Provider credentials (lib/cloud/oci.py ENV_KEYS) in this command's environment reach lib/remote.py only: taken off
+# the environment here, before any other program runs (bash builtins only), and exported again into remote_py's one
+# child (scripts/lib.sh). The shell keeps them as unexported variables.
+for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT; do export -n "$mc_k"; done; unset mc_k
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
 [ "${MC_REMOTE:-0}" = 1 ] || die "$VM_NAME is a VM on this Mac: scripts/build-vm.sh builds it"
 vm_target_check
 vm_notice
 BUILD_QUIET_EXIT=0
-trap 'rc=$?; if [ $rc = 0 ]; then emit_event lifecycle build_done info "The computer $VM_NAME was set up" "$(mc_cmd) start";
+KEEP_ON_FAILURE=0
+for a in "$@"; do case "$a" in --keep-on-failure) KEEP_ON_FAILURE=1 ;; *) die "usage: metacomputer --vm NAME build [--keep-on-failure]" ;; esac; done
+CREATED_THIS_RUN=0
+# A failed build that made an instance deletes it again (or, with --keep-on-failure, stops it through the provider),
+# and says what's left billing. Your own server's rollback is done where its failure is found (owner_check).
+cleanup_failed() { # RC
+  [ "$1" != 0 ] && [ "$CREATED_THIS_RUN" = 1 ] || return 0
+  if [ "$KEEP_ON_FAILURE" = 1 ]; then
+    say "the setup failed; keeping the instance it made (--keep-on-failure), stopped through $WHERE"
+    if remote_py sleep --vm "$VM_NAME" --force >/dev/null; then
+      warn "it's stopped: $WHERE bills its disk until you delete it: metacomputer vm delete $VM_NAME"
+    else
+      warn "it couldn't be stopped: it is RUNNING and billing at $WHERE. Stop it (metacomputer --vm $VM_NAME stop --force) or delete it (metacomputer vm delete $VM_NAME)"
+    fi
+    return 0
+  fi
+  say "the setup failed; deleting what it made at $WHERE (an instance bills while it exists)"
+  if remote_py delete --vm "$VM_NAME" --network-too; then
+    ok "deleted at $WHERE: nothing of this build is left billing (metacomputer cloud status oci lists what's there)"
+  else
+    warn "it could NOT be deleted: an instance of $VM_NAME may still be RUNNING and billing at $WHERE. Delete it: metacomputer vm delete $VM_NAME (or metacomputer cloud status oci, then delete it in Oracle's console)"
+  fi
+}
+trap 'rc=$?; trap - ERR; set +e; cleanup_failed $rc
+      if [ $rc = 0 ]; then emit_event lifecycle build_done info "The computer $VM_NAME was set up" "$(mc_cmd) start";
       elif [ "$BUILD_QUIET_EXIT" = 0 ]; then emit_event lifecycle build_failed error "Setting up the computer $VM_NAME failed (exit $rc)" "see ${BUILD_LOG:-the newest logs build-*.log}" "exit=$rc"; fi' EXIT
+# Interrupted (Ctrl-C, the terminal closed, killed): a failure like any other, so what it made is cleaned up (bash
+# would otherwise run the EXIT trap with the status of whatever ran last, often 0).
+trap 'exit 130' INT; trap 'exit 129' HUP; trap 'exit 143' TERM
 TS="$(date +%Y%m%d-%H%M%S)"
 BUILD_LOG="$LOG_DIR/build-$TS.log"
 exec > >(tee -a "$BUILD_LOG") 2>&1
@@ -63,14 +100,16 @@ if [ "$KIND" = made ]; then
     echo "$HK_NAME $(cut -d' ' -f1,2 "$SSH_DIR/hostkey.pub")" > "$KNOWN_HOSTS"
     chmod 600 "$KNOWN_HOSTS" "$SSH_DIR/hostkey"
     say "making the instance on $WHERE"
+    CREATED_THIS_RUN=1       # from here, a failure deletes what this build made (cleanup_failed)
     remote_py create --vm "$VM_NAME" || die "the instance wasn't made (above); metacomputer --vm $VM_NAME status shows what's there"
+    remote_py identity --vm "$VM_NAME" --write >/dev/null || die "couldn't record $VM_NAME's identity"
   else
     say "the instance exists: setting it up again"
     remote_py wake --vm "$VM_NAME" >/dev/null || die "couldn't start the instance (above)"
   fi
   MC_T_USER=""   # its address is in its record now
-  say "waiting for its first boot (cloud-init makes the accounts)"
-  wait_ssh admin 900 || die "SSH to $VM_NAME never answered (metacomputer --vm $VM_NAME status)"
+  say "waiting for its first boot (cloud-init loads its firewall and makes the accounts)"
+  wait_ssh admin "${MCOMP_REMOTE_SSH_WAIT:-900}" || die "SSH to $VM_NAME never answered (metacomputer --vm $VM_NAME status)"
   if gssh admin 'test -f /var/lib/metacomputer/finalized'; then
     BUILD_QUIET_EXIT=1
     die "$VM_NAME is set up already (metacomputer --vm $VM_NAME status). To set it up from scratch: metacomputer vm delete $VM_NAME, then vm create it again"
@@ -84,24 +123,36 @@ else
   OWN=(ssh -o BatchMode=yes -o PreferredAuthentications=publickey -o PasswordAuthentication=no
        -o KbdInteractiveAuthentication=no -o ConnectTimeout=15 -p "${SSH_HOST_PORT:-22}" "$SETUP_USER@$SSH_HOST")
   "${OWN[@]}" true </dev/null || die "your own SSH to $SETUP_USER@$SSH_HOST (port ${SSH_HOST_PORT:-22}) didn't sign in with a key without asking anything. Sign in once yourself (ssh -p ${SSH_HOST_PORT:-22} $SETUP_USER@$SSH_HOST: check the host key it shows), with a key, then run this again"
+  # Your access must survive the setup: checked with a fresh connection after it and after the reboot, and if it
+  # doesn't, the setup's SSH settings and firewall come off again (cuaadmin still has the setup's sudo then).
+  owner_check() { # WHEN
+    "${OWN[@]}" true </dev/null 2>/dev/null && { ok "your own account still signs in ($1)"; return 0; }
+    warn "your account $SETUP_USER can't sign in to $SSH_HOST any more ($1): taking the setup's SSH settings and firewall back off"
+    gssh admin 'sudo /opt/metacomputer/bin/remote-uninstall rollback' || warn "the rollback failed: sign in another way (your provider's console) and run sudo /opt/metacomputer/bin/remote-uninstall rollback"
+    "${OWN[@]}" true </dev/null 2>/dev/null && ok "your account signs in again" || warn "your account still can't sign in: use your provider's console"
+    BUILD_QUIET_EXIT=0
+    die "the setup was rolled back because your own account couldn't sign in afterwards ($1); nothing of it is in force"
+  }
   ARCH_SEEN="$("${OWN[@]}" 'dpkg --print-architecture' </dev/null)"
   BS="$(mktemp -d "$SOCK_DIR/bootstrap.XXXXXX")"
   cp "$LAB_ROOT/provisioning/remote/bootstrap.sh" "$BS/"
   remote_py key-lists --vm "$VM_NAME" --dir "$BS" || die "couldn't write the key lists"
   rdir="metacomputer-bootstrap-$TS"
-  ( cd "$BS" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -cf - bootstrap.sh keys-guest keys-admin ) \
+  cp "$LAB_ROOT/provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall" "$BS/"
+  printf '%s\n' "$(plan egress)" > "$BS/egress"
+  ( cd "$BS" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -cf - bootstrap.sh keys-guest keys-admin guest-firewall egress ) \
     | "${OWN[@]}" "umask 077; mkdir -p ~/$rdir && tar -xf - -C ~/$rdir" || die "couldn't copy the bootstrap to $SSH_HOST"
   "$LAB_ROOT/scripts/safe-rmtree.sh" --quiet "$BS"
   say "bootstrap on $SSH_HOST as $SETUP_USER (with sudo)"
   if "${OWN[@]}" 'sudo -n true' </dev/null 2>/dev/null; then
-    out="$("${OWN[@]}" "sudo bash ~/$rdir/bootstrap.sh ~/$rdir $SETUP_USER; rc=\$?; rm -rf ~/$rdir; exit \$rc" </dev/null)"
+    out="$("${OWN[@]}" "sudo bash ~/$rdir/bootstrap.sh ~/$rdir $SETUP_USER ${SSH_HOST_PORT:-22}; rc=\$?; rm -rf ~/$rdir; exit \$rc" </dev/null)"
     printf '%s\n' "$out" | grep -v '^HOSTKEY ' || true
   else
     [ -t 0 ] || die "sudo on $SSH_HOST asks $SETUP_USER for a password: run this in your own terminal, where you can type it"
     # sudo asks on the server's terminal (ssh -tt): its prompt shows here as it comes; the password isn't echoed.
     bs_out="$SOCK_DIR/bootstrap-$TS.out"
     ssh -tt -o PreferredAuthentications=publickey -o PasswordAuthentication=no -o ConnectTimeout=15 \
-      -p "${SSH_HOST_PORT:-22}" "$SETUP_USER@$SSH_HOST" "sudo bash ~/$rdir/bootstrap.sh ~/$rdir $SETUP_USER; rc=\$?; rm -rf ~/$rdir; exit \$rc" \
+      -p "${SSH_HOST_PORT:-22}" "$SETUP_USER@$SSH_HOST" "sudo bash ~/$rdir/bootstrap.sh ~/$rdir $SETUP_USER ${SSH_HOST_PORT:-22}; rc=\$?; rm -rf ~/$rdir; exit \$rc" \
       | tr -d '\r' | tee "$bs_out" | grep -v '^HOSTKEY ' || true
     out="$(cat "$bs_out")"; rm -f "$bs_out"
   fi
@@ -109,6 +160,8 @@ else
   [ -n "$hk" ] || die "the bootstrap didn't report the server's host key; nothing was pinned"
   echo "$HK_NAME $hk" > "$KNOWN_HOSTS"; chmod 600 "$KNOWN_HOSTS"
   ok "host key pinned as $HK_NAME: $(ssh-keygen -lf "$KNOWN_HOSTS" | cut -d' ' -f2)"
+  remote_py identity --vm "$VM_NAME" --write >/dev/null || die "couldn't record $VM_NAME's identity"
+  owner_check "after the bootstrap"
   wait_ssh admin 120 || die "metacomputer's own key doesn't sign in to $SSH_HOST as $ADMIN_USER"
 fi
 case "$ARCH_SEEN" in arm64) A=arm64 ;; amd64) A=x86_64 ;; *) die "$VM_NAME is $ARCH_SEEN: metacomputer sets up arm64 and amd64" ;; esac
@@ -136,6 +189,7 @@ remote_py key-lists --vm "$VM_NAME" --dir "$P/payload" || die "couldn't write th
   echo "CUA_DRIVER_VERSION=$CUA_DRIVER_VERSION"; echo "CUA_DRIVER_TARBALL=$CUA_DRIVER_TARBALL"
   echo "CUA_DRIVER_SHA256=$CUA_DRIVER_SHA256"; echo "CUA_SRC_COMMIT=$CUA_SRC_COMMIT"; echo "BUILD_ID=$TS"
   echo "MCOMP_TARGET=remote"; echo "MCOMP_GUEST_ARCH=$([ "$ARCH" = x86_64 ] && echo amd64 || echo arm64)"
+  echo "MCOMP_SSH_PORT=${SSH_HOST_PORT:-22}"
   echo "MCOMP_EGRESS=$(plan egress)"; echo "MCOMP_IDLE_STOP=$(plan idle_stop)"
   echo "MCOMP_BROWSERS=\"$BROWSERS\""
   echo "MCOMP_EXTRA_PACKAGES=\"$(echo $EXTRA_PACKAGES)\""
@@ -158,12 +212,15 @@ while :; do
   [ "$st" != "$last" ] && { echo "  … $st"; last="$st"; }
   case "$st" in
     DONE) break ;;
-    FAILED) gssh admin 'sudo tail -60 /var/log/metacomputer-provision.log' || true; die "the setup failed (left as it is for a look: metacomputer --vm $VM_NAME ssh admin)" ;;
+    FAILED) gssh admin 'sudo tail -60 /var/log/metacomputer-provision.log' || true
+            [ "$KIND" = made ] || owner_check "after the failed setup"
+            die "the setup failed (above)$([ "$KIND" = made ] || echo "; your server is left as the setup left it, your access checked: metacomputer --vm $VM_NAME ssh admin to look")" ;;
   esac
   [ $(( $(date +%s) - start )) -gt 3600 ] && die "the setup took over an hour"
   sleep 10
 done
 ok "set up in $(( ($(date +%s) - start) / 60 )) min"
+[ "$KIND" = made ] || owner_check "after the setup"
 gssh admin 'sudo cat /var/log/metacomputer-provision.log' > "$LOG_DIR/provision-$TS.log" 2>/dev/null || true
 
 # --- 3. reboot into the desktop, check it, finalize ------------------------------------------------------------
@@ -178,6 +235,7 @@ while :; do
 done
 wait_session 300 || die "the desktop session never became ready (metacomputer --vm $VM_NAME ssh admin; sudo metacomputer-admin logs)"
 ok "desktop session ready"
+[ "$KIND" = made ] || owner_check "after the reboot, with the firewall loaded at boot"
 "$LAB_ROOT/bin/metacomputer" _vnc-install
 gssh ops /opt/metacomputer/bin/guest-status > "$LOG_DIR/guest-status-$TS.json"
 "$PY" - "$LOG_DIR/guest-status-$TS.json" <<'EOF' || die "the desktop isn't ready (see the guest-status log)"
@@ -192,6 +250,7 @@ gssh admin "sudo bash -s $ADMIN_USER '$GUEST_USER'" < "$LAB_ROOT/provisioning/gu
 gssh admin 'sync; test -f /var/lib/metacomputer/finalized && sudo -n -l | grep -q metacomputer-admin && ! sudo -n -l | grep -q "(ALL) NOPASSWD: ALL"' \
   || die "finalize did not take effect"
 ok "finalized: $ADMIN_USER may run only metacomputer-admin with sudo; cloud-init is off"
+CREATED_THIS_RUN=0       # set up: from here nothing is deleted on a failure
 # The computer's private host key now lives only in it; the Mac keeps the public half (known_hosts, the vault).
 rm -f "$SSH_DIR/hostkey"
 printf 'remote=1\nbuild=%s\narch=%s\n' "$TS" "$ARCH" > "$SSH_DIR/guest-features"

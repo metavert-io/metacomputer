@@ -1,0 +1,51 @@
+#!/bin/sh
+# remote-uninstall: take metacomputer's setup back off a server it was set up on over SSH (your own server). Root.
+#   remote-uninstall rollback   what a setup that would lock its owner out is undone with: its SSH settings (the
+#                               server's own, saved before the setup changed them, put back), its firewall (the
+#                               service off and disabled, the network's dependency on it removed, its one nftables
+#                               table deleted), then sshd checked and reloaded
+#   remote-uninstall all        rollback, then the idle stop off, metacomputer's sudo rules removed, and its accounts
+#                               (cua, cuaadmin, mcfill, mcproxy) locked with their key lists removed. Their home
+#                               folders and the desktop's packages stay (remove them yourself if you want)
+# Run with your own account's sudo over your own SSH connection (metacomputer vm delete NAME --remove-from-server
+# does), then check that a new connection of yours still signs in.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+BACKUP=/var/lib/metacomputer/rollback
+[ "$(id -u)" = 0 ] || { echo "remote-uninstall: run it as root" >&2; exit 1; }
+
+ssh_back() {
+  for f in /etc/ssh/sshd_config.d/1[0-9]-metacomputer*.conf /etc/ssh/sshd_config.d/20-metacomputer*.conf; do
+    [ -e "$f" ] && rm -f -- "$f"
+  done
+  if [ -d "$BACKUP/sshd_config.d" ]; then
+    cp -pR "$BACKUP/sshd_config.d/." /etc/ssh/sshd_config.d/
+  fi
+  sshd -t
+  systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+  echo "remote-uninstall: SSH settings back to the server's own"
+}
+firewall_off() {
+  systemctl disable --now metacomputer-firewall.service 2>/dev/null || true
+  rm -f /etc/systemd/system/systemd-networkd.service.d/10-metacomputer-firewall.conf
+  systemctl daemon-reload
+  if nft list table inet metacomputer >/dev/null 2>&1; then nft delete table inet metacomputer; fi
+  rm -f /run/metacomputer/firewall-fallback
+  echo "remote-uninstall: metacomputer's firewall is off (its table deleted; other rules untouched)"
+}
+
+case "${1:-}" in
+  rollback) firewall_off; ssh_back ;;
+  all)
+    firewall_off; ssh_back
+    systemctl disable --now metacomputer-idle.timer 2>/dev/null || true
+    rm -f /etc/sudoers.d/89-metacomputer-setup /etc/sudoers.d/90-metacomputer
+    visudo -c >/dev/null
+    for u in cua cuaadmin mcfill mcproxy; do
+      getent passwd "$u" >/dev/null && usermod -L -e 1 "$u" 2>/dev/null || true
+    done
+    rm -f /etc/ssh/metacomputer-keys/cua /etc/ssh/metacomputer-keys/cuaadmin \
+          /etc/ssh/metacomputer-fill/authorized_keys /etc/ssh/metacomputer-proxy/authorized_keys
+    echo "remote-uninstall: metacomputer's accounts are locked and can't sign in; their homes and the packages stay" ;;
+  *) echo "usage: remote-uninstall rollback | all" >&2; exit 2 ;;
+esac

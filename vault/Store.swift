@@ -61,6 +61,10 @@ struct VMBinding: Codable {
     // Such a binding has no gateway: the pinned host key is what's checked.
     var ssh_host: String? = nil
     var host_key_alias: String? = nil
+    // ...and the computer it is (its instance or setup and its host key, hashed: lib/remote.py identity), as the
+    // computer-id file beside its keys said when it was bound. A computer deleted, or made again under the same
+    // name, has another: the binding then refuses until it's bound again.
+    var computer_id: String? = nil
 }
 
 extension VMBinding {
@@ -77,6 +81,16 @@ func validHost(_ s: String) -> Bool {
     if matches(s, "^[0-9A-Fa-f:]{2,39}$") && s.contains(":") { return true }
     return matches(s, "^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
         && !matches(s, "^[0-9.]+$")
+}
+
+/// A computer elsewhere's identity file, beside its keys (lib/remote.py identity writes it; vm delete removes it).
+func computerIDPath(opsKey: String) -> String { (opsKey as NSString).deletingLastPathComponent + "/computer-id" }
+
+/// The identity in that file: 64 hex digits on one line, or nil.
+func readComputerID(_ path: String) -> String? {
+    guard let bytes = try? readFileBytes(path, max: 256) else { return nil }
+    let s = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    return matches(s, "^[0-9a-f]{64}$") ? s : nil
 }
 
 /// The name a remote computer's host key is pinned under (scripts/lib.sh mc_hostkey_name).

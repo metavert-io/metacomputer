@@ -4,8 +4,9 @@ provisioning/remote/bootstrap.sh, run over your own SSH connection).
 
 The user-data does three things and no more: it pins the SSH host key generated on this Mac for this computer (so
 the first connection is already checked: no trust on first use), it makes no default account (the provider's usual
-`ubuntu` user with passwordless sudo never exists), and it runs provisioning/remote/bootstrap.sh, which makes the
-two accounts metacomputer signs in with. Everything else (the desktop, Cua Driver, the firewall) is the setup over
+`ubuntu` user with passwordless sudo never exists), and it runs provisioning/remote/bootstrap.sh, which loads the
+guest firewall (guest-firewall, with the computer's EGRESS) and then makes the two accounts metacomputer signs in
+with. Everything else (the desktop, Cua Driver, the firewall) is the setup over
 SSH that your own server gets too (lib/remote.py), so both are set up the same way.
 
 The host's private key is in the user-data, which the provider keeps with the instance and serves to it through
@@ -13,6 +14,7 @@ its metadata service: the guest firewall refuses that service to every account o
 is turned off (finalize.sh), and its cached copy is deleted. Pure functions: nothing here touches a file, the
 network or a program."""
 import base64
+import gzip
 import json
 import re
 
@@ -48,7 +50,8 @@ def _q(s):
     return json.dumps(s)        # a JSON string is a valid YAML scalar
 
 
-def user_data(name, host_private, host_public, keys, bootstrap, hostname="metacomputer", timezone=None):
+def user_data(name, host_private, host_public, keys, bootstrap, firewall, egress="internet", hostname="metacomputer",
+              timezone=None):
     """The #cloud-config for a VM a provider makes (module docstring). ValueError when something isn't what it
     should be (a key, the host name), or when it's larger than a provider takes."""
     check_name(name)
@@ -58,8 +61,13 @@ def user_data(name, host_private, host_public, keys, bootstrap, hostname="metaco
         raise ValueError("the host key isn't an ed25519 key pair")
     if timezone is not None and not re.fullmatch(r"[A-Za-z0-9_+/-]{1,64}", timezone):
         raise ValueError(f"{timezone!r} isn't a time zone")
+    if egress not in ("internet", "off"):
+        raise ValueError(f"{egress!r} isn't an EGRESS setting")
+    if not (firewall or "").startswith("#!/bin/sh"):
+        raise ValueError("the guest firewall isn't the script it should be")
     guest, admin = key_lists(keys)
-    files = {"keys-guest": guest, "keys-admin": admin, "bootstrap.sh": bootstrap}
+    files = {"keys-guest": guest, "keys-admin": admin, "egress": egress + "\n", "guest-firewall": firewall,
+             "bootstrap.sh": bootstrap}
     lines = ["#cloud-config",
              f"# metacomputer {name}: the host key pinned on the Mac, no default account, then bootstrap.sh",
              f"hostname: {hostname}", "manage_etc_hosts: true", "ssh_pwauth: false", "disable_root: true",
@@ -71,10 +79,11 @@ def user_data(name, host_private, host_public, keys, bootstrap, hostname="metaco
     lines += ["write_files:"]
     for fname, body in files.items():
         lines += [f"  - path: /run/metacomputer-bootstrap/{fname}", "    owner: root:root",
-                  f"    permissions: {_q('0700' if fname.endswith('.sh') else '0600')}", "    encoding: b64",
-                  f"    content: {base64.b64encode(body.encode()).decode()}"]
+                  f"    permissions: {_q('0700' if fname in ('bootstrap.sh', 'guest-firewall') else '0600')}",
+                  "    encoding: gz+b64",
+                  f"    content: {base64.b64encode(gzip.compress(body.encode(), mtime=0)).decode()}"]
     lines += ["runcmd:",
-              '  - [bash, /run/metacomputer-bootstrap/bootstrap.sh, /run/metacomputer-bootstrap]',
+              '  - [bash, /run/metacomputer-bootstrap/bootstrap.sh, /run/metacomputer-bootstrap, "", "22"]',
               '  - [rm, -rf, /run/metacomputer-bootstrap]']
     text = "\n".join(lines) + "\n"
     if len(base64.b64encode(text.encode())) > MAX_USER_DATA:

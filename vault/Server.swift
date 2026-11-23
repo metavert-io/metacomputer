@@ -1262,7 +1262,7 @@ final class UnlockServer {
             if let g = b.gateway_path { d["gateway"] = g }
             if let h = b.ssh_host { d["ssh_host"] = h }
             if b.fill_user == nil || (!b.isRemote && (b.gateway_path == nil || b.gateway_sha256 == nil))
-                || (b.isRemote && b.host_key_alias == nil) { d["needs_bind"] = true }
+                || (b.isRemote && (b.host_key_alias == nil || b.computer_id == nil)) { d["needs_bind"] = true }
             return d
         }
         let sessions: [[String: Any]] = p.sessions.keys.sorted().map { n in

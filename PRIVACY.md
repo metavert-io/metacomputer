@@ -60,7 +60,8 @@ over SSH, and everything in it (its screen, its files, what's typed into it) is 
 hardware, under your agreement with them. For Oracle Cloud, `lib/remote.py` calls Oracle's API with the credentials
 you hand it, to make, start, stop and delete the computer and its network; nothing else is sent to Oracle. The
 computer reaches the internet itself (no gateway on your Mac): its own firewall refuses cloud metadata services and
-private and link-local addresses, and `EGRESS=off` turns its internet off except package updates.
+private and link-local addresses (on Oracle Cloud, its own network security group also lets out only public
+addresses), and `EGRESS=off` turns its internet off, package updates included.
 
 **Only when you set them up:**
 - Event sinks and the vault's audit sinks: events go to the webhook, OpenTelemetry Collector, syslog server or ntfy

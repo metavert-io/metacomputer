@@ -1731,11 +1731,30 @@ CLAIMS = [
      and "self.hand_over_claim(client, running, drop_own=client.holder == client.peer_pid)" in raw("lib/mcp_hub.py")
      and 'client.holder = (client.claude or parent or client.peer_pid) if kind == "call" else client.peer_pid' in raw("lib/mcp_hub.py")),
     # A computer elsewhere (docs/remote.md, SECURITY.md): the promises its code keeps.
-    ("SECURITY.md", r"refuses every account, root included, the cloud's metadata services and every link-local address",
+    ("SECURITY.md", r"applies to every account, root included, though root in the guest could remove it",
      lambda m: 'ip daddr @private4 counter reject' in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
      and "169.254.0.0/16" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
      and "fe80::/10" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
      and "Before=network-pre.target" in raw("provisioning/remote/rootfs/etc/systemd/system/metacomputer-firewall.service")),
+    ("SECURITY.md", r"OCI applies no security rule\s+to 169\.254\.0\.0/16",
+     lambda m: '"metadata": False' in raw("lib/cloud/oci.py") and '"169.254.0.0/16"' in raw("lib/cloud/ubuntu_vm.py")
+     and "169.254" not in "".join(__import__("cloud.ubuntu_vm").ubuntu_vm.public_v4())),
+    ("SECURITY.md", r"each computer's own network security group lets out public IPv4 addresses only",
+     lambda m: "egress_security_rules=[]))" in raw("lib/cloud/oci.py") and "for cidr in public_v4()]" in raw("lib/cloud/oci.py")
+     and "nsg_ids=[nsg_id] if nsg_id else None" in raw("lib/cloud/oci.py")
+     and raw("lib/cloud/oci.py").index("nsg = api.make_nsg(name, egress)") < raw("lib/cloud/oci.py").index("iid = api.launch(")),
+    ("SECURITY.md", r"rules that don't load\s+give way to an SSH-only fallback \(nothing out but replies\), and if that doesn't load either, the network stays down",
+     lambda m: "render_emergency()" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and "Requires=metacomputer-firewall.service" in raw(
+         "provisioning/remote/rootfs/etc/systemd/system/systemd-networkd.service.d/10-metacomputer-firewall.conf")),
+    ("SECURITY.md", r"A tightened rule applies to connections already open",
+     lambda m: "ct direction reply accept" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
+     and "ct state established" not in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall").split("chain output")[1]),
+    ("SECURITY.md", r"checks your account's access before its settings apply and with a fresh connection of yours after\s+the setup and after the reboot",
+     lambda m: 'owner_check "after the setup"' in raw("scripts/remote-build.sh")
+     and 'owner_check "after the reboot' in raw("scripts/remote-build.sh")
+     and "remote-uninstall rollback" in raw("scripts/remote-build.sh").split("  owner_check() {", 1)[1].split("\n  }\n", 1)[0]
+     and "sshd -T -C" in raw("provisioning/guest/provision.sh")),
     ("SECURITY.md", r"VNC server listens on the computer's own `127.0.0.1:5900` only",
      lambda m: '[ "$(head -n 1 /etc/metacomputer/vnc-listen 2>/dev/null)" = 127.0.0.1 ] && LISTEN=127.0.0.1'
      in raw("provisioning/guest/rootfs/opt/metacomputer/bin/session-init")
@@ -1745,9 +1764,23 @@ CLAIMS = [
      lambda m: 'ssh-keygen -q -t ed25519 -N \'\' -C "mcomp-$VM_NAME-host" -f "$SSH_DIR/hostkey"' in raw("scripts/remote-build.sh")
      and raw("scripts/remote-build.sh").index('> "$KNOWN_HOSTS"') < raw("scripts/remote-build.sh").index("remote_py create")
      and "StrictHostKeyChecking=yes" in fn_src("scripts/lib.sh", "ssh_base")),
-    ("SECURITY.md", r"`lib/remote.py`, the one program that calls OCI, gets them, and nothing else\s+metacomputer starts does",
-     lambda m: 'for mc_k in $MC_PROVIDER_ENV; do export -n "$mc_k"' in raw("scripts/lib.sh")
+    ("SECURITY.md", r"`lib/remote.py`, the one program that calls OCI, is started with\s+them, and nothing else metacomputer starts is",
+     lambda m: all(raw(f).index('do export -n "$mc_k"; done') < raw(f).index(first) for f, first in (
+                   ("bin/metacomputer", 'LIB="$(dirname "$SELF")/../scripts/lib.sh"'), ("scripts/lib.sh", "LAB_ROOT="),
+                   ("scripts/remote-build.sh", '. "$(dirname "$0")/lib.sh"')))
      and "mc_export_provider_env; exec" in fn_src("scripts/lib.sh", "remote_py")),
+    ("SECURITY.md", r"A build that fails after making an instance deletes it",
+     lambda m: 'remote_py delete --vm "$VM_NAME" --network-too' in fn_src("scripts/remote-build.sh", "cleanup_failed")
+     and "cleanup_failed $rc" in raw("scripts/remote-build.sh")
+     and "raise Refused(" in raw("lib/remote.py") and "deleted again" in raw("lib/remote.py")),
+    ("SECURITY.md", r"`start` never hard-stops a running instance unless its\s+console shows the guest already powered off",
+     lambda m: "def powered_off(self, name):" in raw("lib/cloud/oci.py") and "Nothing was stopped" in raw("lib/cloud/oci.py")
+     and "reboot: Power down" in raw("lib/cloud/oci.py")),
+    ("SECURITY.md", r"`vm delete` checks again, under the computer's lock, that no session\s+is using it",
+     lambda m: 'RDP_SIG" = "$first"' in raw("scripts/vm-commands.sh") and "lock_fd_take 6" in raw("scripts/vm-commands.sh")),
+    ("SECURITY.md", r"one deleted and made again under the same name\s+is refused until it's bound again",
+     lambda m: "readComputerID(computerIDPath(opsKey: t.binding.ops_key_path)) == want" in raw("vault/Guest.swift")
+     and "computer_id: computerID" in raw("vault/Commands.swift") and '"identity", "--vm", ' not in raw("vault/Commands.swift")),
     ("docs/remote.md", r"tries each of\s+the region's other domains once and then stops",
      lambda m: "Every availability domain was tried once" in raw("lib/cloud/oci.py") and "for ad in ads:" in raw("lib/cloud/oci.py")),
     ("SECURITY.md", r"`SSH_AUTH=cert` \(refused: its certificates name the Mac's gateway address\)",

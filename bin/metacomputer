@@ -130,6 +130,10 @@
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
+# Provider credentials (lib/cloud/oci.py ENV_KEYS) in this command's environment reach lib/remote.py only: taken off
+# the environment here, before any other program runs (bash builtins only), and exported again into remote_py's one
+# child (scripts/lib.sh). The shell keeps them as unexported variables.
+for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT; do export -n "$mc_k"; done; unset mc_k
 # Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
 # Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
 # confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it
@@ -362,6 +366,7 @@ do_start_remote() {
 }
 do_stop_remote() {
   parse_flags "$@"
+  local force=""; for a in ${REST[@]+"${REST[@]}"}; do case "$a" in --force) force=--force ;; *) die "usage: metacomputer stop [--force] [--override]" ;; esac; done
   expect_guard
   if ! remote_made; then
     hub_stop
@@ -376,10 +381,46 @@ do_stop_remote() {
     ( do_record stop ) || warn "could not finish the recording (metacomputer record stop)"
   fi
   remote_can_ask || die "stopping $VM_NAME needs $(remote_where)'s credentials in this command's environment (docs/remote.md). Left alone, it powers itself off after ${IDLE_STOP:-15} minutes unused, but $(remote_where) counts it as running (and bills a billed size) until it's stopped there"
-  say "stopping $VM_NAME (the guest shuts down, then $(remote_where) stops it; its disk is kept)"
-  remote_py sleep --vm "$VM_NAME" >/dev/null || die "couldn't stop it (above)"
+  if [ -n "$force" ]; then say "stopping $VM_NAME at once (--force: $(remote_where) powers it off; its disk is kept)"
+  else say "stopping $VM_NAME (the guest shuts down, then $(remote_where) stops it; its disk is kept. If it doesn't answer, this can take up to 15 minutes: --force powers it off at once)"; fi
+  remote_py sleep --vm "$VM_NAME" $force >/dev/null || die "couldn't stop it (above)"
   emit_event lifecycle stopped info "The computer $VM_NAME stopped" "" "forced=no"
   ok "stopped"
+}
+# EGRESS of a computer elsewhere: what its settings say, what its provider enforces outside it (where it does), and
+# what its own firewall has in force, each said apart: a setting is never taken for what's in force.
+remote_egress_guest() { # the guest's own firewall's EGRESS, or "unknown"
+  local v; v="$(gssh admin 'sudo /usr/local/sbin/metacomputer-admin egress status' 2>/dev/null | tail -1)"
+  case "$v" in internet|off|fallback|none) printf '%s' "$v" ;; *) printf 'unknown' ;; esac
+}
+remote_net_status() {
+  local outside="not asked (no credentials in this command)" guest
+  case "${PROVIDER:-}" in ubuntu-vm) outside="none: only its own firewall (your server's host may add its own)" ;; esac
+  if remote_can_ask; then outside="$(remote_py egress --vm "$VM_NAME" 2>/dev/null || echo unknown)"; fi
+  guest="unknown (it doesn't answer)"; vm_running "$VM_NAME" && guest="$(remote_egress_guest)"
+  printf '%s
+' "network of $VM_NAME:" "  setting (in $MC_SETTINGS_LABEL)  EGRESS=${EGRESS:-internet}"     "  outside the computer ($(remote_where))  $outside" "  its own firewall, in force  $guest"
+  case "$guest" in internet|off) [ "$guest" = "${EGRESS:-internet}" ] || printf '%s
+' "  ! what's in force isn't the setting: metacomputer --vm $VM_NAME net egress ${EGRESS:-internet}" ;; esac
+}
+remote_net_egress() { # internet|off: the provider's rules (where it has them), then the guest's, each checked; then the setting
+  local want="$1" got
+  case "$want" in internet|off) ;; *) die "usage: metacomputer net egress internet|off" ;; esac
+  owners_check
+  handoff_hold_unless_override
+  vm_running "$VM_NAME" || die "$VM_NAME doesn't answer (metacomputer start): its firewall can't be changed; nothing was"
+  if remote_made; then
+    remote_can_ask || die "changing $VM_NAME's egress needs $(remote_where)'s credentials in this command's environment (its rules outside the computer change too); nothing was changed"
+    got="$(remote_py egress --vm "$VM_NAME" --set "$want")" || die "$(remote_where) didn't take the new rules (above); nothing else was changed"
+    [ "$got" = "$want" ] || die "$(remote_where)'s rules read back as '$got', not $want; the guest's firewall wasn't changed"
+    ok "outside the computer ($(remote_where)): EGRESS=$want"
+  fi
+  gssh admin "sudo /usr/local/sbin/metacomputer-admin egress $want" >/dev/null || die "the computer's firewall didn't take EGRESS=$want (metacomputer --vm $VM_NAME net status)"
+  got="$(remote_egress_guest)"
+  [ "$got" = "$want" ] || die "its firewall reads back as '$got', not $want (metacomputer --vm $VM_NAME net status)"
+  ok "its own firewall: EGRESS=$want (in force now; connections it had open are cut where the new rule refuses them)"
+  browser_set EGRESS "$want"
+  ok "EGRESS=$want in $MC_SETTINGS_LABEL"
 }
 view_tunnel() { # a computer elsewhere: an SSH tunnel from 127.0.0.1:VNC_PORT here to its live view (x11vnc on its own
   # 127.0.0.1:5900), opened with its view key (which may open that one forward and nothing else). It stays up while
@@ -2418,9 +2459,9 @@ if [ "${MC_REMOTE:-0}" = 1 ]; then
     reset|baseline|restore|checkpoint|checkpoints)
               remote_only_mac "$cmd" "$("$PY" "$LAB_ROOT/lib/remote.py" missing --provider "${PROVIDER:-}" --feature "$cmd" 2>/dev/null || echo "it has no snapshots")" ;;
     net)      case "${1:-status}" in
-                status) echo "network: $VM_NAME's own firewall: EGRESS=${EGRESS:-internet} ($([ "${EGRESS:-internet}" = off ] && echo "nothing out but package updates" || echo "the internet, with metadata, link-local and private ranges refused"))"
-                        gssh admin 'sudo /usr/local/sbin/metacomputer-admin egress status' 2>/dev/null | sed 's/^/in force there: EGRESS=/' | term_safe; exit 0 ;;
-                *) remote_only_mac "metacomputer net $1" "it has no allowlist of names; set EGRESS=internet or off in $MC_SETTINGS_LABEL, then $(mc_cmd) build (docs/remote.md)" ;;
+                status) remote_net_status; exit $? ;;
+                egress) remote_net_egress "${2:-}"; exit $? ;;
+                *) remote_only_mac "metacomputer net $1" "it has no allowlist of names; metacomputer net egress internet|off sets what it may reach (docs/remote.md)" ;;
               esac ;;
     volume|refdisk) remote_only_mac "metacomputer $cmd" "volumes and reference disks reach a VM on this Mac only, for now" ;;
     logs)     n="${1:-40}"; [[ "$n" =~ ^[0-9]{1,6}$ ]] || die "usage: metacomputer logs [LINES]"

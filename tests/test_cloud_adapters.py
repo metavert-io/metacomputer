@@ -302,6 +302,26 @@ def manifests():
     check("...and the storage capabilities are separate keys", all(k in caps.KEYS for k in
                                                                      ("root_disk", "volumes", "snapshots", "backup", "bucket_mount")))
     check("PERSIST words: one line for each mode", set(caps.PERSIST_WORDS) == set(caps.PERSIST_MODES))
+    # What's enforced outside the computer is said apart from its own firewall, and never claimed when nothing is.
+    nothing = {"enforced": False, "private_ranges": False, "metadata": False, "off": False}
+    check("...outside egress rules claimed while nothing is enforced outside: refused",
+          any("nothing is enforced outside" in p for p in caps.check_manifest(
+              dict(FAKE_MANIFEST, outside_egress=dict(nothing, metadata=True)))))
+    check("...outside egress that isn't its four yes/no answers: refused",
+          any(p.startswith("outside_egress") for p in caps.check_manifest(
+              dict(FAKE_MANIFEST, outside_egress={"enforced": "yes"}))))
+    check("...billing it doesn't say (what a stopped computer bills, what an idle stop saves): refused",
+          any(p.startswith("billing") for p in caps.check_manifest(
+              dict(FAKE_MANIFEST, billing={"stopped": "sometimes", "guest_poweroff": "nothing", "note": "x"})))
+          and any(p.startswith("billing") for p in caps.check_manifest(
+              dict(FAKE_MANIFEST, billing={"stopped": "storage", "guest_poweroff": "nothing"}))))
+    truth = {n: (c.manifest["outside_egress"], c.manifest["billing"]["stopped"], c.manifest["billing"]["guest_poweroff"])
+             for n, c in cloud.ADAPTERS.items() if n != "fake"}
+    check("each provider's cost and egress truth: Oracle Cloud bills a stopped computer's disk, and a guest that "
+          "powered itself off as running; its rules outside refuse private ranges but not the metadata service; your "
+          "own server: nothing enforced outside, its billing unknown; this Mac: nothing billed",
+          truth["oci"] == ({"enforced": True, "private_ranges": True, "metadata": False, "off": True}, "storage", "nothing")
+          and truth["ubuntu-vm"] == (nothing, "unknown", "n/a") and truth["local-lume"][1:] == ("none", "n/a"), truth)
 
 
 def resolver():

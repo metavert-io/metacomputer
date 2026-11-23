@@ -1,57 +1,68 @@
 #!/bin/sh
 # guest-firewall: the firewall of a metacomputer computer that isn't on the user's Mac (an Ubuntu VM reached over
 # the internet: your own server, or one a provider made). On the Mac, the gateway (mcomp-netgw) is the boundary;
-# here the computer itself enforces it, with one nftables table, inet metacomputer, that nothing else writes.
+# here the computer itself enforces it, with one nftables table, inet metacomputer, that nothing else writes. It's a
+# layer inside the guest: root in the guest can remove it. What a provider enforces outside the computer (OCI: the
+# computer's own network security group) is the layer root can't touch (docs/remote.md, SECURITY.md).
 #
-#   guest-firewall apply      load the rules for /etc/metacomputer/egress (metacomputer-firewall.service, at boot,
-#                             before the network; metacomputer-admin egress, when the setting changes)
-#   guest-firewall render [--egress internet|off] [--uids "resolve=N network=N timesync=N apt=N"]
+#   guest-firewall apply      load the rules for /etc/metacomputer/egress and /etc/metacomputer/ssh-ports
+#                             (metacomputer-firewall.service, at boot, before the network, which needs it; bootstrap.sh
+#                             at first boot; metacomputer-admin egress). If they don't load, an SSH-only table is
+#                             loaded instead (SSH in, nothing out but DHCP), so the computer stays reachable to fix
+#                             and lets nothing else out; if even that fails, it exits 1 and the network doesn't start.
+#   guest-firewall render [--egress internet|off] [--ports "22 2222"] [--uids "resolve=N network=N timesync=N"]
+#   guest-firewall render-emergency [--ports "22"] [--uids ...]
 #                             print the rules (what apply loads; the tests render them on the Mac)
-#   guest-firewall status     the table as loaded
+#   guest-firewall status     the table as loaded (and whether it's the SSH-only fallback)
 #
-# Inbound: SSH (port 22) only, from anywhere; the provider's own firewall may narrow it. Nothing else listens
-# outside: the live view (x11vnc) binds 127.0.0.1 and is reached through an SSH tunnel.
-# Outbound, for every account (root and the desktop user alike):
-#   - never the cloud's metadata services or any other link-local address (169.254.0.0/16, fe80::/10; that holds
-#     169.254.169.254, the metadata address of every major cloud, OCI's DNS and its DHCP), nor a private, shared,
-#     loopback-but-not-lo, documentation, multicast or reserved range (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7
-#     including OCI's IPv6 metadata fd00:c1::a9fe:a9fe, ...): no reaching the provider's internal network, the
-#     user's home network or a tailnet;
+# Inbound: SSH only (the ports sshd listens on, /etc/metacomputer/ssh-ports), from anywhere; the provider's own
+# firewall may narrow it. Nothing else listens outside: the live view (x11vnc) binds 127.0.0.1, reached through SSH.
+# Outbound, every packet the computer starts (established connections included, so a rule tightened now cuts what was
+# already open; only replies to connections made TO it, SSH, are let through as such):
+#   - never the cloud's metadata services or any other link-local address (169.254.0.0/16, fe80::/10), nor a private,
+#     shared, loopback-but-not-lo, documentation, multicast or reserved range (10/8, 172.16/12, 192.168/16, 100.64/10,
+#     fc00::/7 including OCI's IPv6 metadata fd00:c1::a9fe:a9fe, ...), for every account;
 #   - the exceptions are the system services that need the cloud's own addresses, each to its one port: the DNS
-#     resolver (systemd-resolved, port 53), the DHCP client (systemd-networkd, 67/547) and the clock (chrony or
-#     timesyncd, 123), matched by their accounts;
-#   - EGRESS=internet (the default): the rest of the internet is open; EGRESS=off: nothing else leaves, except
-#     package downloads (APT's _apt account), so security updates keep coming.
-# The desktop user's programs reach DNS through the local resolver (127.0.0.53), so names resolve under both.
+#     resolver (systemd-resolved, 53), the DHCP client (systemd-networkd, 67/547) and the clock (chrony or timesyncd,
+#     123), matched by their accounts;
+#   - EGRESS=internet (the default): the rest of the internet is open; EGRESS=off: nothing else leaves (package updates
+#     included), as the provider's rules say too where it has them.
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 CONF=/etc/metacomputer/egress
+PORTS_CONF=/etc/metacomputer/ssh-ports
 TABLE=metacomputer
+MARK=/run/metacomputer/firewall-fallback
 
 private4="0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/3"
 private6="::/127, ::ffff:0:0/96, 64:ff9b::/96, 64:ff9b:1::/48, 100::/64, 2001:db8::/32, fc00::/7, fe80::/10, ff00::/8"
 
 uid_of() { id -u "$1" 2>/dev/null || true; }
-system_uids() { # "resolve=N network=N timesync=N apt=N": the accounts the exceptions are for, as this system has them
-  r="$(uid_of systemd-resolve)"; n="$(uid_of systemd-network)"; a="$(uid_of _apt)"
+system_uids() { # "resolve=N network=N timesync=N": the accounts the exceptions are for, as this system has them
+  r="$(uid_of systemd-resolve)"; n="$(uid_of systemd-network)"
   t="$(uid_of _chrony)"; [ -n "$t" ] || t="$(uid_of systemd-timesync)"
-  printf 'resolve=%s network=%s timesync=%s apt=%s' "$r" "$n" "$t" "$a"
+  printf 'resolve=%s network=%s timesync=%s' "$r" "$n" "$t"
 }
 pick() { # KEY "k=v k=v": the value, if it's a number
   for kv in $2; do
     case "$kv" in "$1="*) v="${kv#*=}"; case "$v" in ''|*[!0-9]*) ;; *) printf '%s' "$v" ;; esac ;; esac
   done
 }
+ports_of() { # "22 2222" -> "22, 2222": port numbers only, 22 when there are none
+  out=""
+  for p in $1; do
+    case "$p" in ''|*[!0-9]*) continue ;; esac
+    [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || continue
+    case ", $out, " in *", $p, "*) ;; *) out="${out:+$out, }$p" ;; esac
+  done
+  printf '%s' "${out:-22}"
+}
+saved_ports() { cat "$PORTS_CONF" 2>/dev/null | tr '\n' ' ' || true; }
 
-render() { # EGRESS UIDS
-  egress="$1"; uids="$2"
-  case "$egress" in internet|off) ;; *) echo "guest-firewall: egress must be internet or off, not '$egress'" >&2; exit 2 ;; esac
-  r="$(pick resolve "$uids")"; n="$(pick network "$uids")"; t="$(pick timesync "$uids")"; a="$(pick apt "$uids")"
-  cat <<EOF
-# metacomputer guest firewall (guest-firewall render; EGRESS=$egress)
-table inet $TABLE
-delete table inet $TABLE
-table inet $TABLE {
+head_rules() { # PORTS [sets]: the table and its input chain (the same for both rule sets); the full rules' sets too
+  # The fallback has no sets: nothing that can keep the full rules from loading is in it.
+  printf 'table inet %s\ndelete table inet %s\ntable inet %s {\n' "$TABLE" "$TABLE" "$TABLE"
+  [ "${2:-}" != sets ] || cat <<EOF
 	set private4 {
 		type ipv4_addr
 		flags interval
@@ -62,6 +73,8 @@ table inet $TABLE {
 		flags interval
 		elements = { $private6 }
 	}
+EOF
+  cat <<EOF
 	chain input {
 		type filter hook input priority filter; policy drop;
 		iif "lo" accept
@@ -71,12 +84,22 @@ table inet $TABLE {
 		meta l4proto ipv6-icmp accept
 		udp dport 68 accept comment "DHCP replies"
 		udp dport 546 accept comment "DHCPv6 replies"
-		tcp dport 22 accept comment "SSH, key only (sshd)"
+		tcp dport { $1 } accept comment "SSH, key only (sshd)"
 	}
+EOF
+}
+
+render() { # EGRESS PORTS UIDS
+  egress="$1"; ports="$(ports_of "$2")"; uids="$3"
+  case "$egress" in internet|off) ;; *) echo "guest-firewall: egress must be internet or off, not '$egress'" >&2; exit 2 ;; esac
+  r="$(pick resolve "$uids")"; n="$(pick network "$uids")"; t="$(pick timesync "$uids")"
+  echo "# metacomputer guest firewall (guest-firewall render; EGRESS=$egress)"
+  head_rules "$ports" sets
+  cat <<EOF
 	chain output {
 		type filter hook output priority filter; policy accept;
 		oif "lo" accept
-		ct state established,related accept
+		ct direction reply accept comment "replies to connections made to this computer (SSH)"
 		meta l4proto ipv6-icmp icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-report, mld2-listener-report } accept comment "IPv6 neighbour discovery"
 EOF
   [ -z "$r" ] || printf '\t\tmeta skuid %s meta l4proto { tcp, udp } th dport 53 accept comment "the DNS resolver"\n' "$r"
@@ -84,33 +107,60 @@ EOF
   [ -z "$t" ] || printf '\t\tmeta skuid %s meta l4proto udp th dport 123 accept comment "the clock"\n' "$t"
   printf '\t\tip daddr @private4 counter reject comment "metadata, link-local and private ranges"\n'
   printf '\t\tip6 daddr @private6 counter reject comment "metadata, link-local and private ranges"\n'
-  if [ "$egress" = off ]; then
-    [ -z "$a" ] || printf '\t\tmeta skuid %s meta l4proto tcp th dport { 80, 443 } accept comment "package downloads"\n' "$a"
-    printf '\t\tcounter reject comment "EGRESS=off"\n'
-  fi
+  [ "$egress" != off ] || printf '\t\tcounter reject comment "EGRESS=off"\n'
   printf '\t}\n}\n'
+}
+
+render_emergency() { # PORTS UIDS: SSH in; out, nothing but replies to it and the DHCP client (to keep the address)
+  ports="$(ports_of "$1")"; n="$(pick network "$2")"
+  echo "# metacomputer guest firewall: the SSH-only fallback (the full rules didn't load)"
+  head_rules "$ports"
+  printf '\tchain output {\n\t\ttype filter hook output priority filter; policy drop;\n\t\toif "lo" accept\n'
+  printf '\t\tct direction reply accept comment "replies to SSH"\n'
+  printf '\t\tmeta l4proto ipv6-icmp icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept\n'
+  [ -z "$n" ] || printf '\t\tmeta skuid %s meta l4proto udp th dport { 67, 547 } accept comment "the DHCP client"\n' "$n"
+  printf '\t}\n}\n'
+}
+
+opts() { # parse --egress --ports --uids into EG PT UI
+  EG=internet; PT=""; UI=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --egress) EG="${2:-}"; shift ;;
+      --ports) PT="${2:-}"; shift ;;
+      --uids) UI="${2:-}"; shift ;;
+      *) echo "usage: guest-firewall render [--egress internet|off] [--ports LIST] [--uids LIST]" >&2; exit 2 ;;
+    esac
+    shift
+  done
+  [ -n "$UI" ] || UI="$(system_uids)"
+  [ -n "$PT" ] || PT="$(saved_ports)"
 }
 
 case "${1:-}" in
   apply)
     egress="$(head -n 1 "$CONF" 2>/dev/null | tr -d ' \t\r' || true)"; [ -n "$egress" ] || egress=internet
+    install -d -m 0755 /run/metacomputer
     tmp="$(mktemp /run/metacomputer-firewall.XXXXXX)"
-    render "$egress" "$(system_uids)" > "$tmp"
-    nft -c -f "$tmp" || { rm -f "$tmp"; echo "guest-firewall: the rules don't load; the previous ones stay" >&2; exit 1; }
-    nft -f "$tmp"; rm -f "$tmp"
-    echo "guest-firewall: EGRESS=$egress loaded" ;;
-  render)
-    shift; egress=internet; uids=""
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        --egress) egress="${2:-}"; shift ;;
-        --uids) uids="${2:-}"; shift ;;
-        *) echo "usage: guest-firewall render [--egress internet|off] [--uids LIST]" >&2; exit 2 ;;
-      esac
-      shift
-    done
-    [ -n "$uids" ] || uids="$(system_uids)"
-    render "$egress" "$uids" ;;
-  status) nft list table inet "$TABLE" ;;
-  *) echo "usage: guest-firewall apply | render [--egress internet|off] [--uids LIST] | status" >&2; exit 2 ;;
+    if (render "$egress" "$(saved_ports)" "$(system_uids)") > "$tmp" 2>/dev/null && nft -c -f "$tmp" && nft -f "$tmp"; then
+      rm -f "$tmp" "$MARK"
+      echo "guest-firewall: EGRESS=$egress loaded (SSH in on $(ports_of "$(saved_ports)"))"
+      exit 0
+    fi
+    echo "guest-firewall: the rules for EGRESS=$egress didn't load; loading the SSH-only fallback" >&2
+    render_emergency "$(saved_ports)" "$(system_uids)" > "$tmp"
+    if nft -c -f "$tmp" && nft -f "$tmp"; then
+      rm -f "$tmp"; date -u +%Y-%m-%dT%H:%M:%SZ > "$MARK"
+      echo "guest-firewall: SSH-only fallback loaded: nothing leaves this computer until the rules are fixed" >&2
+      exit 0
+    fi
+    rm -f "$tmp"
+    echo "guest-firewall: not even the fallback loaded; the network stays down (fix it from the provider's console)" >&2
+    exit 1 ;;
+  render) shift; opts "$@"; render "$EG" "$PT" "$UI" ;;
+  render-emergency) shift; opts "$@"; render_emergency "$PT" "$UI" ;;
+  status)
+    [ ! -e "$MARK" ] || echo "the SSH-only fallback is loaded (since $(cat "$MARK")): the full rules didn't load"
+    nft list table inet "$TABLE" ;;
+  *) echo "usage: guest-firewall apply | render [--egress internet|off] [--ports LIST] [--uids LIST] | render-emergency | status" >&2; exit 2 ;;
 esac

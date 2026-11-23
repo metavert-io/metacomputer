@@ -768,10 +768,13 @@ images            STORAGE_DIR/volumes/NAME.img  --disk  ─▶     metacomputer-
 ## Network
 
 A computer elsewhere has no gateway on this Mac: its own firewall (`guest-firewall`, an
-nftables table loaded before the network, docs/remote.md) is the boundary there. SSH is
-the only way in; out, every account is refused metadata, link-local and private ranges
+nftables table loaded before the network, which requires it; an SSH-only fallback when its
+rules don't load, docs/remote.md) is the boundary there, with the provider's rules outside
+it where the provider enforces them (on Oracle Cloud, the computer's own network security
+group: public IPv4 only, or nothing; never 169.254.0.0/16, which OCI doesn't filter). SSH
+is the only way in; out, every account is refused metadata, link-local and private ranges
 except the DNS resolver, DHCP client and clock on their own ports, and `EGRESS=off` closes
-the rest but package downloads. What follows is the Mac's VM.
+the rest. What follows is the Mac's VM.
 
 Lume runs the VM in `gateway:` mode: its network device is a datagram socket
 to mcomp-netgw (Cua's cua-netgw with metacomputer's patch, below), a user-mode gateway (gvisor-tap-vsock) on the host. The guest
@@ -989,10 +992,14 @@ otherwise).
   over SSH. `lib/cloud/ubuntu_vm.py` has what every such VM shares (a persistent disk, no
   snapshots or volumes yet, its own firewall as the egress model, the live view as the one
   port forward) and the bring-your-own-server adapter, which needs no provider code;
-  `lib/cloud/oci.py` adds a thin driver (make, start, stop, delete, list, the network) on
-  Oracle's SDK, imported only when a call needs it, with credentials only from the
-  environment. `lib/remote.py` is what the CLI calls for the provider and the computer's
-  record (`RUN_DIR/remote.json`, 0600: the instance and the address it was given);
+  `lib/cloud/oci.py` adds a thin driver (make, start, stop, delete, list, the network and
+  each computer's network security group, its serial console's last lines) on Oracle's
+  SDK, imported only when a call needs it, with credentials only from the environment.
+  Each manifest says what's enforced outside the VM (`outside_egress`) and what a stopped
+  computer bills (`billing`). `lib/remote.py` is what the CLI calls for the provider and
+  the computer's record (`RUN_DIR/remote.json`, 0600: the instance and the address it was
+  given, and a launch in progress, by its operation tag, so a lost one is found again) and
+  identity (`computer-id`, which the vault's binding names);
   `scripts/remote-build.sh` sets it up the same way wherever it is: a provider's computer
   boots with cloud-init user-data (`lib/cloud/guest.py`: the host key made here, no default
   account, `provisioning/remote/bootstrap.sh`), your own server runs `bootstrap.sh` once over

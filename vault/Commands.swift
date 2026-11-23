@@ -451,7 +451,7 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let vm = a.positional[0]
     // A computer reached over SSH elsewhere (docs/remote.md): its address and the name its host key is pinned under,
     // instead of a gateway on this Mac.
-    var host: String?, alias: String?
+    var host: String?, alias: String?, computerID: String?
     if let h = a.last("host") {
         guard validHost(h) else { throw usageError("--host: the computer's address (an IP address or a DNS name)") }
         guard let al = a.last("host-key-alias"), validHostKeyAlias(al) else { throw usageError("--host-key-alias: mcomp-VM, the name its host key is pinned under") }
@@ -465,6 +465,13 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     guard let fk = a.last("fill-key"), let ok = a.last("ops-key") else { throw usageError(usage) }
     let fillKey = try checkKeyFile(fk, "fill-key"), opsKey = try checkKeyFile(ok, "ops-key")
+    if host != nil {
+        guard let cid = readComputerID(computerIDPath(opsKey: opsKey)) else {
+            throw VaultError("no identity beside the computer's keys (\(computerIDPath(opsKey: opsKey))): set it up "
+                             + "first (metacomputer --vm \(vm) build), then bind it")
+        }
+        computerID = cid
+    }
     guard let fillUser = a.last("fill-user"), validUser(fillUser) else { throw usageError("--fill-user: the VM's fill account (mcfill)") }
     guard let opsUser = a.last("ops-user"), validUser(opsUser) else { throw usageError("--ops-user: the VM's desktop user (e.g. cua)") }
     var proxyKey: String?, proxyUser: String?, proxyPort: Int?
@@ -495,7 +502,7 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let fp = hostKeyFingerprint(hostKey)
     oprint("""
     About to pin VM \(vm):
-      SSH           \(host.map { "\($0):\(port), a computer reached over SSH (its host key pinned as \(alias ?? ""))" } ?? "127.0.0.1:\(port)")
+      SSH           \(host.map { "\($0):\(port), a computer reached over SSH (its host key pinned as \(alias ?? ""))" } ?? "127.0.0.1:\(port)")\(computerID.map { "\n  computer      \(String($0.prefix(16)))... (made again under this name, it has another: bind again then)" } ?? "")
       host key      \(fp) (\(hostKey.split(separator: " ").first ?? ""))
       fills         as \(fillUser), key \(fillKey)
       sessions      as \(opsUser), key \(opsKey)
@@ -512,7 +519,8 @@ func cmdBind(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let (key, _) = try unlockKey(paths)
     let b = VMBinding(ssh_port: port, host_key_line: hostKey, ops_key_path: opsKey, guest_user: opsUser,
                       fill_key_path: fillKey, fill_user: fillUser, proxy_key_path: proxyKey, proxy_user: proxyUser, proxy_port: proxyPort,
-                      gateway_path: gateway, gateway_sha256: gwSHA, bound: isoTime(), ssh_host: host, host_key_alias: alias)
+                      gateway_path: gateway, gateway_sha256: gwSHA, bound: isoTime(), ssh_host: host, host_key_alias: alias,
+                      computer_id: computerID)
     try updateVault(paths, key) { p in p.vms[vm] = b }
     audit(paths, ["op": "bind", "result": "ok", "vm": vm, "ssh_port": port, "host_key": fp, "gateway": gateway ?? "none",
                   "remote": host != nil, "proxy": proxyUser != nil], macKey: vaultAuditKey(paths, key))

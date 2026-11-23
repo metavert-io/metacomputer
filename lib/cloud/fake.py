@@ -21,6 +21,8 @@ MANIFEST = {
     "bucket_mount": None,
     "sleep_wake": {"kind": "auto-sleep", "keeps_processes": True},
     "egress": {"model": "dns-allowlist", "allowlist": True, "private_ranges_blocked": True},
+    "outside_egress": {"enforced": True, "private_ranges": True, "metadata": True, "off": True},
+    "billing": {"stopped": "storage", "guest_poweroff": "stops-billing", "note": "made up, for tests"},
     "port_forward": True,
     "sizes": ("2x4", "4x8"),
     "regions": ("here", "there"),

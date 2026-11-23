@@ -627,11 +627,17 @@ def run(td, procs):
         rc, out = tty([BIN, "bind", vm, "--port", str(p), *common, "--gateway", g],
                       [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
         check(f"bind {vm}", rc == 0, out)
-    # A computer reached over SSH elsewhere (docs/remote.md): its address and its host key's alias, no gateway.
+    # A computer reached over SSH elsewhere (docs/remote.md): its address and its host key's alias, no gateway, and
+    # the identity beside its keys (lib/remote.py identity), which a fill must find unchanged.
+    r = client("bind", "noidvm", "--port", "22", "--host", "203.0.113.9", "--host-key-alias", "mcomp-noidvm", *common)
+    check("bind a computer elsewhere with no identity beside its keys: refused", r.returncode != 0
+          and "no identity beside" in r.stderr, r.stderr)
+    ident = os.path.join(sshdir, "computer-id")
+    open(ident, "w").write("a" * 64 + "\n")
     rc, out = tty([BIN, "bind", "remotevm", "--port", "22", "--host", "203.0.113.9", "--host-key-alias", "mcomp-remotevm",
                    *common], [("Type yes to pin", "yes\n"), ("Vault passphrase", PASS + "\n")])
-    check("bind a computer elsewhere: its address and alias pinned, and no gateway", rc == 0
-          and "203.0.113.9:22" in out and "mcomp-remotevm" in out and "no gateway" in out, out)
+    check("bind a computer elsewhere: its address, alias and identity pinned, and no gateway", rc == 0
+          and "203.0.113.9:22" in out and "mcomp-remotevm" in out and "no gateway" in out and "aaaaaaaaaaaaaaaa" in out, out)
     for extra, why in ((["--host", "203.0.113.9", "--host-key-alias", "mcomp-x", "--gateway", my_exe], "--gateway is for a VM on this Mac"),
                        (["--host", "203.0.113.9"], "--host-key-alias"),
                        (["--host", "-oProxyCommand=x", "--host-key-alias", "mcomp-x"], "--host"),
@@ -739,6 +745,14 @@ def run(td, procs):
           "HostKeyAlias=mcomp-remotevm" in c["argv"] and c["known_hosts"] == f"mcomp-remotevm {hostkey}\n"
           and "StrictHostKeyChecking=yes" in c["argv"] and "ProxyCommand=none" in c["argv"], (c["known_hosts"], c["argv"]))
     check("...the value on ssh's stdin only", json.loads(c["stdin"]).get("value") == PW_VALUE and PW_VALUE not in " ".join(c["argv"]))
+    n = len(calls())
+    open(ident, "w").write("b" * 64 + "\n")          # the computer of that name was deleted and made again
+    r = client("fill", "web-login", "--vm", "remotevm", "--field", "password")
+    check("a computer made again under the same name (another identity): the old binding refuses, nothing is sent",
+          r.returncode == 2 and "bind` again" in js(r).get("reason", "") and len(calls()) == n, r.stdout)
+    os.remove(ident)                                   # deleted (vm delete removes the identity)
+    r = client("fill", "web-login", "--vm", "remotevm", "--field", "password")
+    check("...and one deleted (no identity): refused too, nothing sent", r.returncode == 2 and len(calls()) == n, r.stdout)
 
     n = len(calls())
     for name, field in (("web-login", "otp"), ("web-otp", "password"), ("web-text", "password")):

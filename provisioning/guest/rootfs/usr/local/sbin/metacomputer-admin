@@ -34,7 +34,11 @@ case "${1:-}" in
     # A VM reached over the internet (its own firewall, guest-firewall): EGRESS=internet or off.
     [ -e /etc/metacomputer/remote ] || { echo "egress: this VM's network is the Mac's gateway (metacomputer net)" >&2; exit 2; }
     case "${2:-}" in
-      status) head -n 1 /etc/metacomputer/egress 2>/dev/null || echo internet ;;
+      # What's in force: read from the loaded table, never from the setting (the SSH-only fallback, or no table).
+      status) if [ -e /run/metacomputer/firewall-fallback ]; then echo fallback
+              elif nft list table inet metacomputer 2>/dev/null | grep -q '"EGRESS=off"'; then echo off
+              elif nft list table inet metacomputer >/dev/null 2>&1; then echo internet
+              else echo none; fi ;;
       internet|off) printf '%s\n' "$2" > /etc/metacomputer/egress; /opt/metacomputer/bin/guest-firewall apply ;;
       *) echo "usage: metacomputer-admin egress status|internet|off" >&2; exit 2 ;;
     esac ;;

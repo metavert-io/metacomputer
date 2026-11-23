@@ -211,10 +211,16 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `lib/cloud/transport.py` (scripts/lib.sh `ssh_base`'s remote half and the vault's binding): its host key pinned as
   `mcomp-NAME`, never an address, never trusted on first use; a provider's tunnel registers there and runs through
   `lib/proxywrap.py`. Provider credentials come only from the environment and reach only `lib/remote.py`
-  (`remote_py`, `mc_export_provider_env`): never a file, an argument, a log or another child. Its own firewall
-  (`guest-firewall`) is the boundary there: never let metadata, link-local or private ranges through, and keep the live
-  view on its `127.0.0.1` behind the `view` key. Everything a provider makes stays in the configured compartment,
-  tagged. Tests: `python3 tests/test_remote.py` (no VM, no network).
+  (`remote_py`, `mc_export_provider_env`): never a file, an argument, a log or another child; `bin/metacomputer`,
+  `scripts/lib.sh` and `scripts/remote-build.sh` `export -n` them first thing. Its own firewall (`guest-firewall`,
+  fail-closed: the network requires it) is the boundary there, with the provider's rules outside it where the
+  provider enforces them (OCI: a network security group per computer): never let metadata, link-local or private
+  ranges through, never claim more outside isolation than the manifest's `outside_egress` (OCI can't filter
+  169.254.0.0/16), and keep the live view on its `127.0.0.1` behind the `view` key. Never hard-stop a provider's
+  RUNNING instance without proof the guest is off (`stop --force` is the user's call); a failed build deletes what it
+  made. Your own server: keep the owner's access (ports, saved SSH settings, checks with rollback). Everything a
+  provider makes stays in the configured compartment, tagged. Tests: `python3 tests/test_remote.py` (no VM, no
+  network).
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every
   settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file

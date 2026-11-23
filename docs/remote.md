@@ -5,12 +5,14 @@ else**, reached over SSH: **your own server**, or one a **provider** makes for y
 same desktop (XFCE, Firefox, optionally Chrome, LibreOffice), the same Cua Driver, the same accounts, and your Mac
 stays the controller: the hub and all its guards, the vault, recordings, the action log and the CLI run here, as for
 a VM on your Mac. The difference is where the VM runs, and what keeps it apart from everything else (its own firewall
-instead of the Mac's gateway).
+and, where the provider enforces them, the provider's rules, instead of the Mac's gateway).
 
 | | Your own server (`--on server`) | Oracle Cloud (`--on oci`) |
 |---|---|---|
 | Who makes it | you | metacomputer, in your OCI compartment |
-| Who powers it on and off | you (metacomputer never does) | `start` / `stop`; the guest powers itself off after `IDLE_STOP` minutes unused (OCI bills a billed size until `stop`) |
+| Who powers it on and off | you (metacomputer never does) | `start` / `stop`, through OCI's API; the guest powers itself off after `IDLE_STOP` minutes unused, which OCI doesn't count as stopped |
+| What a stopped computer costs | between you and its host | its boot volume only, once stopped through the API; a guest that powered itself off is billed as running ([costs](#what-a-stopped-computer-costs)) |
+| Egress rules outside the VM | none of metacomputer's (only its own firewall) | its own network security group: public addresses only, or nothing; not the metadata service ([below](#what-keeps-it-apart)) |
 | Architecture | arm64 or x86_64 (found out) | from `--size` |
 | What it costs | between you and its host | `vm create` says the rate first; Arm within the Always Free allowance costs nothing |
 | What's kept | its disk | its disk (`PERSIST=disk`), also while stopped |
@@ -31,16 +33,26 @@ metacomputer vm create work --on server --host 203.0.113.5 --user ubuntu [--port
      is the one checked), with a key only: it refuses to go on if your account would need a password to sign in,
      because setup turns password sign-in off;
   2. runs `provisioning/remote/bootstrap.sh` with `sudo` (if `sudo` asks your password, run it in your own terminal:
-     the prompt comes from your server, and the password isn't echoed). It makes the accounts `cua` (the desktop,
-     no sudo) and `cuaadmin` (maintenance), each reached only with keys made on your Mac for this computer, and
-     reports the server's host key, which is pinned on your Mac as `mcomp-work`;
-  3. from then on uses only those keys: uploads the payload and runs the same setup as every VM (below).
-- Your account keeps signing in as before, with the keys in its home (`AllowUsers` lists it; a `Match` block keeps its
-  own `authorized_keys`), and keeps its own `sudo`.
+     the prompt comes from your server, and the password isn't echoed). It loads the guest firewall first (SSH let in
+     on every port `sshd -T` says sshd listens on, and the one you gave with `--port`), then makes the accounts `cua`
+     (the desktop, no sudo) and `cuaadmin` (maintenance), each reached only with keys made on your Mac for this
+     computer, and reports the server's host key, which is pinned on your Mac as `mcomp-work`;
+  3. signs in again with a fresh connection of your own, to check your access survived, then uses only the new keys:
+     uploads the payload and runs the same setup as every VM (below).
+- **Your access is kept and checked.** Before any of its SSH settings can apply, the setup saves your server's own
+  `sshd_config.d` (to `/var/lib/metacomputer/rollback`), writes your account's access (`AllowUsers` lists it; a
+  `Match` block keeps its own `authorized_keys`) and checks it with `sshd -t` and `sshd -T`; if the new settings would
+  lock your account out, it puts the server's own back and stops. After the setup and again after its reboot, a fresh
+  connection of yours is checked; if it can't sign in, the setup's SSH settings and firewall are taken back off
+  (`/opt/metacomputer/bin/remote-uninstall rollback`) and the build stops, saying so. Your account keeps its own
+  `sudo`.
 - metacomputer never powers your server on or off; `metacomputer --vm work stop` only closes this Mac's connection.
-- `metacomputer vm delete work` removes it here (settings, runtime folder) and leaves the server as it is; it says
-  what to remove there (the four accounts, the `sshd_config.d` files, the firewall service), or delete the keys folder
-  on your Mac so it can't sign in again.
+- `metacomputer vm delete work` removes it here (settings, runtime folder, its identity) and leaves the server as it
+  is, saying how to take the setup off. `vm delete work --remove-from-server` does that first, over your own SSH with
+  your `sudo`: `/opt/metacomputer/bin/remote-uninstall all` puts your SSH settings back, turns metacomputer's
+  firewall off (its one nftables table and its service; other rules are untouched), turns the idle stop off, removes
+  its sudo rules, and locks its four accounts and removes their key lists (their home folders and the desktop's
+  packages stay); then a fresh connection of yours is checked before anything is removed here.
 
 ## Oracle Cloud (OCI)
 
@@ -78,12 +90,27 @@ Allow group <group> to inspect compartments in tenancy
 
 **What it makes**, all in that compartment and tagged `metacomputer=NAME` (the network `metacomputer=network`), so
 `metacomputer cloud status oci` lists them even if this Mac lost their settings:
-- one VCN with one public subnet and an internet gateway, made with the first computer and deleted with the last;
-  its security list lets in **SSH (port 22) and ICMP type 3 code 4** (what TCP needs to size its packets) and nothing
-  else;
+- one VCN (IPv4 only) with one public subnet and an internet gateway, made with the first computer and deleted with
+  the last; its security list lets in **SSH (port 22) and ICMP type 3 code 4** (what TCP needs to size its packets)
+  and lets **nothing** out. It's made under a lock that one process on this Mac holds at a time, so two `vm create`s
+  at once share one network, and `vm delete` leaves it while another computer is being made in it (if two Macs each
+  made one, the oldest is used and deleting deletes both);
+- each computer's own **network security group** (`metacomputer-NAME`), made before its instance and deleted with
+  it: with `EGRESS=internet` it lets out every public IPv4 address (103 blocks: everything except the private,
+  shared, loopback, link-local, documentation, benchmarking, multicast and reserved ranges the guest firewall also
+  refuses), with `EGRESS=off` nothing. OCI enforces it outside the VM, so nothing in the guest, root included, can
+  change it;
 - the instance: Canonical's newest Ubuntu 24.04 image for the shape's architecture, a 50 GB boot volume, a public
-  address, the IMDS v2 endpoints only, the Oracle Cloud Agent's plugins off, and cloud-init user-data that pins the
-  host key made on your Mac, makes **no default account**, and runs `bootstrap.sh` (`lib/cloud/guest.py`).
+  address, its security group, the IMDS v2 endpoints only (the legacy v1 ones disabled), the Oracle Cloud Agent's
+  plugins off, and cloud-init user-data that pins the host key made on your Mac, makes **no default account**, and
+  runs `bootstrap.sh` (`lib/cloud/guest.py`), which loads the guest firewall before anything else.
+
+**What OCI can't block**: it applies no security rule to link-local addresses (169.254.0.0/16), where the instance
+metadata service (169.254.169.254), the VCN's DNS resolver and its clock answer, whatever the rules say. So the
+metadata service, which keeps the instance's user-data (with the host key's private half), is refused only by the
+guest firewall, a layer that root inside the guest could undo. The desktop's accounts have no root (`cua` has no
+sudo; `cuaadmin` may run only `metacomputer-admin`). `metacomputer net status` and the provider's manifest say this
+rather than claim more.
 
 **Sizes**: `arm-2x12` (VM.Standard.A1.Flex, 2 OCPU, 12 GB: the whole Always Free Arm allowance, so it costs nothing
 there), `arm-1x6`, `x86-1x8` and `x86-2x8` (VM.Standard.E5.Flex, billed by the hour), and `x86-micro`
@@ -92,17 +119,41 @@ an availability domain has no room for the shape ("out of host capacity", common
 the region's other domains once and then stops, saying so: run `metacomputer --vm NAME build` again later. Nothing
 is made until you agree (`vm create` shows the rate and what's kept first; `--yes` agrees).
 
-**Lifecycle**: `start` starts a stopped instance and waits for the desktop; `stop` shuts the guest down, then OCI
-stops the instance (its disk stays; OCI bills a stopped standard instance for its disk only). With nothing using it
-for `IDLE_STOP` minutes (15 by default: no SSH connection, which includes the hub's, a recording or the live view's
-tunnel, and no inner Claude session), the guest powers itself off. **OCI doesn't notice that**: an instance whose
-guest powered itself off still counts as running, and a billed size is still billed, until it's stopped through the
-API. `metacomputer stop` does that (a plain stop, since the guest is already off), and `start` does it before
-starting the instance again; `status` says when it runs at OCI but doesn't answer. Within the Always Free allowance
-this costs nothing either way; for a billed size, stop it when you're done rather than rely on the idle stop. `vm delete NAME` terminates the instance with its
-boot volume, and the network once no computer of yours uses it. **A monthly limit**: OCI's budgets (with an alert to
-your email) are set by the tenancy's administrator in the console; metacomputer's API user can't set or enforce one,
-so keep a budget alert there.
+**Lifecycle**: `start` starts a stopped instance and waits for the desktop. `stop` asks the guest to shut down, then
+OCI stops the instance (a soft stop, which OCI turns into a hard one after 15 minutes; its disk stays); `stop --force`
+stops it at once, like pulling the power. With nothing using it for `IDLE_STOP` minutes (15 by default: no SSH
+connection, which includes the hub's, a recording or the live view's tunnel, and no inner Claude session), the guest
+powers itself off. **OCI doesn't count that as stopped**: the instance stays RUNNING, and a billed size is billed as
+running, until it's stopped through the API: `metacomputer stop` does that (a plain stop once the guest's console
+shows it's off). `start` of an instance that is RUNNING but doesn't answer reads its serial console first: only when
+the guest's last words are its power-off (`reboot: Power down`) does it stop the instance and start it again;
+otherwise it refuses and stops nothing (the guest may be busy, or just unreachable from here), and `stop --force`
+then `start` restarts it. `status` says when it's RUNNING at OCI but doesn't answer. `vm delete NAME` terminates the
+instance with its boot volume and its security group, and the network once no computer of yours uses it. **A monthly
+limit**: OCI's budgets (with an alert to your email) are set by the tenancy's administrator in the console;
+metacomputer's API user can't set or enforce one, so keep a budget alert there.
+
+**A build that fails** (or is interrupted: Ctrl-C, the terminal closed, killed) after it made the instance deletes it again (instance, boot volume, security group, and the
+network if no other computer uses it) and says nothing of it is left billing, or exactly what could not be deleted.
+`build --keep-on-failure` stops it through the API instead, so its disk can be looked at, and says what still bills
+(its boot volume) and how to delete it. An instance whose record can't be written on the Mac is deleted at once; a
+launch whose answer was lost (the connection dropped) is found by the operation tag it was launched with and deleted
+when you build again.
+
+## What a stopped computer costs
+
+Each provider's manifest (`lib/cloud/`, `billing`) says what a stopped computer still bills, and `vm create` says it
+before you agree. What the idle stop saves depends on the provider, because a guest powering itself off isn't the
+provider stopping it:
+
+| Provider | Stopped through its API (`stop`) | The guest powered itself off (`IDLE_STOP`) | What the idle stop saves |
+|---|---|---|---|
+| Oracle Cloud, standard shapes (every `--size`) | compute stops billing; the boot volume is still billed (nothing within the Always Free allowance) | billed as running: OCI still counts it RUNNING | nothing by itself: `metacomputer stop` (or `vm delete`) is what stops the bill |
+| DigitalOcean, Vultr, Hetzner (not supported yet) | billed in full: a stopped server bills like a running one until it's deleted | billed in full | nothing: only deleting it stops the bill |
+| Your own server | between you and its host | metacomputer doesn't power it off (`IDLE_STOP=off`) | nothing |
+
+The idle stop still ends the desktop and everything running in it when nobody has used it for a while; for a billed
+size, stop or delete it when you're done.
 
 `metacomputer cloud status oci` (instances, network, boot volumes metacomputer made), `cloud doctor oci` (the
 credentials, the network's rules), `cloud setup oci` (makes the network) and `cloud teardown oci` (deletes the
@@ -137,19 +188,43 @@ nothing that's already right:
   view --open` (or `view --tunnel`, for another VNC client) opens an SSH tunnel to it from `127.0.0.1:VNC_PORT` on
   your Mac with the `view` key, which may open that one forward and nothing else; the tunnel closes when the viewer
   does. There's no public port for it, and `view --tailnet` is refused.
-- **Out** (`guest-firewall`, nftables, loaded before the network comes up): every account, root included, is refused
-  the cloud's metadata services and every link-local address (169.254.0.0/16, which holds 169.254.169.254 on every
-  major cloud, and fe80::/10), and private, shared and reserved ranges (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7,
-  which holds OCI's IPv6 metadata address, multicast, ...): no provider-internal network, no home network, no tailnet.
-  The exceptions are the system services that need the cloud's own addresses, each to its one port and matched by its
-  account: the DNS resolver (53), the DHCP client (67, 547) and the clock (123); programs in the desktop resolve names
-  through the local resolver. **`EGRESS`** (per computer): `internet` (the default) lets the rest of the internet
-  through; `off` lets nothing else out except package downloads, so security updates keep coming. There's no
-  allowlist of names here; `metacomputer net status` shows the setting, and `net allow` is refused.
+- **Out, in two layers**, each said for what it is:
+  - **Outside the VM, where the provider enforces it.** On Oracle Cloud, the computer's own network security group
+    (above): public addresses only with `EGRESS=internet`, nothing with `EGRESS=off`. Nothing in the guest can change
+    it, but it can't refuse link-local addresses, so the metadata service stays reachable at the network level. Your
+    own server gets no outside layer from metacomputer: only its own firewall (your host's firewall is yours to set).
+  - **Inside the VM** (`guest-firewall`, nftables): the rules apply to every account, root included, though root in
+    the guest could remove them (the desktop's accounts can't). They refuse the cloud's metadata services and every
+    link-local address (169.254.0.0/16, which holds 169.254.169.254 on every major cloud, and fe80::/10), and
+    private, shared and reserved ranges (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7, which holds OCI's IPv6
+    metadata address, multicast, ...): no provider-internal network, no home network, no tailnet. The exceptions
+    are the system services that need the cloud's own addresses, each to its one port and matched by its account:
+    the DNS resolver (53), the DHCP client (67, 547) and the clock (123); programs in the desktop resolve names
+    through the local resolver.
+  - **`EGRESS`** (per computer): `internet` (the default) lets the rest of the internet through; `off` lets nothing
+    else out, package downloads included (updates come again with `net egress internet`). There's no allowlist of
+    names here, and `net allow` is refused.
+  - **Fail closed.** The firewall's service runs before the network, and the network requires it (a
+    `systemd-networkd` drop-in): if its rules don't load, an SSH-only fallback does (SSH in, nothing out but replies;
+    `net status` says `fallback`), and if not even that loads, the network stays down. At a provider computer's
+    first boot the network is up before cloud-init runs: `bootstrap.sh` loads the firewall before it makes any
+    account, and the provider's rules are in force from the start.
+  - **Open connections too.** A tightened rule applies to connections already open: the only packets let out as
+    part of an existing connection are replies to connections made to the computer (SSH).
+  - **`metacomputer net status`** says the setting, what's enforced outside the VM, and what's in force inside it,
+    each apart. **`net egress internet|off`** changes it on a computer that's set up: the provider's rules first
+    (read back), then the guest's firewall (read back), then the setting; if the computer doesn't answer or the
+    provider can't be asked, nothing is changed.
 - **Your Mac's things stay on your Mac**: no file of yours, no secret and no key but the computer's own goes to it;
   ssh forwards nothing of the Mac's (no agent, no X11, no ports, no config file); the vault types a value into a page
   over its fill account's SSH connection and never stores it there; API keys stay on the Mac behind the vault's
   proxy (an SSH reverse forward to the computer's `127.0.0.1`).
+- **The vault binds the computer, not the name**: its binding of a computer elsewhere names the computer's identity
+  (`~/.ssh/metacomputer-NAME/computer-id`: a hash of its provider instance, or your server's setup, and its pinned
+  host key). A computer deleted and made again under the same name has another one, and the vault refuses it until
+  it's bound again (`metacomputer secrets bind`).
+- **Provider credentials reach one program.** `bin/metacomputer`, `scripts/lib.sh` and `scripts/remote-build.sh`
+  take `OCI_*` out of the environment before they do anything else; only `lib/remote.py` is started with them.
 - **What still differs from the Mac's VM**: the provider runs the hardware, so its screen, disk and what's typed into
   it are on the provider's machines (choose a VM on your Mac for sensitive work); `SSH_AUTH=cert` isn't available
   (its certificates name the Mac's gateway address), and neither are snapshots, volumes or the event watcher's health

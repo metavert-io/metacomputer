@@ -62,9 +62,57 @@ done
 # rootfs/ mirrors target paths. The payload tarball was extracted with
 # --no-same-owner, so everything copied here is root-owned; the desktop
 # user's home is re-owned below.
+# A VM reached over the internet: its firewall, idle stop, the live view's SSH tunnel and a display in memory. Its SSH
+# settings and firewall go in here, before any package is upgraded (an openssh-server upgrade restarts sshd with the
+# settings it finds): the server's own SSH settings are saved first (remote-uninstall rollback puts them back), your
+# own account's access is written and checked before the restrictive settings can take effect, and the firewall lets
+# SSH in on every port sshd listens on.
+remote_ssh_and_firewall() {
+  step "SSH settings and the guest firewall (before anything is upgraded)"
+  install -d -m 0700 /var/lib/metacomputer/rollback
+  if [ ! -d /var/lib/metacomputer/rollback/sshd_config.d ]; then
+    install -d -m 0755 /var/lib/metacomputer/rollback/sshd_config.d
+    for f in /etc/ssh/sshd_config.d/*; do
+      [ -f "$f" ] || continue
+      case "$(basename "$f")" in 1[0-9]-metacomputer*|20-metacomputer*) ;; *) cp -p "$f" /var/lib/metacomputer/rollback/sshd_config.d/ ;; esac
+    done
+  fi
+  cp -r --preserve=mode,timestamps "$PAYLOAD/remote/rootfs/." /
+  # The ports sshd listens on (and the one metacomputer came in on) stay open in the firewall.
+  ports="$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}' | tr '\n' ' ') ${MCOMP_SSH_PORT:-22}"
+  printf '%s\n' $ports | sort -un > /etc/metacomputer/ssh-ports
+  OWNER="$(head -n 1 /etc/metacomputer/owner 2>/dev/null || true)"
+  if [ -n "$OWNER" ]; then
+    [[ "$OWNER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && getent passwd "$OWNER" >/dev/null || { echo "/etc/metacomputer/owner: no account $OWNER"; false; }
+    sed -i "s/^AllowUsers .*/AllowUsers $GUSER $AUSER mcfill mcproxy $OWNER/" /etc/ssh/sshd_config.d/10-metacomputer.conf
+    printf '%s\n' "# metacomputer: $OWNER set this server up and keeps signing in with the keys in its home." \
+      "Match User $OWNER" "	AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2" "Match all" \
+      > /etc/ssh/sshd_config.d/11-metacomputer-owner.conf
+  fi
+  if ! sshd -t || { [ -n "$OWNER" ] && ! sshd -T -C "user=$OWNER,host=localhost,addr=127.0.0.1" \
+       | grep -x 'authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2' >/dev/null; } \
+     || { [ -n "$OWNER" ] && ! sshd -T -C "user=$OWNER,host=localhost,addr=127.0.0.1" | grep -iq "^allowusers .*\b$OWNER\b"; }; then
+    echo "the new SSH settings would lock $OWNER out: putting the server's own back"
+    /opt/metacomputer/bin/remote-uninstall rollback || true
+    false
+  fi
+  systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+  printf '%s\n' "${MCOMP_EGRESS:-internet}" > /etc/metacomputer/egress
+  printf '127.0.0.1\n' > /etc/metacomputer/vnc-listen
+  date -Is > /etc/metacomputer/remote
+  chmod 0644 /etc/metacomputer/egress /etc/metacomputer/vnc-listen /etc/metacomputer/remote /etc/metacomputer/ssh-ports
+  command -v nft >/dev/null || { "${APT[@]}" update; "${APT[@]}" install --no-install-recommends nftables; }
+  /opt/metacomputer/bin/guest-firewall apply
+  systemctl daemon-reload
+  systemctl enable metacomputer-firewall.service
+}
+if [ "$TARGET" = remote ]; then
+  # The guest tree's sshd settings come next: the owner's access and the firewall first (their rollback is saved).
+  install -d -m 0755 /etc/metacomputer /opt/metacomputer/bin
+  install -m 0755 "$PAYLOAD/remote/rootfs/opt/metacomputer/bin/remote-uninstall" /opt/metacomputer/bin/remote-uninstall
+fi
 cp -r --preserve=mode,timestamps "$PAYLOAD/rootfs/." /
-# A VM reached over the internet: its firewall, idle stop, the live view's SSH tunnel and a display in memory.
-if [ "$TARGET" = remote ]; then cp -r --preserve=mode,timestamps "$PAYLOAD/remote/rootfs/." /; fi
+if [ "$TARGET" = remote ]; then remote_ssh_and_firewall; fi
 chown -R "$GUSER:$GUSER" "/home/$GUSER"
 install -d -m 0755 /etc/apt/keyrings
 # Only the pinned key (scripts/pin-gpg-key.sh on the Mac); mozilla.sources names it in Signed-By.
@@ -373,26 +421,8 @@ udevadm control --reload-rules || true
 modprobe uinput || true
 
 if [ "$TARGET" = remote ]; then
-  step "ssh hardening + the guest firewall (this VM's own boundary: SSH in, no metadata or private ranges out)"
-  # Your own server: the account it was set up from keeps signing in, with its own keys, as before.
-  OWNER="$(head -n 1 /etc/metacomputer/owner 2>/dev/null || true)"
-  if [ -n "$OWNER" ]; then
-    [[ "$OWNER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && getent passwd "$OWNER" >/dev/null || { echo "/etc/metacomputer/owner: no account $OWNER"; false; }
-    sed -i "s/^AllowUsers .*/AllowUsers $GUSER $AUSER mcfill mcproxy $OWNER/" /etc/ssh/sshd_config.d/10-metacomputer.conf
-    printf '%s\n' "# metacomputer: $OWNER set this server up and keeps signing in with the keys in its home." \
-      "Match User $OWNER" "	AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2" "Match all" \
-      > /etc/ssh/sshd_config.d/11-metacomputer-owner.conf
-    sshd -T -C "user=$OWNER,host=localhost,addr=127.0.0.1" | grep -x 'authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2' >/dev/null \
-      || { echo "sshd wouldn't read $OWNER's own keys"; false; }
-  fi
-  sshd -t
-  printf '%s\n' "${MCOMP_EGRESS:-internet}" > /etc/metacomputer/egress
-  printf '127.0.0.1\n' > /etc/metacomputer/vnc-listen
-  date -Is > /etc/metacomputer/remote
-  chmod 0644 /etc/metacomputer/egress /etc/metacomputer/vnc-listen /etc/metacomputer/remote
+  step "the guest firewall, as the setup leaves it (it was put in place before anything was upgraded)"
   /opt/metacomputer/bin/guest-firewall apply
-  systemctl daemon-reload
-  systemctl enable metacomputer-firewall.service
   /opt/metacomputer/bin/guest-firewall status | head -40
   step "idle stop (IDLE_STOP=${MCOMP_IDLE_STOP:-off})"
   printf '%s\n' "${MCOMP_IDLE_STOP:-off}" > /etc/metacomputer/idle-stop

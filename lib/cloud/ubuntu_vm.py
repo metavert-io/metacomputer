@@ -11,10 +11,33 @@ stays the controller: the hub, the vault, recordings and every guard run here.
 
 Providers that make the VM (OCI: lib/cloud/oci.py) add a thin driver for create, start, stop and delete on top of
 RemoteVM; your own server has none: you make it, keep it on, and delete it."""
+import ipaddress
+
 from .adapter import Adapter, AdapterError, HandledByCLI, NotSupported, check_name
 from . import transport
 
 EGRESS = ("internet", "off")
+# What a computer elsewhere never reaches (the guest firewall's private4 set, guest-firewall; a provider's outside
+# rules, where it has them): this host, private, shared (CGNAT, tailnets), link-local (cloud metadata), documentation,
+# benchmarking, multicast and reserved ranges.
+PRIVATE_V4 = ("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+              "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+              "224.0.0.0/3")
+
+
+def public_v4():
+    """IPv4 without PRIVATE_V4, as the fewest CIDR blocks: what a provider's allow-only egress rules list."""
+    left = [ipaddress.ip_network("0.0.0.0/0")]
+    for p in PRIVATE_V4:
+        net = ipaddress.ip_network(p)
+        nxt = []
+        for block in left:
+            if net.subnet_of(block):
+                nxt.extend(block.address_exclude(net))
+            elif not block.subnet_of(net):
+                nxt.append(block)
+        left = nxt
+    return tuple(str(n) for n in ipaddress.collapse_addresses(left))
 ARCHES = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x86_64", "amd64": "x86_64"}
 
 # What every Ubuntu VM reached over SSH has; each adapter adds its name, place, label, sleep and sizes.
@@ -26,7 +49,8 @@ BASE = {
     "backup": None,
     "bucket_mount": None,
     # Its own firewall (guest-firewall): the internet, with metadata, link-local and private ranges refused; no
-    # allowlist of names (EGRESS=internet or off).
+    # allowlist of names (EGRESS=internet or off). That firewall is in the guest, so root in the guest can undo it:
+    # what a provider enforces outside the computer is `outside_egress`, each adapter's own.
     "egress": {"model": "guest-firewall", "allowlist": False, "private_ranges_blocked": True},
     "port_forward": True,        # the live view, through an SSH tunnel to this Mac's loopback
     "regions": (),
@@ -34,14 +58,19 @@ BASE = {
 }
 
 MANIFEST = dict(BASE, name="ubuntu-vm", place="server", label="your own server",
-                sleep_wake={"kind": "none", "keeps_processes": False}, sizes=())
+                sleep_wake={"kind": "none", "keeps_processes": False}, sizes=(),
+                # metacomputer sets nothing up outside your server: only its own firewall holds, and root on the
+                # server can undo it. Your host's firewall is yours to add.
+                outside_egress={"enforced": False, "private_ranges": False, "metadata": False, "off": False},
+                billing={"stopped": "unknown", "guest_poweroff": "n/a",
+                         "note": "your own server: metacomputer never stops it; what it costs is your host's terms"})
 
 
 def check_egress(v):
     v = (v or "internet").strip().lower()
     if v not in EGRESS:
         raise AdapterError(f"EGRESS={v} isn't a setting: internet (the default: the internet, with metadata, "
-                           "link-local and private ranges refused) or off (nothing but package updates)")
+                           "link-local and private ranges refused) or off (nothing out, package updates included)")
     return v
 
 

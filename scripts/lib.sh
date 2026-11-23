@@ -2,6 +2,11 @@
 # metacomputer host library: configuration, Lume + mcomp-netgw (cua-netgw)
 # lifecycle, SSH. Sourced by bin/metacomputer and scripts/*. macOS /bin/bash 3.2.
 
+# Provider credentials (lib/cloud/oci.py ENV_KEYS) in this command's environment reach lib/remote.py only: taken off
+# the environment here, before any other program runs (bash builtins only), and exported again into remote_py's one
+# child (scripts/lib.sh). The shell keeps them as unexported variables.
+for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT; do export -n "$mc_k"; done; unset mc_k
+
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- which VM: its settings (docs/commands.md, "More than one VM") -------------------
@@ -622,8 +627,7 @@ vm_mac() { lume_field "$1" macAddress; }
 mc_hostkey_name() { if [ "${MC_REMOTE:-0}" = 1 ]; then printf 'mcomp-%s' "$VM_NAME"; else printf '[127.0.0.1]:%s' "$SSH_PORT"; fi; }
 # A provider's credentials (lib/cloud/oci.py ENV_KEYS) reach lib/remote.py only: this shell keeps them, unexported, so
 # nothing else it starts (the hub, ssh, the helpers) inherits them; remote_py hands them to its one child.
-MC_PROVIDER_ENV="OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT"
-for mc_k in $MC_PROVIDER_ENV; do export -n "$mc_k" 2>/dev/null || true; done; unset mc_k
+MC_PROVIDER_ENV="OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT"   # as at the top
 mc_export_provider_env() { # in a subshell, before it runs what needs them: lib/remote.py, or metacomputer itself
   local k; for k in $MC_PROVIDER_ENV; do [ -z "${!k:-}" ] || export "$k"; done
 }

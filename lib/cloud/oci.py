@@ -9,8 +9,13 @@ command with secrets in its environment); nothing is written to disk and no valu
 Every instance, network and volume it makes is in that compartment and carries the freeform tag
 metacomputer=NAME (its network: metacomputer=network), so `metacomputer cloud status oci` finds them even when this
 Mac lost their settings. The network is one VCN with one public subnet, an internet gateway, and a security list
-that lets in SSH (port 22) and the ICMP message TCP needs to size its packets, and nothing else. Instances get only
-the IMDS v2 endpoints, no Oracle Cloud Agent plugins, a public address, and the user-data of lib/cloud/guest.py.
+that lets in SSH (port 22) and the ICMP message TCP needs to size its packets, and lets nothing out. Each computer has
+a network security group of its own (metacomputer-NAME) on its network card, which lets out only public addresses
+(EGRESS=internet: every IPv4 address but the private, shared and reserved ranges of ubuntu_vm.PRIVATE_V4) or nothing
+(EGRESS=off). That's outside the guest: root in the computer can't change it. OCI applies no security rule to
+169.254.0.0/16, so its metadata service, DNS and NTP there can't be refused from outside; the guest's own firewall
+refuses the metadata service (a second layer, which root in the guest could undo). Instances get only the IMDS v2
+endpoints, no Oracle Cloud Agent plugins, a public address, and the user-data of lib/cloud/guest.py.
 
 Sizes: arm-2x12 (VM.Standard.A1.Flex: 2 OCPU, 12 GB, the whole Always Free Arm allowance), arm-1x6, x86-1x8 or
 x86-2x8 (VM.Standard.E5.Flex, billed; on x86 an OCPU is two hardware threads), and x86-micro (VM.Standard.E2.1.Micro:
@@ -20,15 +25,17 @@ Always Free, but 1 GB and a fraction of a core: slow, for trying it out). The im
 The SDK (`pip install oci`, any Python the CLI runs as OCI_PYTHON) is imported only when a call needs it; the
 adapter takes another `api` (tests: a stand-in), so nothing here reaches the network on its own."""
 import base64
+import contextlib
 import os
 import time
 
 from .adapter import AdapterError, NotSupported, check_name
-from .ubuntu_vm import BASE, RemoteVM
+from .ubuntu_vm import BASE, RemoteVM, check_egress, public_v4
 
 ENV_KEYS = ("OCI_USER", "OCI_TENANCY", "OCI_FINGERPRINT", "OCI_REGION", "OCI_API_KEY_PEM", "OCI_COMPARTMENT")
 TAG = "metacomputer"
 NETWORK_TAG = "network"
+OP_TAG = "metacomputer-op"      # the build that launched it: a launch whose record was lost is found by this
 VCN_CIDR = "10.77.0.0/16"
 SUBNET_CIDR = "10.77.0.0/24"
 BOOT_GB = 50
@@ -58,7 +65,16 @@ STATES = {"RUNNING": "awake", "STARTING": "starting", "PROVISIONING": "starting"
 MANIFEST = dict(BASE, name="oci", place="oci", label="Oracle Cloud",
                 # Stop and start: the boot volume keeps everything; running programs don't survive a stop.
                 sleep_wake={"kind": "stop-start", "keeps_processes": False},
-                sizes=tuple(SIZES))
+                sizes=tuple(SIZES),
+                # The computer's own network security group (outside the guest): egress only to public addresses,
+                # or none with EGRESS=off. OCI doesn't apply security rules to 169.254.0.0/16, so its metadata
+                # service (and its DNS) can't be refused from outside: only the guest's firewall refuses them.
+                outside_egress={"enforced": True, "private_ranges": True, "metadata": False, "off": True},
+                # Stopped through the API, a standard shape bills only its boot volume. A guest that powers itself
+                # off (the idle stop) still counts as running, and bills, until it's stopped through the API.
+                billing={"stopped": "storage", "guest_poweroff": "nothing",
+                         "note": "stopped through the API: only the boot volume is billed (standard shapes); a guest "
+                                 "that powered itself off is still billed until metacomputer stop"})
 
 
 class Capacity(AdapterError):
@@ -85,6 +101,17 @@ def size_of(size):
     return s
 
 
+def egress_of(rules):
+    """What a computer's group lets out, read back from its rules: "off" (nothing), "internet" (exactly every public
+    IPv4 block, any protocol, and nothing else), or "other" (anything else: not what metacomputer set)."""
+    out = [r for r in rules if r["direction"] == "EGRESS"]
+    if not out:
+        return "off"
+    if sorted(r["destination"] for r in out) == sorted(public_v4()) and all(r["protocol"] == "all" for r in out):
+        return "internet"
+    return "other"
+
+
 class SDK:
     """The calls the adapter makes, on Oracle's Python SDK. Each takes and returns plain values (dicts, strings), so
     a stand-in can take its place in the tests. Nothing in it prints a credential."""
@@ -100,7 +127,7 @@ class SDK:
         oci.config.validate_config(cfg)
         self.cfg = cfg
         # Oracle's own retry strategy: it waits and tries again on throttling (429, as after a stop and a start in a
-        # row) and on the service's passing errors, with backoff, then gives up.
+        # row) and on the service's passing errors, with backoff, then gives up. Never for a launch (below).
         retry = oci.retry.DEFAULT_RETRY_STRATEGY
         self.compute = oci.core.ComputeClient(cfg, retry_strategy=retry)
         self.net = oci.core.VirtualNetworkClient(cfg, retry_strategy=retry)
@@ -127,13 +154,15 @@ class SDK:
                 return {"id": i.id, "name": i.display_name}
         raise AdapterError(f"Oracle Cloud lists no Ubuntu 24.04 image for {shape} in this region")
 
-    def instances(self, tag_value=None):
+    def instances(self, tag_value=None, op=None):
         out = []
         for i in self._all(self.compute.list_instances, self.compartment):
-            t = (i.freeform_tags or {}).get(TAG)
-            if t and (tag_value is None or t == tag_value) and i.lifecycle_state != "TERMINATED":
+            tags = i.freeform_tags or {}
+            t = tags.get(TAG)
+            if (t and (tag_value is None or t == tag_value) and (op is None or tags.get(OP_TAG) == op)
+                    and i.lifecycle_state not in ("TERMINATED", "TERMINATING")):
                 out.append({"id": i.id, "name": t, "state": i.lifecycle_state, "shape": i.shape,
-                            "ad": i.availability_domain, "created": str(i.time_created)})
+                            "ad": i.availability_domain, "created": str(i.time_created), "op": tags.get(OP_TAG)})
         return out
 
     def instance(self, iid):
@@ -158,10 +187,18 @@ class SDK:
         return None
 
     # the network
+    def networks(self):
+        """metacomputer's VCNs in the compartment, oldest first. One, normally: two creates at once from different
+        Macs could each make one (one Mac takes a lock for it); the oldest is the one used, and delete_network
+        deletes them all."""
+        return sorted((v for v in self._all(self.net.list_vcns, self.compartment)
+                       if (v.freeform_tags or {}).get(TAG) == NETWORK_TAG and v.lifecycle_state == "AVAILABLE"),
+                      key=lambda v: (str(v.time_created), v.id))
+
     def network(self):
-        """{vcn, subnet, igw} ids of metacomputer's network in the compartment, or None."""
-        vcns = [v for v in self._all(self.net.list_vcns, self.compartment)
-                if (v.freeform_tags or {}).get(TAG) == NETWORK_TAG and v.lifecycle_state == "AVAILABLE"]
+        """{vcn, subnet, igw} ids of metacomputer's network in the compartment (the oldest, if there are more), or
+        None."""
+        vcns = self.networks()
         if not vcns:
             return None
         v = vcns[0]
@@ -189,7 +226,8 @@ class SDK:
             wait(self.net, self.net.get_internet_gateway(g.id), "lifecycle_state", "AVAILABLE", max_wait_seconds=300)
             n["igw"] = g.id
         # The VCN's own route table and security list, made to say exactly this: out through the gateway; in, SSH
-        # and the ICMP "fragmentation needed" message (path MTU) only; out, anything (the guest firewall decides).
+        # and the ICMP "fragmentation needed" message (path MTU) only; out, nothing: each computer's own network
+        # security group says what it may reach (nsg_egress).
         self.net.update_route_table(n["route_table"], m.UpdateRouteTableDetails(route_rules=[
             m.RouteRule(destination="0.0.0.0/0", destination_type="CIDR_BLOCK", network_entity_id=n["igw"])]))
         self.net.update_security_list(n["security_list"], m.UpdateSecurityListDetails(
@@ -200,8 +238,7 @@ class SDK:
                 m.IngressSecurityRule(protocol="1", source="0.0.0.0/0", source_type="CIDR_BLOCK", is_stateless=False,
                                       icmp_options=m.IcmpOptions(type=3, code=4),
                                       description="metacomputer: path MTU (fragmentation needed)")],
-            egress_security_rules=[m.EgressSecurityRule(protocol="all", destination="0.0.0.0/0",
-                                                        destination_type="CIDR_BLOCK", is_stateless=False)]))
+            egress_security_rules=[]))
         if not n["subnet"]:
             s = self.net.create_subnet(m.CreateSubnetDetails(
                 compartment_id=self.compartment, vcn_id=n["vcn"], cidr_block=SUBNET_CIDR, display_name="metacomputer",
@@ -210,6 +247,76 @@ class SDK:
             wait(self.net, self.net.get_subnet(s.id), "lifecycle_state", "AVAILABLE", max_wait_seconds=300)
             n["subnet"] = s.id
         return n
+
+    # each computer's own network security group: what it may reach, outside the guest
+    def nsg(self, name):
+        """The id of the computer's network security group, or None."""
+        n = self.network()
+        if not n:
+            return None
+        for g in self._all(self.net.list_network_security_groups, compartment_id=self.compartment, vcn_id=n["vcn"]):
+            if (g.freeform_tags or {}).get(TAG) == name and g.lifecycle_state == "AVAILABLE":
+                return g.id
+        return None
+
+    def make_nsg(self, name, egress):
+        n = self.network() or self.make_network()
+        gid = self.nsg(name)
+        if gid is None:
+            m = self.oci.core.models
+            g = self.net.create_network_security_group(m.CreateNetworkSecurityGroupDetails(
+                compartment_id=self.compartment, vcn_id=n["vcn"], display_name=f"metacomputer-{name}",
+                freeform_tags={TAG: name})).data
+            self.oci.wait_until(self.net, self.net.get_network_security_group(g.id), "lifecycle_state", "AVAILABLE",
+                                max_wait_seconds=300)
+            gid = g.id
+        self.nsg_egress(gid, egress)
+        return gid
+
+    def nsg_egress(self, gid, egress):
+        """Make the group's rules exactly: egress to every public IPv4 block (internet), or none (off); no ingress
+        (the subnet's security list lets in SSH)."""
+        m = self.oci.core.models
+        old = [r.id for r in self._all(self.net.list_network_security_group_security_rules, gid)]
+        for i in range(0, len(old), 25):
+            self.net.remove_network_security_group_security_rules(
+                gid, m.RemoveNetworkSecurityGroupSecurityRulesDetails(security_rule_ids=old[i:i + 25]))
+        if check_egress(egress) == "internet":
+            rules = [m.AddSecurityRuleDetails(direction="EGRESS", protocol="all", destination=cidr,
+                                              destination_type="CIDR_BLOCK", is_stateless=False,
+                                              description="metacomputer: public addresses only")
+                     for cidr in public_v4()]
+            for i in range(0, len(rules), 25):
+                self.net.add_network_security_group_security_rules(
+                    gid, m.AddNetworkSecurityGroupSecurityRulesDetails(security_rules=rules[i:i + 25]))
+
+    def nsg_rules(self, gid):
+        return [{"direction": r.direction, "protocol": r.protocol, "destination": r.destination, "source": r.source}
+                for r in self._all(self.net.list_network_security_group_security_rules, gid)]
+
+    def delete_nsg(self, name):
+        gid = self.nsg(name)
+        if gid:
+            self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, gid)
+        return bool(gid)
+
+    def console_tail(self, iid, lines=40):
+        """The last lines of the instance's serial console (captured now): what the guest itself last said."""
+        m = self.oci.core.models
+        h = self.compute.capture_console_history(m.CaptureConsoleHistoryDetails(instance_id=iid)).data
+        try:
+            for _ in range(30):
+                if self.compute.get_console_history(h.id).data.lifecycle_state == "SUCCEEDED":
+                    break
+                time.sleep(2)
+            text = self.compute.get_console_history_content(h.id, length=262144).data
+            text = text if isinstance(text, str) else text.decode(errors="replace")
+        finally:
+            try:
+                self.compute.delete_console_history(h.id)
+            except self.oci.exceptions.ServiceError:
+                pass
+        return [ln for ln in text.splitlines() if ln.strip()][-lines:]
 
     def security_rules(self):
         n = self.network()
@@ -237,23 +344,52 @@ class SDK:
         raise AdapterError("a network resource wasn't deleted in time; metacomputer cloud status oci shows what's left")
 
     def delete_network(self):
+        """Deletes every network of metacomputer's in the compartment (called once no instance is left)."""
+        done = False
+        while self._delete_one_network():
+            done = True
+        return done
+
+    def _delete_one_network(self):
         n = self.network()
         if not n:
             return False
         m = self.oci.core.models
+        for g in self._all(self.net.list_network_security_groups, compartment_id=self.compartment, vcn_id=n["vcn"]):
+            if g.lifecycle_state != "TERMINATED" and (g.freeform_tags or {}).get(TAG):
+                self._delete(self.net.delete_network_security_group, self.net.get_network_security_group, g.id)
         if n["subnet"]:
-            self.net.delete_subnet(n["subnet"])
-            self._gone(self.net.get_subnet, n["subnet"])
-        self.net.update_route_table(n["route_table"], m.UpdateRouteTableDetails(route_rules=[]))
+            self._delete(self.net.delete_subnet, self.net.get_subnet, n["subnet"])
+        try:
+            self.net.update_route_table(n["route_table"], m.UpdateRouteTableDetails(route_rules=[]))
+        except self.oci.exceptions.ServiceError as e:
+            if e.status != 404:
+                raise
         if n["igw"]:
-            self.net.delete_internet_gateway(n["igw"])
-            self._gone(self.net.get_internet_gateway, n["igw"])
-        self.net.delete_vcn(n["vcn"])
-        self._gone(self.net.get_vcn, n["vcn"])
+            self._delete(self.net.delete_internet_gateway, self.net.get_internet_gateway, n["igw"])
+        self._delete(self.net.delete_vcn, self.net.get_vcn, n["vcn"])
         return True
 
+    def _delete(self, delete, get, rid):
+        """Delete a network resource and wait until it's gone; one already gone (404) is fine."""
+        try:
+            delete(rid)
+        except self.oci.exceptions.ServiceError as e:
+            if e.status != 404:
+                raise
+        self._gone(get, rid)
+
+    def nsg_names(self):
+        """The computers that have a security group in metacomputer's network(s) (made with, or for, an instance)."""
+        out = []
+        for v in self.networks():
+            for g in self._all(self.net.list_network_security_groups, compartment_id=self.compartment, vcn_id=v.id):
+                if g.lifecycle_state not in ("TERMINATED", "TERMINATING") and (g.freeform_tags or {}).get(TAG):
+                    out.append(g.freeform_tags[TAG])
+        return out
+
     # instances
-    def launch(self, name, ad, shape, ocpus, memory_gb, image_id, subnet_id, user_data):
+    def launch(self, name, ad, shape, ocpus, memory_gb, image_id, subnet_id, user_data, nsg_id=None, op=None):
         m = self.oci.core.models
         try:
             i = self.compute.launch_instance(m.LaunchInstanceDetails(
@@ -262,13 +398,17 @@ class SDK:
                                            if shape.endswith(".Flex") else None),
                 source_details=m.InstanceSourceViaImageDetails(image_id=image_id, boot_volume_size_in_gbs=BOOT_GB),
                 create_vnic_details=m.CreateVnicDetails(subnet_id=subnet_id, assign_public_ip=True,
-                                                        display_name=f"metacomputer-{name}"),
+                                                        display_name=f"metacomputer-{name}",
+                                                        nsg_ids=[nsg_id] if nsg_id else None),
                 metadata={"user_data": base64.b64encode(user_data.encode()).decode()},
                 instance_options=m.InstanceOptions(are_legacy_imds_endpoints_disabled=True),
                 agent_config=m.LaunchInstanceAgentConfigDetails(is_monitoring_disabled=True,
                                                                 is_management_disabled=True,
                                                                 are_all_plugins_disabled=True),
-                freeform_tags={TAG: name})).data
+                freeform_tags=dict({TAG: name}, **({OP_TAG: op} if op else {}))),
+                # Tried exactly once: "Out of host capacity" is a 500, which Oracle's default strategy retries for up
+                # to ten minutes, and a launch retried after a lost answer could make a second instance.
+                retry_strategy=self.oci.retry.NoneRetryStrategy()).data
         except self.oci.exceptions.ServiceError as e:
             if "capacity" in (e.message or "").lower():
                 raise Capacity(f"Oracle Cloud is out of {shape} capacity in {ad.split(':')[-1]} now") from None
@@ -310,10 +450,13 @@ class OCI(RemoteVM):
     name = "oci"
     manifest = MANIFEST
 
-    def __init__(self, computers=None, states=None, api=None, env=None):
+    def __init__(self, computers=None, states=None, api=None, env=None, network_lock=None):
         super().__init__(computers, states)
         self._api = api
         self._env = env
+        # Held while the shared network (and a computer's group in it) is made: lib/remote.py passes a lock that one
+        # process on this Mac holds at a time, so two creates at once don't each make a network.
+        self._network_lock = network_lock or contextlib.nullcontext
 
     @property
     def api(self):
@@ -330,9 +473,12 @@ class OCI(RemoteVM):
         return st
 
     # lifecycle
-    def create(self, name, region=None, size=None, persist="auto", user_data=None, ads=None):
-        """Launch the instance for `name` (its network first, if there's none). Tries the availability domains in
-        order once each when one has no capacity, then stops. Returns {instance, ad, shape, size, image, arch}."""
+    def create(self, name, region=None, size=None, persist="auto", user_data=None, ads=None, egress="internet",
+               op=None):
+        """Launch the instance for `name` (its network and its own security group first). Tries the availability
+        domains in order once each when one has no capacity, then stops. `op` tags the instance with the build that
+        launched it, so a launch whose record was lost can be found (and deleted). Returns {instance, ad, shape,
+        size, image, arch, nsg}."""
         check_name(name)
         from . import capabilities
         if region is not None:
@@ -348,7 +494,9 @@ class OCI(RemoteVM):
         api = self.api
         if api.instances(name):
             raise AdapterError(f"Oracle Cloud has an instance for {name} already (metacomputer cloud status oci)")
-        net = api.make_network()
+        with self._network_lock():
+            net = api.make_network()
+            nsg = api.make_nsg(name, egress)
         img = api.image(shape)
         tried = []
         ads = ads or api.availability_domains(shape)
@@ -356,22 +504,36 @@ class OCI(RemoteVM):
             raise AdapterError(f"no availability domain in this region offers {shape} to this compartment")
         for ad in ads:
             try:
-                iid = api.launch(name, ad, shape, ocpus, mem, img["id"], net["subnet"], user_data)
+                iid = api.launch(name, ad, shape, ocpus, mem, img["id"], net["subnet"], user_data, nsg_id=nsg, op=op)
             except Capacity as e:
                 tried.append(str(e))
                 continue
             return {"instance": iid, "ad": ad, "shape": shape, "size": sz, "image": img["name"], "arch": arch,
-                    "ocpus": ocpus, "memory_gb": mem}
+                    "ocpus": ocpus, "memory_gb": mem, "nsg": nsg}
         raise Capacity("; ".join(tried) + ". Every availability domain was tried once; try again later, or another size")
 
+    def powered_off(self, name):
+        """Whether the guest of a RUNNING instance powered itself off: its serial console's last line says so
+        (`reboot: Power down`). OCI doesn't notice a shutdown from inside, so this is the only proof there is; an
+        instance whose SSH merely doesn't answer may be busy or cut off, and is never stopped on that ground."""
+        st = self._state(name)
+        tail = self.api.console_tail(st["instance"])
+        return bool(tail) and tail[-1].rstrip().endswith("reboot: Power down")
+
     def wake(self, name, guest_up=None):
-        """Start it. guest_up=False (its SSH doesn't answer though OCI says RUNNING): the guest powered itself off
-        (its idle stop), which OCI doesn't notice, so it's stopped through the API first, then started."""
+        """Start it. guest_up=False (its SSH doesn't answer though OCI says RUNNING): stopped through the API and
+        started again only when its console proves the guest powered itself off (its idle stop); otherwise refused,
+        saying what to do: a running computer that doesn't answer is never stopped by `start`."""
         st = self._state(name)
         cur = self.api.instance(st["instance"])
         if cur is None:
             raise AdapterError(f"{name}'s instance is gone from Oracle Cloud")
         if cur["state"] == "RUNNING" and guest_up is False:
+            if not self.powered_off(name):
+                raise AdapterError(f"{name} runs at Oracle Cloud but its SSH doesn't answer, and its console doesn't "
+                                   "show that it powered itself off: it may be busy or cut off. Nothing was stopped. "
+                                   f"Check it (metacomputer --vm {name} status); to restart it anyway: metacomputer "
+                                   f"--vm {name} stop --force, then start")
             self.api.action(st["instance"], "STOP")
             self.api.wait_state(st["instance"], "STOPPED")
             cur = self.api.instance(st["instance"]) or cur
@@ -382,14 +544,15 @@ class OCI(RemoteVM):
             self.api.wait_state(st["instance"], "RUNNING")
         return self.status(name)
 
-    def sleep(self, name, guest_up=True):
-        """Stop it: a soft stop (the guest shuts down, then OCI stops it) while the guest runs; a plain stop when it
-        already powered itself off (OCI would wait 15 minutes for a shutdown that already happened). Only a stop
-        through the API stops OCI's billing: a guest that powered itself off still counts as running."""
+    def sleep(self, name, guest_up=True, force=False):
+        """Stop it: a soft stop (the guest shuts down, then OCI stops it). A plain stop (power off at once) only with
+        force, or when its console proves the guest already powered itself off (OCI would wait 15 minutes for a
+        shutdown that already happened). Only a stop through the API stops OCI's billing."""
         st = self._state(name)
         cur = self.api.instance(st["instance"])
         if cur and cur["state"] not in ("STOPPED", "STOPPING"):
-            self.api.action(st["instance"], "SOFTSTOP" if guest_up else "STOP")
+            hard = force or (guest_up is False and self.powered_off(name))
+            self.api.action(st["instance"], "STOP" if hard else "SOFTSTOP")
         if cur:
             self.api.wait_state(st["instance"], "STOPPED")
         return self.status(name)
@@ -399,6 +562,35 @@ class OCI(RemoteVM):
         if self.api.instance(st["instance"]) is not None:
             self.api.terminate(st["instance"])
             self.api.wait_state(st["instance"], "TERMINATED", timeout=900)
+        self.api.delete_nsg(name)
+
+    def set_egress(self, name, allow):
+        raise NotSupported(self.name, "egress allowlist", "Oracle Cloud's computers have no allowlist of names: "
+                           "EGRESS=internet (public addresses only, outside the guest too) or off")
+
+    def apply_egress(self, name, egress):
+        """EGRESS for its own security group (outside the guest); the guest's firewall is set over SSH."""
+        self._state(name)
+        gid = self.api.nsg(name)
+        if gid is None:
+            raise AdapterError(f"{name} has no security group of its own at Oracle Cloud (made by an earlier version: "
+                               "delete it and make it again)")
+        self.api.nsg_egress(gid, check_egress(egress))
+        return self.egress(name)
+
+    def egress(self, name):
+        st = self.states.get(check_name(name)) or {}
+        s = self._settings(name)
+        out = {"model": "guest-firewall", "setting": check_egress(s.get("EGRESS")), "allow": []}
+        if st.get("instance"):
+            try:
+                api = self.api               # Oracle's API, when the credentials are here (else: not known)
+            except AdapterError:
+                api = None
+            gid = api.nsg(name) if api else None
+            rules = api.nsg_rules(gid) if gid else None
+            out["outside"] = None if rules is None else egress_of(rules)
+        return out
 
     def status(self, name):
         st = self.states.get(check_name(name)) or {}
@@ -421,7 +613,8 @@ class OCI(RemoteVM):
     def setup(self):
         """Checks the credentials and the compartment, and makes the network (or finds it)."""
         api = self.api
-        n = api.make_network()
+        with self._network_lock():
+            n = api.make_network()
         return {"ok": True, "network": n, "note": "the network lets in SSH only (port 22)"}
 
     def doctor(self):
@@ -440,6 +633,12 @@ class OCI(RemoteVM):
             ok = all((r["protocol"] == "6" and r["ports"] == (22, 22)) or (r["protocol"] == "1" and r["icmp"] == (3, 4))
                      for r in rules)
             out.append({"check": "network lets in SSH only", "ok": ok, "detail": str(rules)})
+            for i in api.instances():
+                gid = api.nsg(i["name"])
+                rs = api.nsg_rules(gid) if gid else []
+                bad = [r for r in rs if r["direction"] != "EGRESS" or r["destination"] not in public_v4()]
+                out.append({"check": f"{i['name']}: its own security group lets out public addresses only",
+                            "ok": bool(gid) and not bad, "detail": f"{len(rs)} rules" if gid else "no group"})
         out.append({"check": "instances", "ok": True, "detail": str(len(api.instances()))})
         return out
 
