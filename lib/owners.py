@@ -545,14 +545,6 @@ AT_TERMINAL_HINT = ("in your own terminal (Terminal, iTerm or an SSH session), n
                     "Codex, OpenClaw, Hermes Agent, Gemini CLI), a script or a pipe")
 
 
-def proc_cwd(pid):
-    out = subprocess.run(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True).stdout
-    for line in out.splitlines():
-        if line.startswith("n"):
-            return line[1:]
-    return None
-
-
 def alive(pid):
     try:
         os.kill(int(pid), 0)
