@@ -161,9 +161,11 @@ def reader(cmd, logfd, cap, mode, port, wait, r, w, sw):
 
 
 def main(argv):
-    if any(a in ("-h", "--help") for a in (argv[:argv.index("--")] if "--" in argv else argv)):
-        print(__doc__)
-        return 0
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is opened or run
+    strictargs.expect(argv, ["--log PATH [--cap BYTES] --fork -- ~COMMAND...",
+                             "--log PATH [--cap BYTES] --listen PORT [--wait SECONDS] -- ~COMMAND..."],
+                      prog="tunnellog.py", usage=__doc__)
     if "--" not in argv:
         print(__doc__, file=sys.stderr)
         return 2

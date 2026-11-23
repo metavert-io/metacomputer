@@ -314,6 +314,9 @@ def for_cli(transport, check=False):
 
 
 def main(argv):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    strictargs.expect(argv, ["view --transport N ~WORD...", "reset [--check] --transport N ~WORD..."], prog="input_reset.py")
     check = False
     if argv[:1] == ["reset"]:
         check = argv[1:2] == ["--check"]

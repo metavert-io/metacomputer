@@ -2408,7 +2408,8 @@ none after a new unlock). A page in the VM can't make one: requests come only th
 - **Identity providers always ask** (the list under "Identity providers always ask"): no rule can name one as its
   site or as a link's host, and a code or link for one from a pipe or a relay always needs `approve ID`.
 
-**Exit codes** (`ask`, `give`, `code`, `relay`, `fill --request`; `--json` on each prints one JSON line with `status`):
+**Exit codes** (`ask`, `give`, `code`, `relay`, `fill --request`; each prints one JSON line with `status`, the first four
+with `--json`, `fill --request` always):
 
 | Exit | `status` | Means |
 | --- | --- | --- |

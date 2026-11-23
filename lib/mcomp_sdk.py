@@ -335,46 +335,25 @@ def say_err(text):
 
 
 def call_main(argv):
-    session, timeout, rest, as_json, raw = None, 120.0, [], False, False
-    seen = set()
-
-    def refuse(why):
-        print(f"metacomputer call: {why}\n{USAGE}", file=sys.stderr)
+    # Its command line (lib/strictargs.py): anything it wouldn't use is refused before the hub is reached, a request
+    # for usage given as --session's value too (`call --session --help TOOL` once ran TOOL in a session named --help).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs
+    p = strictargs.expect(argv, ["[--session NAME] [--timeout SECONDS] [--json] [--raw] TOOL [JSON]"], prog="metacomputer call",
+                          usage=USAGE)
+    session, rest = p.opts.get("--session"), p.words
+    as_json, raw = bool(p.opts.get("--json")), bool(p.opts.get("--raw"))
+    if as_json and raw:
+        print("metacomputer call: --json or --raw, not both\n" + USAGE, file=sys.stderr)
         return 2
-    it = iter(argv)
-    for a in it:
-        # Anything it wouldn't use is refused before the hub is reached: an option it doesn't have, a second value for
-        # --session or --timeout, a word after TOOL and its JSON.
-        opt = a.split("=", 1)[0] if a.startswith("--") else a
-        if opt in ("--session", "--timeout"):
-            if opt in seen:
-                return refuse(f"{opt} given twice")
-            seen.add(opt)
-        if a == "--session":
-            session = next(it, None)
-        elif a.startswith("--session="):
-            session = a.split("=", 1)[1]
-        elif a == "--timeout":
-            try:
-                timeout = float(next(it, ""))
-            except ValueError:
-                print(USAGE, file=sys.stderr)
-                return 2
-        elif a == "--json":
-            as_json = True
-        elif a == "--raw":
-            raw = True
-        elif a in ("-h", "--help"):
-            print(USAGE)
-            return 0
-        elif a.startswith("-"):
-            return refuse(f"unknown option {termsafe.escape_for_terminal(a[:60])}")
-        else:
-            rest.append(a)
-    if len(rest) > 2:
-        return refuse("one TOOL and its JSON arguments, nothing more")
-    if not rest or (session is not None and not mcp_hub.SESSION_RE.match(session)):
-        print(USAGE + ("\n(session names: 1-64 letters, digits, '.', '_' or '-')" if rest else ""), file=sys.stderr)
+    try:
+        timeout = float(p.opts.get("--timeout", 120.0))
+    except ValueError:
+        print(USAGE, file=sys.stderr)
+        return 2
+    if session is not None and not mcp_hub.SESSION_RE.match(session):
+        print(USAGE + "\n(session names: 1-64 letters, digits, '.', '_' or '-', starting with a letter, digit or '_')",
+              file=sys.stderr)
         return 2
     tool = rest[0]
     try:

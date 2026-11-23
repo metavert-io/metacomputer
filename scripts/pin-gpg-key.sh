@@ -11,9 +11,9 @@
 # installing the whole file would let an appended key sign packages. GnuPG drops
 # subkeys without a valid binding signature from the primary key when it imports,
 # so a subkey grafted onto the pinned key is left out too.
-for mc_a in "$@"; do case "$mc_a" in -h|--help) sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;; esac; done  # usage only
+. "$(dirname "$0")/strictargs.sh"
+if ! sa_check pin-gpg-key.sh "scripts/pin-gpg-key.sh BUNDLE FPR OUT" 3 3 "" "" "$@"; then sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0; fi   # usage only
 set -Eeuo pipefail
-[ $# -eq 3 ] || { echo "usage: $0 BUNDLE FPR OUT" >&2; exit 2; }
 src="$1" fpr="$(printf '%s' "$2" | tr 'a-f' 'A-F')" out="$3"
 [[ "$fpr" =~ ^[0-9A-F]{40}$ ]] || { echo "pin-gpg-key: $2 isn't a full 40-digit fingerprint" >&2; exit 2; }
 # A short private home (GnuPG's sockets fail on paths over ~104 characters).

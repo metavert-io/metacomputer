@@ -405,10 +405,15 @@ def spec_walk(BIN, env, vdir, calls, audit_recs):
                          for o in s2["values"] + s2["lists"] + s2["flags"] if o not in mine)
         other = sibling[0] if sibling else sorted(o for o in allopts if o not in mine)[0]
         variants = [("an unknown option", argv + ["--no-such-option"]),
+                    *([(f"a flag twice (--{sp['flags'][0]})", argv + [f"--{sp['flags'][0]}"] * (1 if f"--{sp['flags'][0]}" in argv else 2))]
+                      if sp["flags"] else []),
                     (f"another form's option (--{other})", argv + [f"--{other}"] + (["x"] if allopts[other] else [])),
                     ("a request for usage as a word (-hx)", argv + ["-hx"])]
         if sp["max"] < 1000:
             variants.append(("a word too many", argv + [f"x{i}" for i in range(sp["max"] - max(sp["min"], have) + 1)]))
+        if sp["values"]:
+            v1 = sp["values"][0]
+            variants.append((f"a value option twice (--{v1})", argv + [f"--{v1}", "x", f"--{v1}", "y"]))
         if sp["values"] or sp["lists"]:
             v = (sp["values"] + sp["lists"])[0]
             variants.append((f"a request for usage as --{v}'s value", argv + [f"--{v}", "--help"]))
@@ -424,6 +429,15 @@ def spec_walk(BIN, env, vdir, calls, audit_recs):
           "a usage error (64) before anything runs; nothing asked of the unlocked vault or the VM, no record, no file changed",
           len(specs) > 60 and not bad and not changed and len(calls()) == n_calls and len(audit_recs()) == n_recs,
           (bad[:6], changed[:4], len(calls()) - n_calls, len(audit_recs()) - n_recs))
+    # runMain's every command has a declaration (or is ssh's ProxyCommand, or a test build's own): found in its source.
+    src = open(os.path.join(LAB, "vault", "Commands.swift")).read()
+    body = src[src.index("func runMain("):src.index("// MARK: - passphrase helpers")]
+    cases = {c for line in re.findall(r'^\s*case ((?:"[^"]+",?\s*)+):', body, re.M) for c in re.findall(r'"([^"]+)"', line)}
+    subs = {"ap2", "wba", "rule", "session", "audit-sink", "shop-cli"}
+    undeclared = sorted(c for c in cases if c not in specs and c not in subs and c != "_tunnel"
+                        and c not in ("test-legacy-totp-link", "test-agent-kind"))
+    check("runMain's every command has its declaration (vault/ArgSpecs.swift), found in its dispatch, not a list",
+          len(cases) > 40 and not undeclared and all(any(k.startswith(s + " ") for k in specs) for s in subs), undeclared)
     # The two the review found, and that their right forms still go through (the parser, not the command, refused).
     rr = subprocess.run([BIN, "rule", "remove", "0000abcd", "--site", "--help"], env=env, capture_output=True, text=True,
                         timeout=30, stdin=subprocess.DEVNULL)
@@ -431,6 +445,12 @@ def spec_walk(BIN, env, vdir, calls, audit_recs):
                         stdin=subprocess.DEVNULL)
     ok = subprocess.run([BIN, "rule", "list", "--json"], env=env, capture_output=True, text=True, timeout=30,
                         stdin=subprocess.DEVNULL)
+    # (round 5) `set --header` was declared a list but read once: a second header dropped the first, unread.
+    hd = subprocess.run([BIN, "set", "x", "--kind", "api", "--api-host", "api.example.com", "--header", "INVALID",
+                         "--header", "Authorization: Bearer {value}"], env=env, capture_output=True, text=True, timeout=30,
+                        stdin=subprocess.DEVNULL)
+    check("`set --header` takes one header: a second is a usage error (it once dropped the first unread)",
+          hd.returncode == 64 and "--header given twice" in hd.stderr, (hd.returncode, hd.stderr[-160:]))
     check("`rule remove ID --site --help` and `revoke --all ID ID` are usage errors; `rule list --json` still answers",
           rr.returncode == 64 and "--site" in rr.stderr and rv.returncode == 64 and "at most 1 word" in rv.stderr
           and ok.returncode == 0, (rr.returncode, rr.stderr[-120:], rv.returncode, rv.stderr[-120:], ok.returncode))

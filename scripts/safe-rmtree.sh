@@ -3,11 +3,15 @@
 # only when, as the folder it physically is, it neither is nor holds a folder some VM of this checkout uses (every
 # VM's keys, runtime, logs, vault and spool, the account's home, the checkout). Status 1, with the reason, when one is
 # refused or the VMs can't be read; then nothing more is deleted. --quiet: say a refusal and go on (status 0).
-# -h or --help (before any PATH): this text, and nothing is deleted.
-case "${1:-}" in -h|--help) sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+# -h or --help (anywhere): this text, and nothing is deleted. A PATH never starts with '-' (give ./-name): any other
+# option, a word shaped like a request for usage, or no PATH is a usage error (exit 2), and nothing is deleted.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+. "$here/strictargs.sh"
+if ! sa_check safe-rmtree.sh "scripts/safe-rmtree.sh [--quiet] PATH..." 1 n "--quiet" "" "$@"; then
+  sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0
+fi
 py="${PY:-/opt/homebrew/bin/python3}"
 [ -x "$py" ] || py="$(command -v python3 2>/dev/null)" || { echo "metacomputer: no python3 to check what to delete; nothing was deleted" >&2; exit 1; }
-quiet=()
-[ "${1:-}" != --quiet ] || { quiet=(--quiet); shift; }
-exec "$py" -B "$here/../lib/safedelete.py" rmtree ${quiet[@]+"${quiet[@]}"} -- "$@"
+quiet=() paths=()
+for a in "$@"; do case "$a" in --quiet) quiet=(--quiet) ;; *) paths+=("$a") ;; esac; done
+exec "$py" -B "$here/../lib/safedelete.py" rmtree ${quiet[@]+"${quiet[@]}"} -- "${paths[@]}"

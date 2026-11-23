@@ -149,6 +149,8 @@ set -uo pipefail
 for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY; do export -n "$mc_k"; done; unset mc_k
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
+# The command-line rules of every metacomputer bash program (sa_check, sa_is_help_shaped): functions only.
+. "$(dirname "$SELF")/../scripts/strictargs.sh"
 # --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same);
 # --on PLACE picks it by where it is (lib/placement.py, below, once the settings are read).
 # Each is given once, and its value is a name or a place, never an option or a request for usage (no VM name or place
@@ -180,9 +182,9 @@ unset mc_vm_given
 # the runner, SSH, a provider, the vault or the network, and no file is written (tests/test_help.py). `ssh ROLE CMD...`
 # leaves them to the guest's command. A program with a usage text of its own prints it (Python with -B: no bytecode
 # is written); anything else, or a program that can't, gets this file's usage lines for the command.
-# Options that take a value, by command: the word after one is that option's value (a file, a name, a text), never a
-# request for usage, so `sh --file --help` still reads the file named --help and `handoff --say --help` is still the
-# handoff's own error. tests/test_help.py checks this table against each command's own parser (argparse's, vm_shell's,
+# Options that take a value, by command: the word after one is in that option's place, never a request for usage here;
+# the command's own parser refuses it as a value too (`sh --file --help` and `handoff --say --help` are usage errors,
+# a file named --help is ./--help). tests/test_help.py checks this table against each command's own parser (argparse's, vm_shell's,
 # vm_claude's, mcomp_sdk's, each.py's, guest_put's, the vault's parseArgs, vm-commands.sh's and this file's).
 mc_value_options() { # CMD
   case "$1" in
@@ -379,6 +381,7 @@ mc_take() { # USAGE MIN MAX "FLAGS" "VALUE-OPTIONS" ARGS...: each argument a fla
       o="${a%%=*}"
       case "$vals" in *" $o= "*)
         case "$seen" in *" $o "*) mc_usage_error "$o given twice; usage: metacomputer $u" ;; esac
+        case "${a#*=}" in -?*) mc_usage_error "$o needs a value, not an option; usage: metacomputer $u" ;; esac
         seen="$seen$o "; shift; continue ;;
       esac ;;
     esac
@@ -386,9 +389,13 @@ mc_take() { # USAGE MIN MAX "FLAGS" "VALUE-OPTIONS" ARGS...: each argument a fla
       a="${a%=}"
       [ $# -ge 2 ] || mc_usage_error "$a needs a value; usage: metacomputer $u"
       case "$seen" in *" $a "*) mc_usage_error "$a given twice; usage: metacomputer $u" ;; esac
+      case "$2" in -?*) mc_usage_error "$a needs a value, not an option ($(mc_shown "$2")); usage: metacomputer $u" ;; esac
       seen="$seen$a "; shift 2; continue ;;
     esac
-    case "$flags" in *" $a "*) shift; continue ;; esac
+    case "$flags" in *" $a "*)
+      case "$seen" in *" $a "*) mc_usage_error "$a given twice; usage: metacomputer $u" ;; esac
+      seen="$seen$a "; shift; continue ;;
+    esac
     case "$a" in -?*) mc_usage_error "unknown option $(mc_shown "$a"); usage: metacomputer $u" ;; esac
     n=$((n + 1))
     [ "$n" -le "$max" ] || mc_usage_error "unexpected word $(mc_shown "$a"); usage: metacomputer $u"
@@ -476,6 +483,9 @@ mc_strict() { # CMD ARGS...
         *)      mc_usage_error "usage: metacomputer net [status [--json] | allow NAME... [--for 2h] [--exact] | remove NAME... | clear | egress internet|off]" ;;
       esac ;;
     put)             mc_take "put HOST_PATH... [--to GUEST_DIR] [--overwrite]" 1 99999 "--overwrite" "--to" "$@" ;;
+    security)        mc_take "security [apply] [--json]" 0 1 "--json" "" "$@"
+                     [ $# -eq 0 ] || [ "$*" = --json ] || case " $* " in *" apply "*) ;; *)
+                       mc_usage_error "usage: metacomputer security [apply] [--json]" ;; esac ;;
     test)            mc_take "test [A B C D E F | all] [--run-id ID] [--override]" 0 99 "--override" "--run-id" "$@" ;;
     cloud)           mc_take "cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG] [--forget OP]" 2 2 "--json" \
                        "--org= --forget=" "$@" ;;

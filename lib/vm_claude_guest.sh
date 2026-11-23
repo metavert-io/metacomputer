@@ -24,6 +24,12 @@
 # 124 the wait timed out.
 set -u
 umask 022    # what Claude Code and the programs it starts inherit; the token's file is written under 077
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own): -h or --help alone shows
+# the usage; an action it doesn't have is refused (exit 2) before anything is done. ARGS are the action's own
+# (checked by the Mac): Claude Code's arguments for start, key names for keys.
+case "$*" in -h|--help) echo "usage: vm_claude_guest.sh ACTION SESSION [ARGS...]"; exit 0 ;; esac
+case "${1:-}" in status|start|send|keys|read|wait|show|probe|stop) ;;
+  *) echo "usage: vm_claude_guest.sh status|start|send|keys|read|wait|show|probe|stop SESSION [ARGS...] (nothing was run)" >&2; exit 2 ;; esac
 
 TOKEN="${MCOMP_CLAUDE_TOKEN:-}"
 TEXT="${MCOMP_CLAUDE_TEXT:-}"

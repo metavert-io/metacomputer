@@ -557,6 +557,8 @@ class Front:
         self.finish()
 
 if __name__ == "__main__":
+    import strictargs           # its command line, by metacomputer's rules, before anything is started
+    strictargs.expect(sys.argv[1:], ["", "--refresh-cache [--seed]"], prog="mcp_lazy.py", usage=__doc__)
     if "--refresh-cache" in sys.argv:
         sys.exit(mcp_hub.main(["mcp_hub.py", "refresh-cache"] + (["--seed"] if "--seed" in sys.argv else [])))
     if os.environ.get("MCOMP_HUB_PID"):

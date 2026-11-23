@@ -45,6 +45,9 @@ step() { printf '\n%s\n' "${b}$*${o}"; }
 die()  { printf '\n%s\n' "${r}release: $1${o}" >&2; shift; local l; for l in "$@"; do printf '%s\n' "  $l" >&2; done; exit 1; }
 would() { printf '%s\n' "  would run: $*"; }
 
+. "$(dirname "$0")/strictargs.sh"
+if ! sa_check release.sh "scripts/release.sh VERSION [--tag [--draft-release]] [--dry-run [--skip-tests]]" 1 1 \
+       "--tag --dry-run --skip-tests --draft-release" "" "$@"; then usage; exit 0; fi
 VERSION="" TAG_STEP=0 DRY=0 SKIP_TESTS=0 DRAFT=0
 for a in "$@"; do
   case "$a" in

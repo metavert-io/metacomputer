@@ -58,6 +58,9 @@ def read(path):
 
 
 def main(argv):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    strictargs.expect(argv, ["read [FILE]"], prog="defaultvm.py")
     if len(argv) not in (1, 2) or argv[0] != "read":
         print("usage: defaultvm.py read [FILE]", file=sys.stderr)
         return 2

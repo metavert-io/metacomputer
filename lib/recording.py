@@ -64,6 +64,10 @@ SHOW = ("app", "name", "bundle_id", "title", "url", "key", "keys", "action", "pa
 STEP_LIST = ("steps", "actions")
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 def probe_duration(path):
     try:
         out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -618,7 +622,7 @@ def cmd_unsynced(a):
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p = strictargs.Parser(description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("sidecar")
     s.add_argument("mp4")

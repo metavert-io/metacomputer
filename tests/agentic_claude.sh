@@ -8,6 +8,10 @@
 # recording, synced to recordings/guest-runs/<name>/.
 set -euo pipefail
 LAB="$(cd "$(dirname "$0")/.." && pwd)"
+. "$LAB/scripts/strictargs.sh"
+if ! sa_check agentic_claude.sh "tests/agentic_claude.sh [TASK_FILE]" 0 1 "" "" "$@"; then
+  sed -n '2,/^set -/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0
+fi
 PY="${PY:-/opt/homebrew/bin/python3}"; [ -x "$PY" ] || PY=python3
 TASK_FILE="${1:-$LAB/tests/agentic/calculator.md}"
 TS="$(date +%Y%m%d-%H%M%S)"

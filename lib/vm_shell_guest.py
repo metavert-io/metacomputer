@@ -318,6 +318,10 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:]:             # it takes no arguments (its request comes on stdin): -h says so; anything else is refused
+        print("usage: vm_shell_guest.py < REQUEST   (no arguments; lib/vm_shell.py sends the request)",
+              file=sys.stdout if sys.argv[1:] in (["-h"], ["--help"]) else sys.stderr)
+        sys.exit(0 if sys.argv[1:] in (["-h"], ["--help"]) else 2)
     rc = main()
     try:
         sys.stdout.flush()

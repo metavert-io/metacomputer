@@ -1,6 +1,13 @@
 #!/bin/bash
 # metacomputer on Fly Sprites: the X server's part inside the session's namespaces (svc-xvfb runs it through
 # in-session, as root): the X cookie, then Xvfb, both as the desktop user.
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="xvfb-inner (no arguments)"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "xvfb-inner: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 0:) ;; *) echo "xvfb-inner: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
 set -eu
 . /etc/metacomputer/sprite.env
 U="${GUEST_USER:-cua}"; D="${DISPLAY_NUM:-0}"; G="${SCREEN:-1920x1080}"

@@ -9,6 +9,13 @@
 #                               folders and the desktop's packages stay (remove them yourself if you want)
 # Run with your own account's sudo over your own SSH connection (metacomputer vm delete NAME --remove-from-server
 # does), then check that a new connection of yours still signs in.
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="remote-uninstall rollback | all"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "remote-uninstall: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 1:rollback|1:all) ;; *) echo "remote-uninstall: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 BACKUP=/var/lib/metacomputer/rollback

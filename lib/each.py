@@ -47,20 +47,25 @@ def run_one(vm, cmd, timeout):
 
 
 def main(argv):
-    timeout = 3600
-    if argv and argv[0].startswith("--timeout"):
-        try:
-            timeout = int(argv[0].split("=", 1)[1]) if "=" in argv[0] else int(argv[1])
-        except (ValueError, IndexError):
-            print("metacomputer each: --timeout SECONDS", file=sys.stderr)
-            return 2
-        argv = argv[1:] if "=" in argv[0] else argv[2:]
-    if len(argv) < 3 or argv[1] != "--":
-        print("usage: metacomputer each [--timeout S] VM,VM,... -- COMMAND [ARGS...]   (main = this checkout's VM)",
-              file=sys.stderr)
+    # Its command line (lib/strictargs.py): exactly --timeout (`--timeout-typo=10` was taken for it), once, before the
+    # VMs; everything after `--` is the command, whole.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    usage = "usage: metacomputer each [--timeout S] VM,VM,... -- COMMAND [ARGS...]   (main = this checkout's VM)"
+    try:                        # (main is called in-process too: a usage error is its exit status, as before)
+        p = strictargs.expect(argv, ["[--timeout SECONDS] VMS -- ~COMMAND..."], prog="metacomputer each", usage=usage)
+    except SystemExit as e:
+        return e.code
+    try:
+        timeout = int(p.opts.get("--timeout", 3600))
+    except ValueError:
+        print("metacomputer each: --timeout SECONDS", file=sys.stderr)
         return 2
-    vms = [v.strip() for v in argv[0].split(",") if v.strip()]
-    cmd = argv[2:]
+    if len(p.words) < 2:
+        print(usage, file=sys.stderr)
+        return 2
+    vms = [v.strip() for v in p.words[0].split(",") if v.strip()]
+    cmd = p.words[1:]
     if not vms or len(vms) > MAX_VMS or len(set(vms)) != len(vms) or not all(NAME_RE.match(v) for v in vms):
         print(f"metacomputer each: give 1 to {MAX_VMS} different VM names, separated by commas", file=sys.stderr)
         return 2

@@ -116,4 +116,7 @@ def event_of(kind, host=None):
 
 if __name__ == "__main__":
     import sys
+    if sys.argv[1:]:             # no arguments (it reads a page's JSON on stdin): -h says so; anything else is refused
+        print("usage: botcheck.py < PAGE.json", file=sys.stdout if sys.argv[1:] in (["-h"], ["--help"]) else sys.stderr)
+        sys.exit(0 if sys.argv[1:] in (["-h"], ["--help"]) else 2)
     print(json.dumps({"kind": detect(json.load(sys.stdin))}))

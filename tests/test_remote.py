@@ -3994,7 +3994,7 @@ def cli(td):
               r.returncode == 0 and all(x in text.splitlines() for x in ("PLACE=oci", "PROVIDER=oci", "SIZE=arm-1x6",
                                                                          "EGRESS=off", "IDLE_STOP=15")), (r.stderr, text))
         for args, want in ((["--on", "server", "--user", "owner"], "--host ADDRESS"),
-                           (["--on", "server", "--host", "-oProxyCommand=x", "--user", "o"], "isn't an IP address"),
+                           (["--on", "server", "--host", "-oProxyCommand=x", "--user", "o"], "--host needs a value, not an option"),
                            (["--on", "server", "--host", "192.0.2.3", "--user", "o", "--size", "arm-1x6"], "--size"),
                            (["--on", "oci", "--host", "192.0.2.3"], "your own server"),
                            (["--on", "oci", "--size", "huge"], "no size"),

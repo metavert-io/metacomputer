@@ -572,7 +572,7 @@ def cli(td):
               r.returncode == 0 and all(x in text.splitlines() for x in (
                   "PLACE=sprites", "PROVIDER=sprites", "TRANSPORT=sprite", "SPRITE_ORG=my-org", "SPRITE_NAME=sp1",
                   "EGRESS=internet", "IDLE_STOP=off")), (r.stderr, text))
-        for args, want in ((["--on", "sprites"], "--org ORG"), (["--on", "sprites", "--org", "-x"], "SPRITE_ORG"),
+        for args, want in ((["--on", "sprites"], "--org ORG"), (["--on", "sprites", "--org", "-x"], "--org needs a value, not an option"),
                            (["--on", "sprites", "--org", "o", "--size", "big"], "Fly sizes it"),
                            (["--on", "sprites", "--org", "o", "--sprite", "Bad_Name"], "SPRITE_NAME"),
                            (["--on", "oci", "--sprite", "x"], "--sprite is for --on sprites")):

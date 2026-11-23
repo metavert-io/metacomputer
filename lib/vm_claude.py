@@ -152,6 +152,11 @@ def ttl_seconds(v):
     return n
 
 
+def _help_shaped(s):
+    """A request for usage, or a word shaped like one (lib/strictargs.py is_help_word: this file runs alone too)."""
+    return s in ("-h", "--help", "--h", "--he", "--hel") or s.startswith("--help=") or (s.startswith("-h") and not s.startswith("--"))
+
+
 def parse(argv):
     o = {"action": "start", "session": "claude", "json": False, "override": False, "help": False,
          "token": None, "ttl": None, "model": None, "skip": False, "cwd": DEFAULT_WORKDIR, "show": False,
@@ -185,11 +190,23 @@ def parse(argv):
                 raise Usage(f"{opt} given twice (one value, please)")
             given.add(opt)
             if eq:
-                return val
-            if i + 1 >= len(argv):
-                raise Usage(f"{opt} needs a value")
-            i += 1
-            return argv[i]
+                v = val
+            else:
+                if i + 1 >= len(argv):
+                    raise Usage(f"{opt} needs a value")
+                i += 1
+                v = argv[i]
+            if _help_shaped(v):                 # a request for usage is never a value (`--file --help`)
+                raise Usage(f"{opt} needs a value, not a request for usage")
+            if v.startswith("-"):               # nor an option typed in its place (a file named so is ./-name)
+                raise Usage(f"{opt} needs a value, not an option ({v[:40]!r})")
+            return v
+
+        def flag():
+            if a in given:                      # a flag once: a second is refused, as a second value is
+                raise Usage(f"{a} given twice")
+            given.add(a)
+            return True
 
         if a == "--":
             if act == "start":
@@ -200,6 +217,8 @@ def parse(argv):
                 raise Usage("only start (Claude Code's own arguments) and send (the text) take -- ")
             break
         if a.startswith("-") and a != "-" and not (act == "keys" and not a.startswith("--")):
+            if _help_shaped(a) and a not in ("-h", "--help"):
+                raise Usage(f"{a[:40]!r} isn't a request for usage: -h or --help")
             if opt not in allowed:
                 raise Usage(f"{opt} isn't an option of `claude {act}`")
             if opt in ("-h", "--help"):
@@ -207,8 +226,10 @@ def parse(argv):
             elif opt == "--session":
                 o["session"] = value()
             elif opt == "--json":
+                flag()
                 o["json"] = True
             elif opt == "--override":
+                flag()
                 o["override"] = True
             elif opt == "--token":
                 o["token"] = value()
@@ -217,20 +238,25 @@ def parse(argv):
             elif opt == "--model":
                 o["model"] = value()
             elif opt == "--skip-permissions":
+                flag()
                 o["skip"] = True
             elif opt == "--cwd":
                 o["cwd"] = value()
             elif opt == "--show":
+                flag()
                 o["show"] = True
             elif opt == "--no-install":
+                flag()
                 o["install"] = False
             elif opt == "--file":
                 if o["text_source"]:
                     raise Usage("give the text one way: TEXT, --file F or -")
                 o["text_source"], o["file"] = "file", value()
             elif opt == "--no-enter":
+                flag()
                 o["enter"] = False
             elif opt == "--wait":
+                flag()
                 o["wait"] = True
             elif opt == "--timeout":
                 o["timeout"] = _int("--timeout", value(), 1, 3500)
@@ -239,10 +265,13 @@ def parse(argv):
             elif opt == "--lines":
                 o["lines"] = _int("--lines", value(), 1, 5000)
             elif opt == "--all":
+                flag()
                 o["all"] = True
             elif opt == "--again":
+                flag()
                 o["again"] = True
             elif opt == "--revoke":
+                flag()
                 o["revoke"] = True
         else:
             positional.append(a)

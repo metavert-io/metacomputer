@@ -15,6 +15,13 @@
 # is Xvfb and the desktop runs as Sprites services (provisioning/sprite/rootfs/opt/metacomputer/sprite/), Ubuntu
 # 26.04 on amd64, no full upgrade of Fly's image, no guest firewall (Fly's network policy is the boundary, outside the
 # VM), browsers' own DNS-over-HTTPS locked off (it would bypass that policy's names), and the setup doesn't reboot.
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="provision.sh [PAYLOAD]"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "provision.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 0:|1:*) ;; *) echo "provision.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
 set -Eeuo pipefail
 PAYLOAD="${1:-/opt/metacomputer-payload}"
 LOG=/var/log/metacomputer-provision.log

@@ -1213,6 +1213,9 @@ def old_layout_checkout(t):
     write(os.path.join(co, "bin", "metacomputer"), "#!/bin/sh\nexit 0\n", 0o755)
     os.makedirs(os.path.join(co, "lib"))
     shutil.copy2(os.path.join(LAB, "lib", "claude_mcp.py"), os.path.join(co, "lib"))
+    shutil.copy2(os.path.join(LAB, "lib", "strictargs.py"), os.path.join(co, "lib"))       # the rules of its command lines
+    os.makedirs(os.path.join(co, "scripts"), exist_ok=True)
+    shutil.copy2(os.path.join(LAB, "scripts", "strictargs.sh"), os.path.join(co, "scripts"))
     shutil.copytree(os.path.join(LAB, "skills", "metacomputer"), os.path.join(co, "skills", "metacomputer"))
     shutil.copytree(os.path.join(LAB, ".claude-plugin"), os.path.join(co, ".claude-plugin"))
     shutil.copytree(os.path.join(LAB, "plugin"), os.path.join(co, "plugin"))

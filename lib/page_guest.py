@@ -778,9 +778,21 @@ def page_action(action, a):
         end_session(k)
 
 
+def _help_shaped(s):
+    """A request for usage, or a word shaped like one (lib/strictargs.py's rule; this runs in the VM, on its own)."""
+    return s in ("-h", "--help", "--h", "--he", "--hel") or s.startswith("--help=") or (s.startswith("-h") and not s.startswith("--"))
+
+
+ACTIONS = ("gpu", "debug", "read", "shots", "page-open", "page-read", "page-fill", "page-select", "page-click",
+           "page-upload", "page-close")
+
+
 def main(argv):
-    if len(argv) != 2:
+    if argv in (["-h"], ["--help"]):
         print(json.dumps({"ok": False, "error": "usage: page_guest.py ACTION JSON"}))
+        return 0
+    if len(argv) != 2 or argv[0] not in ACTIONS or any(_help_shaped(a) for a in argv) or argv[1].startswith("-"):
+        print(json.dumps({"ok": False, "error": "usage: page_guest.py ACTION JSON (ACTION: " + ", ".join(ACTIONS) + ")"}))
         return 2
     try:
         a = json.loads(argv[1])

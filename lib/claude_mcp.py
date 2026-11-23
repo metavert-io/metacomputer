@@ -294,6 +294,10 @@ def recheck(name, want, env=None):
 
 
 def main(argv):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    strictargs.expect(argv, ["user-get NAME --root CHECKOUT --link LINK", "user-recheck NAME"], prog="claude_mcp.py",
+                      usage=__doc__.split("\n\n")[1])
     if len(argv) == 6 and argv[0] == "user-get" and argv[2] == "--root" and argv[4] == "--link":
         print(line(shutil.which("claude"), argv[1], argv[3], argv[5]))
         return 0

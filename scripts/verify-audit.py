@@ -43,6 +43,11 @@ SD_ID = "metacomputer@32473"
 ZERO = "0" * 64
 
 
+sys.path.insert(0, __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.dirname(
+    __import__("os").path.abspath(__file__))), "lib"))
+import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
 def parse_key(text):
     """A sink key: base64 (as printed) or 64 hex digits; the 32 bytes either way."""
     t = text.strip()
@@ -244,7 +249,7 @@ class Checker:
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="Check metacomputer secrets audit events (hashes, chain, order, signatures).")
+    ap = strictargs.Parser(description="Check metacomputer secrets audit events (hashes, chain, order, signatures).")
     ap.add_argument("--key", help="capture mode: the sink's signing key as printed (base64; hex also accepted)")
     ap.add_argument("--key-file", help="capture mode: a file holding that key")
     ap.add_argument("--expect-start", type=int, help="the first event must have this seq")

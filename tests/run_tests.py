@@ -30,6 +30,8 @@ TESTS = {
 
 
 def main(argv):
+    import strictargs           # its command line, by metacomputer's rules (lib/ is on the path), before anything runs
+    strictargs.expect(argv, ["[TEST...] [--run-id ID]"], prog="metacomputer test", usage=__doc__)
     run_id = time.strftime("run-%Y%m%d-%H%M%S")
     sel = []
     i = 0

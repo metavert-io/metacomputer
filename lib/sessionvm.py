@@ -718,6 +718,10 @@ def show(argv):
 
 
 def main(argv):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # its command line, by metacomputer's rules, before anything is done
+    strictargs.expect(argv, ["guard --vm NAME [--ssh-port PORT] [--chosen WHICH] [--settings ~LABEL] -- ~COMMAND...",
+                             "show [--json]"], prog="sessionvm.py", usage=__doc__)
     if argv[:1] == ["guard"]:
         return guard(argv[1:])
     if argv[:1] == ["show"]:

@@ -702,7 +702,20 @@ main() {
   DIR=""; DIR_FROM=""; REF=""; REF_KIND=""; REF_COMMIT=""; REF_BRANCH=""; REPO="$MC_REPO"; NO_CHROME=0; NO_BUILD=0; NO_CODEX=0; NO_CLAUDE=0; REPLACE_VM=0
   NO_OPENCLAW=0; NO_HERMES=0; NO_GEMINI=0; NO_ANTIGRAVITY=0
   DRY=0; YES=0; CONFIRM=0; HEALTH=""; VM_NEW=0
+  # metacomputer's command-line rules (scripts/strictargs.sh; this file runs on its own, so they're here): exactly -h or
+  # --help prints the usage; each option once; a value never starts with '-'; anything else is refused (exit 2), and
+  # nothing is done.
+  local a o seen=" "
+  for a in "$@"; do case "$a" in -h|--help) usage; exit 0 ;; esac; done
   while [ $# -gt 0 ]; do
+    case "$1" in
+      -h?*|--h|--he|--hel|--help=*) echo "get.sh: '$1' isn't a request for usage: -h or --help (see --help)" >&2; exit 2 ;;
+    esac
+    o="${1%%=*}"; [ "$o" = -y ] && o=--yes
+    case "$seen" in *" $o "*) echo "get.sh: $o given twice (see --help)" >&2; exit 2 ;; esac
+    seen="$seen$o "
+    case "$1" in --dir|--ref|--repo) case "${2:-}" in -*) echo "get.sh: $1 needs a value, not '${2:-}' (see --help)" >&2; exit 2 ;; esac ;;
+                 --dir=-*|--ref=-*|--repo=-*) echo "get.sh: ${1%%=*} needs a value, not '${1#*=}' (see --help)" >&2; exit 2 ;; esac
     case "$1" in
       --dir) [ $# -ge 2 ] && [ -n "$2" ] || { echo "get.sh: --dir needs a folder" >&2; exit 2; }; DIR="$2"; shift ;;
       --dir=*) DIR="${1#--dir=}" ;;

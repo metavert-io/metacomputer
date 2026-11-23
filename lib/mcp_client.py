@@ -300,6 +300,10 @@ def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0
+    if argv[0] != "--call":     # --call's words are `metacomputer call`'s, which checks them (lib/mcomp_sdk.py)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import strictargs           # its command line, by metacomputer's rules, before anything is done
+        strictargs.expect(argv, ["--probe", "--tools", "--describe TOOL"], prog="mcp_client.py", usage=__doc__)
     # Everything here goes through the hub (lib/mcomp_sdk.py), like `metacomputer call`.
     import mcomp_sdk
     if argv[0] == "--probe":

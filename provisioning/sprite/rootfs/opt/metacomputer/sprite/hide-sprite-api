@@ -9,6 +9,12 @@
 # can't either: the mount is locked there), and the socket answers them "connection refused".
 # Fly's own channel (`sprite exec`, its services) keeps the real /.sprite: that's the controller's, as the Mac
 # owner's is for a VM on the Mac. Docs: docs/sprites.md and SECURITY.md ("Fly Sprites").
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or no program is
+# refused (exit 2), and nothing is done.
+mc_usage="hide-sprite-api CMD [ARGS...]"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+case "${1:-}" in ''|-*) echo "hide-sprite-api: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
 set -eu
 mount -t tmpfs -o size=1m,mode=0755,nosuid,nodev,noexec sprite-hidden /.sprite
 exec "$@"

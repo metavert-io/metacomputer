@@ -4,6 +4,13 @@
 # large enough for Firefox (64 MB on a Sprite), the X socket's folder, a stale X lock removed (/tmp is on the disk and
 # in checkpoints, so a restore brings one back). Then everything else (the X cookie and the server, both as the
 # desktop user) inside the session's namespaces (in-session, xvfb-inner): nothing of the desktop user's runs outside.
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="svc-xvfb (no arguments: a Sprite service)"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "svc-xvfb: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 0:) ;; *) echo "svc-xvfb: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
 set -eu
 . /etc/metacomputer/sprite.env
 U="${GUEST_USER:-cua}"; UID_="$(id -u "$U")"; D="${DISPLAY_NUM:-0}"

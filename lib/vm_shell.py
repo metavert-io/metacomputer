@@ -176,6 +176,11 @@ def _int(opt, v, lo, hi):
     return n
 
 
+def _help_shaped(s):
+    """A request for usage, or a word shaped like one (lib/strictargs.py is_help_word: this file runs alone too)."""
+    return s in ("-h", "--help", "--h", "--he", "--hel") or s.startswith("--help=") or (s.startswith("-h") and not s.startswith("--"))
+
+
 def parse(argv):
     o = {"source": None, "command": None, "file": None, "cwd": None, "timeout": DEFAULT_TIMEOUT,
          "max_output": DEFAULT_OUTPUT, "json": False, "raw": False, "read_only": False, "override": False,
@@ -197,11 +202,23 @@ def parse(argv):
                 raise Usage(f"{opt} given twice (one value, please)")
             given.add(opt)
             if eq:
-                return val
-            if i + 1 >= len(argv):
-                raise Usage(f"{opt} needs a value")
-            i += 1
-            return argv[i]
+                v = val
+            else:
+                if i + 1 >= len(argv):
+                    raise Usage(f"{opt} needs a value")
+                i += 1
+                v = argv[i]
+            if _help_shaped(v):                 # a request for usage is never a value (`--file --help`)
+                raise Usage(f"{opt} needs a value, not a request for usage")
+            if v.startswith("-") and opt not in ("-c", "--command"):   # nor an option in its place (./-name); a
+                raise Usage(f"{opt} needs a value, not an option ({v[:40]!r})")    # script's text may start with '-'
+            return v
+
+        def flag():
+            if a in given:                      # a flag once: a second is refused, as a second value is
+                raise Usage(f"{a} given twice")
+            given.add(a)
+            return True
 
         if a == "--":
             o["args"] = argv[i + 1:]
@@ -221,15 +238,17 @@ def parse(argv):
         elif opt == "--max-output":
             o["max_output"] = _int("--max-output", value(), MIN_OUTPUT, MAX_OUTPUT)
         elif a == "--json":
-            o["json"] = True
+            o["json"] = flag()
         elif a == "--raw":
-            o["raw"] = True
+            o["raw"] = flag()
         elif a == "--read-only":
-            o["read_only"] = True
+            o["read_only"] = flag()
         elif a == "--override":
-            o["override"] = True
+            o["override"] = flag()
         elif a in ("-h", "--help"):
             o["help"] = True
+        elif _help_shaped(a):
+            raise Usage(f"{a[:40]!r} isn't a request for usage: -h or --help")
         else:
             raise Usage(f"unknown argument {a!r}")
         i += 1

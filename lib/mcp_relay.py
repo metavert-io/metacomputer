@@ -299,7 +299,9 @@ if __name__ == "__main__":
     if sys.argv[1:2] in (["-h"], ["--help"]):
         print(__doc__)          # usage only: no log key is made, nothing is started
         sys.exit(0)
-    if len(sys.argv) < 2:
+    # PROGRAM [ARGS...]: the rest is that program's command, whole; the program is a path or a name, never an option or
+    # anything shaped like a request for usage.
+    if len(sys.argv) < 2 or sys.argv[1].startswith("-"):
         print(__doc__, file=sys.stderr)
         sys.exit(2)
     sys.exit(main(sys.argv[1:]))

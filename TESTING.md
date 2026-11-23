@@ -526,7 +526,15 @@ refuse an unknown option and `verify --all FILE`. And `checkpoint --delete keep 
 `--help=x`, `-hx`, an extra word, an unknown option), on a copy whose runner has the checkpoint, deletes nothing,
 while `checkpoint --delete keep --yes` does. Every form is also run with the options before the command misused
 (`--vm --help --vm NAME`, `--vm -h`, `--vm=--help=x`, `--vm NAME --vm NAME`, `--on mac --on mac`, `--on -hx`): a usage
-error, nothing run.
+error, nothing run; and with its flag given twice.
+
+Every program in the tree: a scan finds them (tracked files that are executable, start with `#!`, or are Python with
+a `__main__`; the suites aside), and each must have an entry in `ENTRY` (how it's run and a command line it takes),
+or the check fails: a new program fails until it has one. Each is run on the copy with every misuse: `-h` and
+`--help` (answered or refused), `-hx`, `--help=x`, `--hel`, an option it doesn't have, its flag twice, its value option
+twice, `--help` and an option as that option's value, and a word too many (where its arguments end), each refused
+with exit 2 but the requests for usage; for every one, nothing is called (stand-ins on the PATH), connected (a
+sitecustomize) or written. The vault's forms are walked by tests/test_vault_ops.py, its dispatch scanned there too.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 

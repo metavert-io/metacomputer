@@ -13,6 +13,13 @@
 # and the Start Center all open the copy: one LibreOffice process then serves
 # both apps, as on a VM with the system package. Prints "overlay".
 # Everything is in the user's home, so a reset to the baseline removes it.
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="calc-overlay.sh DEBS_DIR"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "calc-overlay.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 1:*) ;; *) echo "calc-overlay.sh: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
 set -euo pipefail
 DEBS="$1"
 if [ -e /usr/lib/libreoffice/program/libsclo.so ]; then echo system; exit 0; fi

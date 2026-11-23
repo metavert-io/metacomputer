@@ -13,6 +13,13 @@
 # enough to edit into videos; several times larger).
 # AUDIO: auto (include the VM's sound when it has the virtual sound card,
 # VIRTUAL_AUDIO=on; nothing else is ever captured) or off (video only, the default).
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="desktop-record start NAME [FPS] [QUALITY] [AUDIO] | stream NAME [FPS] [QUALITY] [AUDIO] | stop | status"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "desktop-record: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 0:|1:stop|1:status|[2-5]:start|[2-5]:stream) ;; *) echo "desktop-record: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
 set -eu
 RUN="/run/user/$(id -u)/metacomputer"
 DIR="$HOME/metacomputer-runs/manual"

@@ -40,10 +40,17 @@ if ! mc_in_plugins "$mc_self"; then   # loaded in place (a local marketplace) fr
   exit 1
 fi
 if [ "${1:-}" = setup ]; then
-  shift; mc_args=(--confirm)
+  shift; mc_args=(--confirm) mc_seen=" "
+  # metacomputer's command-line rules (scripts/strictargs.sh; the plugin carries no scripts/): each option once, a
+  # folder for --dir (never an option), nothing shaped like a request for usage but -h or --help.
   while [ $# -gt 0 ]; do
+    case "$1" in -h?*|--h|--he|--hel|--help=*) echo "metacomputer setup: '$1' isn't a request for usage: -h or --help" >&2; exit 2 ;; esac
+    case "$mc_seen" in *" ${1/#-y/--yes} "*) echo "metacomputer setup: $1 given twice" >&2; exit 2 ;; esac
+    mc_seen="$mc_seen${1/#-y/--yes} "
     case "$1" in
-      --dir) [ $# -ge 2 ] || { echo "metacomputer setup: --dir needs a folder" >&2; exit 2; }; mc_args+=(--dir "$2"); shift ;;
+      --dir) [ $# -ge 2 ] || { echo "metacomputer setup: --dir needs a folder" >&2; exit 2; }
+             case "$2" in -*) echo "metacomputer setup: --dir needs a folder, not '$2'" >&2; exit 2 ;; esac
+             mc_args+=(--dir "$2"); shift ;;
       --no-chrome|--no-build|--no-codex|--no-claude|--no-openclaw|--no-hermes|--no-gemini|--no-antigravity|--yes|-y|--dry-run|--help|-h) mc_args+=("$1") ;;
       *) echo "metacomputer setup: unknown option $1 (setup takes --dir DIR, --no-chrome, --no-build, --no-claude, --no-codex, --no-openclaw, --no-hermes, --no-gemini, --no-antigravity, --yes, --dry-run)" >&2; exit 2 ;;
     esac

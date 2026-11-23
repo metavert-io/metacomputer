@@ -14,16 +14,20 @@ short overview, and the [guide](guide.md) shows what each is for, task by task.
 alias). `metacomputer help` prints a summary. `--help` or `-h` anywhere in a command (after it, its
 subcommand or its arguments, before a `--`) prints that command's usage and exits 0 without doing anything: no
 settings are read, and nothing reaches the VM, its runner, SSH, a provider, the vault or the network (`ssh ROLE CMD`
-leaves them to the guest's command). Right after an option that takes a value it's that value, as before (`sh --file
---help` runs the file named `--help`); the usage comes from the command's own program asked with fixed words only,
-never the rest of what was typed. Every command refuses, before it does anything, what it wouldn't use: an option it
-doesn't have, a second value for an option that takes one (options that take a list, like `--site`, repeat), a word
-beyond its arguments, an abbreviated option, and a request for usage that isn't exactly `-h` or `--help` (`--help=x`,
+leaves them to the guest's command). Right after an option that takes a value it isn't a request for usage, and the
+command refuses it as that value too (`sh --file --help` is a usage error; a file named `--help` is `./--help`); the
+usage comes from the command's own program asked with fixed words only, never the rest of what was typed. Every command refuses, before it does anything, what it wouldn't use: an option it
+doesn't have, a flag given twice, a second value for an option that takes one (options that take a list, like
+`--site`, repeat), a value that starts with `-` where no value can (a name, a folder, a number), a word beyond its
+arguments or one missing, an abbreviated option, and a request for usage that isn't exactly `-h` or `--help` (`--help=x`,
 `-hx`, `--hel`): each is a usage error (a file whose name starts with `-` is given as `./-name`). So is a request for
 usage given as an option's value or a word where nothing reads it, and `--vm` or `--on` given twice or with an option
 for its value (`--vm --help --vm NAME`). The vault checks each of its command lines against what that command's form
 declares (vault/ArgSpecs.swift: its options, those that repeat, its flags and how many words it takes), so an option
-of another of its subcommands is refused too. `metacomputer --vm NAME COMMAND`
+of another of its subcommands is refused too. The same rules hold for every program in the repository, not only
+`metacomputer`: scripts/ (scripts/strictargs.sh), lib/ (lib/strictargs.py), install.sh, get.sh, the plugins'
+launchers and the programs the VM runs; tests/test_help.py finds each by a scan and runs every misuse on it.
+`metacomputer --vm NAME COMMAND`
 runs any command on the VM `NAME`; without `--vm`, a command acts on your default
 computer ([More than one VM](#more-than-one-vm)).
 

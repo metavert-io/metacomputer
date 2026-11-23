@@ -790,15 +790,16 @@ CLAIMS = [
      < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')
      and 'case "$a" in --) return 1 ;; -h|--help) return 0 ;; esac' in raw("bin/metacomputer")
      and "test_help" in raw("scripts/release.sh")),
-    ("docs/commands.md", r"Right after an option that takes a value it's that value, as before \(`sh --file --help` runs "
-                         r"the file named `--help`\); the usage comes from the command's own program asked with fixed "
-                         r"words only, never the rest of what was typed",
+    ("docs/commands.md", r"Right after an option that takes a value it isn't a request for usage, and the command refuses it "
+                         r"as that value too \(`sh --file --help` is a usage error; a file named `--help` is `./--help`\); "
+                         r"the usage comes from the command's own program asked with fixed words only, never the rest of "
+                         r"what was typed",
      lambda m: 'case "$vals" in *" $a "*) skip=1 ;; esac' in raw("bin/metacomputer")
      and "def value_option_checks():" in raw("tests/test_help.py")
      and 'margs=("$c" "$@")' not in raw("bin/metacomputer") and 'margs=("$@")' not in raw("bin/metacomputer")
      and 'mod="$c"; margs=(${subw[@]+"${subw[@]}"} --help)' in raw("bin/metacomputer")),
     ("docs/commands.md", r"Every command refuses, before it does anything, what it wouldn't use: an option it doesn't have, a "
-                         r"second value for an option that takes one",
+                         r"flag given twice, a second value for an option that takes one",
      lambda m: "mc_strict \"$@\"" in raw("bin/metacomputer") and "mc_help_malformed \"$@\"" in raw("bin/metacomputer")
      and raw("bin/metacomputer").index('mc_strict "$@"') < raw("bin/metacomputer").index('. "$LIB"')
      and 'throw usageError("--\\(name) given twice")' in raw("vault/ArgSpecs.swift")
@@ -816,6 +817,17 @@ CLAIMS = [
      and not any(re.search(r"parseArgs\([^\n]*(values|flags):", raw(f"vault/{f}"))        # no declaration but the table's
                  for f in os.listdir(os.path.join(LAB, "vault")) if f.endswith(".swift"))
      and "GLOBAL_MISUSE" in raw("tests/test_help.py") and "def spec_walk(" in raw("tests/test_vault_ops.py")),
+    ("SECURITY.md", r"each prints one JSON line with `status`, the first four\s+with `--json`, `fill --request` always",
+     lambda m: '"fill --request": ArgSpec(values: ["request", "vm", "selector", "profile", "browser-pid", "window-id"], flags: ["human"])'
+     in raw("vault/ArgSpecs.swift") and 'printCodeResult(res, json: true, verb: "filled")' in raw("vault/Codes.swift")),
+    ("docs/commands.md", r"The same rules hold for every program in the repository, not only\s+`metacomputer`: scripts/ "
+                         r"\(scripts/strictargs.sh\), lib/ \(lib/strictargs.py\)",
+     lambda m: "sa_check() {" in raw("scripts/strictargs.sh") and "def expect(" in raw("lib/strictargs.py")
+     and "def entry_points():" in raw("tests/test_help.py") and "def entry_forms():" in raw("tests/test_help.py")
+     and '. "$(dirname "$SELF")/../scripts/strictargs.sh"' in raw("bin/metacomputer")
+     and all('. "' in raw(f"scripts/{s}") and "strictargs.sh" in raw(f"scripts/{s}") for s in (
+         "build-tools.sh", "build-vault.sh", "build-vm.sh", "check-public.sh", "fetch-artifacts.sh", "pin-gpg-key.sh",
+         "release.sh", "remote-build.sh", "safe-rmtree.sh"))),
     ("docs/codex.md", r"one that only asks for its usage \(`--help` or `-h`\) prints it, since it runs nothing",
      lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
      < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')),

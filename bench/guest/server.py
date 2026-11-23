@@ -17,6 +17,15 @@ import time
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
+# ROOT LOG [PORT]: metacomputer's command-line rules (lib/strictargs.py; this runs in the VM, alone): -h or --help shows
+# the usage; anything else (an option, a word too many or missing, a port that isn't one) is refused before it serves.
+if sys.argv[1:] in (["-h"], ["--help"]):
+    print("usage: server.py ROOT LOG [PORT]")
+    sys.exit(0)
+if not 2 <= len(sys.argv[1:]) <= 3 or any(a.startswith("-") for a in sys.argv[1:]) \
+        or (len(sys.argv) > 3 and not sys.argv[3].isdigit()):
+    print("usage: server.py ROOT LOG [PORT]", file=sys.stderr)
+    sys.exit(2)
 ROOT, LOG = sys.argv[1], sys.argv[2]
 PORT = int(sys.argv[3]) if len(sys.argv) > 3 else 8000
 ACCEPT = ("/submit", "/answer", "/reserve", "/pick", "/ship", "/code", "/book", "/extend")

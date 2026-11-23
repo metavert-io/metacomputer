@@ -238,11 +238,18 @@ def put(ssh, files, to, overwrite, user):
 
 
 def main(argv):
-    if len(argv) < 2 or argv[0] != "--transport":
+    if argv in (["-h"], ["--help"]):
+        print(__doc__)
+        return 0
+    if len(argv) < 2 or argv[0] != "--transport" or not argv[1].isdigit():
         print(__doc__, file=sys.stderr)
         return 2
     n = int(argv[1])
     ssh, rest = argv[2:2 + n], argv[2 + n:]
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import strictargs           # what follows the transport, by metacomputer's rules, before anything is copied
+    strictargs.expect(rest, ["PATH... [--to GUEST_DIR] [--overwrite]"], prog="metacomputer put",
+                      usage="usage: metacomputer put HOST_PATH... [--to GUEST_DIR] [--overwrite]")
     to, overwrite, files, to_given = "~/Inbox", False, [], False
     i = 0
     while i < len(rest):
@@ -259,6 +266,9 @@ def main(argv):
             i += 2
             continue
         if a == "--overwrite":
+            if overwrite:
+                print("metacomputer: --overwrite given twice", file=sys.stderr)
+                return 2
             overwrite = True
         elif a in ("-h", "--help"):        # usage only, never a file to copy
             print(__doc__)

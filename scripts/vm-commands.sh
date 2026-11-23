@@ -3,6 +3,10 @@
 # one command, deleting one safely, and the default computer. Sourced by bin/metacomputer (its functions and the
 # settings scripts/lib.sh loaded are in scope); macOS /bin/bash 3.2. Settings: one file per VM, config/vms/NAME.env,
 # and config/default-vm naming the default (scripts/lib.sh, "which VM").
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then    # run on its own: it's sourced, and does nothing (exit 2; -h: this line)
+  case "$*" in -h|--help) echo "scripts/vm-commands.sh: sourced by bin/metacomputer (metacomputer vm ...), never run"; exit 0 ;; esac
+  echo "scripts/vm-commands.sh: sourced by bin/metacomputer (metacomputer vm ...); nothing was run" >&2; exit 2
+fi
 
 # Settings that are the Mac's choices rather than one VM's: `vm create` copies the ones these settings set
 # differently from config/defaults.env into the new VM's file (it doesn't read config/local.env later on).
@@ -76,6 +80,7 @@ vm_all_settings() {
 vm_list() { # [--on PLACE] [--json]
   local json=() on=() a tmp rc=0 sel="$VM_NAME" def="" problem="${MC_DEFAULT_PROBLEM:-}"
   local usage="usage: metacomputer list [--on PLACE] [--json]   (or: metacomputer vm list ...)"
+  sa_check metacomputer "${usage#usage: }" 0 0 "--json" "--on=" "$@" || return 0   # (-h/--help: bin/metacomputer's)
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json=(--json) ;;
@@ -132,6 +137,7 @@ vm_list() { # [--on PLACE] [--json]
 # is started, stopped or changed, and a hub or session already running keeps the VM it started with.
 vm_default() { # [NAME] [--json]
   local name="" json=0 a info kind label usage="usage: metacomputer default [NAME] [--json]"
+  sa_check metacomputer "${usage#usage: }" 0 1 "--json" "" "$@" || return 0
   for a in "$@"; do
     case "$a" in
       --json) json=1 ;;
@@ -274,6 +280,9 @@ vm_port_in_use() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 vm_create() { # NAME [--ssh-port P] [--vnc-port P] [--no-build] [--yes] | NAME --on PLACE [--host H --user U --port P] [--size S] [--region R] [--egress E]
   local name="" ssh="" vnc="" build=1 a a2 used p f vault rows k v def tmp rc
   local on="${MC_ON_ARG:-}" host="" huser="" hport="" size="" egress="" idle="" org="${SPRITES_ORG:-}" sprite="" region="" rlabel=""
+  # Every option once, a value that's never an option (`--org --help` took the request for usage as the organization).
+  sa_check metacomputer "vm create NAME [--on PLACE] [OPTIONS]   (metacomputer help: vm create)" 1 1 "--no-build --yes -y" \
+    "--on= --host --user --port --size --region --egress --idle-stop --org --sprite --ssh-port= --vnc-port=" "$@" || return 0
   while [ $# -gt 0 ]; do
     case "$1" in
       --on) vc_once --on; [ $# -ge 2 ] || die "--on needs a place: server (your own server), oci (Oracle Cloud), sprites (Fly Sprites), hetzner, digitalocean or vultr"; on="$2"; shift ;;
@@ -518,6 +527,8 @@ vm_q() { # KEY VALUE: KEY='VALUE' for a settings file (quoted for bash)
 # are another VM's, it runs itself again with --vm NAME, and the checks below happen there.
 vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]
   local name="" confirm_name="" force=0 del_vault=0 del_vols=0 yes_given=0 remove_from_server=0 checked_provider="" a args=("$@")
+  sa_check metacomputer "vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes] [--remove-from-server] [--checked-provider] [--yes]" \
+    1 1 "--force --delete-vault --delete-volumes --remove-from-server --checked-provider --yes -y" "--confirm=" "$@" || return 0
   while [ $# -gt 0 ]; do
     case "$1" in
       --confirm) vc_once --confirm; [ $# -ge 2 ] || die "--confirm needs the VM's name"; confirm_name="$2"; shift ;;

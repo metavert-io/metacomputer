@@ -396,7 +396,35 @@ def host_escape():
     return escape_for_terminal
 
 
+def _help_shaped(s):
+    """A request for usage, or a word shaped like one (lib/strictargs.py's rule; this runs in the VM, on its own)."""
+    return s in ("-h", "--help", "--h", "--he", "--hel") or s.startswith("--help=") or (s.startswith("-h") and not s.startswith("--"))
+
+
+USAGE = ("usage: guest_inspect.py [SECTION...|all] [--minutes N] [--top N]   (in the VM; SECTION: " + ", ".join(SECTIONS)
+         + ")\n       guest_inspect.py --render|--render-profiles|--json-out < SNAPSHOT   (on this Mac)")
+
+
 def main(argv):
+    # Its command line, by metacomputer's rules (lib/strictargs.py; this runs in the VM on its own): -h or --help shows
+    # the usage; each option once, with a number; anything else is refused before anything is read.
+    if any(a in ("-h", "--help") for a in argv):
+        print(USAGE)
+        return 0
+    if argv[:1] in (["--json-out"], ["--render"], ["--render-profiles"]) and len(argv) != 1:
+        print(USAGE, file=sys.stderr)
+        return 2
+    seen = set()
+    for j, a in enumerate(argv):
+        if a in ("--minutes", "--top"):
+            if a in seen or j + 1 >= len(argv) or not argv[j + 1].isdigit():
+                print(json.dumps({"error": f"{a} once, with a number"}))
+                return 2
+            seen.add(a)
+        elif _help_shaped(a) or (a.startswith("-") and a not in ("--json-out", "--render", "--render-profiles")
+                                  and (j == 0 or argv[j - 1] not in ("--minutes", "--top"))):
+            print(json.dumps({"error": f"unknown argument {a[:40]!r}"}))
+            return 2
     if argv[:1] == ["--json-out"]:
         # `inspect --json`: the VM's snapshot as JSON, written again by this Mac (ASCII only: every control or
         # non-ASCII character is a \u escape), so nothing the VM sent reaches a terminal raw. The same JSON.

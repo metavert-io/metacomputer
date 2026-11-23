@@ -28,8 +28,8 @@ let argSpecs: [String: ArgSpec] = [
     "rekey": ArgSpec(flags: ["enclave", "no-enclave"]),
     "recover": ArgSpec(flags: ["no-enclave"]),
     "rotate-session-key": ArgSpec(),
-    "set": ArgSpec(values: Set(["kind", "username", "approval", "api-host", "api-path-prefix", "answer-timeout"]).union(cardValues),
-                   lists: Set(["origin", "project", "header"]).union(cardLists), flags: Set(["replace"]).union(cardFlags), words: 1...1),
+    "set": ArgSpec(values: Set(["kind", "username", "approval", "api-host", "api-path-prefix", "answer-timeout", "header"]).union(cardValues),
+                   lists: Set(["origin", "project"]).union(cardLists), flags: Set(["replace"]).union(cardFlags), words: 1...1),
     "delete": ArgSpec(words: 1...1),
     "bind": ArgSpec(values: ["port", "host-key-line", "fill-key", "fill-user", "ops-key", "ops-user", "proxy-key", "proxy-user", "proxy-port",
                              "gateway", "host", "host-key-alias", "tunnel", "tunnel-id"],
@@ -206,6 +206,7 @@ func scanArgs(_ argv: [String], _ spec: ArgSpec, form: String? = nil) throws -> 
                 if isHelpWord(v) { throw usageError("--\(name) needs a value, not a request for usage (-h, --help) (mcomp-vault help)") }
                 a.values[name, default: []].append(v)
             } else if spec.flags.contains(name) && inline == nil {
+                if a.flags.contains(name) { throw usageError("--\(name) given twice") }    // a flag once, as a value
                 a.flags.insert(name)
             } else if spec.flags.contains(name) {
                 throw usageError("--\(name) takes no value")
