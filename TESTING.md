@@ -675,7 +675,8 @@ a folder there, both files populated, a byte-order mark), with a temporary `HOME
 `python3 tests/test_install.py` (218 checks) needs no VM, no network and no
 Homebrew. Every command that looks at the Mac or reaches out (`uname`, `sw_vers`,
 `sysctl`, `df`, `dscl`, `curl`, `xcode-select`, `brew`, `ssh`, `security`, the VM
-runner) is a stub on `PATH` that logs its calls, in a temporary home, with its own
+runner) is a stub on `PATH` that logs its calls (one JSON line each, written whole in one
+append, so stubs running at once never split each other's; checked first), in a temporary home, with its own
 lock folder (`MCOMP_LOCK_DIR`) and account home (so the real `~/.config/lume` is never
 read). git is the real one behind a wrapper that refuses network URLs (with
 `GIT_ALLOW_PROTOCOL=file`), so every repository is a local folder. One check uses the
@@ -1191,11 +1192,13 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (228 checks, about two minutes): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (229 checks, about two minutes): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
-  `c` and Ctrl-C at a terminal, the asking session refused "done" without a terminal,
+  `c` and Ctrl-C at a terminal (Ctrl-C sent once the wait has begun, to a handoff started with SIGINT's default
+  action as a person's shell starts it, even when the suite runs as a background job, which inherits SIGINT
+  ignored), the asking session refused "done" without a terminal,
   one at a time, refused while another session acts (unless `--override` or a person at
   a terminal), `owners.py check` exit 4, `release` leaving it, garbage, links and records
   with a field of the wrong type failing closed for at most 2 hours (from the kernel's change time, so a

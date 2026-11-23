@@ -91,9 +91,26 @@ def run(*args, claude=None, stdin=subprocess.DEVNULL, **extra):
                           text=True, timeout=60)
 
 
-def start(*args, claude=SESSION_A, stdin=subprocess.DEVNULL, **extra):
+def start(*args, claude=SESSION_A, stdin=subprocess.DEVNULL, preexec_fn=None, **extra):
     return subprocess.Popen(hcmd(*args), env=env(FAKE_CLAUDE=claude, **extra), stdin=stdin, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True)
+                            stderr=subprocess.PIPE, text=True, preexec_fn=preexec_fn)
+
+
+def waiting(p, timeout=60):
+    """What a handoff prints up to its last line before it waits ("Waiting up to ..."), read from its output as it
+    comes: once that's there, the wait has begun. "" if it isn't there within timeout (or the output ends first).
+    finish() returns the rest of the output."""
+    fd, got, end = p.stdout.fileno(), b"", time.time() + timeout
+    while time.time() < end:
+        if b"Waiting up to" in got and got.endswith(b"\n"):
+            return got.decode("utf-8", "replace")
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if ready:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            got += chunk
+    return ""
 
 
 def wait_open(timeout=10):
@@ -305,17 +322,20 @@ def terminal_checks():
               (rc, rec, e))
         check(f"{name}: no phone ping when the person at the terminal opened it",
               not any(e["family"] == "needs_you" for e in events_log()[n0:]) and "press Enter" in o, o)
+    # Ctrl-C once it waits (its last line is out). The handoff starts as a person's shell starts a command at its
+    # terminal, with SIGINT's default action: this suite may run as a script's background job (`&`), which inherits
+    # SIGINT ignored, and a program keeps an ignored SIGINT ignored, as metacomputer does.
     clear()
     m, s = pty.openpty()
-    p = start("--why", "captcha", "--say", SAY, stdin=s, claude=None)
+    p = start("--why", "captcha", "--say", SAY, stdin=s, claude=None,
+              preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
     os.close(s)
-    wait_open()
-    time.sleep(0.3)
+    head = waiting(p)
     p.send_signal(signal.SIGINT)
     rc, o, e = finish(p)
     os.close(m)
-    check("Ctrl-C at that terminal cancels (exit 4)", rc == 4 and owners.handoff_record()["ended_from"] == "ctrl_c",
-          (rc, o, e))
+    check("Ctrl-C at that terminal cancels (exit 4)", head and rc == 4
+          and owners.handoff_record()["ended_from"] == "ctrl_c", (rc, (head + o)[-300:], e))
     # A terminal inside the session that asked isn't the user's: Codex can give its commands a pseudo-terminal, so
     # there `done` would be the agent saying the user is done (owners.at_user_terminal).
     clear()
