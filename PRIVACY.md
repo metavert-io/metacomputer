@@ -56,13 +56,15 @@ outbound mail. Telemetry is turned off where the parts have it: Cua Driver's (on
 Lume's on your Mac, Firefox's telemetry and studies, and Chrome's usage reports. The browsers otherwise contact
 their makers' services as they normally do, such as safe-browsing checks.
 
-**A computer elsewhere** (your own server, or one Oracle Cloud makes; only when you make one): your Mac reaches it
-over SSH, and everything in it (its screen, its files, what's typed into it) is on that server or the provider's
-hardware, under your agreement with them. For Oracle Cloud, `lib/remote.py` calls Oracle's API with the credentials
-you hand it, to make, start, stop and delete the computer and its network; nothing else is sent to Oracle. The
-computer reaches the internet itself (no gateway on your Mac): its own firewall refuses cloud metadata services and
-private and link-local addresses (on Oracle Cloud, its own network security group also lets out only public
-addresses), and `EGRESS=off` turns its internet off, package updates included.
+**A computer elsewhere** (your own server, or one Oracle Cloud, Hetzner Cloud, DigitalOcean or Vultr makes; only
+when you make one): your Mac reaches it over SSH, and everything in it (its screen, its files, what's typed into it)
+is on that server or the provider's hardware, under your agreement with them. For a provider, `lib/remote.py` calls
+its API with the credentials you hand it, to make, start, stop and delete the computer and what it needs there (its
+network or firewall, and, at Hetzner, DigitalOcean and Vultr, the public half of the computer's own SSH key for its
+first boot); nothing else is sent to the provider. The computer reaches the internet itself (no gateway on your Mac):
+its own firewall refuses cloud metadata services and private and link-local addresses (on Oracle Cloud, Hetzner
+Cloud and DigitalOcean, the provider's firewall also lets out only public addresses; Vultr's filters only what comes
+in), and `EGRESS=off` turns its internet off, package updates included.
 
 **Only when you set them up:**
 - Event sinks and the vault's audit sinks: events go to the webhook, OpenTelemetry Collector, syslog server or ntfy

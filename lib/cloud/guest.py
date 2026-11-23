@@ -71,7 +71,7 @@ def user_data(name, host_private, host_public, keys, bootstrap, firewall, egress
     lines = ["#cloud-config",
              f"# metacomputer {name}: the host key pinned on the Mac, no default account, then bootstrap.sh",
              f"hostname: {hostname}", "manage_etc_hosts: true", "ssh_pwauth: false", "disable_root: true",
-             "ssh_deletekeys: true", "ssh_genkeytypes: []", "users: []", "ssh_keys:", "  ed25519_private: |"]
+             "ssh_deletekeys: true", "ssh_genkeytypes: [ed25519]", "users: []", "ssh_keys:", "  ed25519_private: |"]
     lines += [f"    {ln}" for ln in host_private.strip().splitlines()]
     lines += [f"  ed25519_public: {_q(' '.join(host_public.split()[:2]))}"]
     if timezone:

@@ -8,8 +8,9 @@
 #                                  same. Without it: your default computer (metacomputer default), else
 #                                  config/local.env's VM (MCOMP_CONFIG=FILE: that file's)
 #   --on PLACE                     act on the computer at PLACE: mac (this Mac; your default computer when it's
-#                                  there), server (your own server), oci (Oracle Cloud), sprites (Fly Sprites), or
-#                                  cloud (anywhere but this Mac). With --vm, both must agree
+#                                  there), server (your own server), oci (Oracle Cloud), sprites (Fly Sprites),
+#                                  hetzner (Hetzner Cloud), digitalocean, vultr, or cloud (anywhere but this Mac).
+#                                  With --vm, both must agree
 #   list [--on PLACE] [--json]     every computer: where it is (WHERE), state, disk, ports, baseline; * marks the
 #                                  one these settings act on (without --vm: your default computer)
 #   default [NAME] [--json]        your default computer, the one a command acts on when none is named, and its
@@ -18,12 +19,14 @@
 #   vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]
 #                                  a VM of its own: writes config/vms/NAME.env (ports, keys, folders, vault) and builds it
 #   vm create NAME --on server --host ADDRESS --user ACCOUNT [--port P] | --on oci [--size SIZE] [--egress internet|off]
+#             | --on hetzner|digitalocean|vultr [--size SIZE] [--region REGION] [--egress internet|off]
 #                                  a computer elsewhere, an Ubuntu 24.04 VM reached over SSH (docs/remote.md): your
-#                                  own server (set up once over your SSH, with sudo), or one Oracle Cloud makes
+#                                  own server (set up once over your SSH, with sudo), or one a provider makes
 #   vm create NAME --on sprites --org ORG [--sprite SPRITE] [--egress internet|off]
 #                                  a Sprite on Fly.io, reached through Fly's tunnel (docs/sprites.md)
-#   cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG]
-#                                  what metacomputer made at a provider (oci, sprites), checks, its network, removing it
+#   cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG] [--forget OP]
+#                                  what metacomputer made at a provider (oci, sprites, hetzner, digitalocean, vultr),
+#                                  checks, its network, removing it
 #   vm delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes]
 #                                  delete a VM, its baseline and config/vms/NAME.env, after you type its name
 #                                  (--yes doesn't count); volumes and the vault folder stay unless their flag asks
@@ -133,10 +136,10 @@
 # stop, reset, restore, baseline and test refuse while another session is
 # using the computer (metacomputer who); --override proceeds anyway (ask first).
 set -uo pipefail
-# Provider credentials (lib/cloud/oci.py ENV_KEYS) in this command's environment reach lib/remote.py only: taken off
-# the environment here, before any other program runs (bash builtins only), and exported again into remote_py's one
-# child (scripts/lib.sh). The shell keeps them as unexported variables.
-for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT; do export -n "$mc_k"; done; unset mc_k
+# Provider credentials (lib/remote.py PROVIDER_ENV: each driver's own) in this command's environment reach
+# lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported
+# again into remote_py's one child (scripts/lib.sh). The shell keeps them as unexported variables.
+for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY; do export -n "$mc_k"; done; unset mc_k
 # Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
 # Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
 # confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it
@@ -257,7 +260,7 @@ session_guard() {
   export MCOMP_GUARD_VM="$VM_NAME:$SSH_PORT"
 }
 case "$cmd" in
-  help|-h|--help|where|setup|update|version|vm|list|default|events|notify|learn|actions|agents|each|mcp|mcp-lazy|cloud) ;;
+  help|-h|--help|where|setup|update|version|list|default|events|notify|learn|actions|agents|each|mcp|mcp-lazy) ;;
   volume|refdisk|contact-sheet|checkpoints|_*) ;;
   *) session_guard "$@" ;;
 esac
@@ -338,7 +341,34 @@ need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (meta
 
 # --- a computer reached over SSH (scripts/lib.sh MC_REMOTE; lib/remote.py; docs/remote.md) -------------------
 remote_made() { [ "${PROVIDER:-ubuntu-vm}" != ubuntu-vm ]; }    # a provider makes (and starts, stops) it
-remote_where() { case "${PROVIDER:-}" in oci) echo "Oracle Cloud" ;; sprites) echo "Fly Sprites" ;; *) echo "your own server at ${SSH_HOST:-?}" ;; esac; }
+remote_where() { case "${PROVIDER:-}" in oci) echo "Oracle Cloud" ;; sprites) echo "Fly Sprites" ;; hetzner) echo "Hetzner Cloud" ;;
+  digitalocean) echo DigitalOcean ;; vultr) echo Vultr ;; *) echo "your own server at ${SSH_HOST:-?}" ;; esac; }
+# What lib/remote.py plan says of this computer's provider (its outside layer, what a stopped computer bills, how a
+# stop asks the guest): read once, in this shell, by remote_plan_load, which fails (saying why) when it can't be read
+# or a word isn't one it knows. A plan that can't be read is never taken for "no": the commands that need it refuse.
+remote_plan_load() {
+  [ -z "${MC_REMOTE_PLAN:-}" ] || return 0
+  local out k v
+  out="$(remote_py plan --vm "$VM_NAME")" || { warn "couldn't read what $(remote_where) enforces and bills for $VM_NAME (lib/remote.py plan, above)"; return 1; }
+  for k in outside:yes/no billing_stopped:none/storage/full/unknown soft_stop:api/guest; do
+    v="$(printf '%s\n' "$out" | sed -n "s/^${k%%:*}=//p" | head -1)"
+    [ -n "$v" ] || { warn "lib/remote.py plan for $VM_NAME says nothing of ${k%%:*}"; return 1; }
+    case "/${k#*:}/" in *"/$v/"*) ;; *) warn "lib/remote.py plan for $VM_NAME says ${k%%:*}='$v', which this command doesn't know"; return 1 ;; esac
+  done
+  MC_REMOTE_PLAN="$out"
+}
+remote_plan() { # KEY: one word of the plan remote_plan_load read in this shell (nothing, and failure, without it)
+  local v; v="$(printf '%s\n' "${MC_REMOTE_PLAN:-}" | sed -n "s/^$1=//p" | head -1)"
+  [ -n "$v" ] && printf '%s\n' "$v"
+}
+remote_billing_words() { # what a stopped computer still bills there, in words (remote_plan_load first)
+  case "$(remote_plan billing_stopped)" in
+    full) echo "$(remote_where) bills it in full while it's stopped: only deleting it (metacomputer vm delete $VM_NAME) stops the charges" ;;
+    storage) echo "$(remote_where) bills its disk while it's stopped" ;;
+    none) echo "$(remote_where) bills nothing while it's stopped" ;;
+    *) echo "$(remote_where) may bill it in full while it's stopped (what it bills couldn't be told): only deleting it (metacomputer vm delete $VM_NAME) is sure to stop the charges" ;;
+  esac
+}
 remote_only_mac() { # WHAT WHY: refused for a computer elsewhere, saying why (lib/cloud/capabilities.py's feature map)
   [ "${MC_REMOTE:-0}" = 1 ] || return 0
   die "$1 isn't available for $VM_NAME, a computer reached over SSH ($(remote_where)): $2"
@@ -383,6 +413,16 @@ do_stop_remote() {
   fi
   owners_check
   handoff_hold_unless_override
+  if [ "${PROVIDER:-}" != sprites ]; then
+    # How it's stopped (and what it bills stopped) is the plan's, and stopping it needs its provider's credentials:
+    # both are checked before anything is touched (the hub, a recording): a plan that can't be read stops nothing.
+    remote_plan_load || die "can't tell how $(remote_where) stops $VM_NAME, or what it bills stopped (above): nothing was stopped (its hub and recordings were left as they were)"
+    if [ "${PROVIDER:-}" = oci ]; then
+      remote_can_ask || die "stopping $VM_NAME needs $(remote_where)'s credentials in this command's environment (docs/remote.md). Left alone, it powers itself off after ${IDLE_STOP:-15} minutes unused, but $(remote_where) counts it as running (and bills a billed size) until it's stopped there"
+    else
+      remote_can_ask || die "stopping $VM_NAME needs $(remote_where)'s credentials ($(remote_cred_names)) in this command's environment (docs/remote.md). Stopped or not, $(remote_billing_words)"
+    fi
+  fi
   hub_stop
   if [ -s "$RUN_DIR/manual-recording" ]; then
     say "finishing the desktop recording first"
@@ -405,12 +445,23 @@ do_stop_remote() {
     ok "this Mac's connections to $VM_NAME are closed (the hub's, the live view's, the vault's): Fly pauses it about 10 s later (asleep, only its disk is billed); the next command wakes it"
     return 0
   fi
-  remote_can_ask || die "stopping $VM_NAME needs $(remote_where)'s credentials in this command's environment (docs/remote.md). Left alone, it powers itself off after ${IDLE_STOP:-15} minutes unused, but $(remote_where) counts it as running (and bills a billed size) until it's stopped there"
   if [ -n "$force" ]; then say "stopping $VM_NAME at once (--force: $(remote_where) powers it off; its disk is kept)"
-  else say "stopping $VM_NAME (the guest shuts down, then $(remote_where) stops it; its disk is kept. If it doesn't answer, this can take up to 15 minutes: --force powers it off at once)"; fi
-  remote_py sleep --vm "$VM_NAME" $force >/dev/null || die "couldn't stop it (above)"
+  elif [ "${PROVIDER:-}" = oci ]; then say "stopping $VM_NAME (the guest shuts down, then $(remote_where) stops it; its disk is kept. If it doesn't answer, this can take up to 15 minutes: --force powers it off at once)"
+  elif [ "$(remote_plan soft_stop)" = guest ]; then say "stopping $VM_NAME (it's asked to shut down over SSH; $(remote_where) doesn't report a guest's own power-off, so unless its state says stopped, it's left as it is and said so. --force halts it at once)"
+  else say "stopping $VM_NAME (the guest shuts down, then $(remote_where) sees it off; its disk is kept. --force powers it off at once)"; fi
+  # A provider without a shutdown call of its own (Vultr: its halt is a power-off) and that doesn't see a guest power
+  # itself off: the guest is asked over SSH (it must answer). Then only the provider's own state can say it's off:
+  # SSH going quiet proves nothing, and nothing is halted without --force (lib/cloud/vps.py sleep).
+  local asked=""
+  if [ -z "$force" ] && [ "$(remote_plan soft_stop)" = guest ]; then
+    gssh admin true >/dev/null 2>&1 || die "$VM_NAME doesn't answer over SSH, so it can't be asked to shut down; nothing was stopped. $(remote_where) doesn't see a guest that powered itself off (the idle stop does that), so it may be off already, or busy or cut off. To power it off at once: metacomputer --vm $VM_NAME stop --force"
+    gssh admin 'sudo /usr/local/sbin/metacomputer-admin poweroff' >/dev/null 2>&1 || true
+    asked=--asked
+  fi
+  remote_py sleep --vm "$VM_NAME" $force $asked >/dev/null || die "couldn't stop it (above)"
   emit_event lifecycle stopped info "The computer $VM_NAME stopped" "" "forced=no"
   ok "stopped"
+  case "$(remote_plan billing_stopped)" in none|storage) ;; *) warn "$(remote_billing_words)" ;; esac
 }
 # EGRESS of a computer elsewhere: what its settings say, what its provider enforces outside it (where it does), and
 # what its own firewall has in force, each said apart: a setting is never taken for what's in force.
@@ -444,8 +495,17 @@ remote_net_egress() { # internet|off: the provider's rules (where it has them), 
     ok "EGRESS=$want in $MC_SETTINGS_LABEL"
     return 0
   fi
-  vm_running "$VM_NAME" || die "$VM_NAME doesn't answer (metacomputer start): its firewall can't be changed; nothing was"
+  # Whether the provider holds EGRESS outside the computer too is the plan's word: one that can't be read changes
+  # nothing (never taken for a provider with no outside layer).
+  local outside=no
   if remote_made; then
+    remote_plan_load || die "can't tell whether $(remote_where) holds $VM_NAME's egress outside it too (above): nothing was changed (not its firewall, not $(remote_where)'s rules, not the setting)"
+    outside="$(remote_plan outside)"
+  fi
+  vm_running "$VM_NAME" || die "$VM_NAME doesn't answer (metacomputer start): its firewall can't be changed; nothing was"
+  if remote_made && [ "$outside" = no ]; then
+    ok "outside the computer ($(remote_where)): nothing to set (its firewall filters only what comes in)"
+  elif remote_made; then
     remote_can_ask || die "changing $VM_NAME's egress needs $(remote_where)'s credentials in this command's environment (its rules outside the computer change too); nothing was changed"
     got="$(remote_py egress --vm "$VM_NAME" --set "$want")" || die "$(remote_where) didn't take the new rules (above); nothing else was changed"
     [ "$got" = "$want" ] || die "$(remote_where)'s rules read back as '$got', not $want; the guest's firewall wasn't changed"
@@ -1077,6 +1137,8 @@ if remote:
               + (f"   idle stop: {r.get('idle_stop')} min" if r.get("idle_stop") not in (None, "off") else ""))
     if r.get("input"):
         print(f"input         {r['input']}")
+    if r.get("billing"):
+        print(f"billing       {r['billing']}")
 else:
     print(f"gateway       {m(out['gateway'])} mcomp-netgw   forwards listening on: {fwd or '-'}   lease: {lease or '-'}")
 print(f"ssh           {m(out['ssh'])}")
@@ -2776,7 +2838,12 @@ case "$cmd" in
   secrets)    do_secrets "$@"; exit $? ;;
   learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
   agents)     exec "$PY" "$LAB_ROOT/lib/agents.py" "$@" ;;
-  cloud)      [ $# -ge 2 ] || die "usage: metacomputer cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG]   (PROVIDER: oci, sprites)"
+  cloud)      [ $# -ge 2 ] || die "usage: metacomputer cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG] [--forget OP]   (PROVIDER: oci, sprites, hetzner, digitalocean, vultr)"
+              # teardown deletes what metacomputer left at the provider, servers included, and --forget drops the
+              # record of a launch that may have made one: the user's own call, at their own terminal (an agent says
+              # the command instead). Fly Sprites has nothing to tear down (lib/remote.py says so).
+              [ "${2:-}" = sprites ] || case " $* " in *" teardown "*|*" --forget "*|*" --forget="*)
+                user_tty || die "metacomputer cloud $* deletes what metacomputer left at the provider (servers included) or forgets a launch that may have made one, so it's yours to run: in your own terminal (not through Claude Code, Codex or another agent). Nothing was changed" ;; esac
               PROVIDER="$2" remote_py cloud "$@"; exit $? ;;
   build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   setup)      # ./install.sh; with no terminal to ask on, only with --yes (as the plugin's setup)

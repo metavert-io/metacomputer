@@ -11,6 +11,14 @@ import subprocess
 import time
 
 from cloud.adapter import AdapterError
+from cloud.vps import static_scrub
+
+
+def said(err, cap):
+    """What the command printed on its standard error, fit to go into a message: its last `cap` characters, with
+    anything credential-shaped replaced (its own sign-in is a token this program never sees, so it can't be named;
+    lib/cloud/vps.py static_scrub)."""
+    return static_scrub(" ".join(bytes(err).decode(errors="replace").split())[-cap:], cap)
 
 
 class SpriteCLI:
@@ -116,7 +124,7 @@ class SpriteCLI:
         out = stdout.decode(errors="replace")
         text, _, code = out.rstrip("\n").rpartition("\n")
         if rc != 0 or not code.isdigit():
-            why = " ".join(stderr.decode(errors="replace").split())[-200:]
+            why = said(stderr, 200)
             raise AdapterError(f"Fly's Sprites API didn't answer ({why or 'no reason given'}); is the sprite command "
                                "signed in to that organization? (sprite login)")
         return int(code), text

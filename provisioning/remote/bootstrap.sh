@@ -13,6 +13,8 @@
 # makes it permanent. It prints the host's ed25519 public key last, which the Mac pins (read over a connection you
 # already trust). Running it again changes nothing that's already right.
 set -Eeuo pipefail
+# A failure says where, on the console and in cloud-init's log (a step that fails under set -e says nothing otherwise).
+trap 'echo "bootstrap: failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 DIR="${1:?usage: bootstrap.sh DIR [OWNER] [SSH_PORT]}"
 OWNER="${2:-}"
 PORT="${3:-22}"
@@ -31,7 +33,12 @@ case "$OWNER" in ''|"$GUSER"|"$AUSER"|root|mcfill|mcproxy) [ -z "$OWNER" ] || fa
 # The guest firewall, before anything else (provision.sh installs its service, which loads it at every boot).
 install -d -m 0755 /etc/metacomputer /opt/metacomputer/bin /var/lib/metacomputer
 case "$(head -n 1 "$DIR/egress")" in internet|off) head -n 1 "$DIR/egress" > /etc/metacomputer/egress ;; *) fail "egress: internet or off" ;; esac
-{ sshd -T 2>/dev/null | awk '$1 == "port" {print $2}'; echo "$PORT"; } | sort -un > /etc/metacomputer/ssh-ports
+# sshd -T (and -t) need sshd's privilege separation folder, which nothing has made yet at a provider computer's first
+# boot when ssh is socket-activated, as Ubuntu's is (found live on Hetzner Cloud: sshd -T failed, and with it this).
+install -d -m 0755 /run/sshd
+ports="$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')" \
+  || fail "sshd -T couldn't read sshd's settings: $(sshd -T 2>&1 >/dev/null | head -n 2 | tr '\n' ' ')"
+printf '%s\n' $ports "$PORT" | sort -un > /etc/metacomputer/ssh-ports
 install -o root -g root -m 0755 "$DIR/guest-firewall" /opt/metacomputer/bin/guest-firewall
 /opt/metacomputer/bin/guest-firewall mark-setup   # being set up: EGRESS=off lets apt's downloads out (this boot, 3 h)
 if ! command -v nft >/dev/null; then
@@ -48,6 +55,13 @@ for u in "$GUSER" "$AUSER"; do
 done
 # Nothing but metacomputer's own sudo rule: the desktop user is in no admin group.
 for g in sudo admin adm wheel lxd docker; do gpasswd -d "$GUSER" "$g" >/dev/null 2>&1 || true; done
+# A provider's computer: root signs in with nothing. The key the provider put in root's account (it makes a server
+# without a root password only when it's given one: the computer's admin key, for this first boot) comes off, and
+# root's password is locked (Vultr sets one, shown in its console). Your own server's root is yours: left as it is.
+if [ -z "$OWNER" ]; then
+  rm -f /root/.ssh/authorized_keys /root/.ssh/authorized_keys2
+  passwd -l root >/dev/null
+fi
 
 # The key lists, root-owned, outside the homes (sshd reads only these once the setup has installed its settings),
 # and the same lines in the homes until then (finalize.sh removes those).

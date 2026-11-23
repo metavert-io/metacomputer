@@ -160,7 +160,19 @@ FORMS = [
     ("net", ["allow", "example.com", "--exact"], "act"), ("checkpoint", ["ck", "--replace"], "act"),
     ("restore", ["ck", "--yes"], "act"), ("reset", ["--yes"], "act"), ("baseline", ["--yes"], "act"),
     ("desktop-restart", [], "act"),
-    ("cloud", ["setup", "oci"], "exempt"), ("cloud", ["teardown", "oci"], "exempt"),
+    ("cloud", ["setup", "oci"], "exempt"), ("cloud", ["teardown", "oci"], "act"),
+    ("vm", ["create", "x", "--on", "hetzner", "--size", "cax21", "--region", "hel1", "--yes"], "exempt"),
+    ("vm", ["create", "x", "--on", "digitalocean", "--egress", "off", "--no-build"], "exempt"),
+    ("vm", ["create", "x", "--on", "vultr", "--region", "ewr", "--yes"], "exempt"),
+    ("cloud", ["status", "hetzner", "--json"], "exempt"), ("cloud", ["doctor", "digitalocean"], "exempt"),
+    ("cloud", ["setup", "vultr"], "exempt"), ("cloud", ["teardown", "hetzner"], "act"),
+    # cloud teardown deletes servers metacomputer left at a provider, --forget drops the record of a launch that may
+    # have made one, and vm delete --checked-provider says the person looked at the provider: each acts (and runs only
+    # at the user's own terminal: bin/metacomputer, scripts/vm-commands.sh)
+    ("cloud", ["teardown", "digitalocean", "--forget", "0" * 32], "act"),
+    ("cloud", ["status", "vultr", "--forget=" + "0" * 32], "act"), ("cloud", ["teardown", "vultr", "--json"], "act"),
+    ("vm", ["delete", "x", "--confirm", "x", "--checked-provider"], "act"),
+    ("vm", ["delete", "x", "--checked-provider"], "act"),
     # trace
     ("trace", ["list"], "exempt"), ("trace", ["show", "t"], "exempt"), ("trace", ["export", "t", "--out", "f"], "exempt"),
     ("trace", ["start", "t"], "act"), ("trace", ["stop"], "act"), ("trace", ["delete", "t"], "act"),

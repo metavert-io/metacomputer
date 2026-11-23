@@ -1642,10 +1642,10 @@ another VM:
   the same without one. Claude's skill passes `--confirm` only for a VM you named for
   deletion.
 
-## A computer elsewhere (`--on server`, `--on oci`)
+## A computer elsewhere (`--on server`, `--on oci`, `--on hetzner|digitalocean|vultr`)
 
 A computer can be an Ubuntu 24.04 VM reached over SSH instead of a Lume VM on your Mac: your own server, or one Oracle
-Cloud makes ([docs/remote.md](docs/remote.md)). The Mac stays the controller, so the hub and every guard, the vault,
+Cloud, Hetzner Cloud, DigitalOcean or Vultr makes ([docs/remote.md](docs/remote.md)). The Mac stays the controller, so the hub and every guard, the vault,
 recordings, the action log, handoffs and the one-controller rule apply as they do on the Mac. What changes is the
 boundary: there's no gateway on your Mac between it and the world, so the computer enforces its own, with the
 provider's rules outside it where the provider enforces them, and no more than that is claimed.
@@ -1660,8 +1660,15 @@ provider's rules outside it where the provider enforces them, and no more than t
   or nothing (`EGRESS=off`, from the end of its setup: while it's set up it lets out public addresses, for the
   packages); nothing in the guest can change that. **What it can't do:** OCI applies no security rule
   to 169.254.0.0/16, so the instance metadata service (and the VCN's resolver and clock there) stays reachable at the
-  network level; only the guest firewall refuses it. Your own server gets no outside layer from metacomputer. The
-  provider's manifest says which of these it enforces (`outside_egress`), and `net status` shows it.
+  network level; only the guest firewall refuses it. On Hetzner Cloud and DigitalOcean each computer's own firewall
+  lets in SSH only and lets out public IPv4 addresses only (at DigitalOcean, also DNS, port 53 only, to exactly
+  DigitalOcean's own resolver for the Droplet's VPC: read once at its first boot, refused unless it's the VPC's
+  `resolver_ip`, pinned, never read from the computer again; nothing else on that network), or nothing; neither is
+  claimed to refuse the metadata
+  service (both answer it past their firewalls, `EGRESS=off` included: tested live). Vultr's firewall filters only
+  what comes in (SSH only): nothing outside a Vultr computer limits what it sends, so its own firewall is the only
+  egress layer there. Your own server gets no outside layer from metacomputer. The provider's manifest says which of
+  these it enforces (`outside_egress`), and `net status` shows it.
 - **Out, inside the VM: never metadata, link-local or private ranges.** Its firewall (`guest-firewall`, nftables)
   applies to every account, root included, though root in the guest could remove it; the desktop's accounts have no
   root (`cua` has no sudo, `cuaadmin` may run only `metacomputer-admin`). It refuses the cloud's metadata services and
@@ -1701,13 +1708,22 @@ provider's rules outside it where the provider enforces them, and no more than t
   firewall refuses the metadata service to everyone in the VM, and cloud-init is turned off once it's set up). Use a
   VM on your Mac for work you wouldn't put on a provider's machine. No file, secret or key of your Mac's goes there:
   the vault types a value over its fill account's connection and keeps API keys on the Mac behind its proxy.
-- **Provider credentials reach one program.** OCI's come only from the environment of the command you run (your
-  secrets manager hands them over). `bin/metacomputer`, `scripts/lib.sh` and `scripts/remote-build.sh` take them out
+- **Provider credentials reach one program.** OCI's, and the API tokens of Hetzner Cloud (`HCLOUD_TOKEN`),
+  DigitalOcean (`DIGITALOCEAN_TOKEN`) and Vultr (`VULTR_API_KEY`), come only from the environment of the command you
+  run (your secrets manager hands them over). `bin/metacomputer`, `scripts/lib.sh` and `scripts/remote-build.sh` take them out
   of the environment before anything else runs; `lib/remote.py`, the one program that calls OCI, is started with
   them, and nothing else metacomputer starts is (the hub, ssh, the helpers, the build's own commands). `lib/remote.py`
   takes them out of its own environment first and hands them to the adapter as a value, so nothing it starts either
-  (getconf, the settings resolver, ssh) gets them. Everything it makes is in the one compartment you name, tagged
-  `metacomputer`.
+  (getconf, the settings resolver, ssh) gets them. What a provider says in an error (Hetzner Cloud, DigitalOcean,
+  Vultr) is printed only scrubbed: the token and anything credential-shaped removed, never a raw answer, capped; an
+  error inside a successful answer (Hetzner's failed actions) too.
+  Everything it makes is in the one compartment you name, tagged
+  `metacomputer` (at Hetzner Cloud, DigitalOcean and Vultr: in your account, marked with the computer's name and the
+  build's operation; a server not marked so is never touched). The REST calls to those three go only to their API
+  addresses, over HTTPS, and never follow a redirect, which would carry the token elsewhere.
+- **No root on a provider's computer.** It's made with no default account, and its user-data keeps root from using
+  the first-boot key a provider needs to make a server without a root password; `bootstrap.sh` then removes that key
+  and locks root's password (Vultr sets one).
 - **The vault binds a computer, not a name.** A binding to a computer elsewhere names its identity (its provider
   instance or your server's setup, with its pinned host key, hashed); one deleted and made again under the same name
   is refused until it's bound again. An API token is for the computer it was made for: each request checks that the
@@ -1721,7 +1737,22 @@ provider's rules outside it where the provider enforces them, and no more than t
 - **Nothing left billing by surprise, and nothing deleted that a build didn't make.** A build that fails or is
   interrupted after making an instance deletes what that build made, found by the operation it tagged its launch with,
   and never an instance it found (or, with `--keep-on-failure`, records it as kept, so no later try takes it for a
-  lost launch, then stops it and says what still bills). What a build makes of the shared network and its computer's
+  lost launch, then stops it and says what still bills). At Hetzner Cloud, DigitalOcean and Vultr, and at Oracle Cloud,
+  the instance's id is journaled the moment its create returns, and the clean-up reads each journaled id directly,
+  never taking an empty listing for proof, nor an instance that doesn't carry its operation's mark; a create whose
+  answer was lost and that shows nowhere leaves its journal unresolved: the clean-up says a server may exist and fails,
+  and no new one is made under that name until it's found. `vm delete` refuses such a computer until you say you've
+  looked, and then the operation stays listed by `cloud status`, with the provider's console and API lookup, until a
+  teardown finds what it made: a possibly billing server is never forgotten silently. That list is changed under one
+  lock, so two commands at once never lose each other's entries; `vm delete --checked-provider`, `cloud teardown` and
+  `--forget` run only at your own terminal. Whatever deletes, stops, starts or forgets an instance reads it by its own
+  id first and acts only if it carries, now, the computer's name and the recorded operation (a listing's row is only a
+  candidate); anything else stops the command with nothing done and the record kept. `net egress` (and DigitalOcean's
+  resolver exception) changes a firewall only after the same check, and only the firewall recorded for the computer,
+  read by its id and marked for its operation. Every error from a provider's
+  facade or adapter is scrubbed in one place (its token, anything credential-shaped) before it's printed, and
+  everything `lib/remote.py` prints passes a last filter for the credentials it was given (each line of an API key's
+  PEM too); what Fly's `sprite` command says, whose sign-in it never sees, is scrubbed of anything credential-shaped. What a build makes of the shared network and its computer's
   group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact
   resources and no others; the journal is on the disk (`F_FULLFSYNC`, or `fsync` where that isn't supported) before
   anything billable is launched, and an error making it so refuses the launch. `start` checks
@@ -1729,7 +1760,14 @@ provider's rules outside it where the provider enforces them, and no more than t
   capture ends with the guest's power-off; a stop is waited for through OCI's 15-minute shutdown window; `vm delete`
   checks again, under the computer's lock, that no session is using it before anything is stopped; the shared network
   is changed only under a lock (`vm create`, `cloud setup` and `cloud teardown` alike), and never deleted while a
-  computer is being made in it.
+  computer is being made in it. At Hetzner Cloud, DigitalOcean and Vultr a server is made by one call, never retried;
+  its firewall and first-boot key are made first, under that provider's lock, each by this operation's own create
+  (never one a listing shows) and recorded by id the moment that create returns, before anything configures it; the
+  clean-up and `vm delete` delete those exact ones. A stopped server there is billed in full, which `vm create`, `stop` and
+  `status` say: only deleting it stops the charges. Vultr neither asks a guest to shut down nor sees one that powered
+  itself off, and its start restarts a running instance: there `stop` asks the guest over SSH and then believes only
+  Vultr's own state; SSH going quiet is no proof, so without that it halts nothing and says the guest may still be on
+  and billing (`stop --force` halts it), and nothing is started on a guess.
 - **What isn't there yet:** `SSH_AUTH=cert` (refused: its certificates name the Mac's gateway address), snapshots and
   `reset`, volumes and Mac folders, and the event watcher's health checks. Your own server's other software and
   accounts are yours to keep apart; give metacomputer a server of its own.

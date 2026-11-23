@@ -8,6 +8,10 @@
     oci.py            Oracle Cloud (`oci`): a thin driver that makes, starts, stops and deletes such VMs
     sprites.py        Fly Sprites (`sprites`): Sprites made, checkpointed and deleted through Fly's sprite command,
                       reached through its tunnel (the `sprite` transport)
+    vps.py            what the providers that bill servers by the hour share (their REST API, a firewall and a
+                      first-boot key per computer, billing in full while stopped)
+    hetzner.py        Hetzner Cloud (`hetzner`), digitalocean.py DigitalOcean (`digitalocean`), vultr.py Vultr
+                      (`vultr`): a thin driver each, on vps.py
     transport.py      how SSH reaches a computer that isn't on this Mac: the hook a provider's tunnel plugs into
     guest.py          the cloud-init user-data and key lists a VM reached over SSH is given
     fake.py           an in-memory stand-in for the tests (`fake`), never a provider
@@ -18,11 +22,15 @@ from . import capabilities
 from .adapter import INTERFACE, Adapter, AdapterError, HandledByCLI, NotSupported
 from .fake import Fake
 from .local_lume import LocalLume
+from .digitalocean import DigitalOcean
+from .hetzner import Hetzner
 from .oci import OCI
 from .sprites import Sprites
 from .ubuntu_vm import UbuntuVM
+from .vultr import Vultr
 
-ADAPTERS = {LocalLume.name: LocalLume, Fake.name: Fake, UbuntuVM.name: UbuntuVM, OCI.name: OCI, Sprites.name: Sprites}
+ADAPTERS = {LocalLume.name: LocalLume, Fake.name: Fake, UbuntuVM.name: UbuntuVM, OCI.name: OCI, Sprites.name: Sprites,
+            Hetzner.name: Hetzner, DigitalOcean.name: DigitalOcean, Vultr.name: Vultr}
 
 __all__ = ["ADAPTERS", "INTERFACE", "Adapter", "AdapterError", "HandledByCLI", "NotSupported", "adapter",
            "by_place", "capabilities", "providers", "registered"]

@@ -34,6 +34,7 @@ import time
 from . import transport
 from .adapter import AdapterError, NotSupported, check_name
 from .ubuntu_vm import BASE, RemoteVM, check_egress
+from .vps import static_scrub
 
 SPRITE_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 ORG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}")
@@ -308,7 +309,7 @@ class Sprites(RemoteVM):
         t0 = time.monotonic()
         rc, _o, err = self.cli.exec(org, sprite, ["true"], timeout=120)
         if rc != 0:
-            why = " ".join(err.decode(errors="replace").split())[-160:]
+            why = static_scrub(" ".join(err.decode(errors="replace").split())[-160:], 160)
             raise AdapterError(f"{name}'s Sprite didn't answer ({why or 'no reason given'})")
         return dict(self.status(name), woke_in_s=round(time.monotonic() - t0, 2))
 

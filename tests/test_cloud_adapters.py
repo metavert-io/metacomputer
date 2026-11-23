@@ -66,7 +66,8 @@ KEEPER = dict(copy.deepcopy(FAKE_MANIFEST), label="a keeping stand-in", root_dis
 def subjects():
     """(label, adapter) for every registered adapter, and the stand-in with the other manifests."""
     # A provider's adapter is made with no credentials (env={}): the contract never reaches a provider.
-    out = [(n, cloud.adapter(n, env={}) if n == "oci" else cloud.adapter(n)) for n in cloud.registered()]
+    takes_env = ("oci", "hetzner", "digitalocean", "vultr")
+    out = [(n, cloud.adapter(n, env={}) if n in takes_env else cloud.adapter(n)) for n in cloud.registered()]
     out += [("fake (bare)", Fake(BARE)), ("fake (keeper)", Fake(KEEPER))]
     return out
 
@@ -196,9 +197,13 @@ def registry():
           cloud.registered())
     check("every registered adapter is an Adapter, under its own name",
           all(issubclass(c, cloud.Adapter) and c.name == n for n, c in cloud.ADAPTERS.items()))
-    check("the providers are your own server, Oracle Cloud and Fly Sprites (the stand-in and this Mac don't count)",
-          cloud.providers() == {"server": "your own server", "oci": "Oracle Cloud", "sprites": "Fly Sprites"}
+    check("the providers are your own server, Oracle Cloud, Fly Sprites, Hetzner Cloud, DigitalOcean and Vultr (the "
+          "stand-in and this Mac don't count)",
+          cloud.providers() == {"server": "your own server", "oci": "Oracle Cloud", "sprites": "Fly Sprites",
+                                "hetzner": "Hetzner Cloud", "digitalocean": "DigitalOcean", "vultr": "Vultr"}
           == placement.PROVIDERS, cloud.providers())
+    check("...each provider's place is its own name", all(cloud.by_place(p).name == p for p in
+                                                           ("oci", "sprites", "hetzner", "digitalocean", "vultr")))
     check("by_place finds each place's adapter, and none for a place there isn't",
           cloud.by_place("mac").name == "local-lume" and cloud.by_place("oci").name == "oci"
           and cloud.by_place("server").name == "ubuntu-vm" and cloud.by_place("sprites").name == "sprites"

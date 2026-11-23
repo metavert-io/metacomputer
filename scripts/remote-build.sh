@@ -1,8 +1,8 @@
 #!/bin/bash
-# Set up a computer reached over SSH (docs/remote.md): an Ubuntu 24.04 VM that a provider makes (oci) or your own
-# server (server); or a Fly Sprite (sprites, docs/sprites.md: its first step through Fly's own channel, `sprite exec`;
-# no reboot: its desktop is Sprites services). The same desktop, driver and accounts as the Mac's VM, set up the same
-# way on all of them:
+# Set up a computer reached over SSH (docs/remote.md): an Ubuntu 24.04 VM that a provider makes (oci, hetzner,
+# digitalocean, vultr) or your own server (server); or a Fly Sprite (sprites, docs/sprites.md: its first step through
+# Fly's own channel, `sprite exec`; no reboot: its desktop is Sprites services). The same desktop, driver and accounts
+# as the Mac's VM, set up the same way on all of them:
 #   1. a provider's: its keys and host key made here, then its instance, whose cloud-init runs bootstrap.sh;
 #      your own: bootstrap.sh run once over your own SSH connection (your account, with sudo), and the host key it
 #      reports pinned;
@@ -23,10 +23,10 @@
 #
 #   scripts/remote-build.sh [--keep-on-failure]
 set -Eeuo pipefail
-# Provider credentials (lib/cloud/oci.py ENV_KEYS) in this command's environment reach lib/remote.py only: taken off
-# the environment here, before any other program runs (bash builtins only), and exported again into remote_py's one
-# child (scripts/lib.sh). The shell keeps them as unexported variables.
-for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT; do export -n "$mc_k"; done; unset mc_k
+# Provider credentials (lib/remote.py PROVIDER_ENV: each driver's own) in this command's environment reach
+# lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported
+# again into remote_py's one child (scripts/lib.sh). The shell keeps them as unexported variables.
+for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY; do export -n "$mc_k"; done; unset mc_k
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
 [ "${MC_REMOTE:-0}" = 1 ] || die "$VM_NAME is a VM on this Mac: scripts/build-vm.sh builds it"
@@ -68,20 +68,26 @@ close_guest_setup_egress() {
   fi
 }
 close_provider_setup_egress() {
-  [ "$SETUP_OPEN" = 1 ] && [ "$KIND" != own ] || return 0
+  [ "$SETUP_OPEN" = 1 ] && [ "$KIND" != own ] && [ "$(plan outside)" = yes ] || return 0
   if remote_py egress --vm "$VM_NAME" --set "$(wanted_egress)" >/dev/null; then ok "$WHERE's rules: EGRESS=$(wanted_egress)"
   else warn "$WHERE's rules couldn't be set back to EGRESS=$(wanted_egress): metacomputer --vm $VM_NAME net egress $(wanted_egress)"; fi
 }
 # A failed build that made an instance deletes it again (or, with --keep-on-failure, stops it through the provider),
 # and says what's left billing. Your own server's rollback is done where its failure is found (owner_check).
+stopped_bills() { # what a stopped computer still bills at its provider, in words
+  case "$(plan billing_stopped)" in
+    full) printf '%s' "$WHERE bills it in full while it's stopped, until you delete it" ;;
+    *) printf '%s' "$WHERE bills its disk until you delete it" ;;
+  esac
+}
 cleanup_failed() { # RC
   [ "$1" != 0 ] && [ "$SETUP_DONE" = 0 ] || return 0
   if [ -n "$ABORT_OP" ] && [ "$KEEP_ON_FAILURE" != 1 ]; then
     say "the setup failed; deleting what this build made at $WHERE (an instance bills while it exists)"
     if remote_py abort --vm "$VM_NAME" --op "$ABORT_OP"; then
-      ok "nothing this build made is left billing at $WHERE (metacomputer cloud status $PROVIDER lists what's there)"
+      ok "nothing this build made is left billing at $WHERE (metacomputer cloud status $(plan provider) lists what's there)"
     else
-      warn "what this build made could NOT be deleted: an instance of $VM_NAME may still be RUNNING and billing at $WHERE. Delete it: metacomputer vm delete $VM_NAME (or metacomputer cloud status $PROVIDER, then delete it in the provider's console)"
+      warn "what this build made could NOT be deleted: an instance of $VM_NAME may still be RUNNING and billing at $WHERE. Delete it: metacomputer vm delete $VM_NAME (or metacomputer cloud status $(plan provider), then delete it in $WHERE's console)"
       close_guest_setup_egress; close_provider_setup_egress
     fi
     return 0
@@ -92,7 +98,7 @@ cleanup_failed() { # RC
     local kept=0; remote_py abort --vm "$VM_NAME" --op "$ABORT_OP" --keep >/dev/null && kept=1
     close_provider_setup_egress     # its record names the kept instance now
     if [ "$kept" = 1 ]; then
-      warn "an instance this build made is stopped: $WHERE bills its disk until you delete it: metacomputer vm delete $VM_NAME"
+      warn "an instance this build made is stopped: $(stopped_bills): metacomputer vm delete $VM_NAME"
     else
       warn "it couldn't be stopped: an instance this build made may be RUNNING and billing at $WHERE. Stop it (metacomputer --vm $VM_NAME stop --force) or delete it (metacomputer vm delete $VM_NAME)"
     fi
@@ -101,7 +107,7 @@ cleanup_failed() { # RC
   close_provider_setup_egress
   if [ "$WOKEN" = 1 ]; then
     say "the setup failed; stopping $VM_NAME again (this build started it)"
-    remote_py sleep --vm "$VM_NAME" --force >/dev/null && warn "it's stopped: $WHERE bills its disk until you delete it" \
+    remote_py sleep --vm "$VM_NAME" --force >/dev/null && warn "it's stopped: $(stopped_bills)" \
       || warn "it couldn't be stopped: it is RUNNING and billing at $WHERE (metacomputer --vm $VM_NAME stop --force)"
   fi
 }
@@ -138,7 +144,19 @@ for p in $EXTRA_PACKAGES; do [[ "$p" =~ ^[a-z0-9][a-z0-9.+-]*$ ]] || die "EXTRA_
 for b in $BROWSERS; do case "$b" in firefox|chrome|webkit) ;; *) die "BROWSERS: '$b' isn't firefox, chrome or webkit" ;; esac; done
 [ -z "${VOLUMES:-}${REFDISKS:-}" ] || die "VOLUMES and REFDISKS reach only a VM on this Mac for now; remove them from $MC_SETTINGS_LABEL"
 PLAN="$(remote_py plan --vm "$VM_NAME")" || die "can't set up $VM_NAME (above)"
-plan() { printf '%s\n' "$PLAN" | sed -n "s/^$1=//p"; }
+plan() { printf '%s\n' "$PLAN" | sed -n "s/^$1=//p" | head -1; }
+plan_word() { # KEY WORD...: the plan's KEY must be there and be one of the WORDs (a plan that can't be read is never
+  # taken for "no": the build stops before anything is made or changed)
+  local k="$1" v; v="$(plan "$1")"; shift
+  [ -n "$v" ] && case " $* " in *" $v "*) true ;; *) false ;; esac \
+    || die "lib/remote.py plan for $VM_NAME says $k='$v', which the build doesn't know: nothing was made or changed"
+}
+plan_word kind made own sprite
+plan_word outside yes no
+plan_word resolvers yes no
+plan_word billing_stopped none storage full unknown
+plan_word soft_stop api guest
+[ -n "$(plan provider)" ] || die "lib/remote.py plan for $VM_NAME names no provider: nothing was made or changed"
 KIND="$(plan kind)"; ARCH="$(plan arch)"; WHERE="$(plan label)"
 case "$KIND" in
   made) what="a computer $WHERE makes" ;;
@@ -244,10 +262,27 @@ elif [ "$KIND" = made ]; then
     remote_py identity --vm "$VM_NAME" --write >/dev/null || die "couldn't record $VM_NAME's identity (its instance and pinned host key)"
     # The setup's downloads again outside too: a failed setup set its provider's rules back to EGRESS. Closed again
     # on every path, as for a new computer (cleanup_failed; after finalize, EGRESS is set and read back).
-    remote_py egress --vm "$VM_NAME" --set internet >/dev/null || die "couldn't open $WHERE's rules for the setup's downloads (above)"
-    ok "setting it up again: its identity recorded; $WHERE's rules let out public addresses until the setup ends (then EGRESS=$(plan egress))"
+    if [ "$(plan outside)" = yes ]; then
+      remote_py egress --vm "$VM_NAME" --set internet >/dev/null || die "couldn't open $WHERE's rules for the setup's downloads (above)"
+      ok "setting it up again: its identity recorded; $WHERE's rules let out public addresses until the setup ends (then EGRESS=$(plan egress))"
+    else
+      ok "setting it up again: its identity recorded"
+    fi
   fi
   setup_deadline_check
+  if [ "$(plan resolvers)" = yes ]; then
+    # A provider whose resolver is on its private network (DigitalOcean): its firewall lets DNS through to exactly
+    # that resolver. A new computer names it now, at its first boot, before anything but cloud-init and bootstrap.sh
+    # has run in it; lib/remote.py checks it's the provider's own resolver for its network and pins it. Never read
+    # from the computer again: a computer set up again uses the pinned one.
+    if [ "$STATE_HAS_INSTANCE" = 0 ]; then
+      res="$(gssh admin "awk '\$1 == \"nameserver\" {print \$2}' /run/systemd/resolve/resolv.conf" 2>/dev/null | head -n 4 | tr '\n' ' ')"
+      got="$(remote_py resolvers --vm "$VM_NAME" --first-boot --set $res)" || die "couldn't let $WHERE's firewall reach $VM_NAME's DNS resolver (above)"
+    else
+      got="$(remote_py resolvers --vm "$VM_NAME" --pinned)" || die "couldn't let $WHERE's firewall reach $VM_NAME's DNS resolver (above)"
+    fi
+    ok "$WHERE's firewall: DNS (port 53) to $WHERE's own resolver for $VM_NAME ($got), nothing else on its private network"
+  fi
   ARCH_SEEN="$(gssh admin 'dpkg --print-architecture')"
 else
   [ -n "${SSH_HOST:-}" ] && [ -n "${SETUP_USER:-}" ] || die "your own server needs SSH_HOST and SETUP_USER in $MC_SETTINGS_LABEL (metacomputer vm create NAME --on server --host ADDRESS --user YOUR_ACCOUNT)"
@@ -417,13 +452,14 @@ if [ "$KIND" != sprite ]; then
 got="$(gssh admin 'sudo /usr/local/sbin/metacomputer-admin egress status' 2>/dev/null | tail -1)"
 [ "$got" = "$want_egress" ] || die "its own firewall reads back as '${got:-nothing}', not EGRESS=$want_egress"
 fi
-if [ "$KIND" != own ]; then
+OUTSIDE=no; [ "$KIND" = own ] || OUTSIDE="$(plan outside)"
+if [ "$OUTSIDE" = yes ]; then
   got="$(remote_py egress --vm "$VM_NAME" --set "$want_egress")" || die "$WHERE didn't take EGRESS=$want_egress (above)"
   [ "$got" = "$want_egress" ] || die "$WHERE's rules read back as '$got', not EGRESS=$want_egress"
 fi
 case "$KIND" in
   sprite) ok "EGRESS=$want_egress: in force in Fly's network policy, outside the computer" ;;
-  made) ok "EGRESS=$want_egress: in force in its own firewall and in $WHERE's rules" ;;
+  made) ok "EGRESS=$want_egress: in force in its own firewall$([ "$OUTSIDE" = yes ] && echo " and in $WHERE's rules" || echo " ($WHERE's firewall filters only what comes in)")" ;;
   *) ok "EGRESS=$want_egress: in force in its own firewall" ;;
 esac
 if [ "$KIND" = sprite ]; then

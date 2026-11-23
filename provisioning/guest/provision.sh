@@ -53,6 +53,40 @@ done
 APT=(apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
      -o Acquire::Retries=5)
 
+# A provider's computer (reached over the internet, no owner): an apt mirror on the provider's own network can't be
+# reached through its firewalls, which refuse private ranges (DigitalOcean's mirrors.digitalocean.com answers there at
+# a private address: found live, every download failed). Before anything uses apt, a source whose host resolves to a
+# private address uses Ubuntu's own archive instead. Your own server's sources are yours: left as they are.
+is_private4() {
+  case "$1" in
+    10.*|127.*|169.254.*|192.168.*|0.*) return 0 ;;
+    172.*) o="${1#172.}"; o="${o%%.*}"; [ "$o" -ge 16 ] && [ "$o" -le 31 ] ;;
+    100.*) o="${1#100.}"; o="${o%%.*}"; [ "$o" -ge 64 ] && [ "$o" -le 127 ] ;;
+    *) return 1 ;;
+  esac
+}
+apt_public_mirror() { # nothing in it may fail: under set -E a failing command in $(...) would run the ERR trap there
+  local f u h a uri
+  case "$(dpkg --print-architecture)" in arm64) uri=http://ports.ubuntu.com/ubuntu-ports/ ;; *) uri=http://archive.ubuntu.com/ubuntu/ ;; esac
+  for f in /etc/apt/sources.list.d/*.sources /etc/apt/sources.list; do
+    [ -f "$f" ] || continue
+    for u in $( { grep -oE 'https?://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]*' "$f" || true; } | sort -u); do
+      h="${u#*://}"; h="${h%%/*}"
+      for a in $( { getent ahostsv4 "$h" 2>/dev/null || true; } | awk '{print $1}' | sort -u); do
+        if is_private4 "$a"; then
+          sed -i "s#$u#$uri#g" "$f"
+          echo "apt: $h is on the provider's own network; $f uses Ubuntu's archive instead"
+          break
+        fi
+      done
+    done
+  done
+}
+if [ "$TARGET" = remote ] && [ ! -s /etc/metacomputer/owner ]; then
+  step "apt sources (a provider's mirror on its private network: Ubuntu's archive instead)"
+  apt_public_mirror
+fi
+
 step "payload + versions"
 cat "$PAYLOAD/versions.env"
 
@@ -98,7 +132,9 @@ remote_ssh_and_firewall() {
     /opt/metacomputer/bin/remote-uninstall rollback || true
     false
   fi
-  # The ports sshd listens on (and the one metacomputer came in on) stay open in the firewall.
+  # The ports sshd listens on (and the one metacomputer came in on) stay open in the firewall. (sshd -T needs its
+  # privilege separation folder, which a socket-activated ssh may not have made yet.)
+  install -d -m 0755 /run/sshd
   ports="$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}' | tr '\n' ' ') ${MCOMP_SSH_PORT:-22}"
   printf '%s\n' $ports | sort -un > /etc/metacomputer/ssh-ports
   OWNER="$(head -n 1 /etc/metacomputer/owner 2>/dev/null || true)"
@@ -541,5 +577,12 @@ update-locale LANG=en_US.UTF-8
 } > /etc/metacomputer/versions
 chmod 0644 /etc/metacomputer/versions
 
+if [ "${MCOMP_TARGET:-}" = remote ]; then
+  # A VM reached over the internet: cloud-init off before the reboot into the desktop (finalize.sh turns it off too).
+  # It has nothing left to do, and its datasource may need the metadata service, which this computer's firewall now
+  # refuses: Vultr's then fell back to no datasource, took the computer for a new one and made new host keys (found
+  # live; the pinned key refused the computer, as it should).
+  touch /etc/cloud/cloud-init.disabled
+fi
 date -Is > "$STATE/provisioned"
 step "provisioning complete; $([ "$TARGET" = sprite ] && echo "the desktop starts as Sprites services" || echo "cloud-init will reboot into the desktop")"

@@ -2,10 +2,10 @@
 # metacomputer host library: configuration, Lume + mcomp-netgw (cua-netgw)
 # lifecycle, SSH. Sourced by bin/metacomputer and scripts/*. macOS /bin/bash 3.2.
 
-# Provider credentials (lib/cloud/oci.py ENV_KEYS) in this command's environment reach lib/remote.py only: taken off
-# the environment here, before any other program runs (bash builtins only), and exported again into remote_py's one
-# child (scripts/lib.sh). The shell keeps them as unexported variables.
-for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT; do export -n "$mc_k"; done; unset mc_k
+# Provider credentials (lib/remote.py PROVIDER_ENV: each driver's own) in this command's environment reach
+# lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported
+# again into remote_py's one child (scripts/lib.sh). The shell keeps them as unexported variables.
+for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY; do export -n "$mc_k"; done; unset mc_k
 
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -625,9 +625,9 @@ vm_mac() { lume_field "$1" macAddress; }
 # The name its host key is pinned under in known_hosts: the VM's loopback port here, mcomp-NAME for a computer
 # elsewhere (HostKeyAlias: never its address, which can change).
 mc_hostkey_name() { if [ "${MC_REMOTE:-0}" = 1 ]; then printf 'mcomp-%s' "$VM_NAME"; else printf '[127.0.0.1]:%s' "$SSH_PORT"; fi; }
-# A provider's credentials (lib/cloud/oci.py ENV_KEYS) reach lib/remote.py only: this shell keeps them, unexported, so
+# A provider's credentials (lib/remote.py PROVIDER_ENV) reach lib/remote.py only: this shell keeps them, unexported, so
 # nothing else it starts (the hub, ssh, the helpers) inherits them; remote_py hands them to its one child.
-MC_PROVIDER_ENV="OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT"   # as at the top
+MC_PROVIDER_ENV="OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY"   # as at the top
 mc_export_provider_env() { # in a subshell, before it runs what needs them: lib/remote.py, or metacomputer itself
   local k; for k in $MC_PROVIDER_ENV; do [ -z "${!k:-}" ] || export "$k"; done
 }
@@ -651,8 +651,15 @@ remote_can_ask() { # whether the provider can be asked from here (its credential
   case "${PROVIDER:-}" in
     oci) [ -n "${OCI_USER:-}" ] && [ -n "${OCI_API_KEY_PEM:-}" ] ;;
     sprites) [ -x "$(mc_sprite_cli)" ] ;;
+    hetzner) [ -n "${HCLOUD_TOKEN:-}" ] ;;
+    digitalocean) [ -n "${DIGITALOCEAN_TOKEN:-}" ] ;;
+    vultr) [ -n "${VULTR_API_KEY:-}" ] ;;
     *) return 1 ;;
   esac
+}
+remote_cred_names() { # the variables PROVIDER's credentials come in (for messages; never their values)
+  case "${PROVIDER:-}" in oci) echo "OCI_*" ;; hetzner) echo HCLOUD_TOKEN ;; digitalocean) echo DIGITALOCEAN_TOKEN ;;
+    vultr) echo VULTR_API_KEY ;; sprites) echo "the sprite command's sign-in" ;; *) echo "its credentials" ;; esac
 }
 remote_can_ask_for() { local PROVIDER="$1"; remote_can_ask; }   # PROVIDER: before a computer of its own has settings
 mc_sprite_cli() { # SPRITE_CLI, else sprite on PATH, else ~/.local/bin/sprite (lib/cloud/sprites.py default_cli)

@@ -1,24 +1,25 @@
 # A computer elsewhere: an Ubuntu VM reached over SSH
 
 metacomputer's computers normally run on your Mac (Lume VMs). A computer can also be an **Ubuntu 24.04 VM somewhere
-else**, reached over SSH: **your own server**, or one a **provider** makes for you (Oracle Cloud first). A **Fly
-Sprite** is a computer elsewhere too, reached through Fly's tunnel, with its own page: [docs/sprites.md](sprites.md). It gets the
+else**, reached over SSH: **your own server**, or one a **provider** makes for you (Oracle Cloud, Hetzner Cloud,
+DigitalOcean, Vultr). A **Fly Sprite** is a computer elsewhere too, reached through Fly's tunnel, with its own page:
+[docs/sprites.md](sprites.md). It gets the
 same desktop (XFCE, Firefox, optionally Chrome, LibreOffice), the same Cua Driver, the same accounts, and your Mac
 stays the controller: the hub and all its guards, the vault, recordings, the action log and the CLI run here, as for
 a VM on your Mac. The difference is where the VM runs, and what keeps it apart from everything else (its own firewall
 and, where the provider enforces them, the provider's rules, instead of the Mac's gateway).
 
-| | Your own server (`--on server`) | Oracle Cloud (`--on oci`) |
-|---|---|---|
-| Who makes it | you | metacomputer, in your OCI compartment |
-| Who powers it on and off | you (metacomputer never does) | `start` / `stop`, through OCI's API; the guest powers itself off after `IDLE_STOP` minutes unused, which OCI doesn't count as stopped |
-| What a stopped computer costs | between you and its host | its boot volume only, once stopped through the API; a guest that powered itself off is billed as running ([costs](#what-a-stopped-computer-costs)) |
-| Egress rules outside the VM | none of metacomputer's (only its own firewall) | its own network security group: public addresses only, or nothing; not the metadata service ([below](#what-keeps-it-apart)) |
-| Architecture | arm64 or x86_64 (found out) | from `--size` |
-| What it costs | between you and its host | `vm create` says the rate first; Arm within the Always Free allowance costs nothing |
-| What's kept | its disk | its disk (`PERSIST=disk`), also while stopped |
-| Snapshots, `reset`, checkpoints | no | no (not yet) |
-| Volumes and Mac folders | no (not yet) | no (not yet) |
+| | Your own server (`--on server`) | Oracle Cloud (`--on oci`) | Hetzner Cloud, DigitalOcean, Vultr (`--on hetzner\|digitalocean\|vultr`) |
+|---|---|---|---|
+| Who makes it | you | metacomputer, in your OCI compartment | metacomputer, in your account (Hetzner: the token's project) |
+| Who powers it on and off | you (metacomputer never does) | `start` / `stop`, through OCI's API; the guest powers itself off after `IDLE_STOP` minutes unused, which OCI doesn't count as stopped | `start` / `stop`, through the provider's API; the guest powers itself off after `IDLE_STOP` minutes unused, which Hetzner and DigitalOcean see as off (Vultr doesn't: its idle stop is off by default) |
+| What a stopped computer costs | between you and its host | its boot volume only, once stopped through the API; a guest that powered itself off is billed as running ([costs](#what-a-stopped-computer-costs)) | **everything**: a stopped server is billed in full until it's deleted ([costs](#what-a-stopped-computer-costs)) |
+| Egress rules outside the VM | none of metacomputer's (only its own firewall) | its own network security group: public addresses only, or nothing; not the metadata service ([below](#what-keeps-it-apart)) | Hetzner, DigitalOcean: its own firewall, public addresses only, or nothing; not the metadata service. Vultr: none (its firewall filters only what comes in) |
+| Architecture | arm64 or x86_64 (found out) | from `--size` | from `--size`: Hetzner's CAX sizes are Arm (the default), the rest x86_64 |
+| What it costs | between you and its host | `vm create` says the rate first; Arm within the Always Free allowance costs nothing | `vm create` says the hourly rate first, and that only deleting stops it |
+| What's kept | its disk | its disk (`PERSIST=disk`), also while stopped | its disk (`PERSIST=disk`), also while stopped |
+| Snapshots, `reset`, checkpoints | no | no (not yet) | no (not yet) |
+| Volumes and Mac folders | no (not yet) | no (not yet) | no (not yet) |
 
 ## Your own server
 
@@ -159,6 +160,114 @@ record this Mac lost) is left alone. It says nothing of it is left billing, or e
 launch whose answer was lost (the connection dropped) is found by the operation tag it was launched with and deleted
 when you build again.
 
+## Hetzner Cloud, DigitalOcean and Vultr
+
+```bash
+metacomputer vm create arm2 --on hetzner [--size cax11] [--region fsn1] [--egress internet|off] [--idle-stop 15]
+metacomputer vm create x86a --on digitalocean [--size s-2vcpu-4gb] [--region nyc3]
+metacomputer vm create x86b --on vultr [--size vc2-2c-4gb] [--region ewr]
+```
+
+Three thin drivers on one base (`lib/cloud/vps.py`; `hetzner.py`, `digitalocean.py`, `vultr.py`), each through the
+provider's REST API (Python's standard library; no SDK to install). **Everything a stopped server costs is still
+billed at all three**: only deleting it stops the charges ([costs](#what-a-stopped-computer-costs)).
+
+**Credentials**: one API token each, only from the environment of the command that needs it (`vm create`, `build`,
+`start`, `stop`, `status`'s provider line, `net egress`, `vm delete`, `cloud ...`), handed over by your secrets
+manager for that one command; nothing writes it to disk, puts it on a command line or prints it, and only
+`lib/remote.py` gets it.
+
+| Provider | Variable | What it needs |
+|---|---|---|
+| Hetzner Cloud | `HCLOUD_TOKEN` | an API token of one project, Read & Write (the project is the boundary: everything metacomputer makes is in it) |
+| DigitalOcean | `DIGITALOCEAN_TOKEN` | a personal access token; a custom-scoped one needs `droplet`, `firewall` and `ssh_key` (create, read, update, delete) and read on `regions`, `sizes`, `image`, `actions` and `vpc` (`vpc:read`: the resolver's address is checked against the Droplet's VPC; DigitalOcean adds `snapshot:read`). `vm create` checks `vpc:read` before it makes anything, and `cloud doctor digitalocean` names each read scope the token lacks. No tag scope: metacomputer marks what it makes by name |
+| Vultr | `VULTR_API_KEY` | an API key whose access control list has this Mac's public address; a user with a custom policy needs the instance, SSH key and firewall permissions |
+
+**What it makes**, each marked with the computer's name and the build's operation, so `metacomputer cloud status
+PROVIDER` lists it even if this Mac lost its settings, and a launch whose record was lost is found:
+- **its own firewall**, made before the server (the outside layer, below);
+- **an SSH key**: the public half of the computer's admin key, because these providers make a server without a root
+  password only when they're given a key. It's for the first boot only: the user-data's `disable_root` keeps root
+  from using it, `bootstrap.sh` removes it from root and locks root's password (Vultr sets one anyway, shown in its
+  console), and it's deleted with the computer;
+- **the server**: Ubuntu 24.04 for the size's architecture, IPv4 only (no IPv6 address), a public address, no
+  backups, monitoring or provider agent, and the same cloud-init user-data as on Oracle Cloud (`lib/cloud/guest.py`:
+  the host key made on your Mac, no default account, `bootstrap.sh`). Hetzner marks it with labels
+  (`metacomputer=NAME`, `metacomputer-op=OPERATION`); DigitalOcean and Vultr with its name or label,
+  `mc-OPERATION-NAME`. A server that isn't marked this way is never touched.
+
+**The outside layer**, what each provider's firewall enforces outside the guest (root in the guest can't change it),
+and no more is claimed (`outside_egress` in each manifest; `net status` shows it):
+
+| | Hetzner Cloud | DigitalOcean | Vultr |
+|---|---|---|---|
+| In | SSH (TCP 22) only | SSH (TCP 22) only | SSH (TCP 22) only |
+| Out, `EGRESS=internet` | every public IPv4 address (TCP and UDP on every port, ICMP: the 103 blocks the guest also lets through), nothing private, shared or link-local | the same, plus DNS (TCP and UDP port 53 only) to exactly DigitalOcean's own resolver for the Droplet's VPC, a private address (without it nothing resolves): read once from the new Droplet at its first boot (before anything but cloud-init and `bootstrap.sh` has run in it), refused unless it's that VPC's `resolver_ip` as DigitalOcean's API names it (its documented second-to-last address), and pinned in its record; never read from the computer again (`net egress` and a re-setup use the pinned one); nothing else on that network | **not filtered**: Vultr's firewall filters only what comes in |
+| Out, `EGRESS=off` | nothing: one outbound rule that reaches no one (ICMP to 192.0.2.1, a documentation address), because Hetzner lets everything out of a firewall with no outbound rule | nothing (no outbound rule: DigitalOcean lets out only what a rule allows) | not filtered |
+| The metadata service (169.254.169.254) | **not refused**: Hetzner answers it locally, past its firewalls (as it does DHCP and its DNS resolvers; tested: it answers with `EGRESS=off` too) | **not refused**: tested, it answers through DigitalOcean's firewall with `EGRESS=off` too | not filtered |
+| When it applies | named in the server's create call | applied right after the Droplet is made (DigitalOcean takes no firewall in that call; a Droplet it can't be applied to is deleted at once) | named in the create call, with its SSH rule already in it (a group with no rule isn't enforced) |
+
+In every case the computer's own firewall (below) refuses the metadata service, link-local and private ranges, and
+holds `EGRESS`; on Vultr it's the only egress layer, and `net egress` changes only it (and says there's nothing to
+set outside).
+
+**Sizes and regions** (`--size`, `--region`; the rate is said before anything is made):
+
+| Provider | Sizes | Default | Regions (default first) |
+|---|---|---|---|
+| Hetzner Cloud | Arm (Ampere): `cax11` (2 vCPU, 4 GB), `cax21` (4, 8 GB), `cax31` (8, 16 GB); x86: `cx23` (2, 4 GB), `cx33` (4, 8 GB) | `cax11` | `fsn1`, `nbg1`, `hel1` (Hetzner's Arm sizes are in its EU locations) |
+| DigitalOcean | `s-2vcpu-4gb`, `s-4vcpu-8gb` (x86: DigitalOcean has no Arm Droplets) | `s-2vcpu-4gb` | `nyc3`, and any region that offers the size |
+| Vultr | `vc2-2c-4gb`, `vc2-4c-8gb` (x86) | `vc2-2c-4gb` | `ewr`, and any region that offers the size |
+
+Each size bills by the hour up to its monthly price (list prices in each driver, with the date they were read);
+Hetzner also bills the server's IPv4 address. A create is sent once and never retried (a second try after a lost
+answer could make a second server); a provider with no room for the size there says so, and you choose another
+`--region` or size.
+
+**Lifecycle**: `start` powers a stopped server on and waits for the desktop; a server the provider says runs but whose
+SSH doesn't answer is never stopped or started by `start` (`stop --force`, then `start`, restarts it). `stop` asks the
+guest to shut down and waits for the provider to see it off; `stop --force` powers it off at once. Hetzner's and
+DigitalOcean's shutdown call presses the guest's power button, and both see a guest that powered itself off as off
+(tested). **Vultr has no such call**, its halt being a power-off, **doesn't see a guest that powered itself off** (it
+still says running), and **its start restarts an instance that runs** (all three found live). So on Vultr `stop`
+asks the guest itself over SSH (it must answer: one that doesn't is refused) and then waits up to 2 minutes for Vultr's
+own state to say stopped. SSH going quiet proves nothing (the guest may be stalled, cut off, or not obeying), and
+Vultr's state didn't change when tested live, so `stop` then says the guest may still be on, and billed in full either
+way, and halts nothing: `stop --force` halts it through Vultr, as your explicit choice. The idle stop powers the guest off after `IDLE_STOP` minutes unused; on Vultr it's off by default (it would
+save nothing, and leave a guest Vultr thinks runs: `status` says so, and `stop --force`, then `start`, restarts it).
+Whatever the provider, **a stopped server is billed in full**: `vm create`, `stop` and `status` say so. `vm delete NAME`
+deletes the server with its disk, its firewall and its key, by the ids recorded when they were made (DigitalOcean's
+listings can lag a few seconds behind what was just made), then anything else marked with its name.
+
+**A build that fails** deletes what that build made, as on Oracle Cloud: the server, read by the id journaled the
+moment its create returned (and found by its operation's mark), then its firewall and key by the ids journaled as
+each create returned (and by their mark), and nothing else; `--keep-on-failure` records the server as kept and powers
+it off, and says it's still billed in full until it's deleted. A create whose answer was lost (the connection
+dropped, or the provider failed) leaves only its operation in the journal: the clean-up looks for its mark again for
+about a minute, and if nothing shows, it says a server may exist that it can't name, keeps the journal (and the
+firewall and key), and fails, naming the provider's console and API call that would find it; no new computer is made
+under that name until a later look finds it (and deletes it). An instance read by a journaled id is this operation's
+only if it still carries the operation's mark: one marked for another is refused, touched by nothing. `vm delete`
+of such a computer refuses too, keeping everything, until you've looked and say so (`vm delete NAME
+--checked-provider`): then this Mac's settings and records go, but the operation stays listed by `metacomputer cloud
+status PROVIDER` with where to look, its firewall and key kept for it, until `cloud teardown PROVIDER` finds what it
+made and deletes it (or you drop it: `cloud teardown PROVIDER --forget OPERATION`, refused while anything shows under
+its mark). Those three run only in your own terminal: an agent tells you the command instead. Whatever deletes, stops,
+starts or forgets a server (a failed build's clean-up, `vm delete`, `start`, `stop`, `cloud teardown`) first reads it
+by its own id and acts only if it carries, now, the computer's name and the operation recorded for it: a listing's row
+is only a candidate, and anything that doesn't match stops the command with nothing done and the record kept (a
+server named for the computer that this Mac's record didn't make included: delete it at the provider if it's yours).
+`net egress` changes the provider's firewall only after the same check, and only the firewall recorded for the
+computer, read by its id and still marked for its operation. `stop` reads what it needs (the provider's plan, its
+credentials) before it touches anything on this Mac: one it can't read leaves the hub and recordings as they were.
+The list of unresolved launches is changed under one lock, so two commands at once never lose each other's entries.
+
+**Vultr**: its API key works only from the addresses on the key's access control list. When this Mac's address isn't
+on it (it changes when your public address does), Vultr answers "Unauthorized IP address", and metacomputer says
+which address to add (as a `/32`) and where (the key's access control, in Vultr's console). When a user's policy
+lacks a permission a call needs, metacomputer reports Vultr's own words for it and which call it was, rather than
+guess.
+
 ## What a stopped computer costs
 
 Each provider's manifest (`lib/cloud/`, `billing`) says what a stopped computer still bills, and `vm create` says it
@@ -168,7 +277,7 @@ provider stopping it:
 | Provider | Stopped through its API (`stop`) | The guest powered itself off (`IDLE_STOP`) | What the idle stop saves |
 |---|---|---|---|
 | Oracle Cloud, standard shapes (every `--size`) | compute stops billing; the boot volume is still billed (nothing within the Always Free allowance) | billed as running: OCI still counts it RUNNING | nothing by itself: `metacomputer stop` (or `vm delete`) is what stops the bill |
-| DigitalOcean, Vultr, Hetzner (not supported yet) | billed in full: a stopped server bills like a running one until it's deleted | billed in full | nothing: only deleting it stops the bill |
+| Hetzner Cloud, DigitalOcean, Vultr | billed in full: a stopped server bills like a running one until it's deleted (Hetzner: its IPv4 address too) | billed in full (Hetzner and DigitalOcean see it off; Vultr still counts it as running; all bill it the same) | nothing: only deleting it (`vm delete`) stops the bill (Vultr's idle stop is off by default) |
 | Your own server | between you and its host | metacomputer doesn't power it off (`IDLE_STOP=off`) | nothing |
 
 The idle stop still ends the desktop and everything running in it when nobody has used it for a while; for a billed
@@ -177,7 +286,11 @@ size, stop or delete it when you're done.
 `metacomputer cloud status oci` (instances, network, boot volumes metacomputer made), `cloud doctor oci` (the
 credentials, the network's rules), `cloud setup oci` (makes the network) and `cloud teardown oci` (deletes the
 network when no instance is left and no computer is being made in it: its security group there without an instance
-yet). Both change the network under the same lock as `vm create`.
+yet). Both change the network under the same lock as `vm create`. For `hetzner`, `digitalocean` and `vultr`: `cloud
+status` lists the servers, firewalls and keys metacomputer made there (Hetzner: and their IPv4 addresses), `cloud
+doctor` checks the token and each computer's firewall (SSH only in; out, public addresses or nothing), `cloud setup`
+checks the token (there's no shared network to make), and `cloud teardown` deletes first-boot keys left over, once no
+server is left and no computer is being made (its firewall there without its server).
 
 ## The setup, wherever it runs
 
@@ -197,7 +310,11 @@ nothing that's already right:
    LibreOffice, Cua Driver with its telemetry off, the vault's accounts (`mcfill`, `mcproxy`), the guest firewall and
    the idle stop. It reboots into the desktop, sets the live-view password, checks the desktop, then `finalize.sh`
    narrows `cuaadmin`'s sudo to `metacomputer-admin`, removes every other sudo rule the provider's image brought
-   (on a provider's computer; your own server keeps yours) and turns cloud-init off. A provider's computer is set up
+   (on a provider's computer; your own server keeps yours) and turns cloud-init off. (It's already off before that
+   reboot: with the metadata service refused, a provider's datasource that can't tell the computer is the same one
+   without it, as Vultr's can't, would take it for a new one and make new host keys, which the pinned key refuses.)
+   On a provider's computer, `bootstrap.sh` also points apt at Ubuntu's own archive when the image's mirror is on the
+   provider's private network (DigitalOcean's is, inside DigitalOcean), which the firewalls refuse. A provider's computer is set up
    once (delete it and make a new one to start over); your own server can be set up again with `build`, which runs
    `bootstrap.sh` with your sudo again.
 
@@ -211,8 +328,11 @@ nothing that's already right:
 - **Out, in two layers**, each said for what it is:
   - **Outside the VM, where the provider enforces it.** On Oracle Cloud, the computer's own network security group
     (above): public addresses only with `EGRESS=internet`, nothing with `EGRESS=off`. Nothing in the guest can change
-    it, but it can't refuse link-local addresses, so the metadata service stays reachable at the network level. Your
-    own server gets no outside layer from metacomputer: only its own firewall (your host's firewall is yours to set).
+    it, but it can't refuse link-local addresses, so the metadata service stays reachable at the network level. On
+    Hetzner Cloud and DigitalOcean, the computer's own firewall does the same (public addresses only, or nothing), and
+    the metadata service isn't refused by it either (Hetzner answers it past its firewalls; DigitalOcean doesn't say).
+    On Vultr there's no outside egress layer: its firewall filters only what comes in. Your own server gets no outside
+    layer from metacomputer: only its own firewall (your host's firewall is yours to set).
   - **Inside the VM** (`guest-firewall`, nftables): the rules apply to every account, root included, though root in
     the guest could remove them (the desktop's accounts can't). They refuse the cloud's metadata services and every
     link-local address (169.254.0.0/16, which holds 169.254.169.254 on every major cloud, and fe80::/10), and
@@ -264,8 +384,10 @@ nothing that's already right:
   a new binding gets a new tunnel and prunes the old computer's tokens. `vm delete` revokes the VM's tokens in
   whatever vault it uses and locks the computer's own vault.
 - **Provider credentials reach one program.** `bin/metacomputer`, `scripts/lib.sh` and `scripts/remote-build.sh`
-  take `OCI_*` out of the environment before they do anything else; only `lib/remote.py` is started with them, and it
-  takes them out of its own environment first, so nothing it starts gets them.
+  take `OCI_*`, `HCLOUD_TOKEN`, `DIGITALOCEAN_TOKEN` and `VULTR_API_KEY` out of the environment before they do anything
+  else; only `lib/remote.py` is started with them, and it takes them out of its own environment first, so nothing it
+  starts gets them. The REST calls go only to the providers' own API addresses, over HTTPS, and never follow a
+  redirect (`lib/provider_http.py`), which would carry the token elsewhere.
 - **What still differs from the Mac's VM**: the provider runs the hardware, so its screen, disk and what's typed into
   it are on the provider's machines (choose a VM on your Mac for sensitive work); `SSH_AUTH=cert` isn't available
   (its certificates name the Mac's gateway address), and neither are snapshots, volumes or the event watcher's health
@@ -284,8 +406,9 @@ _tunnel`).
 
 ## Settings (`config/vms/NAME.env`)
 
-`PLACE` (`server` or `oci`), `PROVIDER` (`ubuntu-vm` or `oci`), `TRANSPORT` (`ssh`), `SSH_HOST` and `SSH_HOST_PORT`
+`PLACE` (`server`, `oci`, `hetzner`, `digitalocean` or `vultr`), `PROVIDER` (`ubuntu-vm`, or the provider's own name:
+`oci`, `hetzner`, `digitalocean`, `vultr`), `TRANSPORT` (`ssh`), `SSH_HOST` and `SSH_HOST_PORT`
 (your server's address; a provider's computer gets its address from what the provider made, kept in
-`.run-vms/NAME/remote.json`), `SETUP_USER`, `SIZE`, `EGRESS`, `IDLE_STOP`; `SSH_PORT` is kept only so no two computers
+`.run-vms/NAME/remote.json`), `SETUP_USER`, `SIZE`, `REGION` (Hetzner, DigitalOcean, Vultr), `EGRESS`, `IDLE_STOP`; `SSH_PORT` is kept only so no two computers
 here share a port, and `VNC_PORT` is where the live view's tunnel listens on your Mac. `PLACE` other than `mac`
 is refused in `config/local.env`: only a computer of its own can be elsewhere.
