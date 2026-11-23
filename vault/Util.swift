@@ -663,7 +663,7 @@ func agentKindOf(_ name: String, _ args: [String]?) -> String? {
     if name == "hermes" { return "Hermes Agent" }
     guard isInterpreter(name) else { return nil }
     guard let args = args else { return unknownAgent }
-    return interpreterAgent(args, python: name.lowercased().hasPrefix("python"))
+    return interpreterAgent(args)
 }
 
 /// A process the kernel names after an interpreter (node, bun, python): the agent is told by what it runs.
@@ -671,96 +671,39 @@ func isInterpreter(_ name: String) -> Bool {
     return name == "node" || name == "nodejs" || name == "bun" || name == "Python" || matches(name, "^python[0-9.]*$")
 }
 
-/// node's options that take their value as the next argument (lib/owners.py NODE_VALUE_OPTIONS), and the ones after
-/// which no script follows.
-let nodeValueOptions: Set<String> = [
-    "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--title",
-    "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--secure-heap", "--secure-heap-min",
-    "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-directory", "--report-filename",
-    "--report-signal", "--cpu-prof-dir", "--cpu-prof-name", "--cpu-prof-interval", "--heap-prof-dir",
-    "--heap-prof-name", "--heap-prof-interval", "--disable-warning", "--experimental-config-file", "--inspect-port",
-    "--debug-port", "--max-http-header-size", "--experimental-sea-config", "--test-name-pattern", "--test-reporter",
-    "--test-reporter-destination", "--localstorage-file", "--trace-event-categories", "--trace-event-file-pattern",
-    "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--watch-kill-signal"]
-let nodeNoScript: Set<String> = ["-e", "--eval", "-p", "--print", "--run", "-h", "--help", "-v", "--version"]
+/// The agents' entry points, as an interpreter's argument names them (lib/owners.py AGENT_SCRIPTS): a script by its file
+/// name, and words found anywhere in an argument (Gemini CLI's package folder, Hermes Agent's package name).
+let agentScripts: [(String, Set<String>, [String])] = [
+    ("Gemini CLI", ["gemini", "gemini.js"], ["/@google/gemini-cli/"]),
+    ("OpenClaw", ["openclaw", "openclaw.mjs", "openclaw-gateway"], []),
+    ("Hermes Agent", ["hermes", "hermes-agent", "hermes-acp"], ["hermes_cli"])]
 
-/// The script node runs: the first argument after node's own options (their values skipped), or after `--`.
-func nodeScript(_ argv: [String]) -> String? {
-    var i = 1
-    while i < argv.count {
-        let a = argv[i]
-        if a == "--" { return i + 1 < argv.count ? argv[i + 1] : nil }
-        if nodeNoScript.contains(a) { return nil }
-        if a.hasPrefix("-") && a != "-" {
-            i += (!a.contains("=") && nodeValueOptions.contains(a)) ? 2 : 1
-            continue
-        }
-        return a
+/// The agent whose entry point an argument (or an option's `=value`) names, else nil.
+func entryAgent(_ value: String) -> String? {
+    let base = value.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? value   // os.path.basename
+    for (agent, names, words) in agentScripts where names.contains(base) || words.contains(where: { value.contains($0) }) {
+        return agent
     }
     return nil
 }
 
-/// What python runs: ("code", the -c program), ("module", the -m module) or ("script", its path). Short options
-/// cluster; -c and -m end the options, -W and -X take a value.
-func pythonTarget(_ argv: [String]) -> (String, String)? {
-    var i = 1
-    while i < argv.count {
-        let a = argv[i]
-        if a == "--" { return i + 1 < argv.count ? ("script", argv[i + 1]) : nil }
-        if a.hasPrefix("--") { i += a == "--check-hash-based-pycs" ? 2 : 1; continue }
-        if a.hasPrefix("-") && a != "-" {
-            var skip = 1
-            let chars = Array(a)
-            var j = 1
-            while j < chars.count {
-                let c = chars[j]
-                let rest = String(chars[(j + 1)...])
-                if c == "c" || c == "m" {
-                    let v = rest.isEmpty ? (i + 1 < argv.count ? argv[i + 1] : nil) : rest
-                    guard let value = v else { return nil }
-                    return (c == "c" ? "code" : "module", value)
-                }
-                if c == "W" || c == "X" { skip = rest.isEmpty ? 2 : 1; break }
-                j += 1
+/// The agent an interpreter's arguments (exactly) run, else nil, as lib/owners.py script_agent: every argument looked
+/// at, argv[0] (a process's title: `openclaw`, `openclaw-gateway`, `hermes`) included, never an option table: an
+/// argument, or the value after an option's `=`, naming an agent's entry point, as written or, for an absolute path,
+/// as it resolves (a link to it). When in doubt it's an agent; the first argument that names one decides.
+func interpreterAgent(_ args: [String]) -> String? {
+    for a in args {
+        var values = [a]
+        if let eq = a.firstIndex(of: "=") { values.append(String(a[a.index(after: eq)...])) }
+        for v in values where !v.isEmpty {
+            if let got = entryAgent(v) { return got }
+            if v.hasPrefix("/"), let r = realpath(v, nil) {
+                let real = String(cString: r)
+                free(r)
+                if real != v, let got = entryAgent(real) { return got }
             }
-            i += skip
-            continue
-        }
-        return ("script", a)
-    }
-    return nil
-}
-
-/// The agent an interpreter's arguments (exactly) run, else nil, as lib/owners.py script_agent:
-/// - "OpenClaw": argv[0] `openclaw` or `openclaw-gateway` (the names it gives its processes), or node running its
-///   `openclaw` launcher (openclaw.mjs);
-/// - "Hermes Agent": argv[0] `hermes` (its process title, with setproctitle), or python running hermes_cli (`-m`, a
-///   `-c` program that imports it: its launcher's) or a `hermes` script; its gateway runs every conversation;
-/// - "Gemini CLI": node running its `gemini` script (bin/gemini, or bundle/gemini.js of @google/gemini-cli), the
-///   launcher and the node process it starts again, whose children are its shell commands and MCP servers.
-/// The program is read past the interpreter's own options and their values.
-func interpreterAgent(_ args: [String], python: Bool) -> String? {
-    guard let first = args.first else { return nil }
-    let title = URL(fileURLWithPath: first).lastPathComponent
-    if title == "openclaw" || title == "openclaw-gateway" { return "OpenClaw" }
-    if title == "hermes" { return "Hermes Agent" }
-    if python {
-        guard let (kind, v) = pythonTarget(args) else { return nil }
-        switch kind {
-        case "module":
-            let top = v.split(separator: ".").first.map(String.init) ?? v
-            return top == "hermes_cli" || top == "hermes_agent" ? "Hermes Agent" : nil
-        case "code":
-            return v.contains("hermes_cli") ? "Hermes Agent" : nil
-        default:
-            let base = URL(fileURLWithPath: v).lastPathComponent
-            return ["hermes", "hermes-agent", "hermes-acp"].contains(base) ? "Hermes Agent" : nil
         }
     }
-    guard let script = nodeScript(args), !script.isEmpty else { return nil }
-    let base = URL(fileURLWithPath: script).lastPathComponent
-    if base == "gemini" || base == "gemini.js" || script.contains("/@google/gemini-cli/") { return "Gemini CLI" }
-    if base == "openclaw" || base == "openclaw.mjs" { return "OpenClaw" }
     return nil
 }
 

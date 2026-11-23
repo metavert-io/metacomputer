@@ -1768,6 +1768,67 @@ def test_codex_step():
         shutil.rmtree(t, ignore_errors=True)
 
 
+def test_codex_skill_links():
+    """The Codex step's skill links in ~/.agents/skills follow the rule the other agents' do (Codex's re-check): a link is
+    metacomputer's only when it points into this checkout's own skill folders, a relative target read from the link's
+    own folder (never the installer's). A broken link of someone else's, one into another folder of the same name, and
+    a relative one that only looks like the checkout's from where install.sh runs are left as they are, named by their
+    path only, and the step is unfinished (exit 1, recorded for `metacomputer update`); a link into the checkout, the
+    wrong skill or relative, is put right. With the real codex, in a throwaway HOME and CODEX_HOME."""
+    if not shutil.which("codex"):
+        print("SKIP the Codex skill-link checks: no codex command on this Mac")
+        return
+    t = tempfile.mkdtemp(prefix="mcomp-codex-")
+    try:
+        home, ch = os.path.join(t, "home"), os.path.join(t, "home", ".codex")
+        os.makedirs(ch)
+        env = dict(os.environ, HOME=home, CODEX_HOME=ch)
+        for k in ("MCOMP_CONFIG", "MCOMP_VM"):
+            env.pop(k, None)
+        sk = os.path.join(home, ".agents", "skills")
+        os.makedirs(sk)
+        os.makedirs(os.path.join(home, "mine", "skills", "cua-driver"))
+        stamp = os.path.join(home, ".local", "share", "metacomputer", "installed.json")
+        write(stamp, json.dumps({"version": "v0.4.5", "commit": "0" * 40, "checkout": LAB, "incomplete": []}))
+
+        def go():
+            return subprocess.run([INSTALL, "--only-codex"], env=env, capture_output=True, text=True, timeout=180,
+                                  stdin=subprocess.DEVNULL, cwd=t)
+
+        def incomplete():
+            try:
+                return json.load(open(stamp)).get("incomplete") or []
+            except (OSError, ValueError):
+                return None
+        for first, second in ((("/unmounted/custom/skills/metacomputer", "../../mine/skills/cua-driver")),
+                              ("./skills/metacomputer", os.path.join(home, "mine", "skills", "cua-driver"))):
+            for n, target in (("metacomputer", first), ("cua-driver", second)):
+                if os.path.lexists(os.path.join(sk, n)):
+                    os.remove(os.path.join(sk, n))
+                os.symlink(target, os.path.join(sk, n))
+            write(stamp, json.dumps({"version": "v0.4.5", "commit": "0" * 40, "checkout": LAB, "incomplete": []}))
+            p = go()
+            check(f"Codex: links of someone else's ({first}, {second}) are left as they are, named by their path only; "
+                  "exit 1, recorded as unfinished", p.returncode == 1
+                  and os.readlink(os.path.join(sk, "metacomputer")) == first
+                  and os.readlink(os.path.join(sk, "cua-driver")) == second
+                  and "~/.agents/skills/metacomputer is already there and isn't metacomputer's" in p.stdout
+                  and first not in p.stdout + p.stderr and second not in p.stdout + p.stderr
+                  and "codex" in (incomplete() or []), (p.returncode, p.stdout[-600:], incomplete()))
+        for n in ("metacomputer", "cua-driver"):
+            os.remove(os.path.join(sk, n))
+        os.symlink(os.path.relpath(os.path.join(LAB, "skills", "metacomputer"), sk), os.path.join(sk, "cua-driver"))
+        os.symlink(os.path.join(LAB, ".claude", "skills", "cua-driver"), os.path.join(sk, "metacomputer"))
+        p = go()
+        check("Codex: links into this checkout's own skill folders (relative, or the wrong skill) are metacomputer's: "
+              "put right, exit 0, nothing left unfinished", p.returncode == 0
+              and os.readlink(os.path.join(sk, "metacomputer")) == os.path.join(LAB, "skills", "metacomputer")
+              and os.readlink(os.path.join(sk, "cua-driver")) == os.path.join(LAB, ".claude", "skills", "cua-driver")
+              and "codex" not in (incomplete() or []), (p.returncode, p.stdout[-400:], incomplete()))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
 def test_codex_config_edits():
     """The Codex step changes only metacomputer's own registration (F10: its command exactly this checkout's launcher, a
     path earlier versions registered under it, or ~/.local/bin/metacomputer; exactly ["mcp-lazy"]), read again whole
@@ -2152,6 +2213,7 @@ test_vnc_password()
 test_vnc_real_keychain()
 test_setup_in_checkout()
 test_codex_step()
+test_codex_skill_links()
 test_codex_config_edits()
 test_agent_choices()
 test_build_vault_quiet()

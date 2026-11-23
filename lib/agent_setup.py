@@ -18,8 +18,13 @@ run names it by its program and how many arguments it has, or its transport (nev
 says how to remove it yourself, and the step is unfinished. An entry that can't be read ("error") is never taken for a
 missing one. Each read, change and read-back happens under a lock of the agent's own (agent_lock: two metacomputer
 installs never interleave on one agent), the entry is read again right before any change (its digest, or that it's
-still missing), and read back after it. What's left: these agents' CLIs have no compare-and-swap, so a change another
-program makes to the entry between that last read and the agent's own write isn't seen (the window is one CLI call).
+still missing), and read back after it. What's left (docs/commands.md, "The other agents", says the same): these agents'
+CLIs have no compare-and-swap, and the lock binds only metacomputer, so another program (the agent itself, an editor,
+another tool) that writes an entry named metacomputer between that last read and the CLI's own write, a window of one
+CLI call, isn't seen: an add replaces it (Gemini CLI's `mcp add`, Hermes Agent's `config set`; OpenClaw's `mcp add`
+refuses an existing name instead), and a removal, which these CLIs make by name only, removes it. The read-back after
+an add sees what won; the one after a removal can only confirm the name is gone. A skill link swapped for someone else's between metacomputer's
+check and its unlink is removed the same way.
 
 Skill links are metacomputer's only when they point into this checkout's own skill folders (skills/, .claude/skills/;
 a relative target is read from the link's folder): only those are ever replaced or removed. A skill that can't be linked
@@ -464,17 +469,30 @@ def agent_lock(name, env):
         os.close(fd)
 
 
+MENTIONS_CAP = 16 << 20
+# What makes a configuration file pull in others, which an uninstall without the agent's CLI doesn't follow: OpenClaw's
+# `$include` (JSON5), and YAML's `!include` tag.
+INCLUDES = (b"$include", b"!include")
+
+
 def mentions(path):
-    """True when a configuration file may run metacomputer's command (it names metacomputer or mcomp), or can't be
-    read; False when it plainly doesn't."""
+    """Why a configuration file may run metacomputer's command, or None when it plainly doesn't. Anything not read in
+    full counts as maybe: "names it" (metacomputer or mcomp), "can't be read", "is larger than 16 MB" (only the start
+    was read) or "includes other files" (INCLUDES: what they hold wasn't read)."""
     try:
         with open(path, "rb") as f:
-            data = f.read(16 << 20)
+            data = f.read(MENTIONS_CAP + 1)
     except FileNotFoundError:
-        return False
+        return None
     except OSError:
-        return True
-    return b"metacomputer" in data or b"mcomp" in data
+        return "can't be read"
+    if b"metacomputer" in data or b"mcomp" in data:
+        return "names it"
+    if len(data) > MENTIONS_CAP:
+        return "is larger than 16 MB"
+    if any(i in data for i in INCLUDES):
+        return "includes other files"
+    return None
 
 
 # --- the steps ---------------------------------------------------------------------------------------------------
@@ -574,11 +592,12 @@ def install(agent, root, link, env, out):
 def _unregister(agent, prog, root, link, env, out):
     """The MCP server, under the agent's lock: True when it finished. prog None: the agent's CLI isn't available."""
     if prog is None and not agent.reads_files:
-        files = [f for f in agent.config_files(env) if os.path.lexists(f) and mentions(f)]
+        files = [(f, mentions(f)) for f in agent.config_files(env) if os.path.lexists(f)]
+        files = [(f, why) for f, why in files if why]
         if files:
-            out("warn", f"{agent.label}'s {agent.prog} command isn't available, so its configuration "
-                        f"({', '.join(tilde(f, env) for f in files)}) couldn't be read, and it may run metacomputer's "
-                        "command: that stays")
+            out("warn", f"{agent.label}'s {agent.prog} command isn't available, so its configuration couldn't be checked "
+                        f"in full ({'; '.join(tilde(f, env) + ' ' + why for f, why in files)}): it may run "
+                        "metacomputer's command, so that stays")
             out("keep", f"{agent.label}'s")
             return False
         return True
@@ -677,10 +696,15 @@ def status(agent, root, link, env):
 
 
 def main(argv):
+    if argv[:1] == ["link-ours"]:          # install.sh's Codex step: the same ownership rule for its skill links
+        if len(argv) != 4 or argv[2] != "--root":
+            print("usage: agent_setup.py link-ours PATH --root CHECKOUT", file=sys.stderr)
+            return 2
+        return 0 if os.path.islink(argv[1]) and ours_link(argv[1], argv[3]) else 1
     if len(argv) != 6 or argv[0] not in ("install", "uninstall", "status") or argv[1] not in AGENTS \
             or argv[2] != "--root" or argv[4] != "--link":
         print("usage: agent_setup.py install|uninstall|status openclaw|hermes|gemini --root CHECKOUT --link "
-              "~/.local/bin/metacomputer", file=sys.stderr)
+              "~/.local/bin/metacomputer\n       agent_setup.py link-ours PATH --root CHECKOUT", file=sys.stderr)
         return 2
     what, agent, root, link = argv[0], AGENTS[argv[1]], argv[3], argv[5]
     env = dict(os.environ)
@@ -692,6 +716,10 @@ def main(argv):
         done = (install if what == "install" else uninstall)(agent, root, link, env, out)
     except Exception as e:          # never a traceback that could quote a configuration: say what failed, by its type
         out("warn", f"the {agent.label} step stopped unexpectedly ({type(e).__name__})")
+        if what == "uninstall":     # its configuration wasn't checked: it may run the command, which stays
+            out("warn", f"{agent.label}'s configuration wasn't checked, so the command stays; run ./install.sh "
+                        "--uninstall again")
+            out("keep", f"{agent.label}'s")
         done = False
     out.flush()
     return 0 if done else 1

@@ -218,107 +218,55 @@ UNKNOWN_AGENT = "unidentified agent"
 AGENTS = ("Claude Code", "Codex", "OpenClaw", "Hermes Agent", "Gemini CLI", UNKNOWN_AGENT)
 # An interpreter's process (ps comm= is its program, often by its full path): the agent is told by what it runs.
 _INTERPRETER = re.compile(r"(node|nodejs|bun|python[0-9.]*|Python)")
-# node's options that take their value as the next argument (any other option is a flag, or carries `=value`), and the
-# ones after which no script follows (code, or a package.json script).
-NODE_VALUE_OPTIONS = frozenset((
-    "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--title",
-    "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--secure-heap", "--secure-heap-min",
-    "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-directory", "--report-filename",
-    "--report-signal", "--cpu-prof-dir", "--cpu-prof-name", "--cpu-prof-interval", "--heap-prof-dir",
-    "--heap-prof-name", "--heap-prof-interval", "--disable-warning", "--experimental-config-file", "--inspect-port",
-    "--debug-port", "--max-http-header-size", "--experimental-sea-config", "--test-name-pattern", "--test-reporter",
-    "--test-reporter-destination", "--localstorage-file", "--trace-event-categories", "--trace-event-file-pattern",
-    "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--watch-kill-signal"))
-NODE_NO_SCRIPT = frozenset(("-e", "--eval", "-p", "--print", "--run", "-h", "--help", "-v", "--version"))
+# The agents' entry points, as an interpreter's argument names them (script_agent): a script by its file name, Gemini
+# CLI's package folder in its path, and Hermes Agent's package name anywhere (a module, a script, an import). Not
+# OpenClaw's package folder: its helper processes (the relay between its gateway and an MCP server) run from there and
+# are the gateway's, which is found above them.
+AGENT_SCRIPTS = (("Gemini CLI", ("gemini", "gemini.js"), ("/@google/gemini-cli/",)),
+                 ("OpenClaw", ("openclaw", "openclaw.mjs", "openclaw-gateway"), ()),
+                 ("Hermes Agent", ("hermes", "hermes-agent", "hermes-acp"), ("hermes_cli",)))
 
 
 def is_interpreter(comm):
     return bool(_INTERPRETER.fullmatch(os.path.basename(comm or "").strip("()")))
 
 
-def _family(comm):
-    return "python" if os.path.basename(comm or "").strip("()").lower().startswith("python") else "node"
-
-
-def _node_script(argv):
-    """The script node runs: the first argument after node's own options (their values skipped), or after `--`."""
-    i = 1
-    while i < len(argv):
-        a = argv[i]
-        if a == "--":
-            return argv[i + 1] if i + 1 < len(argv) else None
-        if a in NODE_NO_SCRIPT:
-            return None
-        if a.startswith("-") and a != "-":
-            i += 2 if ("=" not in a and a in NODE_VALUE_OPTIONS) else 1
-            continue
-        return a
+def _entry_agent(value):
+    """The agent whose entry point an argument (or an option's `=value`) names, else None (AGENT_SCRIPTS)."""
+    for agent, names, words in AGENT_SCRIPTS:
+        if os.path.basename(value) in names or any(w in value for w in words):
+            return agent
     return None
 
 
-def _python_target(argv):
-    """What python runs: ("code", the -c program), ("module", the -m module) or ("script", its path), or None. Short
-    options cluster (`-IBc PROGRAM`); -c and -m end the options, -W and -X take a value."""
-    i = 1
-    while i < len(argv):
-        a = argv[i]
-        if a == "--":
-            return ("script", argv[i + 1]) if i + 1 < len(argv) else None
-        if a.startswith("--"):
-            i += 2 if a == "--check-hash-based-pycs" else 1
-            continue
-        if a.startswith("-") and a != "-":
-            skip = 1
-            for j in range(1, len(a)):
-                if a[j] in "cm":
-                    v = a[j + 1:] or (argv[i + 1] if i + 1 < len(argv) else None)
-                    return None if v is None else ("code" if a[j] == "c" else "module", v)
-                if a[j] in "WX":
-                    skip = 1 if a[j + 1:] else 2
-                    break
-            i += skip
-            continue
-        return ("script", a)
-    return None
-
-
-def script_agent(argv, family="node"):
-    """The agent an interpreter's arguments (argv, exactly) run, else None:
-      OpenClaw      argv[0] `openclaw` or `openclaw-gateway` (the name it gives its processes), or node running its
-                    `openclaw` launcher (openclaw.mjs) before it does
-      Hermes Agent  argv[0] `hermes` (its process title, with setproctitle), or python running its CLI or gateway: the
-                    module hermes_cli (`-m hermes_cli.main ... gateway run`), a -c program that imports it (its
-                    launcher's), or a `hermes` script; the gateway runs every conversation's tools and MCP servers
-      Gemini CLI    node running its `gemini` script (npm's and Homebrew's bin/gemini, or bundle/gemini.js of the
-                    @google/gemini-cli package): the launcher, and the node process it starts again with more memory,
-                    whose children are its shell commands and MCP servers
-    The program is read past the interpreter's own options and their values (node: NODE_VALUE_OPTIONS; python: -W, -X),
-    from the exact arguments (proc_argv), so a path with spaces stays one."""
-    if not argv:
-        return None
-    title = os.path.basename(argv[0])
-    if title in ("openclaw", "openclaw-gateway"):
-        return "OpenClaw"
-    if title == "hermes":
-        return "Hermes Agent"
-    if family == "python":
-        t = _python_target(argv)
-        if t is None:
-            return None
-        kind, v = t
-        if kind == "module":
-            return "Hermes Agent" if v.split(".")[0] in ("hermes_cli", "hermes_agent") else None
-        if kind == "code":
-            return "Hermes Agent" if "hermes_cli" in v else None
-        return "Hermes Agent" if os.path.basename(v) in ("hermes", "hermes-agent", "hermes-acp") else None
-    script = _node_script(argv)
-    if not script:
-        return None
-    base = os.path.basename(script)
-    if base in ("gemini", "gemini.js") or "/@google/gemini-cli/" in script:
-        return "Gemini CLI"
-    if base in ("openclaw", "openclaw.mjs"):
-        return "OpenClaw"
+def script_agent(argv):
+    """The agent an interpreter's arguments (argv, exactly) run, else None. Every argument is looked at, argv[0] (the
+    title a process gives itself: OpenClaw's `openclaw` and `openclaw-gateway`, Hermes Agent's `hermes`) included, never
+    an interpreter's option table, which can't be complete: an argument, or the value after an option's `=`, that
+    names an agent's entry point (AGENT_SCRIPTS), as written or, for an absolute path, as it resolves (a link to it):
+      Gemini CLI    its `gemini` script (npm's and Homebrew's bin/gemini, bundle/gemini.js of @google/gemini-cli): the
+                    launcher, and the node process it starts again with more memory, whose children are its shell
+                    commands and MCP servers
+      OpenClaw      its `openclaw` launcher (openclaw.mjs) and the names it gives its processes
+      Hermes Agent  its package hermes_cli anywhere (`-m hermes_cli.main ... gateway run`, its launcher's -c program
+                    that imports it, a script in it) or a `hermes` script; the gateway runs every conversation's tools
+                    and MCP servers
+    When in doubt it's an agent: a program that only mentions one (an argument naming bin/gemini, say) counts as that
+    agent, which only makes commands that need the user at their own terminal refuse under it; missing a real agent
+    would let it run them. The first argument that names one decides."""
+    for a in argv or ():
+        for v in (a, a.partition("=")[2]) if "=" in a else (a,):
+            if not v:
+                continue
+            got = _entry_agent(v)
+            if got is None and v.startswith("/"):
+                try:
+                    real = os.path.realpath(v)
+                    got = _entry_agent(real) if real != v and os.path.exists(real) else None
+                except (OSError, ValueError):
+                    got = None
+            if got:
+                return got
     return None
 
 
@@ -336,7 +284,7 @@ def agent_kind(comm, argv=None):
         return "OpenClaw"
     if base == "hermes":
         return "Hermes Agent"
-    return script_agent(argv, _family(comm)) if argv and is_interpreter(comm) else None
+    return script_agent(argv) if argv and is_interpreter(comm) else None
 
 
 def agent_of(pid, table):

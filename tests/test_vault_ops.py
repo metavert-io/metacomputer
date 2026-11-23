@@ -1257,14 +1257,21 @@ def run(td, procs):
               and recs[-1].get("requester", {}).get("agent") == label, (res, recs[-2:]))
     # The same argument cases lib/owners.py is checked against (tests/test_session_guard.py), through the vault's own
     # reading of them
-    cases_file = os.path.join(LAB, "tests", "fixtures", "agent_argv.json")
-    cases = json.load(open(cases_file))
-    r = subprocess.run([BIN, "test-agent-kind", cases_file], env=env, capture_output=True, text=True, timeout=60)
+    sys.path.insert(0, TESTS)
+    import agent_argv_cases
+    links = tempfile.mkdtemp(prefix="mcomp-argv-")
+    try:
+        cases_file = agent_argv_cases.write(links)
+        cases = json.load(open(cases_file))
+        r = subprocess.run([BIN, "test-agent-kind", cases_file], env=env, capture_output=True, text=True, timeout=60)
+    finally:
+        shutil.rmtree(links, ignore_errors=True)
     got = r.stdout.splitlines()
     wrong = [(c["why"], g) for c, g in zip(cases, got) if (None if g == "-" else g) != c["agent"]]
     check(f"the vault tells the agents from their kernel names and arguments as lib/owners.py does ({len(cases)} shared "
-          "cases: options and their values, paths with spaces, -c and -m, titles, unreadable arguments)",
-          r.returncode == 0 and len(got) == len(cases) and not wrong, (wrong, r.stderr[-300:]))
+          "cases: every argument looked at, no option tables; a link by what it resolves to; when in doubt an agent; "
+          "titles, unreadable arguments)", r.returncode == 0 and len(got) == len(cases) and not wrong,
+          (wrong, r.stderr[-300:]))
     h = detached_start("fill", "web-each", "--vm", "opsvm", "--field", "password")
     u.expect("Type web-each to allow")
     u.send("web-each unlock\n")

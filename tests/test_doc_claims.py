@@ -708,17 +708,22 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
-    ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above\s+them in the process tree.*?and\s+also when a node or python process above them has arguments that can't be read",
+    ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above\s+them in the process tree.*?and\s+also when a node or python process above them has arguments that can't be read.*?Such a process is told by every one of its arguments, not by a list of the interpreter's options",
      lambda m: "def at_user_terminal(fds=(0,)):" in raw("lib/owners.py")
      and "return ancestry_complete(os.getpid(), table) and claude_of(os.getpid(), table) is None" in raw("lib/owners.py")
      and 'return "Claude Code"' in function_src("lib/owners.py", "agent_kind")
      and 'return "Codex"' in function_src("lib/owners.py", "agent_kind")
      and 'if base in ("openclaw", "openclaw-gateway"):' in function_src("lib/owners.py", "agent_kind")
-     and 'return script_agent(argv, _family(comm)) if argv and is_interpreter(comm) else None' in function_src("lib/owners.py", "agent_kind")
+     and 'return script_agent(argv) if argv and is_interpreter(comm) else None' in function_src("lib/owners.py", "agent_kind")
+     and "for a in argv or ():" in function_src("lib/owners.py", "script_agent")
+     and 'got = _entry_agent(real) if real != v and os.path.exists(real) else None' in function_src("lib/owners.py", "script_agent")
+     and '("Hermes Agent", ("hermes", "hermes-agent", "hermes-acp"), ("hermes_cli",))' in raw("lib/owners.py")
+     and "NODE_VALUE_OPTIONS" not in raw("lib/owners.py") and "nodeValueOptions" not in raw("vault/Util.swift")
+     and "for a in args {" in raw("vault/Util.swift") and "realpath(v, nil)" in raw("vault/Util.swift")
      and "return UNKNOWN_AGENT if argv is None else agent_kind(comm, argv)" in function_src("lib/owners.py", "agent_of")
      and "guard let args = args else { return unknownAgent }" in raw("vault/Util.swift")
      and 'case unknownAgent:\n        return "an unidentified agent\'s process"' in raw("vault/Util.swift")
-     and all(f'return "{a}"' in function_src("lib/owners.py", "script_agent") for a in ("Gemini CLI", "OpenClaw", "Hermes Agent"))
+     and all(f'("{a}", (' in raw("lib/owners.py") for a in ("Gemini CLI", "OpenClaw", "Hermes Agent"))
      and "if agent_of(p, table):" in function_src("lib/owners.py", "claude_of")
      and "owners.at_user_terminal((0, 2))" in raw("lib/netpolicy.py") and "owners.at_user_terminal((0,))" in raw("lib/learn.py")
      and "return owners.at_user_terminal((0,))" in raw("lib/handoff.py")
@@ -727,11 +732,26 @@ CLAIMS = [
      and "guard atUserTerminal() else {" in raw("vault/TTY.swift")
      and "return agentAbove(getpid()) == false" in raw("vault/TTY.swift")
      and 'if e.name == "codex" { return "Codex" }' in raw("vault/Util.swift")
-     and "return interpreterAgent(args, python: name.lowercased().hasPrefix(\"python\"))" in raw("vault/Util.swift")),
+     and "return interpreterAgent(args)" in raw("vault/Util.swift")),
     ("docs/codex.md", r"a `metacomputer` command stops at once\s+with exit status (77)",
      lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("bin/metacomputer")
      and f"exit {m[1]} ;;" in raw("bin/metacomputer")),
     ("docs/codex.md", r"with `tool_timeout_sec = (\d+)`", lambda m: f"CODEX_TOOL_TIMEOUT={m[1]}" in raw("install.sh")),
+    ("bench/README.md", r"Gemini CLI, Hermes Agent and OpenClaw sessions each run in a throwaway HOME,\s+made for that session.*?"
+                        r"deleted\s+afterwards through `lib/safedelete.py`, whether the session ends, times out\s+or fails"
+                        r".*?None runs with a yolo or approve-everything mode",
+     lambda m: 'ISOLATED = ("gemini", "hermes", "openclaw")' in raw("bench/bench.py")
+     and 'home = tempfile.mkdtemp(prefix="mcomp-bench-home-")' in function_src("bench/bench.py", "run_session")
+     and "finally:\n        end_isolated(agent, claude, home)" in function_src("bench/bench.py", "run_session")
+     and "safedelete.rmtree(home, quiet=True)" in function_src("bench/bench.py", "end_isolated")
+     and "yolo" not in function_src("bench/bench.py", "isolate_session").split('"""')[2]
+     and '"--approval-mode", "default"' in function_src("bench/bench.py", "isolate_session")
+     and '"exec": {"mode": "allowlist"}' in function_src("bench/bench.py", "isolate_session")
+     and '("approvals.mode", "manual")' in raw("bench/bench.py")),
+    ("bench/README.md", r"`--pass-env NAME\[,NAME...\]` \| `BENCH_PASS_ENV` \| none \| `gemini`, `hermes`, `openclaw`: the only variables of yours their sessions get",
+     lambda m: '"pass_env": ""' in raw("bench/bench.py")
+     and "for n in pass_env_names(sw):" in function_src("bench/bench.py", "session_env")
+     and "env = {k: os.environ[k] for k in SESSION_ENV_KEEP if k in os.environ}" in function_src("bench/bench.py", "session_env")),
     ("SECURITY.md", r"A window named by app or title is resolved against the live window list by the driver's own rules",
      lambda m: "def resolve_named(self, spec, every=False):" in raw("lib/mcp_hub.py") and "every=strict)" in raw("lib/mcp_hub.py")
      and "return (True, None) if strict else (False, None)" in raw("lib/mcp_hub.py")

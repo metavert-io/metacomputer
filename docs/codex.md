@@ -36,7 +36,7 @@ What it adds:
 | What | Where | For |
 | --- | --- | --- |
 | The MCP server `metacomputer` (`<checkout>/bin/metacomputer mcp-lazy`) with `tool_timeout_sec = 600` and `default_tools_approval_mode = "approve"` | `$CODEX_HOME/config.toml` (`~/.codex`) | The tools, `mcp__metacomputer__*`, in every Codex session. Codex's default tool timeout (60 s) is shorter than a long `run_steps` or text typed at a person's pace. Codex otherwise asks before every tool that isn't marked read-only (every click), and `codex exec` refuses them; these tools act only on the virtual computer, through the hub's guards. |
-| The skills `metacomputer` and `cua-driver` (links into the checkout) | `~/.agents/skills/` | When and how to use the virtual computer, as Claude Code gets them from the plugin |
+| The skills `metacomputer` and `cua-driver` (links into the checkout) | `~/.agents/skills/` | When and how to use the virtual computer, as Claude Code gets them from the plugin. A link there is metacomputer's only when it points into this checkout's own skill folders; anything else of that name (a broken link included) is left, named by its path, and the step counts as unfinished |
 | metacomputer's rules | `$CODEX_HOME/rules/metacomputer.rules` | Running `metacomputer` commands outside Codex's sandbox (below) |
 
 By hand, the same is:

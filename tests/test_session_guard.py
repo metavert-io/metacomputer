@@ -1295,10 +1295,17 @@ def other_agents_checks():
     check("no record is left behind", rec_files() == [], rec_files())
     # The argument cases the vault is checked against too (tests/test_vault_ops.py, its test-agent-kind): exact argv,
     # options and their values, paths with spaces, -c and -m, titles, unreadable arguments.
-    cases = json.load(open(os.path.join(TESTS, "fixtures", "agent_argv.json")))
+    import agent_argv_cases
+    links = tempfile.mkdtemp(prefix="mcomp-argv-")
+    try:
+        cases = agent_argv_cases.load(links)
+    except OSError:
+        cases = []
     wrong = [(c["why"], owners.agent_of(7, owners.ProcTable({7: (1, c["name"])}, argvs={7: c["argv"]})))
              for c in cases if owners.agent_of(7, owners.ProcTable({7: (1, c["name"])}, argvs={7: c["argv"]})) != c["agent"]]
-    check(f"each agent is told from its exact arguments, and look-alikes aren't ({len(cases)} shared cases)", not wrong,
+    shutil.rmtree(links, ignore_errors=True)
+    check(f"each agent is told from its exact arguments, every one looked at (no option tables), a link by what it "
+          f"resolves to, and when in doubt an agent; look-alikes aren't ({len(cases)} shared cases)", cases and not wrong,
           wrong)
     t = {30: (1, "node")}
     check("a plain process table (the tests' known processes) reads no arguments: an interpreter there isn't an agent",
@@ -1320,6 +1327,19 @@ def other_agents_checks():
         owners.ps_table, owners.os.isatty = real
     check("...so commands only the user runs refuse under it (at_user_terminal), and pass once it's known to be another "
           "program", refused and passed, (refused, passed))
+    # Gemini CLI started with node options no table lists (Codex's re-check): still Gemini, so user-only commands refuse.
+    try:
+        owners.ps_table = lambda strict=False: t
+        owners.os.isatty = lambda fd: True
+        under = {}
+        for opts in (["--dns-result-order", "ipv4first"], ["--disable-proto", "throw"], ["--stack-size", "4000"]):
+            t.argvs[500] = ["/opt/homebrew/bin/node", *opts, "/opt/bin/gemini", "-p", "hi"]
+            under[opts[0]] = (owners.agent_of(500, t), owners.at_user_terminal((0,)))
+    finally:
+        owners.ps_table, owners.os.isatty = real
+    check("...and Gemini CLI started with node options that take a value (--dns-result-order, --disable-proto, "
+          "--stack-size) is still Gemini CLI: commands only the user runs refuse under it",
+          all(v == ("Gemini CLI", False) for v in under.values()), under)
     check("...and the live table reads arguments exactly (proc_argv: this process's own, spaces kept)",
           owners.proc_argv(os.getpid()) is not None and owners.ps_table().argv(os.getpid()) == owners.proc_argv(os.getpid())
           and owners.proc_argv(2 ** 22 + 7) is None)

@@ -106,15 +106,26 @@ in Terminal, iTerm or an SSH session, not through an agent.
 
 ## A benchmark run
 
-`bench/bench.py run --agent gemini` runs each task in `gemini -p ... -o stream-json --approval-mode yolo --skip-trust
---allowed-mcp-server-names metacomputer`, with the work folder's own `.gemini/settings.json` (the server with the run's
-settings, trusted) and the skill in its `.agents/skills`, trusted for that run only. It needs your own Gemini API key or
-Code Assist sign-in, in your own terminal (not run here; Google's README asks not to use Gemini CLI to benchmark Gemini
-models, and this measures metacomputer, not the model):
+`bench/bench.py run --agent gemini` runs each task in `gemini -p ... -o stream-json --approval-mode default --skip-trust
+--allowed-mcp-server-names metacomputer`, in a throwaway HOME made for that session and deleted afterwards
+(bench/README.md, "Isolated sessions"): none of your Gemini CLI settings, sign-in or environment, only the variables you
+name with `--pass-env`. Its `~/.gemini/settings.json` holds only the server (with the run's settings, trusted), with
+folder trust and telemetry off; the skill is in the work folder's `.agents/skills`.
+
+**What it may do without asking:** a policy file (`~/.gemini/policies/`, Gemini CLI's policy engine) allows
+metacomputer's tools and shell commands that start with metacomputer's command, and nothing else. Every other tool
+keeps Gemini CLI's default rule; what that asks for (writing files, other shell commands, fetching pages) is refused in
+a headless session. No yolo.
+
+It needs a Gemini API key (your Code Assist sign-in is in your own `~/.gemini`, which the session doesn't see), given
+to that command only and named with `--pass-env` (not run here; Google's README asks not to use Gemini CLI to benchmark
+Gemini models, and this measures metacomputer, not the model):
 
 ```bash
 export MCOMP_CONFIG=/path/to/test-vm.env
-cd ~/metacomputer && bench/bench.py run --agent gemini --run-id gemini-std
+cd ~/metacomputer
+# GEMINI_API_KEY set for this command only (from your secrets manager), and passed on by name:
+bench/bench.py run --agent gemini --pass-env GEMINI_API_KEY --run-id gemini-std
 ```
 
 Gemini CLI reports tokens, not a cost: `--budget` and `--cap` don't apply, and each task keeps its timeout.

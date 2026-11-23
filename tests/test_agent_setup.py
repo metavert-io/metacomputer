@@ -635,18 +635,73 @@ def no_cli_cases():
         write(os.path.join(b.home, ".hermes", "config.yaml"), "mcp_servers:\n  mine:\n    command: " + b.link + "\n")
         p = b.install("--uninstall")
         check("Hermes Agent not on PATH, its config.yaml naming the command: links kept, said, exit 1",
-              p.returncode != 0 and os.path.islink(b.link) and "couldn't be read" in p.stdout, p.stdout[-400:])
+              p.returncode != 0 and os.path.islink(b.link) and "couldn't be checked in full" in p.stdout
+              and "names it" in p.stdout, p.stdout[-400:])
         p = b.install("--uninstall", MCOMP_BREW_PYTHON="/nonexistent", PATH="/usr/bin:/bin")
         check("...and with no Python 3.11 to read it at all: links kept, said, exit 1", p.returncode != 0
               and os.path.islink(b.link) and "needs Python 3.11" in p.stdout, (p.returncode, p.stdout[-400:]))
         if os.path.exists(os.path.join(b.home, ".hermes", "config.yaml")):
             os.remove(os.path.join(b.home, ".hermes", "config.yaml"))
-        write(os.path.join(b.home, ".openclaw", "openclaw.json"), '{"mcp": {"servers": {}}}')
+        # Inspection that isn't complete means "maybe referenced" (Codex's re-check): an include, or a file too big to
+        # read in full, keeps the command links, with Python and without it.
+        oc = os.path.join(b.home, ".openclaw", "openclaw.json")
+        write(oc, '{"mcp": {"servers": {"$include": "./servers.json5"}}}')
+        write(os.path.join(b.home, ".openclaw", "servers.json5"), '{"metacomputer": {"command": "' + b.link + '"}}')
+        p = b.install("--uninstall")
+        check("OpenClaw not on PATH, its openclaw.json including another file ($include): what that holds wasn't read, "
+              "so the links stay, said, exit 1", p.returncode != 0 and os.path.islink(b.link)
+              and "includes other files" in p.stdout and f"kept {b.link}" in p.stdout, (p.returncode, p.stdout[-400:]))
+        p = b.install("--uninstall", MCOMP_BREW_PYTHON="/nonexistent", PATH="/usr/bin:/bin")
+        check("...and with no Python 3.11 (install.sh reads it itself): the same", p.returncode != 0
+              and os.path.islink(b.link) and f"kept {b.link}" in p.stdout, (p.returncode, p.stdout[-400:]))
+        os.remove(os.path.join(b.home, ".openclaw", "servers.json5"))
+        with open(oc, "w") as f:
+            f.write('{"mcp": {"servers": {}}, "notes": "' + " " * (16 << 20) + '", "x": "' + b.link + '"}')
+        p = b.install("--uninstall")
+        check("...a configuration larger than the 16 MB read, naming the command past it: the links stay, said, exit 1",
+              p.returncode != 0 and os.path.islink(b.link) and "larger than 16 MB" in p.stdout,
+              (p.returncode, p.stdout[-400:]))
+        write(oc, '{"mcp": {"servers": {}}}')
         p = b.install("--uninstall")
         check("a configuration that doesn't name the command doesn't hold the links back", p.returncode == 0
               and not os.path.lexists(b.link), (p.returncode, p.stdout[-400:]))
     finally:
         b.close()
+
+
+def uninstall_error_cases():
+    """Every unexpected error in an agent's uninstall step keeps the command links (its configuration wasn't checked),
+    and says so: a lock file that is a link, a lock folder that can't be written."""
+    print("uninstall: unexpected errors")
+    for name in ("openclaw", "gemini"):
+        b = Box(agents=(name,))
+        try:
+            p = b.install(f"--only-{name}")
+            locks = os.path.join(b.home, ".local", "share", "metacomputer", "locks")
+            lock = os.path.join(locks, f"agent-{name}.lock")
+            ok_setup = p.returncode == 0 and os.path.islink(b.link)
+            os.remove(lock)
+            os.symlink(os.path.join(b.t, "elsewhere"), lock)
+            p = b.install("--uninstall")
+            check(f"{LABEL[name]}: its lock file is a link (refused): the step stops, the configuration isn't touched, "
+                  "and the command links stay, said, exit 1", ok_setup and p.returncode != 0 and os.path.islink(b.link)
+                  and "stopped unexpectedly" in p.stdout and f"kept {b.link}" in p.stdout and entry(b, name) is not None,
+                  (p.returncode, p.stdout[-500:]))
+            os.remove(lock)
+            os.chmod(locks, 0o500)
+            try:
+                p = b.install("--uninstall")
+            finally:
+                os.chmod(locks, 0o700)
+            check(f"{LABEL[name]}: its lock folder can't be written: the same", p.returncode != 0
+                  and os.path.islink(b.link) and f"kept {b.link}" in p.stdout and entry(b, name) is not None,
+                  (p.returncode, p.stdout[-500:]))
+            p = b.install("--uninstall")
+            check(f"{LABEL[name]}: once the lock works again, the uninstall finishes and the links go",
+                  p.returncode == 0 and not os.path.lexists(b.link) and entry(b, name) is None,
+                  (p.returncode, p.stdout[-500:]))
+        finally:
+            b.close()
 
 
 def choice_cases():
@@ -841,6 +896,7 @@ def main():
     lock_cases()
     profile_cases()
     no_cli_cases()
+    uninstall_error_cases()
     choice_cases()
     gemini_home_cases()
     package_cases()

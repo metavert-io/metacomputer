@@ -535,9 +535,18 @@ Claude Code's does: only metacomputer's own entry (a local command, exactly `~/.
 launcher, with exactly `mcp-lazy`) is ever changed or removed, read again right before; anything else is named by its
 program and how many arguments it has, the install says how to remove it yourself, and the step counts as unfinished
 (exit status 1, recorded in installed.json so `metacomputer update` runs it again). Each read, change and read-back
-runs under a lock of the agent's own, so two metacomputer installs never interleave; these agents' CLIs have no
-compare-and-swap, so a change another program makes between the install's last read and the agent's own write isn't
-seen (the window is one CLI call). A skill link is metacomputer's only when it points into this checkout's own skill
+runs under a lock of the agent's own, so two metacomputer installs never interleave.
+
+What that leaves: these agents' CLIs have no compare-and-swap, and the lock binds only metacomputer. So another program
+(the agent itself, an editor, another tool) that writes an entry named `metacomputer` in the moment between the
+install's last read and the agent CLI's own write (one CLI call) isn't seen. In an install, the add then replaces that
+entry (Gemini CLI's `mcp add`, Hermes Agent's `config set`; OpenClaw's `mcp add` refuses a name that's there, so its
+add fails instead), and the read-back after it reports what won. In an uninstall, the removal, which these CLIs make
+by name only, removes it. A skill link swapped for someone else's between the check and the removal is removed the
+same way. Nothing else is in that window: entries with other names, other files, and any change made before the last
+read or after the CLI's write are seen.
+
+A skill link is metacomputer's only when it points into this checkout's own skill
 folders; anything else there is left, and the step counts as unfinished, as it does when a skill can't be linked.
 `--no-NAME` (`--no-codex`,
 `--no-openclaw`, `--no-hermes`, `--no-gemini`) leaves one alone in this run and later ones, until `--NAME`;

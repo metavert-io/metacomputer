@@ -627,6 +627,11 @@ PY
   fi
   chmod 644 "$tmp" && mv "$tmp" "$CODEX_RULES"
 }
+skill_link_ours() { # PATH: 0 when it's a link metacomputer made, one that points into this checkout's own skill folders
+  # (skills/, .claude/skills/; a relative target read from the link's own folder): lib/agent_setup.py's rule, for every
+  # agent. Anything else, a broken link or one into another folder of the same name included, isn't.
+  [ -L "$1" ] && "$CPY" "$ROOT/lib/agent_setup.py" link-ours "$1" --root "$ROOT" >/dev/null 2>&1 </dev/null
+}
 codex_skill_target() { # NAME: what ~/.agents/skills/NAME links to
   if [ "$1" = metacomputer ]; then printf '%s\n' "$ROOT/skills/metacomputer"; else printf '%s\n' "$ROOT/.claude/skills/cua-driver"; fi
 }
@@ -686,12 +691,15 @@ codex_step() {
     target="$(codex_skill_target "$name")"
     link="$AGENT_SKILLS/$name"
     if link_points_here "$link" "$target"; then ok "skill $name (~/.agents/skills)"; continue; fi
-    if [ -L "$link" ] && old_target "$(readlink "$link")"; then
+    if skill_link_ours "$link"; then
       rm -f "${link:?}"
     elif [ -e "$link" ] || [ -L "$link" ]; then
-      warn "$link is already there and isn't metacomputer's; left alone (Codex won't get the $name skill)"; continue
+      warn "~/.agents/skills/$name is already there and isn't metacomputer's (not a link into this checkout's skills); left"
+      warn "alone, so Codex won't get the $name skill: move it away, then ./install.sh --only-codex"
+      CODEX_FAILED=1; continue
     fi
-    ln -s "$target" "$link" && ok "skill $name (~/.agents/skills, read by Codex)"
+    if ln -s "$target" "$link" 2>/dev/null; then ok "skill $name (~/.agents/skills, read by Codex)"
+    else warn "couldn't link the $name skill into ~/.agents/skills; try ./install.sh --only-codex again"; CODEX_FAILED=1; fi
   done
   if [ -e "$CODEX_RULES" ] && ! codex_rules_ours; then
     warn "$CODEX_RULES is there and isn't this checkout's; left alone (docs/codex.md says what it should hold)"
@@ -820,8 +828,9 @@ agent_step() { # NAME: openclaw, hermes or gemini
 # before its removal, and checked after), and the skill links that point here. One that stays and runs
 # ~/.local/bin/metacomputer or mcomp keeps those links (KEEP_CMD).
 agent_config_mentions() { # NAME: 0 when a file of the agent's configuration may run metacomputer's command (it names
-  # metacomputer or mcomp, or can't be read): read without Python, for an uninstall that can't run agent_setup.py
-  local f
+  # metacomputer or mcomp, can't be read, or includes other files: $include, !include): read without Python, for an
+  # uninstall that can't run agent_setup.py
+  local f g
   case "$1" in
     gemini) set -- "${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json" ;;
     hermes) set -- "${HERMES_HOME:-$HOME/.hermes}/config.yaml" "$HOME/.hermes/config.yaml" "$HOME"/.hermes/profiles/*/config.yaml ;;
@@ -830,7 +839,8 @@ agent_config_mentions() { # NAME: 0 when a file of the agent's configuration may
   for f in "$@"; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     [ -r "$f" ] || return 0
-    if grep -q -e metacomputer -e mcomp "$f" 2>/dev/null; then return 0; fi
+    g=0; grep -q -F -e metacomputer -e mcomp -e '$include' -e '!include' "$f" 2>/dev/null || g=$?
+    [ "$g" = 1 ] || return 0      # found, or grep couldn't read it all (2): may run it
   done
   return 1
 }
@@ -848,9 +858,10 @@ agent_uninstall() { # NAME
          || echo __step_unfinished__)"
   case "$out" in *__step_unfinished__*) rc=1; out="${out%__step_unfinished__}" ;; esac
   agent_lines <<<"$out"
-  if [ "$rc" != 0 ]; then
+  if [ "$rc" != 0 ]; then     # unfinished, however it ended: its configuration may still run the command, which stays
     UNINSTALL_FAILED=1
-    if [ -z "${out//[[:space:]]/}" ]; then warn "the uninstall's $label step stopped"; keep_cmd_for "$label's"; fi
+    if [ -z "${out//[[:space:]]/}" ]; then warn "the uninstall's $label step stopped"; fi
+    keep_cmd_for "$label's"
   fi
   return 0
 }

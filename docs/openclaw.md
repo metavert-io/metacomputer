@@ -102,13 +102,26 @@ or an SSH session, not through an agent.
 
 ## A benchmark run
 
-`bench/bench.py run --agent openclaw` runs each task as a one-off `openclaw agent exec ... --json` (no gateway), the
-work folder its workspace (the skill under test in its `skills/`), and for that run only the server with the run's
-settings and tool search off (`--config-override`, never saved). It needs your provider's key (not run here):
+`bench/bench.py run --agent openclaw` runs each task as a one-off `openclaw agent exec ... --json --auth-env-only` (no
+gateway), the work folder its workspace (the skill under test in its `skills/`), in a throwaway HOME made for that
+session and deleted afterwards (bench/README.md, "Isolated sessions"), with a state folder and config file of its own
+inside it (`OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`): none of your OpenClaw settings, keys or environment, only the
+variables you name with `--pass-env`; `--auth-env-only` keeps OpenClaw from looking for stored credentials or other
+programs' sign-ins. The config holds only the run's server, with tool search off.
+
+**What it may do without asking:** the minimal tool profile plus metacomputer's tools (`metacomputer__*`), `exec`,
+reading files in the work folder (`tools.fs.workspaceOnly`) and the skill tools, nothing else; `exec` in allowlist mode
+(`tools.exec.mode: "allowlist"`: a command not on the list is refused, never asked about), with only metacomputer's
+command on the session's allowlist (`openclaw approvals allowlist add`).
+
+It needs your provider's key, given to that command only and named with `--pass-env`, and a model of that provider
+(not run here):
 
 ```bash
 export MCOMP_CONFIG=/path/to/test-vm.env
-cd ~/metacomputer && bench/bench.py run --agent openclaw --run-id openclaw-std
+cd ~/metacomputer
+# OPENAI_API_KEY (or your provider's) set for this command only (from your secrets manager), and passed on by name:
+bench/bench.py run --agent openclaw --pass-env OPENAI_API_KEY --model <provider/model> --run-id openclaw-std
 ```
 
 `agent exec --json` reports a summary of the tool calls, not each call, so these runs have the task checks, tokens and
