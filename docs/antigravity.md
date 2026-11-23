@@ -171,7 +171,8 @@ SSH session, not through an agent.
   `conversation_summaries.db` beside it, read without a write or a lock), with the same rules: only classes, counts, tool
   names and app names from a fixed list, never text. Its own conversation databases (`conversations/*.db`) hold Google's
   binary records, which learn doesn't read.
-- **Slash commands:** the plugin's `/learn` command is Claude Code's; in Antigravity CLI, run `metacomputer learn report`.
+- **The lessons skill** (`/metacomputer:learn`) comes with Claude Code's plugin and Codex's; in Antigravity CLI, run
+  `metacomputer learn report`.
 - **No benchmark runs:** `bench/bench.py` has no `--agent antigravity`. A headless run (`agy -p`) needs a Google sign-in
   or a Gemini API key, and Google's FAQ says wrapping `agy` in third-party tools isn't supported on consumer plans.
 

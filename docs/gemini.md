@@ -103,7 +103,8 @@ in Terminal, iTerm or an SSH session, not through an agent.
   in `<untrusted_context>` for the model; learn reads the text inside.
 - **The tools' names** are `mcp_metacomputer_<tool>` (the skill writes `mcp__metacomputer__`; use the names your tool
   list shows).
-- **Slash commands:** the plugin's `/learn` command is Claude Code's; in Gemini CLI, run `metacomputer learn report`.
+- **The lessons skill** (`/metacomputer:learn`) comes with Claude Code's plugin and Codex's; in Gemini CLI, run
+  `metacomputer learn report`.
 
 ## A benchmark run
 

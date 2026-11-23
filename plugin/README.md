@@ -21,7 +21,7 @@ me what it does".
 
 - **Skills:** `metacomputer`, which tells Claude when a task belongs on the VM and how to drive this desktop, and
   `cua-driver`, the guide to Cua Driver's tools on Linux (from Cua, MIT-licensed).
-- **A command**, `/metacomputer:learn`, which reports repeated mistakes in your own metacomputer sessions.
+- **A skill**, `learn` (`/metacomputer:learn`), which reports repeated mistakes in your own metacomputer sessions.
 - **`bin/metacomputer`**, a short launcher that Claude Code puts on its Bash tool's PATH: it runs the metacomputer
   installed on your Mac with the same arguments.
 - **`get.sh`**, the installer that `metacomputer setup` runs when nothing is installed yet.

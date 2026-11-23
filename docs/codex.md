@@ -66,6 +66,47 @@ values), says to run `codex mcp remove metacomputer` and then `./install.sh --on
 unfinished (exit status 1; `metacomputer update` runs it again). `--uninstall` removes only metacomputer's own, and
 keeps `~/.local/bin/metacomputer` and `mcomp` while an entry that stays runs them.
 
+## Codex's plugin marketplace
+
+The repository is also a Codex plugin marketplace (`.agents/plugins/marketplace.json`), with one plugin, `metacomputer`:
+the same `plugin/` folder Claude Code installs, with a manifest of Codex's own (`plugin/.codex-plugin/plugin.json`).
+It brings the skills, `metacomputer`, `cua-driver` and `learn` (`$metacomputer:learn`, or `/skills`), and no MCP server:
+
+```bash
+codex plugin marketplace add metavert-io/metacomputer
+codex plugin add metacomputer@metacomputer
+```
+
+The tools, Codex's rules and the command still come from metacomputer installed on your Mac (`install.sh`, above): the
+plugin's skills run `~/.local/bin/metacomputer`, and without it they say how to set it up (the plugin's launcher runs its
+own copy's `get.sh`, which says what it will do and asks first). With install.sh's skill links in `~/.agents/skills` as
+well, Codex has the skills twice (the plugin's are named `metacomputer:...`); either is enough. Checked with Codex CLI
+0.167.0 in a throwaway `CODEX_HOME`, with a checkout as the marketplace (`codex plugin marketplace add
+~/metacomputer`): the three skills in the model's instructions (`codex debug prompt-input`). Adding it from GitHub, as
+above, works once this is on the repository's main branch.
+
+## OpenAI's plugin directory
+
+`scripts/build-openai-plugin.py` packages the same skills for OpenAI's plugin directory (ChatGPT and Codex): a ZIP with
+one folder, `metacomputer/`, holding the skills (`metacomputer`, `learn`, `cua-driver`), the icon, the license and the
+notices, and a manifest (`.codex-plugin/plugin.json`: its listing's website, support, privacy policy and terms of
+service URLs) with the release's version and `"requires_local_executor": true`,
+which makes it "Desktop only": installed from the ChatGPT desktop app and used in threads that run on your Mac. It
+carries no MCP server, launcher or script: its skills run the metacomputer installed on your Mac, and say how to
+install it when it isn't. `--check` builds it in memory and checks it against the directory's documented rules (regular
+files only, each skill a folder of its own with its name and a description of at most 1,024 characters, every link
+in a skill leading to a file in the package, the icon); `tests/test_plugin.py` runs that. Its sources are regular
+files only: a skill folder, the icon, the license or the notices that is a link, or sits in a linked folder, stops the
+build (it would bring in what the link points to), and `scripts/sync-plugin.py --check` refuses any link in `plugin/`,
+`agent-plugin/` or `.agents/`. Nothing is uploaded or
+submitted from here: that's the publisher's step, in OpenAI's portal. Not checked: whether the ChatGPT desktop app's
+local threads use the MCP server install.sh gives Codex.
+
+```bash
+python3 scripts/build-openai-plugin.py            # results/openai-plugin/metacomputer-VERSION.zip
+python3 scripts/build-openai-plugin.py --check
+```
+
 ## When Codex changes
 
 metacomputer relies on parts of Codex that aren't a fixed interface: its rules and their checker, the variable its
@@ -129,7 +170,8 @@ accident, not a program set on it (SECURITY.md).
   in the MCP server's instructions. `--draft-with-claude`, `learn bench` and the benchmark run Claude Code
   (`claude -p`).
 - **`metacomputer claude`** starts Claude Code inside the virtual computer; it works the same when Codex asked for it.
-- **Slash commands:** the plugin's `/learn` command is Claude Code's; in Codex, run `metacomputer learn report`.
+- **The lessons skill:** with the plugin from the marketplace (above), Codex has `learn` (`$metacomputer:learn`), the
+  same steps as Claude Code's `/metacomputer:learn`; without it, run `metacomputer learn report`.
 
 ## Login shells and PATH
 

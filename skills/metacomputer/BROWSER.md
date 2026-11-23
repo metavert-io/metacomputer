@@ -9,7 +9,7 @@ Chrome 157 (Google's arm64 build) on 2026-11-16. Background:
 Defaults come from `~/.local/bin/metacomputer browser` (out of the box:
 Firefox, human mode, human pacing). Words in the request override them.
 
-| Mode | What Claude does | Browsers | Use it for |
+| Mode | What the agent does | Browsers | Use it for |
 | --- | --- | --- | --- |
 | **human** (default) | Reads the accessibility tree; clicks and types in the window like a person, at a person's pace ([Human pacing](#human-pacing-browser_pacing)) | Firefox, Chrome started with `launch_app` | **Anything account-facing**: signing in or up, checkout, account settings, posting content. Also demos, recordings, and testing a site as a person would |
 | **page** | Works on the page's own elements through Chrome's DevTools route, in the background | Chrome (`browser_prepare`) | The exception: bulk data entry, reading the user's own sites exactly, file uploads and downloads, and steps human mode can't do. Fastest, but sites can flag it as automated |
@@ -192,7 +192,7 @@ Every VM has its own browsers, profiles, vault scope, allowlist and one-controll
   - Never switch to the other browser, another mode (page, hybrid, human) or another profile to get past it, and never use a CAPTCHA service.
   - Sites with bot checks may refuse the VM's automated browser even when the user ticks the box: page-mode and hybrid Chrome are driven through DevTools, and bot checks look for that (one more reason account pages start in human mode). If it fails for the user too, say so plainly and ask how to go on (for example, they do that step on their own computer). Don't try another way in.
 - **A sign-in the user does themselves, or a 2FA prompt the vault can't fill:** `metacomputer handoff --why login|2fa --say "..."`.
-- **An approval only they can give, or a dialog you won't accept:** `metacomputer notify` with the site's name (not the link) and what to do, for example: `metacomputer notify "Approval needed to send the order at example.com" --why approval --action "Run metacomputer view --open (paste the live-view password with Cmd+V if Screen Sharing asks), check the order, then tell Claude to carry on"`.
+- **An approval only they can give, or a dialog you won't accept:** `metacomputer notify` with the site's name (not the link) and what to do, for example: `metacomputer notify "Approval needed to send the order at example.com" --why approval --action "Run metacomputer view --open (paste the live-view password with Cmd+V if Screen Sharing asks), check the order, then tell your agent to carry on"`.
 - **Say it in your reply, then wait.** [EVENTS.md](EVENTS.md) has the `--why` values and what's sent automatically.
 - **Never look for a way around a sign-in.**
 

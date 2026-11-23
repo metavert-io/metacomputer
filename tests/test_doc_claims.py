@@ -2851,6 +2851,28 @@ CLAIMS = [
      and "ORDER BY w DESC LIMIT ?" in function_src("lib/session_dbs.py", "_recent")
      and "(cutoff, MAX_SESSIONS + 1)" in function_src("lib/session_dbs.py", "_recent")
      and all("_recent(con, " in function_src("lib/session_dbs.py", f) for f in ("read_openclaw", "read_hermes"))),
+    # Codex's marketplace and the OpenAI package (scripts/sync-plugin.py, scripts/build-openai-plugin.py)
+    ("docs/codex.md", r"It brings the skills, `metacomputer`, `cua-driver` and `learn` \(`\$metacomputer:learn`, or `/skills`\), and no MCP server",
+     lambda m: '"skills": ["./skills/", "./.claude/skills/"]' in function_src("scripts/sync-plugin.py", "codex_plugin_json")
+     and "mcpServers" not in function_src("scripts/sync-plugin.py", "codex_plugin_json")
+     and '"source": {"source": "local", "path": "./plugin"}' in function_src("scripts/sync-plugin.py", "codex_marketplace_json")),
+    ("docs/codex.md", r"a manifest \(`\.codex-plugin/plugin\.json`:.*?\) with the release's version and `\"requires_local_executor\": true`, which "
+                      r"makes it \"Desktop only\".*?It\s+carries no MCP server, launcher or script",
+     lambda m: 'd["requires_local_executor"] = True' in function_src("scripts/build-openai-plugin.py", "manifest")
+     and 'json.load(open(os.path.join(LAB, "gemini-extension.json"), encoding="utf-8"))["version"]' in raw("scripts/build-openai-plugin.py")
+     and not re.search(r"bin/metacomputer|get\.sh", raw("scripts/build-openai-plugin.py").split("SKILLS = ", 1)[1].split("DATE =", 1)[0])
+     and 'for k in ("mcpServers", "apps", "hooks", "commands"):' in function_src("scripts/build-openai-plugin.py", "problems")),
+    ("docs/codex.md", r"Its sources are regular\s+files only: a skill folder, the icon, the license or the notices that is a link, or sits "
+                      r"in a linked folder, stops the\s+build.*?`scripts/sync-plugin.py --check` refuses any link in `plugin/`,\s+"
+                      r"`agent-plugin/` or `.agents/`",
+     lambda m: "for rel, path in regular_files(no_link(src_rel)):" in function_src("scripts/build-openai-plugin.py", "contents")
+     and "out.append((dst_rel, regular_file(src_rel), 0o644))" in function_src("scripts/build-openai-plugin.py", "contents")
+     and "if os.path.islink(p):" in function_src("scripts/build-openai-plugin.py", "no_link")
+     and "if os.path.islink(src) or not os.path.isdir(src):" in function_src("scripts/build-openai-plugin.py", "regular_files")
+     and 'for top in ("plugin", "agent-plugin", ".agents"):' in function_src("scripts/sync-plugin.py", "differences")
+     and "if os.path.islink(path):\n        return [path]" in function_src("scripts/sync-plugin.py", "links_in")),
+    ("docs/codex.md", r"Nothing is uploaded or\s+submitted from here",
+     lambda m: not re.search(r"urllib|http\.client|socket|subprocess|requests", raw("scripts/build-openai-plugin.py").split('"""', 2)[2])),
     # Antigravity CLI (docs/antigravity.md; lib/agent_setup.py Antigravity, lib/owners.py, vault/Util.swift)
     ("docs/antigravity.md", r"It changes Antigravity CLI's MCP server `metacomputer` only when\s+there's none, by the rule it uses for the "
                             r"other agents.*?Anything else is never changed or removed",

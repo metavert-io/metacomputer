@@ -50,12 +50,15 @@ Mac's own Claude Code setup is never touched.
   its launcher and the skill say to run `metacomputer update`.
 - The skill and the driver pack name both prefixes; bench and the skill-test analyzer count both.
 """
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(LAB, "bin", "metacomputer")
@@ -1894,7 +1897,196 @@ def test_prefixes():
         shutil.rmtree(t, ignore_errors=True)
 
 
+# --- Codex's marketplace and OpenAI's plugin directory ---------------------------------------------------------------
+def test_codex_openai():
+    """The same plugin/ folder for Codex (.agents/plugins/marketplace.json and plugin/.codex-plugin/plugin.json, which
+    scripts/sync-plugin.py writes: the --check above covers them) and its package for OpenAI's plugin directory
+    (scripts/build-openai-plugin.py): skills only, Desktop only; the learn skill in place of the old command; the
+    launcher in Codex's plugin cache."""
+    mkt = json.load(open(os.path.join(LAB, ".agents", "plugins", "marketplace.json")))
+    codex = json.load(open(os.path.join(LAB, "plugin", ".codex-plugin", "plugin.json")))
+    claude = json.load(open(os.path.join(LAB, "plugin", ".claude-plugin", "plugin.json")))
+    entry = (mkt.get("plugins") or [{}])[0]
+    check("Codex marketplace: metacomputer, one plugin at ./plugin (a local source from the repository's root), "
+          "available, authenticated on install", mkt.get("name") == "metacomputer" and len(mkt["plugins"]) == 1
+          and entry.get("name") == codex.get("name") == claude.get("name") == "metacomputer"
+          and entry.get("source") == {"source": "local", "path": "./plugin"}
+          and entry.get("policy") == {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}, mkt)
+    paths = [codex["skills"]] if isinstance(codex.get("skills"), str) else list(codex.get("skills") or [])
+    paths += [codex["interface"].get("composerIcon"), codex["interface"].get("logo")]
+    check("Codex's manifest names both skill folders (its list replaces the default skills/), and its paths start with "
+          "./ and are in plugin/", codex.get("skills") == ["./skills/", "./.claude/skills/"]
+          and all(isinstance(x, str) and x.startswith("./") and ".." not in x
+                  and os.path.exists(os.path.join(LAB, "plugin", x[2:])) for x in paths), paths)
+    check("Codex's manifest declares no MCP server, hooks, apps or commands, and no version (as Claude Code's)",
+          not {"mcpServers", "hooks", "apps", "commands", "version"} & set(codex), sorted(codex))
+    check("Codex's manifest speaks of the agent, not Claude", "Claude" not in json.dumps(codex), codex.get("description"))
+    learn_md = os.path.join(LAB, "plugin", "skills", "learn", "SKILL.md")
+    text = open(learn_md).read() if os.path.isfile(learn_md) else ""
+    fm = text.split("---")[1] if text.startswith("---") else ""
+    check("/metacomputer:learn is a skill (plugin/skills/learn): named learn, a quoted one-line description, the old "
+          "command gone", re.search(r"^name: learn$", fm, re.M) and re.search(r'^description: ".+"$', fm, re.M)
+          and not os.path.exists(os.path.join(LAB, "plugin", "commands")), fm[:300])
+    allowed = re.search(r"^allowed-tools: (.*)$", fm, re.M)
+    check("...it may run only learn report, list and review without asking (in Claude Code), and has no $ARGUMENTS "
+          "(Codex doesn't fill it)", allowed and set(re.findall(r"Bash\(([^)]*)\)", allowed.group(1))) == {
+              "~/.local/bin/metacomputer learn report:*", "~/.local/bin/metacomputer learn list:*",
+              "~/.local/bin/metacomputer learn review:*"} and "$ARGUMENTS" not in text, allowed and allowed.group(1))
+    check("...and approves only the IDs the user names", "with exactly the IDs the user named" in text)
+    skills_text = "".join(open(os.path.join(LAB, "skills", "metacomputer", f)).read()
+                          for f in os.listdir(os.path.join(LAB, "skills", "metacomputer")))
+    check("the skills speak of the agent where they meant any agent ('this file says Claude' is gone)",
+          "this file says Claude" not in skills_text and "What Claude does" not in skills_text
+          and "tell Claude to carry on" not in skills_text, None)
+    # The OpenAI package
+    build = os.path.join(LAB, "scripts", "build-openai-plugin.py")
+    p = subprocess.run([sys.executable, build, "--check"], capture_output=True, text=True, timeout=120)
+    check("build-openai-plugin.py --check: the package builds and passes its checks", p.returncode == 0,
+          p.stdout + p.stderr)
+    # Their sources are regular files only: a linked skill folder, a linked icon (or license, or notices) would bring
+    # in what it points to, so the package build and sync-plugin's check refuse each (in a copy of the files they read).
+    t = tempfile.mkdtemp(prefix="mcomp-openai-links-")
+    try:
+        lab = os.path.join(t, "lab")
+        for rel in ("scripts/build-openai-plugin.py", "scripts/sync-plugin.py", "get.sh", "LICENSE",
+                    "THIRD_PARTY_NOTICES.md", "gemini-extension.json"):
+            os.makedirs(os.path.dirname(os.path.join(lab, rel)), exist_ok=True)
+            shutil.copy2(os.path.join(LAB, rel), os.path.join(lab, rel))
+        for rel in ("plugin", "agent-plugin", ".agents", "skills/metacomputer", ".claude/skills/cua-driver"):
+            shutil.copytree(os.path.join(LAB, rel), os.path.join(lab, rel), symlinks=True)
+        outside = os.path.join(t, "outside")
+        os.makedirs(outside)
+
+        def both():
+            return [subprocess.run([sys.executable, os.path.join(lab, "scripts", x), "--check"], capture_output=True,
+                                   text=True, timeout=120) for x in ("build-openai-plugin.py", "sync-plugin.py")]
+        ok = both()
+        check("(a copy of the files the package and the plugins are made from builds and checks clean)",
+              [r.returncode for r in ok] == [0, 0], [r.stdout[-300:] + r.stderr[-300:] for r in ok])
+        for what, rel in (("a linked icon", "plugin/icon.png"), ("a linked skills folder", "plugin/skills/learn"),
+                          ("a linked license", "plugin/LICENSE")):
+            src, away = os.path.join(lab, rel), os.path.join(outside, os.path.basename(rel))
+            os.rename(src, away)
+            os.symlink(away, src)
+            code = ("import importlib.util, sys\nspec = importlib.util.spec_from_file_location('b', sys.argv[1])\n"
+                    "b = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(b)\n"
+                    "try:\n    b.contents('1.0.0')\n    print('PACKAGED')\nexcept SystemExit as e:\n    print(e)\n")
+            try:
+                got = both()
+                own = subprocess.run([sys.executable, "-c", code, os.path.join(lab, "scripts", "build-openai-plugin.py")],
+                                     capture_output=True, text=True, timeout=120)
+            finally:
+                os.remove(src)
+                os.rename(away, src)
+            check(f"{what} ({rel}) is refused by build-openai-plugin.py --check and by sync-plugin.py --check, and by "
+                  "the package's own reading of its sources (nothing is packaged from it)",
+                  [r.returncode for r in got] == [1, 1] and "is a link" in got[0].stdout + got[0].stderr
+                  and "is a link" in got[1].stdout and "is a link" in own.stdout and "PACKAGED" not in own.stdout,
+                  [(r.returncode, (r.stdout + r.stderr)[-300:]) for r in got] + [own.stdout[-200:] + own.stderr[-200:]])
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+    t = tempfile.mkdtemp(prefix="mcomp-openai-")
+    try:
+        a, b = os.path.join(t, "a.zip"), os.path.join(t, "b.zip")
+        for out in (a, b):
+            subprocess.run([sys.executable, build, "--out", out, "--version", "9.8.7"], capture_output=True, text=True,
+                           timeout=120)
+        z = zipfile.ZipFile(a)
+        names = z.namelist()
+        m = json.loads(z.read("metacomputer/.codex-plugin/plugin.json"))
+        check("the same sources make the same ZIP", os.path.isfile(a) and open(a, "rb").read() == open(b, "rb").read())
+        check("one folder, metacomputer/, with the manifest, the skills metacomputer, learn and cua-driver, the icon, the "
+              "license and the notices, and nothing else (no launcher, get.sh or commands)",
+              {n.split("/", 1)[0] for n in names} == {"metacomputer"}
+              and {n.split("/")[2] for n in names if n.startswith("metacomputer/skills/")} == {"metacomputer", "learn",
+                                                                                               "cua-driver"}
+              and {n.split("/")[1] for n in names} == {".codex-plugin", "skills", "assets", "LICENSE",
+                                                       "THIRD_PARTY_NOTICES.md"}, sorted(set(n.split("/")[1] for n in names)))
+        check("its manifest: the version given, skills ./skills/, requires_local_executor true (Desktop only), the icon "
+              "under assets/, no MCP server", m.get("version") == "9.8.7" and m.get("skills") == "./skills/"
+              and m.get("requires_local_executor") is True and m["interface"]["logo"] == "./assets/icon.png"
+              and "mcpServers" not in m, m)
+        urls = {k: m["interface"].get(k) for k in ("websiteURL", "supportURL", "privacyPolicyURL", "termsOfServiceURL")}
+        check("...and all four listing URLs, https: the website, support, Metavert's privacy policy and terms of service",
+              urls["privacyPolicyURL"] == "https://www.metavert.io/privacy-policy"
+              and urls["termsOfServiceURL"] == "https://www.metavert.io/terms-of-service"
+              and all(isinstance(v, str) and v.startswith("https://") for v in urls.values()), urls)
+        check("every entry a regular file", all(((i.external_attr >> 16) & 0o170000) == 0o100000 for i in z.infolist()))
+        pack = z.read("metacomputer/skills/cua-driver/SKILL.md").decode()
+        check("the driver pack's links point at ../metacomputer/ in the package", "../../../skills/metacomputer/" not in pack
+              and "../metacomputer/" in pack)
+        same = all(z.read(f"metacomputer/skills/metacomputer/{f}") == open(os.path.join(LAB, "skills", "metacomputer", f), "rb").read()
+                   for f in os.listdir(os.path.join(LAB, "skills", "metacomputer")))
+        check("the metacomputer skill in it is the repository's, byte for byte", same)
+        # What its checks refuse: a link to nothing, a skill named otherwise, a long description, no
+        # requires_local_executor, a link entry
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("build_openai", build)
+        bo = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bo)
+
+        def broken(change):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(a) as src, zipfile.ZipFile(buf, "w") as dst:
+                for i in src.infolist():
+                    data = change(i, src.read(i))
+                    if data is not None:
+                        dst.writestr(i, data)
+            return bo.problems(buf.getvalue())
+
+        def edit(name, f):
+            return lambda i, d: f(d) if i.filename == name else d
+        sk = "metacomputer/skills/learn/SKILL.md"
+        cases = {
+            "a link to nothing": edit(sk, lambda d: d + b"\nSee [this](NOWHERE.md).\n"),
+            "a skill named otherwise": edit(sk, lambda d: d.replace(b"name: learn", b"name: other")),
+            "a description over 1,024 characters": edit(sk, lambda d: d.replace(b'description: "', b'description: "' + b"x" * 1100)),
+            "no requires_local_executor": edit("metacomputer/.codex-plugin/plugin.json",
+                                               lambda d: d.replace(b'"requires_local_executor": true', b'"requires_local_executor": false')),
+        }
+        for what, change in cases.items():
+            check(f"its checks refuse {what}", broken(change), what)
+        link = zipfile.ZipInfo("metacomputer/skills/learn/evil.md")
+        link.external_attr = (0o120777) << 16
+        buf = io.BytesIO()
+        with zipfile.ZipFile(a) as src, zipfile.ZipFile(buf, "w") as dst:
+            for i in src.infolist():
+                dst.writestr(i, src.read(i))
+            dst.writestr(link, "/etc/passwd")
+        check("...and a link entry", any("not a regular file" in x for x in bo.problems(buf.getvalue())))
+        # The launcher in Codex's plugin cache: it hands over, and with nothing set up runs only its own get.sh
+        home = os.path.join(t, "home")
+        root = os.path.join(home, ".codex", "plugins", "cache", "metacomputer", "metacomputer", "local")
+        cached = os.path.join(root, "bin", "metacomputer")
+        os.makedirs(os.path.dirname(cached))
+        shutil.copy2(PLUGIN_CLI, cached)
+        write(os.path.join(root, "get.sh"), '#!/bin/bash\necho "GET.SH RAN $*"\n')
+        p = run([cached, "setup", "--no-antigravity"], base_env(home))
+        check("a copy in Codex's plugin cache (~/.codex/plugins/cache), nothing set up: setup runs its own get.sh with "
+              "--confirm, --no-antigravity passed on", p.returncode == 0 and "GET.SH RAN --confirm --no-antigravity" in p.stdout,
+              p.stdout + p.stderr)
+        alt = os.path.join(t, "cx", "plugins", "cache", "m", "local", "bin", "metacomputer")
+        os.makedirs(os.path.dirname(alt))
+        shutil.copy2(PLUGIN_CLI, alt)
+        fake = os.path.join(t, "checkout", "bin", "metacomputer")
+        write(fake, '#!/bin/bash\necho "CHECKOUT $*"\n', 0o755)
+        local = os.path.join(home, ".local", "bin", "metacomputer")
+        os.makedirs(os.path.dirname(local))
+        os.symlink(fake, local)
+        p = run([alt, "where"], base_env(home, CODEX_HOME=os.path.join(t, "cx")))
+        check("a copy under $CODEX_HOME/plugins/cache hands over to ~/.local/bin/metacomputer", p.stdout.strip() == "CHECKOUT where",
+              p.stdout + p.stderr)
+        os.remove(local)
+        os.symlink(alt, local)
+        p = run([cached, "who"], base_env(home, CODEX_HOME=os.path.join(t, "cx")))
+        check("...and never to a copy inside Codex's plugin cache (no loop)", p.returncode == 1 and " setup" in p.stderr,
+              p.stdout + p.stderr)
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
 test_layout()
+test_codex_openai()
 test_validate()
 test_handoff()
 test_setup()

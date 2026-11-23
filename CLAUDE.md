@@ -11,8 +11,9 @@ and in the MCP configs of the benchmark and tests; `mcp__plugin_metacomputer_met
 is what an older copy of the plugin named them, when it brought the server itself.
 The `metacomputer` Claude Code plugin (`plugin/`, listed by
 `.claude-plugin/marketplace.json`; `install.sh` installs it for every project too)
-carries the skills, `/metacomputer:learn` and the command, and no MCP server or
-hooks. Its `metacomputer` skill (`skills/metacomputer/`) is the entry point from any
+carries the skills (`/metacomputer:learn` is its `learn` skill) and the command, and no MCP server or
+hooks; Codex installs the same folder from the repository's own marketplace (`.agents/plugins/marketplace.json`,
+`plugin/.codex-plugin/plugin.json`). Its `metacomputer` skill (`skills/metacomputer/`) is the entry point from any
 project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rules.
 
 ## Rules
@@ -352,14 +353,20 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   Agent Plugins 1.0.0 package Hermes Agent and OpenClaw install (its plugin.json and mcp.json, the skills one level under
   `skills/` with the driver pack's links pointed at `../metacomputer/`; its own files are README.md, GEMINI.md and the
   launcher `bin/metacomputer`, which runs only an installed checkout's command); `gemini-extension.json` at the root runs
-  that launcher, and `scripts/release.sh` sets its version. Skill frontmatter descriptions stay one double-quoted YAML
+  that launcher, and `scripts/release.sh` sets its version. It also writes Codex's marketplace and manifest for `plugin/`
+  (`.agents/plugins/marketplace.json`, `plugin/.codex-plugin/plugin.json`: Codex reads its own manifest first, and its
+  skills list replaces the default `skills/`, so it names both folders), and `scripts/build-openai-plugin.py` packages
+  the same files for OpenAI's plugin directory (skills only, `requires_local_executor`, the release's version; `--check`,
+  run by test_plugin; it never uploads anything; a linked source stops it, and `sync-plugin.py --check` refuses any link in
+  `plugin/`, `agent-plugin/` or `.agents/`). Skill frontmatter descriptions stay one double-quoted YAML
   line (strict readers, Hermes Agent's, refuse a plain one with `: ` in it); tests/test_agent_setup.py checks both. Its own files: `README.md` (the directory
   listing's text, which must say everything the plugin runs, sends or fetches: keep it and PRIVACY.md current),
-  `icon.png` (rendered from `icon.svg`), `commands/learn.md` and `bin/metacomputer`, a short launcher, not a copy of
+  `icon.png` (rendered from `icon.svg`), `skills/learn/SKILL.md` (the `learn` skill, `/metacomputer:learn`; no
+  `$ARGUMENTS`, which Codex doesn't fill) and `bin/metacomputer`, a short launcher, not a copy of
   the command (the `metacomputer` command on Claude Code's PATH while the plugin is on): it hands over to the
   installed checkout (`$MCOMP_HOME`, else `~/.local/bin/metacomputer`), whether Claude Code loads the plugin in place
   (`install.sh`'s local marketplace) or from a GitHub install's copy. With no checkout, its only other action, in a
-  copy inside Claude Code's plugin folder, is `setup`: `/bin/bash` with the `get.sh` at that copy's root, with
+  copy inside Claude Code's plugin folder or Codex's plugin cache (`$CODEX_HOME/plugins/cache`), is `setup`: `/bin/bash` with the `get.sh` at that copy's root, with
   `--confirm` and an allowlist of options; never let a variable or option pick another script or repository (with
   `--confirm`, get.sh uses an existing checkout only when it's a clean one of the project's repository). Keep `..` out of plugin.json and the launcher (the directory refuses a path that climbs out).
 - Installers never delete a VM on their own: a VM without its baseline is replaced only

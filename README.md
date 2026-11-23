@@ -11,7 +11,8 @@ ffmpeg. The VM is kept away from your files, your accounts, your Mac and your
 network, and what the agent does there can be logged, limited and approved.
 
 Every agent gets the same tools, skill and protections: Claude Code through its plugin and MCP server, the others
-through their MCP servers and skills ([Codex](docs/codex.md), with rules for its sandbox; [OpenClaw](docs/openclaw.md);
+through their MCP servers and skills ([Codex](docs/codex.md), with rules for its sandbox and the plugin from this
+repository's own Codex marketplace; [OpenClaw](docs/openclaw.md);
 [Hermes Agent](docs/hermes.md); [Gemini CLI](docs/gemini.md); [Antigravity CLI](docs/antigravity.md)). Install once and
 whichever you have is set up.
 

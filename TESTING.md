@@ -476,7 +476,7 @@ copy's VMs (off) and are stopped at the end.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 
-`python3 tests/test_plugin.py` (177 checks) needs no VM. `install.sh` runs against a
+`python3 tests/test_plugin.py` (301 checks) needs no VM. `install.sh` runs against a
 stub `claude` that records its arguments and keeps its state in a temporary home,
 so this Mac's own Claude Code setup is never touched. The stub keeps MCP servers in
 three scopes as Claude Code does (user-scope ones in the temporary home's
@@ -495,6 +495,18 @@ install and update checks with the real `claude` CLI, and checks that Claude Cod
 `lib/claude_mcp.py` read the same configuration file (an empty legacy `.config.json`,
 a folder there, both files populated, a byte-order mark), with a temporary `HOME` and
 `CLAUDE_CONFIG_DIR`; it needs no network.
+- Codex and OpenAI: Codex's marketplace (`.agents/plugins/marketplace.json`, a local source `./plugin`) and manifest
+  (`plugin/.codex-plugin/plugin.json`: both skill folders, paths inside the plugin, no MCP server, hooks or version,
+  words for any agent); the `learn` skill in place of the old command (its name, a quoted description, only `learn
+  report|list|review` allowed without asking, no `$ARGUMENTS`); the skills no longer saying "Claude" where they meant
+  any agent; `scripts/build-openai-plugin.py --check`, and a ZIP built twice to the same bytes with one folder, the three
+  skills, the icon, the license and notices and nothing else, a manifest with the version given, `skills: ./skills/` and
+  `requires_local_executor: true`, regular files only and the driver pack's links pointed inside it; its checks refusing
+  a link to nothing, a skill named otherwise, a long description, no `requires_local_executor` and a link entry; a
+  linked icon, skills folder or license (in a copy of the sources) refused by `--check`, by its own reading of the
+  sources and by `sync-plugin.py --check`; and the
+  launcher in Codex's plugin cache (`~/.codex/plugins/cache`, `$CODEX_HOME/plugins/cache`) handing over, running only
+  its own get.sh for `setup`, and never handing over to a copy in that cache.
 - The marketplace lists the plugin at `./plugin`, which holds no links: its copies of
   `skills/metacomputer`, `.claude/skills/cua-driver`, `get.sh`, `LICENSE` and
   `THIRD_PARTY_NOTICES.md` are the repository's files (`scripts/sync-plugin.py --check`),

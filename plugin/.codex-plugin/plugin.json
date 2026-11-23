@@ -1,0 +1,38 @@
+{
+  "name": "metacomputer",
+  "description": "Gives your agent a disposable computer of its own: an isolated Ubuntu 24.04 desktop VM on your Mac that it operates like a person, through Cua Driver's MCP tools, with skills for when and how to use it. Needs macOS on Apple silicon and metacomputer installed (its install script builds the VM and adds the MCP tools to your agent).",
+  "author": {
+    "name": "Metavert",
+    "url": "https://github.com/metavert-io"
+  },
+  "homepage": "https://github.com/metavert-io/metacomputer",
+  "repository": "https://github.com/metavert-io/metacomputer",
+  "license": "MIT",
+  "keywords": [
+    "computer-use",
+    "virtual-machine",
+    "desktop",
+    "linux",
+    "mcp",
+    "cua-driver",
+    "sandbox"
+  ],
+  "skills": [
+    "./skills/",
+    "./.claude/skills/"
+  ],
+  "interface": {
+    "displayName": "metacomputer",
+    "shortDescription": "Your agent's own computer",
+    "longDescription": "metacomputer gives your coding agent a computer of its own: a disposable Ubuntu 24.04 desktop in a virtual machine on your Mac, with Firefox, Chrome, LibreOffice and other apps. The agent reads the screen through the accessibility tree, clicks and types like a person, and works in a real browser, without touching your own screen, apps or accounts. Sign-ins come from your own vault without the agent seeing the values; at a CAPTCHA, a sign-in or a payment the agent hands the step to you. These skills tell the agent when and how to use it; metacomputer itself (the VM, its MCP tools and the command) is installed on your Mac by its install script (https://github.com/metavert-io/metacomputer), which runs locally and sends nothing to Metavert.",
+    "developerName": "Metavert",
+    "category": "Developer Tools",
+    "capabilities": [],
+    "websiteURL": "https://github.com/metavert-io/metacomputer",
+    "supportURL": "https://github.com/metavert-io/metacomputer/issues",
+    "privacyPolicyURL": "https://www.metavert.io/privacy-policy",
+    "termsOfServiceURL": "https://www.metavert.io/terms-of-service",
+    "composerIcon": "./icon.png",
+    "logo": "./icon.png"
+  }
+}
