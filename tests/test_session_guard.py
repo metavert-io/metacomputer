@@ -1316,9 +1316,10 @@ def other_agents_checks():
     shutil.rmtree(links, ignore_errors=True)
     wrong = [(why, g) for (why, g), c in zip(got, cases) if g != c["agent"]]
     check(f"each agent is told by what the process executes: its executable (a native gemini, through a link too), an "
-          f"interpreter's script (relative ones from its own working folder, links by what they resolve to; no option "
-          f"tables), -m module or -c program, its title; other arguments (a file an editor opens) never; it can't be "
-          f"told only when its arguments or working folder can't be read or its script isn't there "
+          f"interpreter's script (relative ones from its own working folder, links by what they resolve to; only "
+          f"options known to take a value move its place), a preload, -m module, its title, and an agent's package "
+          f"named anywhere in its arguments (-pe code, --import, a folder, a link into it); a file merely named gemini "
+          f"never; it can't be told only when its arguments or working folder can't be read or its script isn't there "
           f"({len(cases)} shared cases)", cases and not wrong, wrong)
     t = {30: (1, "node")}
     check("a plain process table (the tests' known processes) reads no arguments: an interpreter there isn't an agent",
@@ -1357,8 +1358,16 @@ def other_agents_checks():
                 ("relative alias", "/opt/homebrew/bin/node", None, ["node", "./gm"], F("w")),
                 ("relative alias, working folder unreadable", "/opt/homebrew/bin/node", None, ["node", "./gm"], None),
                 ("editor", "/opt/homebrew/bin/node", None, ["node", F("tools/editor.js"), F("work/gemini")], files),
-                ("dev shell", "/opt/homebrew/bin/python3", None,
-                 ["python3", F("tools/devshell.py"), "--project", "hermes_cli"], files)):
+                ("dev shell", "/opt/homebrew/bin/python3", None, ["python3", F("tools/devshell.py"), "bash"], files),
+                # Codex's third re-check: code and preloads that load Gemini CLI's package; boolean flags before a
+                # script never move the script's place.
+                ("node -pe", "/opt/homebrew/bin/node", None, ["node", "-pe", "import('@google/gemini-cli')"], files),
+                ("a package preload", "/opt/homebrew/bin/node", None,
+                 ["node", "--import", "@google/gemini-cli", "--eval", "0"], files),
+                ("python -u before a dev shell", "/opt/homebrew/bin/python3", None,
+                 ["python3", "-u", F("tools/devshell.py"), "bash"], files),
+                ("node --no-warnings before an editor", "/opt/homebrew/bin/node", None,
+                 ["node", "--no-warnings", F("tools/editor.js"), F("work/gemini")], files)):
             t[500] = (400, comm)
             t.argvs[500], t.exes[500], t.cwds[500] = argv, exe, cwd
             seen[label] = (owners.agent_of(500, t), owners.at_user_terminal((0,)))
@@ -1371,13 +1380,16 @@ def other_agents_checks():
     check("...and Gemini CLI started with node options that take a value (--dns-result-order, --disable-proto, "
           "--stack-size) is still Gemini CLI: commands only the user runs refuse under it",
           all(v == ("Gemini CLI", False) for v in under.values()), under)
-    check("...and so do a native gemini (by its executable, through a link too) and a relative alias of Gemini CLI's "
-          "script (from the process's own working folder; unidentified when that can't be read), while an editor "
-          "opening a file named gemini and a dev shell naming a project hermes_cli above a terminal are the user's own",
+    check("...and so do a native gemini (by its executable, through a link too), a relative alias of Gemini CLI's "
+          "script (from the process's own working folder; unidentified when that can't be read), `node -pe` and a "
+          "preload that load Gemini CLI's package, while an editor opening a file named gemini and a dev shell above a "
+          "terminal are the user's own, boolean flags before them (python -u, node --no-warnings) included",
           seen == {"native gemini": ("Gemini CLI", False), "native gemini through a link": ("Gemini CLI", False),
                    "relative alias": ("Gemini CLI", False),
                    "relative alias, working folder unreadable": (owners.UNKNOWN_AGENT, False),
-                   "editor": (None, True), "dev shell": (None, True)}, seen)
+                   "editor": (None, True), "dev shell": (None, True), "node -pe": ("Gemini CLI", False),
+                   "a package preload": ("Gemini CLI", False), "python -u before a dev shell": (None, True),
+                   "node --no-warnings before an editor": (None, True)}, seen)
     check("...and the live table reads arguments exactly (proc_argv: this process's own, spaces kept)",
           owners.proc_argv(os.getpid()) is not None and owners.ps_table().argv(os.getpid()) == owners.proc_argv(os.getpid())
           and owners.proc_argv(2 ** 22 + 7) is None)

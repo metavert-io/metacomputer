@@ -554,3 +554,11 @@ folders; anything else there is left, and the step counts as unfinished, as it d
 the vault, handoffs and [an agent session's computer](#an-agent-sessions-computer); OpenClaw's and Hermes Agent's
 gateways, like Codex's app server, run all their conversations in one process, so the vault's session answers don't
 apply there.
+
+A session is recognised by what its process executes: its executable (Gemini CLI's standalone `gemini` too), and for
+node, bun, deno or python the program it runs (its script, a preload, a `-m` module) or any argument naming an agent's
+package (`@google/gemini-cli`, a `gemini-cli` or `openclaw` folder, `hermes_cli`, `hermes-agent`); a process it can't
+tell counts as an agent. This is best-effort defense in depth, not a boundary: anything running as you can arrange the
+process table, and an agent can be started in ways no list knows. Approvals that matter also need you present: Touch
+ID (or macOS's login-password dialog) in the vault's presence mode, or the confirmation typed at the terminal where you
+unlocked it (SECURITY.md, "Approving from elsewhere").

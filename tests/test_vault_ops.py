@@ -1290,9 +1290,10 @@ def run(td, procs):
         shutil.rmtree(links, ignore_errors=True)
     got = r.stdout.splitlines()
     wrong = [(c["why"], g) for c, g in zip(cases, got) if (None if g == "-" else g) != c["agent"]]
-    check(f"the vault tells the agents from their kernel names and arguments as lib/owners.py does ({len(cases)} shared "
-          "cases: every argument looked at, no option tables; a link by what it resolves to; when in doubt an agent; "
-          "titles, unreadable arguments)", r.returncode == 0 and len(got) == len(cases) and not wrong,
+    check(f"the vault tells the agents by what a process executes as lib/owners.py does ({len(cases)} shared cases: "
+          "native executables, scripts in their place (only options known to take a value move it), preloads, an "
+          "agent's package named in any argument, relative paths from the process's folder, links, titles, unreadable "
+          "arguments)", r.returncode == 0 and len(got) == len(cases) and not wrong,
           (wrong, r.stderr[-300:]))
     h = detached_start("fill", "web-each", "--vm", "opsvm", "--field", "password")
     u.expect("Type web-each to allow")

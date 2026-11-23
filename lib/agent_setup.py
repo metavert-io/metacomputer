@@ -41,7 +41,6 @@ behind a folder that can't be searched or listed counts as maybe too), and on an
 Stdlib only; Python 3.11 or later (as lib/agents.py).
 """
 import contextlib
-import glob
 import json
 import os
 import stat
@@ -269,7 +268,7 @@ class Hermes(Agent):
     def config_files(self, env):
         root = os.path.join(home(env), ".hermes")
         return ([os.path.join(env["HERMES_HOME"], "config.yaml")] if env.get("HERMES_HOME") else []) + \
-            [os.path.join(root, "config.yaml")] + sorted(glob.glob(os.path.join(root, "profiles", "*", "config.yaml")))
+            [os.path.join(root, "config.yaml")] + [os.path.join(d, "config.yaml") for d in entries(os.path.join(root, "profiles"))]
 
     def config_dirs(self, env):
         return [os.path.join(home(env), ".hermes", "profiles")]
@@ -320,8 +319,8 @@ class OpenClaw(Agent):
         if env.get("OPENCLAW_CONFIG_PATH"):
             return [env["OPENCLAW_CONFIG_PATH"]]
         state = env.get("OPENCLAW_STATE_DIR") or os.path.join(home(env), ".openclaw")
-        return [os.path.join(state, "openclaw.json")] + sorted(glob.glob(os.path.join(home(env), ".openclaw-*",
-                                                                                         "openclaw.json")))
+        return [os.path.join(state, "openclaw.json")] + [os.path.join(d, "openclaw.json")
+                                                          for d in entries(home(env), ".openclaw-")]
 
     def config_dirs(self, env):
         return [] if env.get("OPENCLAW_CONFIG_PATH") else [home(env)]
@@ -482,6 +481,16 @@ def agent_lock(name, env):
         yield
     finally:
         os.close(fd)
+
+
+def entries(folder, prefix=""):
+    """Every entry of a folder whose name starts with prefix (profiles), whether or not it can be looked into: one that
+    can't is checked as a place a configuration may be (mentions), never left out as a glob would."""
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []                   # a folder that can't be listed is unlisted()'s to report
+    return [os.path.join(folder, n) for n in names if n.startswith(prefix) and n not in (".", "..")]
 
 
 MENTIONS_CAP = 16 << 20

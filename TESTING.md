@@ -410,10 +410,12 @@ copy's VMs (off) and are stopped at the end.
   refuse; look-alikes (OpenClaw's relay and anchor helpers, other node and python programs) aren't agents, and a
   plain process table never reads a command line. A process is told by what it executes, no option tables: Gemini CLI
   started with node options that take a value (`--dns-result-order`, `--disable-proto`, `--stack-size`), a native
-  `gemini` (by its executable, through a link of another name too) and node running a relative link to its script
-  (from the process's own working folder, read live from a stand-in that changed folder) make `at_user_terminal`
-  refuse, while an editor opening a file named gemini and a dev shell naming a project hermes_cli above a terminal
-  are the user's own; a relative script whose working folder can't be read is an unidentified agent.
+  `gemini` (by its executable, through a link of another name too), node running a relative link to its script
+  (from the process's own working folder, read live from a stand-in that changed folder), `node -pe
+  "import('@google/gemini-cli')"` and a preload of Gemini CLI's package make `at_user_terminal` refuse, while an
+  editor opening a file named gemini and a dev shell above a terminal are the user's own, with boolean flags before
+  them (`python3 -u`, `node --no-warnings`) too; a relative script whose working folder can't be read is an
+  unidentified agent.
 - Records (process start times stood in for). A claim kept from before start times were kept never counts, and renewing
   it doesn't give it the current process's; a lease refreshed after its session ended (owners' and the hub's own) keeps
   that session's start time, so the process that has its pid now holds nothing; every write checks the folder again (one
@@ -1259,7 +1261,8 @@ Each of these needs no VM and takes seconds.
   and the skills, a switch during the run changing nothing; an uninstall without an agent's CLI (Gemini CLI's
   settings.json read directly, Hermes Agent's config.yaml looked through, no Python at all) keeping the command, and so
   does a configuration it can't read in full (OpenClaw's `$include` of another file, a file past the 16 MB read,
-  OpenClaw's folder that can't be searched and Hermes Agent's profiles folder that can't be listed, with Python and
+  OpenClaw's folder that can't be searched and Hermes Agent's profiles folder that can't be listed, and one profile
+  folder among others that can't be looked into (a Hermes profile, an OpenClaw ~/.openclaw-NAME), with Python and
   without; Gemini CLI's settings.json past the 4 MB its reader takes); and an unexpected error in an agent's uninstall step (its lock file a link, its lock folder not
   writable) keeping the command too, said, until a run that works removes it. The
   recognition of their sessions is test_session_guard's (stand-in processes as `ps` shows each agent, a titled Hermes,

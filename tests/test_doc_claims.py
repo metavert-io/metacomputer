@@ -708,7 +708,7 @@ def vault_types_on_its_own_path():
 
 
 CLAIMS = [
-    ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above\s+them in the process tree.*?and\s+also when a node or python process above them can't be told.*?A process is told by\s+what it executes: its executable \(a native `gemini`.*?never by its other\s+arguments.*?It can't be told when its arguments or working\s+folder can't be read or its script isn't there",
+    ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent or Gemini CLI is above\s+them in the process tree.*?and\s+also when a node, bun, deno or python process above them can't be told.*?A process\s+is told by what it executes: its executable \(a native `gemini`.*?the first argument that isn't an option or the value of an option known\s+to take one.*?plus any of its arguments naming an agent's package by an identifier of its own \(`@google/gemini-cli`,.*?A file merely named `gemini` is no agent. It can't\s+be told when its arguments or working folder can't be read or its script isn't there",
      lambda m: "def at_user_terminal(fds=(0,)):" in raw("lib/owners.py")
      and "return ancestry_complete(os.getpid(), table) and claude_of(os.getpid(), table) is None" in raw("lib/owners.py")
      and 'return "Claude Code"' in function_src("lib/owners.py", "agent_kind")
@@ -718,8 +718,12 @@ CLAIMS = [
      and "if args is None:\n        return UNKNOWN_AGENT" in function_src("lib/owners.py", "process_agent")
      and "return process_agent(comm, table.exe(pid), lambda: table.argv(pid), lambda: table.cwd(pid))"
      in function_src("lib/owners.py", "agent_of")
-     and "return first() or UNKNOWN_AGENT        # the script's place, and no such file: can't tell"
-     in function_src("lib/owners.py", "script_agent")
+     and "return UNKNOWN_AGENT                    # the script's place, and no file there (or no way to look): can't tell"
+     in function_src("lib/owners.py", "_script_at")
+     and "got = _package_rule(argv[1:], where)" in function_src("lib/owners.py", "script_agent")
+     and '("@google/gemini-cli", "Gemini CLI")' in raw("lib/owners.py") and '("hermes-agent", "Hermes Agent")' in raw("lib/owners.py")
+     and 'if not eq and (flag in (DENO_VALUE_FLAGS if kind == "deno" else NODE_VALUE_FLAGS)):' in function_src("lib/owners.py", "script_agent")
+     and "if let got = packageRule(argv.dropFirst(), cwd: cwd) { return got }" in raw("vault/Util.swift")
      and "if not where:\n            return _UNREADABLE" in function_src("lib/owners.py", "_resolve")
      and '"gemini": "Gemini CLI"' in raw("lib/owners.py") and "proc_pidpath" in function_src("lib/owners.py", "proc_exe")
      and "NODE_VALUE_OPTIONS" not in raw("lib/owners.py") and "nodeValueOptions" not in raw("vault/Util.swift")
@@ -741,6 +745,11 @@ CLAIMS = [
      lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("bin/metacomputer")
      and f"exit {m[1]} ;;" in raw("bin/metacomputer")),
     ("docs/codex.md", r"with `tool_timeout_sec = (\d+)`", lambda m: f"CODEX_TOOL_TIMEOUT={m[1]}" in raw("install.sh")),
+    ("SECURITY.md", r"\*\*Recognising agent sessions is best-effort defense in depth.\*\*.*?So it is never what an approval that "
+                    r"matters rests on: those also\s+need you present, Touch ID \(or macOS's login-password dialog\) in "
+                    r"presence mode, or the confirmation typed at the\s+terminal where you unlocked the vault",
+     lambda m: "deviceOwnerAuthentication" in raw("vault/Approvals.swift")
+     and "Type \\(name) to allow (\\(name) session / \\(name) unlock); anything else refuses" in raw("vault/Server.swift")),
     ("bench/README.md", r"Gemini CLI, Hermes Agent and OpenClaw sessions each run in a throwaway HOME,\s+made for that session.*?"
                         r"deleted\s+afterwards through `lib/safedelete.py`, whether the session ends, times out\s+or fails"
                         r".*?None runs with a yolo or approve-everything mode",

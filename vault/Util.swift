@@ -658,17 +658,47 @@ func pathBase(_ s: String) -> String {
     return s.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? s
 }
 
-/// The agents' programs by file name, a folder in a script's path, python -m modules, words in a -c or -e program, and
-/// bun's commands: lib/owners.py AGENT_NAMES, AGENT_PATH_WORDS, AGENT_MODULES, AGENT_CODE_WORDS, BUN_COMMANDS.
+/// The agents' programs by file name, a folder in a script's path, python -m modules, their packages' identifiers,
+/// the interpreters' options that take a value, preload or carry code, and bun's and deno's commands: lib/owners.py
+/// AGENT_NAMES, AGENT_PATH_WORDS, AGENT_MODULES, AGENT_PACKAGE_WORDS, AGENT_PACKAGE_FOLDERS, AGENT_PACKAGES,
+/// OPENCLAW_HELPERS, NODE_VALUE_FLAGS, NODE_PRELOAD_FLAGS, NODE_CODE_FLAGS, DENO_VALUE_FLAGS, PYTHON_VALUE_FLAGS,
+/// BUN_COMMANDS, DENO_COMMANDS, SCRIPT_COMMANDS.
 let agentNames: [String: String] = [
     "gemini": "Gemini CLI", "gemini.js": "Gemini CLI", "openclaw": "OpenClaw", "openclaw.mjs": "OpenClaw",
     "openclaw-gateway": "OpenClaw", "hermes": "Hermes Agent", "hermes-agent": "Hermes Agent", "hermes-acp": "Hermes Agent"]
 let agentPathWords: [(String, String)] = [("/@google/gemini-cli/", "Gemini CLI"), ("hermes_cli", "Hermes Agent")]
 let agentModules: [String: String] = ["hermes_cli": "Hermes Agent", "hermes_agent": "Hermes Agent"]
-let agentCodeWords: [(String, String)] = [("@google/gemini-cli", "Gemini CLI"), ("openclaw.mjs", "OpenClaw"),
-                                          ("hermes_cli", "Hermes Agent")]
+let agentPackageWords: [(String, String)] = [
+    ("@google/gemini-cli", "Gemini CLI"), ("gemini-cli-core", "Gemini CLI"), ("openclaw.mjs", "OpenClaw"),
+    ("hermes_cli", "Hermes Agent"), ("hermes-agent", "Hermes Agent")]
+let agentPackageFolders: [(String, String)] = [("gemini-cli", "Gemini CLI"), ("openclaw", "OpenClaw")]
+let agentPackages: [String: String] = [
+    "@google/gemini-cli": "Gemini CLI", "@google/gemini-cli-core": "Gemini CLI", "openclaw": "OpenClaw",
+    "hermes-agent": "Hermes Agent"]
+let openclawHelpers = ["dist", "process", "supervisor"]
+let nodeValueFlags: Set<String> = [
+    "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--title",
+    "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--secure-heap", "--secure-heap-min",
+    "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-directory", "--report-filename",
+    "--report-signal", "--cpu-prof-dir", "--cpu-prof-name", "--cpu-prof-interval", "--heap-prof-dir",
+    "--heap-prof-name", "--heap-prof-interval", "--disable-warning", "--experimental-config-file", "--inspect-port",
+    "--debug-port", "--max-http-header-size", "--experimental-sea-config", "--test-name-pattern", "--test-reporter",
+    "--test-reporter-destination", "--localstorage-file", "--trace-event-categories", "--trace-event-file-pattern",
+    "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--watch-kill-signal", "--dns-result-order",
+    "--disable-proto", "--unhandled-rejections", "--experimental-default-type", "--stack-size", "--max-old-space-size",
+    "--max-semi-space-size",
+    "--preload", "--cwd", "--config", "--tsconfig-override", "-d", "--define", "-l", "--main-fields", "--extension-order"]
+let nodePreloadFlags: Set<String> = ["-r", "--require", "--import", "--loader", "--experimental-loader", "--preload"]
+let nodeCodeFlags: Set<String> = ["-e", "--eval", "-p", "--print", "--run"]
+let denoValueFlags: Set<String> = ["-c", "--config", "--import-map", "--location", "--seed", "--cert", "--lock", "--ext",
+                                   "-L", "--log-level"]
+let pythonValueFlags: Set<String> = ["--check-hash-based-pycs"]
 let bunCommands: Set<String> = ["run", "x", "exec", "test", "build", "install", "i", "add", "remove", "rm", "update",
                                 "create", "init", "pm", "link", "unlink", "upgrade", "repl", "outdated", "publish", "patch"]
+let denoCommands: Set<String> = ["run", "serve", "test", "bench", "check", "compile", "eval", "repl", "task", "install",
+                                 "uninstall", "fmt", "lint", "info", "doc", "upgrade", "types", "completions", "coverage",
+                                 "init", "jupyter", "publish", "add", "remove", "outdated", "clean", "lsp", "vendor"]
+let scriptCommands: Set<String> = ["run", "serve", "test", "bench", "check", "compile"]
 
 /// The agent a process is by a name (its kernel name or its executable's path), as lib/owners.py agent_kind.
 func nameKind(_ s: String) -> String? {
@@ -683,12 +713,34 @@ func pathAgent(_ path: String) -> String? {
     return agentPathWords.first(where: { path.contains($0.0) })?.1
 }
 
+/// The agent whose package a text names, as lib/owners.py package_agent.
+func packageAgent(_ text: String, folder: Bool = false) -> String? {
+    if let w = agentPackageWords.first(where: { text.contains($0.0) }) { return w.1 }
+    let parts = text.components(separatedBy: "/")
+    let folders = folder ? parts : Array(parts.dropLast())
+    let helper = parts.indices.contains { i in
+        parts[i] == "openclaw" && Array(parts[min(i + 1, parts.count)..<min(i + 4, parts.count)]) == openclawHelpers
+    }
+    for (name, agent) in agentPackageFolders where folders.contains(name) && !(agent == "OpenClaw" && helper) {
+        return agent
+    }
+    return nil
+}
+
+func realOrSelf(_ path: String) -> String {
+    guard let r = realpath(path, nil) else { return path }
+    defer { free(r) }
+    return String(cString: r)
+}
+
+func isDirectory(_ path: String) -> Bool {
+    var dir: ObjCBool = false
+    return FileManager.default.fileExists(atPath: path, isDirectory: &dir) && dir.boolValue
+}
+
 func fileAgent(_ path: String) -> String? {
-    if let a = pathAgent(path) { return a }
-    guard let r = realpath(path, nil) else { return nil }
-    let real = String(cString: r)
-    free(r)
-    return pathAgent(real)
+    let real = realOrSelf(path)
+    return pathAgent(path) ?? pathAgent(real) ?? packageAgent(real, folder: isDirectory(real))
 }
 
 /// The agent a process is, from what it executes, as lib/owners.py process_agent: its kernel name, then its executable
@@ -700,14 +752,15 @@ func agentKindOf(_ name: String, exe: String?, args: () -> [String]?, cwd: @esca
     let interp: String? = isInterpreter(name) ? name : (exe.map(pathBase).flatMap { isInterpreter($0) ? $0 : nil })
     guard let interp = interp else { return nil }
     guard let a = args() else { return unknownAgent }
-    let kind = interp.lowercased().hasPrefix("python") ? "python" : (interp == "bun" ? "bun" : "node")
+    let low = interp.lowercased()
+    let kind = low.hasPrefix("python") ? "python" : (low == "bun" || low == "deno" ? low : "node")
     return interpreterAgent(a, cwd: cwd, kind: kind)
 }
 
 /// A process the kernel names after an interpreter (node, bun, python): the agent is told by what it runs.
 func isInterpreter(_ name: String) -> Bool {
     let n = pathBase(name)
-    return n == "node" || n == "nodejs" || n == "bun" || n == "Python" || matches(n, "^python[0-9.]*$")
+    return n == "node" || n == "nodejs" || n == "bun" || n == "deno" || n == "Python" || matches(n, "^python[0-9.]*$")
 }
 
 /// What an interpreter's argument names, resolved against the process's working folder (lib/owners.py _resolve).
@@ -719,101 +772,107 @@ func resolveArg(_ arg: String, cwd: () -> String?, kind: String) -> Resolved {
         guard let w = cwd(), !w.isEmpty else { return .unreadable }
         path = w.hasSuffix("/") ? w + arg : w + "/" + arg
     }
-    for p in [path] + (kind == "python" ? [] : [path + ".js", path + ".mjs", path + ".cjs"])
+    for p in [path] + (kind == "python" || kind == "exact" ? [] : [path + ".js", path + ".mjs", path + ".cjs"])
     where FileManager.default.fileExists(atPath: p) {
         return .file(p)
     }
     return .missing
 }
 
+/// lib/owners.py _package_rule: an agent's package named by any argument, or by what one naming a file resolves to.
+func packageRule(_ args: ArraySlice<String>, cwd: () -> String?) -> String? {
+    for a in args {
+        var values = [a]
+        if let eq = a.firstIndex(of: "=") { values.append(String(a[a.index(after: eq)...])) }
+        for v in values where !v.isEmpty {
+            if let got = packageAgent(v) { return got }
+            if v.hasPrefix("-") || v.utf8.count > 4096 { continue }
+            if case .file(let p) = resolveArg(v, cwd: cwd, kind: "exact") {
+                let real = realOrSelf(p)
+                if let got = packageAgent(real, folder: isDirectory(real)) { return got }
+            }
+        }
+    }
+    return nil
+}
+
+/// lib/owners.py _preload_agent: a file a preload names, or its package.
+func preloadAgent(_ spec: String, cwd: () -> String?, kind: String) -> String? {
+    if spec.hasPrefix(".") || spec.hasPrefix("/"), case .file(let p) = resolveArg(spec, cwd: cwd, kind: kind) {
+        return fileAgent(p)
+    }
+    let parts = spec.components(separatedBy: "/")
+    let key = spec.hasPrefix("@") ? parts.prefix(2).joined(separator: "/") : (parts.first ?? "")
+    return agentPackages[key]
+}
+
+func scriptAt(_ arg: String, cwd: () -> String?, kind: String) -> String? {
+    guard case .file(let p) = resolveArg(arg, cwd: cwd, kind: kind) else { return unknownAgent }
+    return fileAgent(p)
+}
+
 /// The agent an interpreter's exact arguments run, else nil, or unknownAgent when it can't be told: as lib/owners.py
-/// script_agent, step for step. Its title (argv[0]); a -c or -e program or python's -m module; else its script, the
-/// first argument naming a file or folder that exists (relative ones from the process's own working folder), with the
-/// next one too when an option comes right before it, and files given as an option's `=value`. Other arguments are
-/// never looked at. Unknown when the script's place holds no file, the program comes from standard input, or the
-/// working folder can't be read for a relative one.
+/// script_agent, step for step. Its title (argv[0]); an agent's package named by any argument or by what one naming
+/// an existing file resolves to; then the program in its place: a preload, python's -m module, or the script (the first
+/// argument that isn't an option or the value of an option known to take one). Code is no script. Unknown when the
+/// script's place names no file, the working folder can't be read for a relative one, or the program is standard input.
 func interpreterAgent(_ argv: [String], cwd: @escaping () -> String?, kind: String) -> String? {
     guard let first0 = argv.first else { return nil }
     if let t = agentNames[pathBase(first0)] { return t }
-    var found: [String] = []
-    func first(_ more: String? = nil) -> String? {
-        for p in found + (more.map { [$0] } ?? []) {
-            if let a = fileAgent(p) { return a }
-        }
-        return nil
-    }
-    var afterOpt = false, bunCmd = false
-    var i = 1
+    if let got = packageRule(argv.dropFirst(), cwd: cwd) { return got }
+    var i = 1, command = false
     let n = argv.count
     while i < n {
         let a = argv[i]
-        if a == "--" || a == "-" {
-            if a == "-" || i + 1 >= n { return first() ?? unknownAgent }
-            switch resolveArg(argv[i + 1], cwd: cwd, kind: kind) {
-            case .unreadable: return unknownAgent
-            case .file(let p): return first(p)
-            case .missing: return first() ?? unknownAgent
-            }
-        }
+        if a == "-" { return unknownAgent }
+        if a == "--" { return i + 1 < n ? scriptAt(argv[i + 1], cwd: cwd, kind: kind) : nil }
         if a.hasPrefix("-") {
-            var prog: (Character, String)? = nil
-            if kind == "python" && !a.hasPrefix("--") {
-                let chars = Array(a)
-                var j = 1
-                while j < chars.count {
-                    if chars[j] == "W" || chars[j] == "X" { break }
-                    if chars[j] == "c" || chars[j] == "m" {
-                        let rest = String(chars[(j + 1)...])
-                        prog = (chars[j], !rest.isEmpty ? rest : (i + 1 < n ? argv[i + 1] : ""))
-                        break
+            let eqIndex = a.firstIndex(of: "=")
+            let flag = eqIndex.map { String(a[..<$0]) } ?? a
+            let value = eqIndex.map { String(a[a.index(after: $0)...]) } ?? ""
+            if kind == "python" {
+                if !a.hasPrefix("--") {
+                    let chars = Array(a)
+                    var j = 1
+                    while j < chars.count {
+                        if chars[j] == "W" || chars[j] == "X" {
+                            if j + 1 >= chars.count { i += 1 }
+                            break
+                        }
+                        if chars[j] == "c" || chars[j] == "m" {
+                            let rest = String(chars[(j + 1)...])
+                            let v = !rest.isEmpty ? rest : (i + 1 < n ? argv[i + 1] : "")
+                            return chars[j] == "m" ? agentModules[v.components(separatedBy: ".").first ?? ""] : nil
+                        }
+                        j += 1
                     }
-                    j += 1
+                } else if pythonValueFlags.contains(flag) && eqIndex == nil {
+                    i += 1
                 }
-            } else if kind != "python" {
-                if ["-e", "--eval", "-p", "--print"].contains(a) {
-                    prog = ("c", i + 1 < n ? argv[i + 1] : "")
-                } else if a.hasPrefix("--eval=") || a.hasPrefix("--print=") {
-                    prog = ("c", String(a[a.index(after: a.firstIndex(of: "=")!)...]))
+            } else {
+                let body = a.dropFirst()
+                if nodeCodeFlags.contains(flag)
+                    || (!a.hasPrefix("--") && kind != "deno" && a.count > 2 && (body.contains("e") || body.contains("p"))) {
+                    return nil
                 }
-            }
-            if let (which, v) = prog {
-                if which == "m" {
-                    return first() ?? agentModules[v.components(separatedBy: ".").first ?? ""]
+                if nodePreloadFlags.contains(flag) && kind != "deno" {
+                    let spec = eqIndex != nil ? value : (i + 1 < n ? argv[i + 1] : "")
+                    if !spec.isEmpty, let got = preloadAgent(spec, cwd: cwd, kind: kind) { return got }
                 }
-                return first() ?? agentCodeWords.first(where: { v.contains($0.0) })?.1
-            }
-            afterOpt = !a.contains("=")
-            let value = a.firstIndex(of: "=").map { String(a[a.index(after: $0)...]) } ?? ""
-            if value.contains("/") {
-                switch resolveArg(value, cwd: cwd, kind: kind) {
-                case .unreadable: return unknownAgent
-                case .file(let p): found.append(p)
-                case .missing: break
-                }
+                if eqIndex == nil && (kind == "deno" ? denoValueFlags : nodeValueFlags).contains(flag) { i += 1 }
             }
             i += 1
             continue
         }
-        if kind == "bun" && !bunCmd && found.isEmpty && bunCommands.contains(a) {
-            bunCmd = true
-            if a != "run" { return first() }
-            afterOpt = false
+        if (kind == "bun" || kind == "deno") && !command && (kind == "bun" ? bunCommands : denoCommands).contains(a) {
+            command = true
+            if !scriptCommands.contains(a) { return nil }
             i += 1
             continue
         }
-        switch resolveArg(a, cwd: cwd, kind: kind) {
-        case .unreadable:
-            return unknownAgent
-        case .file(let p):
-            if !afterOpt { return first(p) }
-            found.append(p)
-        case .missing:
-            if !afterOpt { return first() ?? unknownAgent }
-        }
-        afterOpt = false
-        i += 1
+        return scriptAt(a, cwd: cwd, kind: kind)
     }
-    return first()
+    return nil
 }
 
 /// An agent process that runs all of its conversations, whose requests therefore name no one session: Codex's app

@@ -276,21 +276,54 @@ def is_codex(comm):
 UNKNOWN_AGENT = "unidentified agent"
 AGENTS = ("Claude Code", "Codex", "OpenClaw", "Hermes Agent", "Gemini CLI", UNKNOWN_AGENT)
 # An interpreter's process (ps comm= is its program, often by its full path): the agent is told by what it runs.
-_INTERPRETER = re.compile(r"(node|nodejs|bun|python[0-9.]*|Python)")
+_INTERPRETER = re.compile(r"(node|nodejs|bun|deno|python[0-9.]*|Python)")
 # The agents' programs, by file name: a native executable (Gemini CLI's standalone `gemini`), the name a process gives
 # itself (OpenClaw's `openclaw-gateway`, a titled Hermes Agent's `hermes`), or the script an interpreter runs.
 AGENT_NAMES = {"gemini": "Gemini CLI", "gemini.js": "Gemini CLI", "openclaw": "OpenClaw", "openclaw.mjs": "OpenClaw",
                "openclaw-gateway": "OpenClaw", "hermes": "Hermes Agent", "hermes-agent": "Hermes Agent",
                "hermes-acp": "Hermes Agent"}
-# ...and by a folder in a script's path: Gemini CLI's package, Hermes Agent's. Not OpenClaw's package: its helper
-# processes (the relay between its gateway and an MCP server) run scripts from there and are the gateway's, found above.
+# ...and by a folder in a script's path: Gemini CLI's package, Hermes Agent's.
 AGENT_PATH_WORDS = (("/@google/gemini-cli/", "Gemini CLI"), ("hermes_cli", "Hermes Agent"))
-# python -m: the module's package. A -c or -e program: what it loads.
+# python -m: the module's package.
 AGENT_MODULES = {"hermes_cli": "Hermes Agent", "hermes_agent": "Hermes Agent"}
-AGENT_CODE_WORDS = (("@google/gemini-cli", "Gemini CLI"), ("openclaw.mjs", "OpenClaw"), ("hermes_cli", "Hermes Agent"))
-# bun's commands; `run` is followed by the script, the others run no script file of the agents'.
+# The agents' packages, by identifiers specific to them (never a bare name like `gemini`): found in any argument of an
+# interpreter, or in what an argument naming an existing file resolves to, they make it that agent (package_agent).
+AGENT_PACKAGE_WORDS = (("@google/gemini-cli", "Gemini CLI"), ("gemini-cli-core", "Gemini CLI"),
+                       ("openclaw.mjs", "OpenClaw"), ("hermes_cli", "Hermes Agent"), ("hermes-agent", "Hermes Agent"))
+AGENT_PACKAGE_FOLDERS = (("gemini-cli", "Gemini CLI"), ("openclaw", "OpenClaw"))      # a folder of that name in a path
+# A package a preload names (node --require/--import PKG): its name.
+AGENT_PACKAGES = {"@google/gemini-cli": "Gemini CLI", "@google/gemini-cli-core": "Gemini CLI", "openclaw": "OpenClaw",
+                  "hermes-agent": "Hermes Agent"}
+# OpenClaw's own helpers, which only relay between its gateway and a child it runs (an MCP server): the gateway above
+# them is the session, so they aren't one (openclaw/dist/process/supervisor/service-child-*.js).
+OPENCLAW_HELPERS = ("dist", "process", "supervisor")
+# The interpreters' options that take the next argument as their value (an unknown option takes none: it never moves
+# the script's place), those that preload a module, and those whose value is the program.
+NODE_VALUE_FLAGS = frozenset((
+    "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--title",
+    "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--secure-heap", "--secure-heap-min",
+    "--openssl-config", "--icu-data-dir", "--diagnostic-dir", "--report-dir", "--report-directory", "--report-filename",
+    "--report-signal", "--cpu-prof-dir", "--cpu-prof-name", "--cpu-prof-interval", "--heap-prof-dir",
+    "--heap-prof-name", "--heap-prof-interval", "--disable-warning", "--experimental-config-file", "--inspect-port",
+    "--debug-port", "--max-http-header-size", "--experimental-sea-config", "--test-name-pattern", "--test-reporter",
+    "--test-reporter-destination", "--localstorage-file", "--trace-event-categories", "--trace-event-file-pattern",
+    "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--watch-kill-signal", "--dns-result-order",
+    "--disable-proto", "--unhandled-rejections", "--experimental-default-type", "--stack-size", "--max-old-space-size",
+    "--max-semi-space-size",
+    # bun
+    "--preload", "--cwd", "--config", "--tsconfig-override", "-d", "--define", "-l", "--main-fields", "--extension-order"))
+NODE_PRELOAD_FLAGS = frozenset(("-r", "--require", "--import", "--loader", "--experimental-loader", "--preload"))
+NODE_CODE_FLAGS = frozenset(("-e", "--eval", "-p", "--print", "--run"))      # --run: a package.json script, by name
+DENO_VALUE_FLAGS = frozenset(("-c", "--config", "--import-map", "--location", "--seed", "--cert", "--lock", "--ext",
+                              "-L", "--log-level"))
+PYTHON_VALUE_FLAGS = frozenset(("--check-hash-based-pycs",))
+# bun's and deno's commands: after these comes the script (deno eval: code); any other runs no script of the agents'.
 BUN_COMMANDS = frozenset(("run", "x", "exec", "test", "build", "install", "i", "add", "remove", "rm", "update",
                           "create", "init", "pm", "link", "unlink", "upgrade", "repl", "outdated", "publish", "patch"))
+DENO_COMMANDS = frozenset(("run", "serve", "test", "bench", "check", "compile", "eval", "repl", "task", "install",
+                           "uninstall", "fmt", "lint", "info", "doc", "upgrade", "types", "completions", "coverage",
+                           "init", "jupyter", "publish", "add", "remove", "outdated", "clean", "lsp", "vendor"))
+SCRIPT_COMMANDS = frozenset(("run", "serve", "test", "bench", "check", "compile"))
 
 
 def is_interpreter(comm):
@@ -299,7 +332,7 @@ def is_interpreter(comm):
 
 def _interp_kind(name):
     base = os.path.basename(name or "").strip("()").lower()
-    return "python" if base.startswith("python") else ("bun" if base == "bun" else "node")
+    return "python" if base.startswith("python") else (base if base in ("bun", "deno") else "node")
 
 
 def name_agent(path):
@@ -312,8 +345,22 @@ def path_agent(path):
     return name_agent(path) or next((a for w, a in AGENT_PATH_WORDS if w in (path or "")), None)
 
 
-def code_agent(code):
-    return next((a for w, a in AGENT_CODE_WORDS if w in (code or "")), None)
+def package_agent(text, folder=False):
+    """The agent whose package a text names, else None: an identifier of AGENT_PACKAGE_WORDS anywhere in it, or a folder
+    of AGENT_PACKAGE_FOLDERS in it as a path (a part followed by `/`; the last part too when folder: the text is a
+    folder's path), except a path to OpenClaw's own helpers (OPENCLAW_HELPERS under an openclaw folder: wherever
+    OpenClaw is installed, even under another folder of that name)."""
+    text = text or ""
+    for w, a in AGENT_PACKAGE_WORDS:
+        if w in text:
+            return a
+    parts = text.split("/")
+    folders = parts if folder else parts[:-1]
+    helper = any(p == "openclaw" and tuple(parts[i + 1:i + 4]) == OPENCLAW_HELPERS for i, p in enumerate(parts))
+    for name, a in AGENT_PACKAGE_FOLDERS:
+        if name in folders and not (a == "OpenClaw" and helper):
+            return a
+    return None
 
 
 _UNREADABLE = object()          # a relative path, and the process's working folder couldn't be read
@@ -321,7 +368,7 @@ _UNREADABLE = object()          # a relative path, and the process's working fol
 
 def _resolve(arg, cwd, kind):
     """The file an interpreter's argument names, resolved against the process's own working folder: its path, None
-    when there's none (node also tries .js, .mjs and .cjs, as it does), or _UNREADABLE."""
+    when there's none (node and bun also try .js, .mjs and .cjs, as node does), or _UNREADABLE."""
     if arg.startswith("/"):
         path = arg
     else:
@@ -329,7 +376,7 @@ def _resolve(arg, cwd, kind):
         if not where:
             return _UNREADABLE
         path = os.path.join(where, arg)
-    for p in (path,) + (() if kind == "python" else (path + ".js", path + ".mjs", path + ".cjs")):
+    for p in (path,) + (() if kind in ("python", "exact") else (path + ".js", path + ".mjs", path + ".cjs")):
         try:
             if os.path.exists(p):
                 return p
@@ -338,105 +385,120 @@ def _resolve(arg, cwd, kind):
     return None
 
 
+def _real(path):
+    try:
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        return path
+
+
 def _file_agent(path):
     """The agent a script file is, as written and as it resolves (a link to it)."""
-    got = path_agent(path)
-    if got is None:
-        try:
-            got = path_agent(os.path.realpath(path))
-        except (OSError, ValueError):
-            got = None
-    return got
+    real = _real(path)
+    return path_agent(path) or path_agent(real) or package_agent(real, os.path.isdir(real))
+
+
+def _package_rule(args, cwd):
+    """An interpreter's arguments (and the values after an option's `=`) naming an agent's package, as written or as
+    what one naming an existing file resolves to (against the process's working folder; none when it can't be read)."""
+    for a in args:
+        for v in (a, a.partition("=")[2]) if "=" in a else (a,):
+            if not v:
+                continue
+            got = package_agent(v)
+            if got:
+                return got
+            if v.startswith("-") or len(v) > 4096:
+                continue
+            res = _resolve(v, cwd, "exact")
+            if res and res is not _UNREADABLE:
+                real = _real(res)
+                got = package_agent(real, os.path.isdir(real))
+                if got:
+                    return got
+    return None
+
+
+def _preload_agent(spec, cwd, kind):
+    """A preload (node --require/--import SPEC): a file it names (an agent's script), or a package (AGENT_PACKAGES)."""
+    res = _resolve(spec, cwd, kind) if spec.startswith((".", "/")) else None
+    if res and res is not _UNREADABLE:
+        return _file_agent(res)
+    parts = spec.split("/")
+    return AGENT_PACKAGES.get("/".join(parts[:2]) if spec.startswith("@") else parts[0])
+
+
+def _script_at(arg, cwd, kind):
+    res = _resolve(arg, cwd, kind)
+    if res is _UNREADABLE or res is None:
+        return UNKNOWN_AGENT                    # the script's place, and no file there (or no way to look): can't tell
+    return _file_agent(res)
 
 
 def script_agent(argv, cwd=None, kind="node"):
-    """The agent an interpreter's exact arguments run, else None, or UNKNOWN_AGENT when it can't be told. What the
-    interpreter executes is looked at, never the rest of its arguments (a file an editor opens, a project a dev shell
-    names), and no table of the interpreter's options (which can't be complete):
+    """The agent an interpreter's exact arguments run, else None, or UNKNOWN_AGENT when it can't be told:
       - its title, argv[0] (OpenClaw's `openclaw` and `openclaw-gateway`, a titled Hermes Agent's `hermes`);
-      - a -c or -e program (what it loads: AGENT_CODE_WORDS), python's -m module (AGENT_MODULES);
-      - else its script: the first argument naming a file or folder that exists, relative ones resolved against the
-        process's own working folder (cwd(): its path, or None when it can't be read), checked as written and as it
-        resolves (a link to it) against AGENT_NAMES and AGENT_PATH_WORDS. When an option comes right before that file
-        it may be the option's value (node's --require FILE), so the next file counts too; so does a path given as an
-        option's `=value` (--import=FILE).
-    UNKNOWN_AGENT when the script can't be found: an argument in its place names no file (or the program comes from
-    standard input, `-`), or a relative one can't be resolved because the working folder can't be read. No arguments
-    beyond options (a REPL) is no agent."""
+      - an agent's package named by any argument, or by what one naming an existing file resolves to (relative ones
+        from the process's own working folder: cwd(), its path or None when it can't be read): AGENT_PACKAGE_WORDS
+        and AGENT_PACKAGE_FOLDERS, specific identifiers, never a bare name (so `node -pe "import('@google/gemini-cli')"`
+        and `--import @google/gemini-cli` are Gemini CLI, and an editor opening a file named gemini isn't);
+      - the program in its place: a preload (--require/--import: a file or a package, AGENT_PACKAGES), python's -m
+        module, or the script, the first argument that isn't an option or an option's value (only options known to take
+        one: NODE_VALUE_FLAGS, DENO_VALUE_FLAGS, python's -W, -X; any other option takes none), checked as written and
+        as it resolves against AGENT_NAMES and AGENT_PATH_WORDS. Code (-c, -e, -p and clusters like -pe) is no script:
+        the package rule has read it.
+    UNKNOWN_AGENT when the script's place names no file, the working folder can't be read for a relative one, or the
+    program comes from standard input (`-`). No program but options (a REPL) is no agent."""
     if not argv:
         return None
-    if callable(cwd):
-        where = cwd
-    else:
-        where = (lambda: cwd)
+    where = cwd if callable(cwd) else (lambda: cwd)
     title = name_agent(argv[0])
     if title:
         return title
-    found = []
-
-    def first(*more):
-        for p in found + [m for m in more if m]:
-            got = _file_agent(p)
-            if got:
-                return got
-        return None
-    after_opt = bun_cmd = False
-    i, n = 1, len(argv)
+    got = _package_rule(argv[1:], where)
+    if got:
+        return got
+    i, n, command = 1, len(argv), False
     while i < n:
         a = argv[i]
-        if a == "--" or a == "-":
-            if a == "-" or i + 1 >= n:
-                return first() or UNKNOWN_AGENT
-            res = _resolve(argv[i + 1], where, kind)
-            return UNKNOWN_AGENT if res is _UNREADABLE else (first(res) or (None if res else UNKNOWN_AGENT))
-        if a.startswith("-"):
-            prog = None
-            if kind == "python" and not a.startswith("--"):
-                for j in range(1, len(a)):
-                    if a[j] in "WX":
-                        break
-                    if a[j] in "cm":
-                        v = a[j + 1:] or (argv[i + 1] if i + 1 < n else "")
-                        prog = (a[j], v)
-                        break
-            elif kind != "python":
-                if a in ("-e", "--eval", "-p", "--print"):
-                    prog = ("c", argv[i + 1] if i + 1 < n else "")
-                elif a.startswith(("--eval=", "--print=")):
-                    prog = ("c", a.partition("=")[2])
-            if prog:
-                if prog[0] == "m":
-                    return first() or AGENT_MODULES.get(prog[1].split(".")[0])
-                return first() or code_agent(prog[1])
-            after_opt = "=" not in a
-            value = a.partition("=")[2]
-            if "/" in value:                       # a file as an option's value (a preload): it runs too
-                res = _resolve(value, where, kind)
-                if res is _UNREADABLE:
-                    return UNKNOWN_AGENT
-                if res:
-                    found.append(res)
-            i += 1
-            continue
-        if kind == "bun" and not bun_cmd and not found and a in BUN_COMMANDS:
-            bun_cmd = True
-            if a != "run":
-                return first()
-            after_opt = False
-            i += 1
-            continue
-        res = _resolve(a, where, kind)
-        if res is _UNREADABLE:
+        if a == "-":
             return UNKNOWN_AGENT
-        if res and after_opt:
-            found.append(res)
-        elif res:
-            return first(res)
-        elif not after_opt:
-            return first() or UNKNOWN_AGENT        # the script's place, and no such file: can't tell
-        after_opt = False
-        i += 1
-    return first()
+        if a == "--":
+            return _script_at(argv[i + 1], where, kind) if i + 1 < n else None
+        if a.startswith("-"):
+            flag, eq, value = a.partition("=")
+            if kind == "python":
+                if not a.startswith("--"):
+                    for j in range(1, len(a)):
+                        if a[j] in "WX":
+                            i += 0 if a[j + 1:] else 1        # -W ignore: the next argument is its value
+                            break
+                        if a[j] in "cm":
+                            v = a[j + 1:] or (argv[i + 1] if i + 1 < n else "")
+                            return AGENT_MODULES.get(v.split(".")[0]) if a[j] == "m" else None
+                elif flag in PYTHON_VALUE_FLAGS and not eq:
+                    i += 1
+            else:
+                if flag in NODE_CODE_FLAGS or (not a.startswith("--") and kind != "deno"
+                                               and len(a) > 2 and ("e" in a[1:] or "p" in a[1:])):
+                    return None                       # code (or a package script), which the package rule read
+                if flag in NODE_PRELOAD_FLAGS and kind != "deno":
+                    spec = value if eq else (argv[i + 1] if i + 1 < n else "")
+                    got = _preload_agent(spec, where, kind) if spec else None
+                    if got:
+                        return got
+                if not eq and (flag in (DENO_VALUE_FLAGS if kind == "deno" else NODE_VALUE_FLAGS)):
+                    i += 1
+            i += 1
+            continue
+        if kind in ("bun", "deno") and not command and a in (BUN_COMMANDS if kind == "bun" else DENO_COMMANDS):
+            command = True
+            if a not in SCRIPT_COMMANDS:
+                return None                           # no script file of its own (deno eval: code, read above)
+            i += 1
+            continue
+        return _script_at(a, where, kind)
+    return None
 
 
 def agent_kind(comm, argv=None):

@@ -685,6 +685,31 @@ def no_cli_cases():
         check("a configuration folder that can't be searched (OpenClaw's) or listed (Hermes Agent's profiles) may hold "
               "an entry that runs the command: the links stay, said, exit 1, with Python and without",
               seen and all(all(v) for v in seen.values()), seen)
+        # One profile folder among others that can't be looked into (Codex's third re-check): a glob for the file in it
+        # leaves it out; every profile is checked, so the links stay, with Python and without.
+        seen = {}
+        for label, folder, cfg, text in (
+                ("a Hermes Agent profile", os.path.join(b.home, ".hermes", "profiles", "locked"), "config.yaml",
+                 "mcp_servers:\n  metacomputer:\n    command: " + b.link + "\n"),
+                ("an OpenClaw profile", os.path.join(b.home, ".openclaw-work"), "openclaw.json",
+                 '{"mcp": {"servers": {"metacomputer": {"command": "' + b.link + '", "args": ["mcp-lazy"]}}}}')):
+            write(os.path.join(folder, cfg), text)
+            write(os.path.join(os.path.dirname(folder), "plain" if "profiles" in folder else ".openclaw-plain", cfg), "{}")
+            os.chmod(folder, 0o000)
+            try:
+                p = b.install("--uninstall")
+                p2 = b.install("--uninstall", MCOMP_BREW_PYTHON="/nonexistent", PATH="/usr/bin:/bin")
+            finally:
+                os.chmod(folder, 0o700)
+            seen[label] = (p.returncode != 0 and os.path.islink(b.link) and "can't be looked at" in p.stdout
+                           and f"kept {b.link}" in p.stdout, p2.returncode != 0 and os.path.islink(b.link)
+                           and f"kept {b.link}" in p2.stdout)
+            shutil.rmtree(os.path.join(b.home, ".hermes") if "profiles" in folder else folder)
+            if "profiles" not in folder:
+                shutil.rmtree(os.path.join(b.home, ".openclaw-plain"))
+        check("one profile folder that can't be looked into, among others (a Hermes Agent profile, an OpenClaw "
+              "~/.openclaw-NAME): it may hold an entry that runs the command, so the links stay, said, exit 1, with "
+              "Python and without", seen and all(all(v) for v in seen.values()), seen)
         # Gemini CLI's settings.json past the 4 MB its reader takes: what's beyond wasn't read, so the links stay.
         gs = os.path.join(b.home, ".gemini", "settings.json")
         write(gs, " " * (4 << 20) + '{"mcpServers": {"metacomputer": {"command": "' + b.link + '", "args": ["mcp-lazy"]}}}')

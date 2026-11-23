@@ -198,10 +198,12 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   them); every registered adapter passes `tests/test_cloud_adapters.py`, which uses no VM and no network.
   Which processes are agent sessions is `lib/owners.py` `agent_kind`/`agent_of` (Claude Code, Codex, OpenClaw, Hermes
   Agent, Gemini CLI; by what a process executes (`process_agent`): its name, its executable (`proc_exe`, the realpath
-  of its text image: a native gemini) and, for an interpreter, the program it runs (`script_agent`: its script, the
-  first argument naming a file that exists, relative ones from its working folder (`proc_cwd`), checked as written and
-  resolved against `AGENT_NAMES`/`AGENT_PATH_WORDS`; a -m module or -c program; never its other arguments, no option
-  tables), read only through ps_table's `ProcTable`; arguments or a working folder that can't be read, or a script
+  of its text image: a native gemini) and, for an interpreter (node, bun, deno, python), the program it runs
+  (`script_agent`: its script, the first argument that isn't an option or the value of an option known to take one
+  (`NODE_VALUE_FLAGS`, `DENO_VALUE_FLAGS`; unknown options take none), relative ones from its working folder
+  (`proc_cwd`), checked as written and resolved against `AGENT_NAMES`/`AGENT_PATH_WORDS`; a preload; a -m module) plus
+  any argument naming an agent's package (`AGENT_PACKAGE_WORDS`, `AGENT_PACKAGE_FOLDERS`, as written or resolved;
+  OpenClaw's own helpers excepted), read only through ps_table's `ProcTable`; arguments or a working folder that can't be read, or a script
   that isn't there, are `UNKNOWN_AGENT`, an agent: fail closed) and, for the vault, `vault/Util.swift` `agentKindOf` (and `sharedAgentProcess`:
   Codex's app server, OpenClaw's and Hermes Agent's gateways and an unidentified agent get no session answers): keep the
   two the same; tests/fixtures/agent_argv.json holds the cases both are checked against (test_session_guard, and
