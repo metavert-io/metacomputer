@@ -5,12 +5,20 @@ input and output, and end it, and everything it started, when ssh goes.
     proxywrap.py -- PROGRAM [ARGS...]
 
 A tunnel program can outlive the ssh that started it: ssh sends its ProxyCommand SIGHUP on exit, and a program that
-ignores SIGHUP (Fly's `sprite proxy -W` does) is left running with its connection open, which keeps a cloud computer
+ignores SIGHUP (Fly's `sprite proxy -W` can) is left running with its connection open, which keeps a cloud computer
 awake and billing. So the program runs in a process group of its own, which this process owns: when ssh goes (this
 process gets SIGHUP, SIGTERM or SIGINT, or its parent is gone, checked every half second) or the program itself
 exits, the whole group gets SIGTERM, then SIGKILL after a grace period, and this process waits until the group is
 empty, whatever the program's own children do. The handlers are in place before the program starts. The program
-inherits only standard input, output and error; its exit status is this process's. Standard library only."""
+inherits only standard input, output and error; its exit status is this process's. Standard library only.
+
+This process leaves the process group (and session) ssh started it in, first thing: whoever ends ssh's connection
+may SIGKILL that whole group at once (the hub does, after a grace period), and a SIGKILL would end this process before
+it could end the tunnel, which isn't in that group. Out of it, this process outlives ssh by the half second it takes
+to notice, then ends the tunnel (found live: `hub stop` left `sprite proxy` running, and the Sprite awake).
+
+`ssh -f` doesn't fit: it forks after signing in and the process that started this one exits, so the tunnel would end
+at once. A caller that wants ssh in the background runs it there itself (bin/metacomputer view_tunnel)."""
 import os
 import signal
 import subprocess
@@ -49,6 +57,16 @@ def end_group(pgid, leader=None):
             time.sleep(0.05)
 
 
+def leave_group():
+    """Out of the caller's process group and session (setsid), so a group kill aimed at ssh's connection never ends
+    this process before it has ended the tunnel. A process that leads its group already can't (EPERM): it stays."""
+    try:
+        os.setsid()
+        return True
+    except OSError:
+        return False
+
+
 def run(argv, parent=None):
     parent = os.getppid() if parent is None else parent
     stop = []
@@ -75,6 +93,7 @@ def main(argv):
     if len(argv) < 2 or argv[0] != "--":
         print("usage: proxywrap.py -- PROGRAM [ARGS...]", file=sys.stderr)
         return 2
+    leave_group()
     return run(argv[1:])
 
 

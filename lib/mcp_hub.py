@@ -311,6 +311,32 @@ def _foreground(v):
     return isinstance(v, str) and v.strip().lower() == "foreground"
 
 
+FOREGROUND_ONLY_NOTE = ("metacomputer bridge: sent in the foreground (this computer has no background input: no "
+                        "/dev/uinput, as on Fly Sprites; actions on an element still go through accessibility)")
+
+
+def foreground_only(name, args):
+    """On a computer without the driver's background input (Fly Sprites): input that would need its virtual devices,
+    keys, typing and pixel clicks whose mode isn't foreground (each run_steps step by its effective mode), is sent in
+    the foreground; a call aimed at an element (element_token) keeps its route, accessibility, which works there.
+    Changes args in place; returns the note for the result, or None when nothing changed."""
+    def needs(t, a, mode):
+        return (t in INPUT_TOOLS and isinstance(a, dict) and not a.get("element_token")
+                and not _foreground(a.get("delivery_mode", mode)))
+    changed = False
+    if name in INPUT_TOOLS:
+        if needs(name, args, None):
+            args["delivery_mode"] = "foreground"
+            changed = True
+    elif name == "run_steps":
+        top = args.get("delivery_mode")
+        for t, a in steps_of(args):
+            if needs(t, a, top):
+                a["delivery_mode"] = "foreground"
+                changed = True
+    return FOREGROUND_ONLY_NOTE if changed else None
+
+
 def may_use_devices(name, args):
     """Whether a call may go through the driver's own virtual pointer or keyboard: any input that isn't all in the
     foreground, each run_steps step by its effective mode (its own, else the batch's), read as the driver reads it
@@ -796,6 +822,9 @@ class Hub:
         self.hidden_events = hidden_text.Limiter()   # security.hidden_text: per host, and in all
         self.action_log = self.env.get("MCOMP_ACTION_LOG") == "on"
         self.bounded_mode = self.env.get("MCOMP_DRIVER_MODE", "standard") == "bounded"
+        # A computer without the driver's background input (no /dev/uinput: Fly Sprites; its provider's manifest says
+        # so, scripts/lib.sh MCOMP_BACKGROUND_INPUT): keys, typing and pixel clicks go in the foreground.
+        self.foreground_only = self.env.get("MCOMP_BACKGROUND_INPUT", "on") == "off"
         self.spawn = spawn or self._spawn_bridge
         self.inject = inject_sessions
         self.local = local                       # in-process (MCP_HUB=off): the core ends with its one client
@@ -2114,6 +2143,10 @@ class Hub:
                              "hint": "metacomputer handoff --why captcha; when it returns, read the window again"})
                 return
             err, note = self.chrome_guard(name, args)
+            if not err and self.foreground_only:
+                fg = foreground_only(name, args)
+                if fg:
+                    note = (note + "; " if note else "") + fg
             if launch_note:
                 note = "metacomputer bridge: " + launch_note + ("; " + note if note else "")
             unknown = next((code for text, code in UNKNOWN_TARGET.values() if err == text), None)

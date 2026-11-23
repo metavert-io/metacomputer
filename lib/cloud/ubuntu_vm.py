@@ -53,6 +53,8 @@ BASE = {
     # what a provider enforces outside the computer is `outside_egress`, each adapter's own.
     "egress": {"model": "guest-firewall", "allowlist": False, "private_ranges_blocked": True},
     "port_forward": True,        # the live view, through an SSH tunnel to this Mac's loopback
+    # Xorg's dummy driver and /dev/uinput, as on the Mac: the driver's background input works.
+    "input": {"background": True, "note": "the driver's virtual pointer and keyboard (/dev/uinput)"},
     "regions": (),
     "fresh_start": False,
 }
