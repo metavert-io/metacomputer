@@ -9,6 +9,7 @@ also shows that lessons can't switch a guard.
 
     python3 tests/test_hub.py
 """
+import collections
 import fcntl
 import json
 import os
@@ -175,6 +176,20 @@ for line in sys.stdin:
                                  "screenshot_frame_valid": True}}
             imgs = 1
         ok(mid, f"run_steps: {n}/{n} steps ok", sc, images=imgs)
+    elif name == "run_script" and "getState" in str(a.get("script")):
+        counter[0] += 1
+        sid = f"s{counter[0]:08x}"
+        snaps[sid] = (None, sess)
+        val = {"data": {"snapshot_id": sid, "elements": [{"element_token": f"{sid}:1", "role": "button"}],
+                        "title": "s00000001 report"}}
+        ok(mid, json.dumps(val, indent=1), {"result": val})
+    elif name == "run_script":
+        ok(mid, "script ran: " + json.dumps(a.get("script")), {"script": a.get("script")})
+    elif name == "manyids":
+        n = int(a.get("size", 10))
+        ok(mid, "many", {"elements": [{"element_token": f"s{i + 1:08x}:1"} for i in range(n)]})
+    elif name == "browser_prepare":
+        ok(mid, "prepared", {"side_effects": {"launched_browser": bool(a.get("allow_launch"))}})
     elif name == "start_recording":
         recording[sess] = True
         ok(mid, "recording", {"recording": True})
@@ -297,7 +312,7 @@ def setup_driver():
     extra = {"type": "object", "properties": {"session": {"type": "string"}, "s": {"type": "number"},
                                               "size": {"type": "integer"}, "tag": {"type": "string"}}}
     for n in ("whoami", "echo", "slow", "big", "huge", "nonl", "die", "deaf", "expire", "listchange", "flood",
-              "stderrflood", "deep", "badflood", "commas", "toomany", "hold", "nestedid", "nestedonly"):
+              "stderrflood", "deep", "badflood", "commas", "toomany", "hold", "nestedid", "nestedonly", "manyids"):
         tools.append({"name": n, "description": "test tool", "inputSchema": extra})
     json.dump(tools, open(os.path.join(STATE, "tools.json"), "w"))
     open(FAKE, "w").write(FAKE_DRIVER)
@@ -521,8 +536,9 @@ def session_checks():
     sid2 = next((w.split("=")[1] for w in one.stdout.split() if w.startswith("snapshot_id=")), "")
     two = subprocess.run([PY, os.path.join(LAB, "lib", "mcomp_sdk.py"), "call", "click", json.dumps({"element_token": f"{sid2}:1"})],
                          env=off, capture_output=True, text=True, timeout=60)
-    check("(without the hub, MCP_HUB=off, each call has its own driver: the token is unknown, refused before the driver)",
-          one.returncode == 0 and two.returncode == 1 and "element_token_unknown" in two.stdout, (two.stdout, two.stderr))
+    check("(without the hub, MCP_HUB=off, each call has its own driver: the token isn't that runtime's, refused before "
+          "the driver)", one.returncode == 0 and two.returncode == 1 and "element_token_stale" in two.stdout,
+          (two.stdout, two.stderr))
     rec = cli("--session", "rec1", "start_recording", "{}")
     st = mcp_hub.query_status(r.env)
     check("a recording started by a one-shot call is still running after it (the hub keeps the connection)",
@@ -854,8 +870,8 @@ def handoff_checks():
 
         # The Chrome guard's input reset acts on the desktop: not while the user has the computer.
         ran = []
-        real_run = mcp_hub.subprocess.run
-        mcp_hub.subprocess.run = lambda *a, **kw: ran.append(a) or subprocess.CompletedProcess(a, 0, "0\n", "")
+        real_run = mcp_hub.input_reset.run_guest
+        mcp_hub.input_reset.run_guest = lambda *a, **kw: ran.append(a) or (0, None)
         try:
             handoff.write_record({**later, "id": "h-111111111111", "status": "open", "ended": None})
             note = r.hub.input_reset()
@@ -863,7 +879,7 @@ def handoff_checks():
             handoff.end("h-111111111111", "done", "process")
             r.hub.input_reset()
         finally:
-            mcp_hub.subprocess.run = real_run
+            mcp_hub.input_reset.run_guest = real_run
         check("the hub's input reset doesn't run while the user has the computer, and does after",
               note is None and not during and len(ran) == 1, (note, during, ran))
     finally:
@@ -1224,10 +1240,11 @@ def chrome_checks():
     r.hub.input_reset = lambda: None                 # the real one runs `metacomputer input-reset` in the VM
     for kind in ("claude-code", "call", "sdk"):
         h = client(r, kind)
+        tok = h.call("get_window_state", {"pid": 77, "window_id": CHROME}).structured.get("snapshot_id")
         n0 = len(calls())
-        sv = h.call("set_value", {"pid": 77, "window_id": CHROME, "element_token": "s1:1", "value": "secret-typed"})
+        sv = h.call("set_value", {"pid": 77, "window_id": CHROME, "element_token": f"{tok}:1", "value": "secret-typed"})
         rs = h.call("run_script", {"script": "const a = await cua.getApp({app: 'Google Chrome'}); return 1;"})
-        ck = h.call("click", {"pid": 77, "window_id": CHROME, "element_token": "x"})
+        ck = h.call("click", {"pid": 77, "window_id": CHROME, "element_token": f"{tok}:2"})
         sent = [c["msg"]["params"] for c in tool_calls(None, n0)]
         names = [p["name"] for p in sent]
         check(f"{kind}: set_value and run_script aimed at Chrome are refused before the driver",
@@ -1238,6 +1255,470 @@ def chrome_checks():
         h.close()
     clear_claims()
     r.stop()
+
+
+def input_reset_checks():
+    """After an input reset (lib/input_reset.py) the driver's own devices are gone, and a driver connection that used
+    them would end at its next pointer action through them (Cua Driver 0.53.0). Right before a call that may use them is
+    sent, in the same critical section as the send, the hub reconnects first; never for reads or all-foreground input,
+    never cutting a running call off, not while a driver recording runs or a browser browser_prepare launched is open;
+    tokens checked against the old runtime are refused. Nothing else tears the connection down for a reset. The hub's own
+    (Chrome guard) reset is made the way every reset is."""
+    print("after an input reset: a fresh driver connection before the next background input, safely")
+    import handoff
+    clear_claims()
+    if os.path.lexists(owners.input_reset_path()):
+        os.remove(owners.input_reset_path())
+    cases = [("click", {"x": 1, "y": 1}, True), ("click", {"delivery_mode": "foreground"}, False),
+             ("click", {"delivery_mode": "Foreground"}, False), ("type_text", {"text": "a"}, True),
+             ("set_value", {"delivery_mode": "foreground"}, False), ("run_script", {"script": "1"}, True),
+             ("mouse_button_down", {"delivery_mode": "foreground"}, True), ("get_window_state", {}, False),
+             ("launch_app", {"name": "x"}, False),
+             ("run_steps", {"delivery_mode": "foreground", "steps": [{"click": {"x": 1, "y": 1}}]}, False),
+             ("run_steps", {"steps": [{"click": {"x": 1, "y": 1}}]}, True),
+             ("run_steps", {"delivery_mode": "foreground", "steps": [{"tool": "type_text",
+                                                                     "args": {"text": "a", "delivery_mode": "background"}}]}, True),
+             # the driver reads a step's mode as the tools do (case doesn't matter): BACKGROUND is background
+             ("run_steps", {"delivery_mode": "foreground", "steps": [{"click": {"x": 1, "y": 1,
+                                                                               "delivery_mode": "BACKGROUND"}}]}, True),
+             ("run_steps", {"delivery_mode": "FOREGROUND", "steps": [{"click": {"x": 1, "y": 1}}]}, False),
+             ("run_steps", {"steps": [{"tool": "get_window_state", "args": {}}]}, False)]
+    got = [(n, mcp_hub.may_use_devices(n, a)) for n, a, _ in cases]
+    check("may_use_devices: input that isn't all in the foreground, each step by its effective mode as the driver reads "
+          "it (BACKGROUND under a foreground batch counts), run_script and the raw mouse tools always",
+          got == [(n, w) for n, _, w in cases], [(g, w) for g, (_, _, w) in zip(got, cases) if g[1] != w])
+    check("a reset is recorded whole, and a link there is replaced, never written through", owners.mark_input_reset()
+          and owners.input_reset_at() > time.time() - 5, owners.input_reset_at())
+    os.remove(owners.input_reset_path())
+    os.symlink(os.path.join(TD, "elsewhere"), owners.input_reset_path())
+    owners.mark_input_reset()
+    check("…a link: replaced by the record, nothing created where it pointed",
+          not os.path.islink(owners.input_reset_path()) and not os.path.exists(os.path.join(TD, "elsewhere")))
+    os.remove(owners.input_reset_path())
+
+    r = Running()
+    h = client(r, "call", session="ir")
+    typed = {"pid": 50, "window_id": W, "text": "a"}
+
+    def driver():
+        return h.call("whoami", {}).structured.get("driver_pid")
+
+    def reset():
+        time.sleep(0.02)
+        owners.mark_input_reset()
+
+    # A reset before this connection used the devices (leftovers of an older runtime) never makes later use stale.
+    d0, g0 = driver(), r.hub.up_gen
+    reset()
+    res1 = h.call("type_text", typed)
+    res2 = h.call("type_text", typed)
+    check("a reset recorded before this connection began using the devices makes neither its first nor its later "
+          "background input reconnect", not res1.is_error and not res2.is_error and r.hub.up_gen == g0
+          and driver() == d0, (r.hub.up_gen, g0))
+    reset()                                         # the devices it used are gone now
+    look = h.call("list_windows", {})
+    fg = h.call("type_text", dict(typed, delivery_mode="foreground"))
+    check("after a reset, reads and all-foreground input go on the same connection",
+          not look.is_error and not fg.is_error and r.hub.up_gen == g0 and driver() == d0, (r.hub.up_gen, g0))
+    n0 = len(calls())
+    res = h.call("type_text", typed)
+    d1 = driver()
+    check("…the next background input gets a fresh driver connection first, then goes through it",
+          not res.is_error and r.hub.up_gen == g0 + 1 and d1 != d0 and len(tool_calls("type_text", n0)) == 1,
+          (res.text, r.hub.up_gen, d0, d1))
+    res = h.call("type_text", typed)
+    check("…once: the new connection isn't renewed again", not res.is_error and r.hub.up_gen == g0 + 1 and driver() == d1)
+    check("the hub's log says why it reconnected", "reconnecting so its next pointer or keyboard input makes new ones"
+          in open(mcp_hub.paths(r.env)["log"]).read())
+
+    # No request tears the connection down: not a status client's, not anyone's.
+    reset()
+    g = r.hub.up_gen
+    for kind in ("status", "call"):
+        c = mcomp_sdk.Hub(env=r.env, kind=kind, timeout=20).connect()
+        try:
+            c.request("metacomputer/renew", {})
+        except Exception:
+            pass
+        c.close()
+    time.sleep(0.3)
+    check("a renew request (from a status client or any other) tears nothing down: a reconnect only happens in an "
+          "authorised acting call's own dispatch", r.hub.up_gen == g, (r.hub.up_gen, g))
+    h.call("type_text", typed)                      # (renews for the reset above)
+
+    # Element tokens checked against the old runtime are refused after the reconnect, never sent.
+    ws = h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    tok = f"{ws.structured['snapshot_id']}:1"
+    reset()
+    g, n0 = r.hub.up_gen, len(calls())
+    res = h.call("click", {"pid": 50, "window_id": W, "element_token": tok})
+    sent = tool_calls("click", n0)
+    ws = h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    again = h.call("click", {"pid": 50, "window_id": W, "element_token": f"{ws.structured['snapshot_id']}:1"})
+    check("a click by a token from before a reconnect: refused (element_token_stale, read again), not sent; a fresh "
+          "read's token then works", res.is_error and (res.structured or {}).get("code") == "element_token_stale"
+          and "Read the window again" in res.text and r.hub.up_gen == g + 1 and not sent and not again.is_error,
+          (res.text[:200], res.structured, r.hub.up_gen, g, len(sent), again.text[:120]))
+
+    # A read never renews and never claims: it goes to the current driver (reads don't use its input devices). Its
+    # token is refused once the first device-using input has renewed; reading again then works.
+    h.call("type_text", typed)
+    reset()
+    g = r.hub.up_gen
+    reader = client(r, "call", session="ir")
+    ws = reader.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    rc = next((c for c in r.hub.clients.values() if c.kind == "call" and c is not None and c.calls == 1), None)
+    claimed = bool(rc and rc.has_claim)
+    reader.close()
+    no_renew = r.hub.up_gen == g
+    res = h.call("click", {"pid": 50, "window_id": W, "element_token": f"{ws.structured['snapshot_id']}:1"})
+    ws2 = h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    res2 = h.call("click", {"pid": 50, "window_id": W, "element_token": f"{ws2.structured['snapshot_id']}:1"})
+    check("a read after a reset neither renews nor claims; its token is refused when the first background input renews "
+          "(element_token_stale), and a read after that gives a token that works", no_renew and not claimed
+          and res.is_error and (res.structured or {}).get("code") == "element_token_stale" and r.hub.up_gen == g + 1
+          and not res2.is_error, (no_renew, claimed, res.text[:120], r.hub.up_gen, g, res2.text[:120]))
+    # …and never makes an observer the controller, even where a renewal would be refused (a recording): another
+    # client's action isn't blocked by it.
+    h.call("type_text", typed)
+    h.call("start_recording", {"output_dir": "/tmp/r4"})
+    reset()
+    obs = client(r, "call", session="obs")
+    obs.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    oc = next((c for c in r.hub.clients.values() if c.session == "obs"), None)
+    obs_claim = bool(oc and oc.has_claim)
+    act = h.call("press_key", {"pid": 50, "window_id": W, "key": "a", "delivery_mode": "foreground"})
+    obs.close()
+    h.call("stop_recording", {})
+    check("…no read claim after a renewal that would be refused: the observer holds nothing, and the controller's next "
+          "call goes", not obs_claim and not act.is_error, (obs_claim, act.text[:160]))
+    h.call("type_text", typed)                      # renews (the recording ended)
+
+    # Never cut a running call off: one still running after the wait means no reconnect and a refusal.
+    real_wait = mcp_hub.RENEW_WAIT_S
+    mcp_hub.RENEW_WAIT_S = 0.5
+    try:
+        reset()
+        h.call("list_windows", {})                  # (the guards then know the windows without asking the driver,
+        g = r.hub.up_gen                            # which the stand-in can't answer while `slow` runs)
+        other = client(r, "call", session="ir")
+        box = {}
+        t = threading.Thread(target=lambda: box.update(r=other.call("slow", {"s": 3})))
+        t.start()
+        end = time.time() + 5
+        while time.time() < end and not any(p.get("tool") == "slow" for p in list(r.hub.pending.values())):
+            time.sleep(0.02)
+        res = h.call("type_text", typed)
+        t.join(15)
+        other.close()
+        check("a call still running in the driver after the wait: no reconnect, the background input is refused "
+              "(input_reset_busy) and the running call finishes", res.is_error
+              and (res.structured or {}).get("code") == "input_reset_busy" and r.hub.up_gen == g
+              and box.get("r") is not None and not box["r"].is_error, (res.text[:160], r.hub.up_gen, g,
+                                                                     box.get("r") and box["r"].text[:120]))
+        h.call("type_text", typed)                  # now nothing runs: it renews
+    finally:
+        mcp_hub.RENEW_WAIT_S = real_wait
+
+    # The reset decision is made under the dispatch lock: a reset made while a call waits for it is seen.
+    g = r.hub.up_gen
+    box = {}
+    with owners.dispatch(shared=False):
+        t = threading.Thread(target=lambda: box.update(r=h.call("type_text", typed)))
+        t.start()
+        time.sleep(0.6)                              # it passed its guards and waits at the dispatch lock
+        owners.mark_input_reset()                    # the reset this lock covers
+    t.join(15)
+    check("a reset made while a call waits at the dispatch lock is seen there: the call goes through a fresh "
+          "connection", box.get("r") is not None and not box["r"].is_error and r.hub.up_gen == g + 1,
+          (box.get("r") and box["r"].text[:120], r.hub.up_gen, g))
+
+    # Protections are rechecked after the wait, with every completion's bookkeeping published.
+    reset()
+    g, proc = r.hub.up_gen, r.hub.up
+    key = "test-pending"
+    r.hub.pending[key] = {"gen": r.hub.up_gen, "acting": True, "client": None}
+    lock = getattr(r.hub, "settle_lock", threading.Lock())
+
+    def finish():
+        time.sleep(0.3)
+        with lock:
+            r.hub.pending.pop(key, None)
+            r.hub.recordings["late"] = time.time()   # a start_recording that ended during the wait
+    t = threading.Thread(target=finish)
+    t.start()
+    try:
+        out = r.hub.renew_after_reset()
+    finally:
+        t.join(5)
+        r.hub.pending.pop(key, None)
+    torn = r.hub.up is not proc or r.hub.up_gen != g
+    r.hub.recordings.pop("late", None)
+    check("a recording that starts while a renewal waits is seen: nothing is torn down, the call is refused",
+          isinstance(out, tuple) and (out[1] or {}).get("code") == "input_reset_recording" and not torn, (out, torn))
+    h.call("type_text", typed)                      # renews
+
+    # A driver recording would end with the connection: background input is refused meanwhile, foreground goes.
+    h.call("start_recording", {"output_dir": "/tmp/x"})
+    reset()
+    g, n0 = r.hub.up_gen, len(calls())
+    res = h.call("type_text", typed)
+    fg = h.call("type_text", dict(typed, delivery_mode="foreground"))
+    check("with a driver recording running: background input is refused (nothing sent), foreground goes; the "
+          "connection stays", res.is_error and "stop_recording" in res.text
+          and (res.structured or {}).get("code") == "input_reset_recording" and not fg.is_error
+          and len(tool_calls("type_text", n0)) == 1 and r.hub.up_gen == g, (res.text[:200], res.structured, r.hub.up_gen))
+    h.call("stop_recording", {})
+    res = h.call("type_text", typed)
+    check("…after stop_recording, the next background input reconnects first", not res.is_error
+          and r.hub.up_gen == g + 1, (res.text[:200], r.hub.up_gen))
+
+    # A browser the driver launched ends with it; one it only attached to doesn't; its session's end lets it go.
+    h.call("browser_prepare", {"allow_launch": True, "profile": {"mode": "isolated_new"}})
+    reset()
+    g = r.hub.up_gen
+    res = h.call("type_text", typed)
+    check("with a browser browser_prepare launched: background input refused, no reconnect",
+          res.is_error and (res.structured or {}).get("code") == "input_reset_recording" and r.hub.up_gen == g,
+          (res.text[:160], r.hub.up_gen, g))
+    h.call("end_session", {"session": "ir"})
+    res = h.call("type_text", typed)
+    check("…once its driver session ended, the next background input reconnects as usual", not res.is_error
+          and r.hub.up_gen == g + 1, (res.text[:160], r.hub.up_gen, g))
+    h.call("browser_prepare", {"allow_launch": False})
+    reset()
+    g = r.hub.up_gen
+    res = h.call("type_text", typed)
+    check("a browser it only attached to (launched_browser false) doesn't hold the driver: it reconnects",
+          not res.is_error and r.hub.up_gen == g + 1, (res.text[:160], r.hub.up_gen, g))
+    st = mcp_hub.query_status(r.env)
+    check("the hub's status counts acting calls in flight", (st or {}).get("driver", {}).get("acting") == 0, st)
+
+    # The hub's element tokens are specific to a driver runtime (Cua Driver 0.53.0 numbers snapshots from s00000001 in
+    # every process): a token kept from before a completed renewal is refused, even where the new driver reused its id.
+    def renewed_first_read(pid, wid):
+        reset()
+        h.call("type_text", typed)                  # renews (stale), and starts using the devices on the new runtime
+        return h.call("get_window_state", {"pid": pid, "window_id": wid, "include_screenshot": False})
+    a = renewed_first_read(50, W)                   # the new driver's first read: its own s00000001
+    tok_a = f"{a.structured['snapshot_id']}:1"
+    g = r.hub.up_gen
+    b = renewed_first_read(50, W)                   # renewed again: the next driver's first read, s00000001 again
+    n0 = len(calls())
+    res = h.call("click", {"pid": 50, "window_id": W, "element_token": tok_a})
+    check("a token kept from before a completed renewal is refused (element_token_stale), not sent, though the new "
+          "driver's first read reused the same snapshot id", r.hub.up_gen == g + 1 and res.is_error
+          and (res.structured or {}).get("code") == "element_token_stale" and not tool_calls("click", n0)
+          and a.structured["snapshot_id"] != b.structured["snapshot_id"], (res.text[:160], a.structured.get("snapshot_id"),
+                                                                            b.structured.get("snapshot_id"), r.hub.up_gen, g))
+    c = renewed_first_read(77, CHROME)              # a Chrome window's token, then a renewal
+    tok_c = f"{c.structured['snapshot_id']}:2"
+    renewed_first_read(50, W)
+    n0 = len(calls())
+    res = h.call("click", {"pid": 77, "window_id": CHROME, "element_token": tok_c})
+    check("…a Chrome-targeted call too: refused as stale before the Chrome guard classifies it, nothing sent",
+          res.is_error and (res.structured or {}).get("code") == "element_token_stale" and not tool_calls(None, n0),
+          (res.text[:160], len(tool_calls(None, n0))))
+    # Clients see only the hub's ids; the driver only its own, where they're named.
+    ws = h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+    hs = ws.structured["snapshot_id"]
+    n0 = len(calls())
+    h.call("run_steps", {"steps": [{"click": {"element_token": f"{hs}:1"}}]})
+    h.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False, "since": hs})
+    h.call("run_script", {"script": f"const a = await cua.getApp({{pid: 50}}); await a.click('{hs}:1'); return 1;"})
+    sent = json.dumps([c["msg"]["params"] for c in tool_calls(None, n0)])
+    check("clients see the hub's snapshot ids (in the text too, never the driver's); the driver gets its own back in "
+          "run_steps steps, since and run_script's script", hs.startswith("s") and len(hs) == 9 and hs not in sent
+          and "s00000" in sent and "snapshot_id=s00000" not in ws.text and f"snapshot_id={hs}" in ws.text,
+          (hs, sent[:300], ws.text[:120]))
+    n0 = len(calls())
+    bad = [h.call("get_window_state", {"pid": 50, "window_id": W, "since": "s7777aaaa"}),
+           h.call("run_steps", {"steps": [{"click": {"element_token": "s7777aaaa:1"}}]})]
+    check("an id the hub never handed out in a named field is refused (since, a step), nothing sent",
+          all(x.is_error and (x.structured or {}).get("code") == "element_token_stale" for x in bad)
+          and not tool_calls(None, n0), [x.text[:80] for x in bad])
+    # run_script: only whole ids the hub issued are translated; every other string is left as it is.
+    n0 = len(calls())
+    rs1 = h.call("run_script", {"script": 'return "sdeadbeef";'})
+    rs2 = h.call("run_script", {"script": f'return "{hs}" + "x"; // s7777aaaa and s{hs[1:]}a stay'})
+    sent = [c["msg"]["params"]["arguments"]["script"] for c in tool_calls("run_script", n0)]
+    check("run_script: a string that isn't an id the hub issued is left alone (`return \"sdeadbeef\"` works), and only "
+          "whole issued ids are translated", not rs1.is_error and not rs2.is_error and sent[0] == 'return "sdeadbeef";'
+          and f'"{hs}"' not in sent[1] and "s7777aaaa" in sent[1] and f"s{hs[1:]}a" in sent[1], (rs1.text[:80], sent))
+    # Results: only the named fields and the driver's own lines; `data` included; never the envelope or other strings.
+    st = h.call("run_script", {"script": "const app = await cua.getApp({pid: 50}); return {data: await app.getState()};"})
+    sres = st.structured.get("result", {}).get("data", {}) if st.structured else {}
+    tok_s = (sres.get("elements") or [{}])[0].get("element_token", "")
+    hsid = sres.get("snapshot_id", "")
+    check("a script's `{data: await app.getState()}` comes back with the hub's ids in both the structured and the text "
+          "copy, and its token works", hsid and not hsid.startswith("s0000") and tok_s.startswith(hsid + ":")
+          and f'"snapshot_id": "{hsid}"' in st.text and f'"element_token": "{tok_s}"' in st.text and "s0000000" not in
+          st.text.replace("s00000001 report", "") and sres.get("title") == "s00000001 report",
+          (sres, st.text[:300]))
+    with r.hub.sid_lock:
+        known = r.hub._hub_sid(r.hub.up_gen, "s00000001")
+    env_msg = {"jsonrpc": "2.0", "id": "request-s00000001", "result": {
+        "content": [{"type": "text", "text": "snapshot_id=s00000001 title s00000001 here"}],
+        "structuredContent": {"snapshot_id": "s00000001", "title": "s00000001", "note": "see s00000001"}}}
+    r.hub.tag_ids(env_msg, r.hub.up_gen)
+    check("the envelope and every other string are never touched: a response id `request-s00000001`, a title, a note",
+          env_msg["id"] == "request-s00000001" and env_msg["result"]["structuredContent"]["title"] == "s00000001"
+          and env_msg["result"]["structuredContent"]["note"] == "see s00000001"
+          and env_msg["result"]["structuredContent"]["snapshot_id"] == known
+          and env_msg["result"]["content"][0]["text"] == f"snapshot_id={known} title s00000001 here", env_msg)
+    # An answer naming too many snapshots: refused whole, never half translated, within bounds.
+    before = len(r.hub.sid_in)
+    big = h.call("manyids", {"size": 200000})
+    grew = len(r.hub.sid_in) - before
+    check("an answer naming 200,000 snapshots is refused cleanly (snapshot_ids_too_many), nothing half translated, and "
+          "the hub's map didn't grow", big.is_error and (big.structured or {}).get("code") == "snapshot_ids_too_many"
+          and "s0000" not in big.text and grew == 0, (big.text[:160], grew))
+    ok_many = h.call("manyids", {"size": 300})
+    toks = [e.get("element_token", "") for e in (ok_many.structured or {}).get("elements", [])]
+    check("…one within the cap has every id translated", len(toks) == 300 and not any(t.startswith("s0000") for t in toks),
+          toks[:3])
+
+    # A read's renewal is gone: a status connection's or anyone's read during a stale runtime tears nothing down.
+    g = r.hub.up_gen
+    reset()
+    for kind in ("status", "call"):
+        c = mcomp_sdk.Hub(env=r.env, kind=kind, timeout=20).connect()
+        c.call("get_window_state", {"pid": 50, "window_id": W, "include_screenshot": False})
+        c.close()
+    check("reads never renew (a status connection's or anyone's), so they never take the driver from anyone",
+          r.hub.up_gen == g, (r.hub.up_gen, g))
+    h.call("type_text", typed)                      # renews
+
+    # Ownership is looked at again in the final critical section: a session released while its call waited in a guard,
+    # with another controller active by then, neither restarts the driver nor sends.
+    h.call("type_text", typed)
+    reset()
+    g, n0 = r.hub.up_gen, len(calls())
+    gate, entered = threading.Event(), threading.Event()
+    real_cg = r.hub.chrome_guard
+
+    def paused_guard(name, args):
+        if name == "type_text" and not entered.is_set():
+            entered.set()
+            gate.wait(10)
+        return real_cg(name, args)
+    r.hub.chrome_guard = paused_guard
+    box = {}
+    t = threading.Thread(target=lambda: box.update(r=h.call("type_text", typed)))
+    t.start()
+    entered.wait(10)                                # past its claim check, paused in a guard
+    clear_claims()                                  # the user releases this session…
+    other = foreign_claim()                         # …and another one takes the computer
+    gate.set()
+    t.join(15)
+    r.hub.chrome_guard = real_cg
+    drop_foreign(other)
+    res = box.get("r")
+    check("a call whose session lost the computer while it waited in a guard is refused at dispatch (in use by another "
+          "controller): no driver restart, nothing sent", res is not None and res.is_error
+          and "in use by another controller" in res.text and r.hub.up_gen == g and not tool_calls("type_text", n0),
+          (res and res.text[:160], r.hub.up_gen, g, len(tool_calls("type_text", n0))))
+    h.call("type_text", typed)                      # its own again: renews
+
+    # stop_recording stops the driver's recording whoever started it: no session's marker outlives it.
+    ha, hb = client(r, "call", session="recA"), client(r, "call", session="recB")
+    ha.call("start_recording", {"output_dir": "/tmp/recA"})
+    hb.call("stop_recording", {})
+    ha.close()
+    hb.close()
+    reset()
+    g = r.hub.up_gen
+    res = h.call("type_text", typed)
+    check("a recording started in one session and stopped in another leaves nothing holding the driver: after a reset "
+          "the next background input reconnects", not res.is_error and r.hub.up_gen == g + 1 and not r.hub.recordings,
+          (res.text[:160], r.hub.up_gen, g, r.hub.recordings))
+
+    # Every mapping an answer uses stays while the others are made: with the map full, an answer naming the oldest
+    # mappings and new ones gives tokens that all translate back.
+    gen = r.hub.up_gen
+    with r.hub.sid_lock:
+        saved = (collections.OrderedDict(r.hub.sid_out), collections.OrderedDict(r.hub.sid_in))
+        r.hub.sid_out.clear()
+        r.hub.sid_in.clear()
+        for i in range(mcp_hub.SID_MAP_MAX):
+            r.hub._hub_sid(gen, "s%08x" % (0x70000000 + i))
+    old_ids = ["s%08x" % (0x70000000 + i) for i in range(100)]          # the 100 oldest
+    new_ids = ["s%08x" % (0x7f000000 + i) for i in range(100)]
+    msg = {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "x"}], "structuredContent": {
+        "elements": [{"element_token": f"{d}:1"} for d in old_ids + new_ids]}}}
+    r.hub.tag_ids(msg, gen)
+    toks = [e["element_token"] for e in msg["result"]["structuredContent"].get("elements", [])]
+    back = []
+    for tk in toks:
+        a = {"element_token": tk}
+        back.append(r.hub.untag_ids("click", a)[0] and a["element_token"])
+    with r.hub.sid_lock:
+        r.hub.sid_out.clear(), r.hub.sid_in.clear()
+        r.hub.sid_out.update(saved[0]), r.hub.sid_in.update(saved[1])
+    check("with the translation map full, every token an answer hands out translates back (its own mappings are pinned "
+          "while the new ones are made)", len(toks) == 200 and back == [f"{d}:1" for d in old_ids + new_ids],
+          (len(toks), [b for b in back if not b][:3]))
+
+    # A driver session the hub ends itself (its client has gone) lets go of its browser, as an end_session does.
+    cc = client(r, "claude-code")
+    cc.call("browser_prepare", {"allow_launch": True, "profile": {"mode": "isolated_new"}})
+    held = dict(r.hub.driver_browsers)
+    cc.close()
+    end = time.time() + 5
+    while r.hub.driver_browsers and time.time() < end:
+        time.sleep(0.1)
+    reset()
+    g = r.hub.up_gen
+    res = h.call("type_text", typed)
+    check("a driver session the hub ends after its client went releases its browser: the next background input "
+          "reconnects", bool(held) and not res.is_error and r.hub.up_gen == g + 1, (held, res.text[:160], r.hub.up_gen, g))
+
+    # The hub's own (Chrome guard) reset: as every reset is made.
+    seen = []
+    real = mcp_hub.input_reset.run_guest
+
+    def guest(t, check=False, timeout=None, env=None, capture_err=False):
+        fd = os.open(owners.dispatch_path(), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            held = False
+        except BlockingIOError:
+            held = True
+        finally:
+            os.close(fd)
+        seen.append((held, owners.input_reset_at(), list(t)))
+        return (None, "the connection dropped")
+    mcp_hub.input_reset.run_guest = guest
+    try:
+        before = owners.input_reset_at()
+        note = r.hub.input_reset()
+        after = owners.input_reset_at()
+        other = client(r, "call", session="ir")
+        box = {}
+        t = threading.Thread(target=lambda: box.update(r=other.call("slow", {"s": 2})))
+        t.start()
+        time.sleep(0.4)
+        n_seen = len(seen)
+        busy_note = r.hub.input_reset()
+        t.join(10)
+        other.close()
+        r.hub.local = True
+        local_note = r.hub.input_reset()
+        r.hub.local = False
+    finally:
+        mcp_hub.input_reset.run_guest = real
+    check("the hub's own reset: under the dispatch lock held exclusively, recorded before the guest is asked, and a "
+          "lost answer leaves it recorded (the next background input renews)", len(seen) >= 1 and seen[0][0]
+          and seen[0][1] > before and after > before and "could not remove" in (note or "")
+          and seen[0][2][1:3] == ["ssh", "ops"], (seen[:1], before, after, note))
+    check("…not while a call is still running in the driver (or with MCP_HUB=off): the guest isn't asked",
+          len(seen) == n_seen and "still running" in (busy_note or "") and "MCP_HUB=off" in (local_note or "")
+          and len(seen) == n_seen, (busy_note, local_note, len(seen), n_seen))
+    h.close()
+    clear_claims()
+    r.stop()
+    if os.path.lexists(owners.input_reset_path()):
+        os.remove(owners.input_reset_path())
 
 
 FIREFOX = 41    # a Firefox window (pid 88), only in pacing_checks' world
@@ -1975,7 +2456,7 @@ def bot_check_checks():
           and "metacomputer handoff --why captcha" in res.text
           and "bot check" in json.dumps(res.structured.get("metacomputer_note") or ""), res.text[:200])
     n0 = len(calls())
-    res = h.call("click", {"pid": 50, "window_id": W, "element_token": "x"})
+    res = h.call("click", {"pid": 50, "window_id": W, "element_token": f"{res.structured['snapshot_id']}:3"})
     check("an acting call aimed at that window is refused (bot_check), nothing sent", res.is_error
           and res.structured.get("code") == "bot_check" and not sent_args("click", n0), res.text[:200])
     for label, call in (("by pid", ("type_text", {"pid": 50, "text": "abc"})),
@@ -2780,8 +3261,8 @@ def token_checks():
           and [a.get("delivery_mode") for a in clicks[:2]] == ["foreground", "foreground"], clicks)
     check("a token from another app's read passes as it was", not other.is_error and clicks[-1].get("delivery_mode") is None,
           clicks[-1:])
-    check("a token from a read the hub never saw is refused when that's all there is (code element_token_unknown)",
-          unknown.is_error and unknown.structured.get("code") == "element_token_unknown" and unknown2.is_error
+    check("a token the hub never handed out is refused before any guard looks at it (code element_token_stale)",
+          unknown.is_error and unknown.structured.get("code") == "element_token_stale" and unknown2.is_error
           and len([p for p in sent if p["name"] == "click"]) == 2, (unknown.text[:120], unknown2.text[:80]))
     for i in range(mcp_hub.MAX_SNAPSHOTS + 50):
         r.hub.learn_apps({"snapshot_id": f"s{i:08x}", "pid": 1000 + i, "window_id": i, "app_name": "x"})
@@ -3558,6 +4039,7 @@ def main():
         handoff_teardown_checks()
         handoff_teardown_race_checks()
         chrome_checks()
+        input_reset_checks()
         pacing_checks()
         chrome_nested_checks()
         normalize_checks()

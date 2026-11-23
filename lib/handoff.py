@@ -16,7 +16,13 @@ and waits:
   handoff.py status [--json]        the open handoff, if any
   handoff.py guard [--hold-fd N]    exit 4 (and say why) while a handoff is open; with --hold-fd, the dispatch
                                     lock is taken shared on the caller's descriptor N and kept for the caller
-                                    (bin/metacomputer's fills, session loads and input-reset)
+                                    (bin/metacomputer's fills and session loads)
+
+Opening one also removes the driver's leftover virtual input devices (lib/input_reset.py), under the dispatch lock it
+holds exclusively, so the live view's mouse and keyboard work. When an agent action is still running in the VM (or
+that can't be known) it leaves them, since removing them could cut that action off, and the message says the reset is
+pending and how to make it; when it fails, the handoff opens anyway and its message says how to do it by hand.
+bin/metacomputer passes the SSH command for it first: --transport N WORD...
 
 With INTERACTIVE_PROMPTS=on (off by default: dialogs that wait for the user), opening one for Claude also shows a
 dialog on the Mac's screen, "Claude needs you: <--say>", with Open live view (runs `metacomputer view --open`) and
@@ -47,6 +53,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import flockwait  # noqa: E402
+import input_reset  # noqa: E402
 import owners  # noqa: E402
 import termsafe  # noqa: E402
 
@@ -59,6 +66,8 @@ EXIT_DONE, EXIT_ERROR, EXIT_USAGE, EXIT_REFUSED, EXIT_CANCELLED, EXIT_STOPPED, E
 CODES = {"done": EXIT_DONE, "cancelled": EXIT_CANCELLED, "timed_out": EXIT_TIME_LIMIT, "gone": EXIT_CANCELLED}
 EVENT_TYPES = {"done": "handoff_done", "cancelled": "handoff_cancelled", "timed_out": "handoff_timed_out"}
 SUBCOMMANDS = ("done", "cancel", "wait", "status", "guard")
+TRANSPORT = []   # opening one: the SSH command for the VM's input reset (bin/metacomputer passes --transport N WORD...)
+TRANSPORT_PROBLEM = []   # --transport 0: bin/metacomputer couldn't set SSH up (the reset is reported as failed)
 # The live view, the way every "needs you" message says it (skills/metacomputer/EVENTS.md uses the same words).
 LIVE_VIEW = ("Open the live view: run `metacomputer view --open` on your Mac. Screen Sharing connects with the "
              "live-view password it remembers, or the password is on your clipboard (paste it with Cmd+V when it "
@@ -272,10 +281,36 @@ def report(rec, as_json, hid=None):
     return CODES[s]
 
 
-def instructions(rec, interactive):
+def reset_line(reset, who):
+    """What opening the handoff did about the driver's leftover virtual input devices (lib/input_reset.py), in one
+    line for the user, or None when there's nothing to say."""
+    status, detail, still = reset
+    if status == "pending":
+        return (f"{who}'s leftover virtual input devices weren't removed: {detail}, and removing them could cut it off. "
+                f"{who}'s actions are paused now; once that one has ended, if the live view ignores your mouse or "
+                "keyboard, run `metacomputer input-reset` in your own terminal (it runs while the handoff is open).")
+    if status == "failed":
+        return (f"Note: metacomputer couldn't remove {who}'s leftover virtual input devices ({detail}). If the live "
+                "view ignores your mouse or keyboard, end the handoff (`metacomputer handoff cancel`) and run "
+                "`metacomputer input-reset` (in your own terminal it also runs while the handoff is open).")
+    if status == "skipped":
+        return None
+    said = (f"Removed {who}'s leftover virtual input devices ({detail} pair(s)), so the live view's mouse and keyboard "
+            "reach every app.") if status == "removed" else None
+    if still:
+        return ((said + " ") if said else "") + (
+            f"One of {who}'s actions was still running then: if the live view ignores your mouse or keyboard, run "
+            "`metacomputer input-reset` in your own terminal.")
+    return said
+
+
+def instructions(rec, interactive, reset=("skipped", None, False)):
     out(f"metacomputer: handed the virtual computer to you ({rec['why']}). {agent_word(rec)}'s desktop actions are "
         "paused until you hand it back.")
     out("  What to do: " + termsafe.escape_for_terminal(rec["say"]))
+    line = reset_line(reset, agent_word(rec))
+    if line:
+        out("  " + line)
     out("  1. " + LIVE_VIEW)
     out("     From another device: `metacomputer view` shows the SSH tunnel (`metacomputer view --tailnet`: your "
         "own tailnet).")
@@ -551,6 +586,7 @@ def open_and_wait(a, say, timeout, interactive, opened):
                 f"{owners.short(owners.OWNERS_DIR)}.)")
             return EXIT_REFUSED
         drop_marks(marks)
+        reset = ("skipped", None, False)
         with owners.lock():
             cur = owners.open_handoff()
             if cur:
@@ -575,6 +611,10 @@ def open_and_wait(a, say, timeout, interactive, opened):
                    "ended": None, "ended_from": None, "note": None}
             opened["id"] = rec["id"]             # before the write: a signal during it still finds the record
             write_record(rec)
+        # The driver's leftover virtual input devices go before the user takes the mouse (lib/input_reset.py): still
+        # under the dispatch lock held exclusively, so no agent call is sent meanwhile, and after the record, so every
+        # one after it finds the handoff. The handoff is open whatever this does.
+        reset = (("failed", TRANSPORT_PROBLEM[0], False) if TRANSPORT_PROBLEM else input_reset.at_handoff(TRANSPORT))
     except (OSError, TimeoutError) as e:
         err(f"couldn't record the handoff ({e}); nothing was handed over")
         return EXIT_ERROR
@@ -583,7 +623,7 @@ def open_and_wait(a, say, timeout, interactive, opened):
     told = announce(rec, interactive)
     off = dialog_off_reason(interactive)
     shown = off is None and start_dialog(rec["id"])
-    instructions(rec, interactive)
+    instructions(rec, interactive, reset)
     if shown:
         out("  A dialog on the Mac's screen says the same, with an Open live view button (INTERACTIVE_PROMPTS=on).")
     if told:
@@ -724,6 +764,19 @@ def cmd_guard(argv):
 
 
 def main(argv):
+    if argv[:1] == ["--transport"]:
+        # bin/metacomputer's SSH command for the VM (lib/input_reset.py), ahead of the user's arguments
+        try:
+            k = int(argv[1]) if len(argv) > 1 else -1
+        except ValueError:
+            k = -1
+        if k < 0 or len(argv) < 2 + k:
+            err("--transport N WORD... (bin/metacomputer's)")
+            return EXIT_USAGE
+        TRANSPORT[:] = argv[2:2 + k]
+        if k == 0:
+            TRANSPORT_PROBLEM[:] = ["couldn't set up SSH to the VM"]
+        argv = argv[2 + k:]
     if len(argv) == 2 and argv[0] == "_dialog":
         return run_dialog(argv[1])
     if argv and argv[0] in SUBCOMMANDS:

@@ -665,6 +665,299 @@ def web_cleanup_checks():
     clear()
 
 
+# A stand-in for the guest's input-reset at the end of the SSH command (lib/input_reset.py): it notes whether the
+# handoff was open and the dispatch lock held exclusively while it ran, and answers as FAKE_RESET says.
+FAKE_GUEST = r'''
+import fcntl, json, os, sys, time
+sys.path.insert(0, os.path.join(%r, "lib"))
+import owners
+os.makedirs(owners.OWNERS_DIR, exist_ok=True)
+fd = os.open(owners.dispatch_path(), os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    held = False
+except BlockingIOError:
+    held = True
+with open(os.environ["FAKE_RESET_LOG"], "a") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "dispatch_held": held, "handoff_open": bool(owners.open_handoff()),
+                        "stamp": owners.input_reset_at()}) + "\n")
+mode = os.environ.get("FAKE_RESET", "2")
+if mode == "ssh_fail":
+    sys.exit(255)
+if mode == "slow":
+    time.sleep(30)
+if mode == "flood":
+    sys.stdout.write("9" * 100000)
+    sys.exit(0)
+print(mode)
+'''
+
+
+def input_reset_checks():
+    print("opening a handoff removes the driver's leftover input devices; how every reset is made; view --open's")
+    import input_reset
+    clear()
+    d = os.path.join(TD, "reset")
+    os.makedirs(d, exist_ok=True)
+    fake, log = os.path.join(d, "fake_guest.py"), os.path.join(d, "reset.log")
+    open(fake, "w").write(FAKE_GUEST % LAB)
+    transport = [sys.executable, fake]
+    T = ["--transport", "2"] + transport
+
+    def entries():
+        return [json.loads(x) for x in read(log).splitlines() if x.strip()]
+
+    def unstamp():
+        if os.path.lexists(owners.input_reset_path()):
+            os.remove(owners.input_reset_path())
+    check("the guest's answer: one count and nothing else",
+          [input_reset.parse_count(x) for x in (b"0\n", b" 2 ", b"x", b"1 2", b"", b"12345", b"-1")]
+          == [0, 2, None, None, None, None, None])
+    os.environ["FAKE_RESET_LOG"] = log
+    try:
+        unstamp()
+        os.environ["FAKE_RESET"] = "2"
+        got = input_reset.run_guest(transport, check=True)
+        got2 = input_reset.run_guest(transport)
+        check("run_guest only asks: --check and a plain run record nothing themselves", got == (2, None)
+              and got2 == (2, None) and owners.input_reset_at() == 0.0, (got, got2))
+        outcomes = []
+        for mode in ("ssh_fail", "nope", "flood"):
+            os.environ["FAKE_RESET"] = mode
+            outcomes.append(input_reset.run_guest(transport))
+        os.environ["FAKE_RESET"] = "slow"
+        t0 = time.time()
+        outcomes.append(input_reset.run_guest(transport, timeout=1.5))
+        took = time.time() - t0
+        check("what the VM answers is read with limits: SSH failing, not a count, too long, too slow (stopped at its "
+              "deadline)", [n for n, _ in outcomes] == [None] * 4 and "SSH" in outcomes[0][1]
+              and "count" in outcomes[1][1] and "too long" in outcomes[2][1] and "within 1 s" in outcomes[3][1]
+              and took < 8, (outcomes, took))
+        check("nothing to run it over: no reset", input_reset.run_guest([]) == (None, "no connection to the virtual "
+                                                                                 "computer was given"))
+        # reset_now: recorded before the guest is asked; only a confirmed 0 puts the earlier record back.
+        unstamp()
+        os.environ["FAKE_RESET"] = "2"
+        open(log, "w").close()
+        got = input_reset.reset_now(transport)
+        at_run = entries()[-1].get("stamp") if entries() else None
+        check("reset_now records the reset before the guest is asked, and keeps it when pairs were removed",
+              got == (2, None) and at_run and at_run > 0 and owners.input_reset_at() == at_run, (got, at_run))
+        prev = owners.input_reset_at()
+        os.environ["FAKE_RESET"] = "ssh_fail"
+        got = input_reset.reset_now(transport)
+        check("…an answer that's lost (the reset may have happened) leaves it recorded: the hub renews",
+              got[0] is None and owners.input_reset_at() > prev, (got, prev, owners.input_reset_at()))
+        prev = owners.input_reset_at()
+        os.environ["FAKE_RESET"] = "0"
+        got = input_reset.reset_now(transport)
+        check("…a confirmed 0 puts the earlier record back (nothing to renew)", got == (0, None)
+              and owners.input_reset_at() == prev, (got, prev, owners.input_reset_at()))
+        unstamp()
+        os.makedirs(owners.input_reset_path())          # can't be written: no reset
+        open(log, "w").close()
+        got = input_reset.reset_now(transport)
+        os.rmdir(owners.input_reset_path())
+        check("…when the record can't be written, the guest isn't asked", got[0] is None and "record" in got[1]
+              and entries() == [], (got, entries()))
+        # MCP_HUB=off: nothing reports what each bridge runs, so in-flight is unknown (never 0).
+        os.environ["MCOMP_MCP_HUB"] = "off"
+        try:
+            off = input_reset.in_flight()
+        finally:
+            os.environ.pop("MCOMP_MCP_HUB", None)
+        check("in_flight with MCP_HUB=off is unknown (None), never 0; with no hub at all it's 0",
+              off is None and input_reset.in_flight() == 0, off)
+        # A driver connection the shared hub doesn't own (a script or bridge running a hub of its own, whatever this
+        # command's MCP_HUB says): its calls can't be seen, so in-flight is unknown, not 0.
+        fd_ = os.path.join(TD, "fakessh")
+        os.makedirs(fd_, exist_ok=True)
+        src, exe = os.path.join(fd_, "ssh.c"), os.path.join(fd_, "ssh")
+        open(src, "w").write("#include <unistd.h>\nint main(void) { sleep(60); return 0; }\n")
+        subprocess.run(["/usr/bin/cc", "-o", exe, src], capture_output=True)
+        if os.path.exists(exe):
+            conn = subprocess.Popen([exe, "-T", "-o", f"IdentityFile={TD}/ssh/mcp", "-p", owners.SSH_PORT or "1",
+                                     "cua@127.0.0.1"])
+            time.sleep(0.3)
+            try:
+                seen, unknown = input_reset.outside_connections(None), input_reset.in_flight()
+            finally:
+                conn.kill()
+                conn.wait()
+            check("a driver connection no shared hub owns (a local hub's): in_flight is unknown, never 0",
+                  seen is True and unknown is None and input_reset.in_flight() == 0, (seen, unknown))
+        else:
+            print("SKIP the local-hub connection check: no C compiler for the stand-in ssh")
+    finally:
+        os.environ.pop("FAKE_RESET", None)
+
+    # Opening a handoff: under the dispatch lock held exclusively, after the record is written, recorded first.
+    unstamp()
+    open(log, "w").close()
+    p = start(*T, "--why", "captcha", "--say", SAY, FAKE_RESET="2")
+    h = wait_open()
+    end = time.time() + 15
+    while not entries() and time.time() < end:
+        time.sleep(0.05)
+    run("cancel", claude=SESSION_A)
+    rc, o, e = finish(p)
+    ent = entries()
+    check("opening a handoff runs the guest's input-reset once, with the record written, the dispatch lock held "
+          "exclusively (no agent call can be sent meanwhile) and the reset already recorded",
+          h and len(ent) == 1 and ent[0]["handoff_open"] and ent[0]["dispatch_held"] and (ent[0].get("stamp") or 0) > 0
+          and ent[0]["argv"] == [input_reset.GUEST], ent)
+    check("its message says so", "Removed Claude's leftover virtual input devices (2 pair(s))" in o, o[:800])
+    for mode, want in (("ssh_fail", "couldn't reach the VM over SSH"), ("not-a-count", "wasn't a count")):
+        open(log, "w").close()
+        p = start(*T, "--why", "login", "--say", SAY, FAKE_RESET=mode)
+        h = wait_open()
+        end = time.time() + 15
+        while not entries() and time.time() < end:
+            time.sleep(0.05)
+        time.sleep(0.5)
+        still = owners.open_handoff()
+        run("cancel", claude=SESSION_A)
+        rc, o, e = finish(p)
+        check(f"a reset that fails ({mode}) doesn't stop the handoff: it opens, and its message says to end it and run "
+              "`metacomputer input-reset`", h and still and want in o and "metacomputer handoff cancel" in o
+              and "metacomputer input-reset" in o and "Removed" not in o, o[:900])
+    # When calls may still be running (MCP_HUB=off: that can't be known), nothing is removed: pending.
+    open(log, "w").close()
+    p = start(*T, "--why", "login", "--say", SAY, FAKE_RESET="2", MCOMP_MCP_HUB="off", TEST_OPEN_WAIT="40")
+    h = wait_open()
+    time.sleep(0.8)
+    run("cancel", claude=SESSION_A)
+    rc, o, e = finish(p, 40)
+    check("when it can't be known whether an agent call is still running (MCP_HUB=off), the handoff opens without "
+          "removing anything, and says the reset is pending and how to make it", h and entries() == []
+          and "weren't removed" in o and "metacomputer input-reset" in o and "Removed" not in o, (entries(), o[:900]))
+    p = start("--transport", "0", "--why", "login", "--say", SAY)
+    h = wait_open()
+    time.sleep(0.5)
+    run("cancel", claude=SESSION_A)
+    rc, o, e = finish(p)
+    check("when bin/metacomputer couldn't set SSH up (--transport 0) the handoff still opens, and says what to run",
+          h and "couldn't set up SSH to the VM" in o and "metacomputer input-reset" in o, o[:900])
+    open(log, "w").close()
+    p = start(*T, "--why", "captcha", "--say", SAY, FAKE_RESET="0")
+    wait_open()
+    end = time.time() + 15
+    while not entries() and time.time() < end:
+        time.sleep(0.05)
+    time.sleep(0.3)
+    run("cancel", claude=SESSION_A)
+    rc, o, e = finish(p)
+    check("nothing to remove: nothing said", entries() and "virtual input devices" not in o, o[:600])
+    open(log, "w").close()
+    p = start("--why", "captcha", "--say", SAY)
+    wait_open()
+    time.sleep(0.5)
+    run("cancel", claude=SESSION_A)
+    finish(p)
+    check("handoff.py without bin/metacomputer's transport: nothing is run", entries() == [])
+
+    # In flight: opening waits a little for acting calls already in the driver; when one is still running, or that
+    # can't be known, it removes nothing (removing them could cut that call off).
+    seen, flights = [], [1, 1, 0]
+    real = (input_reset.in_flight, input_reset.run_guest, input_reset.INFLIGHT_WAIT_S, input_reset.POLL_S)
+    try:
+        input_reset.in_flight = lambda: flights.pop(0) if flights else 0
+        input_reset.run_guest = lambda t, check=False, **kw: (seen.append(t) or (1, None))
+        input_reset.POLL_S = 0.01
+        a = input_reset.at_handoff(["ssh"])
+        check("opening waits for the acting calls in flight to end, then resets", a == ("removed", 1, False)
+              and not flights and seen == [["ssh"]], (a, flights))
+        input_reset.INFLIGHT_WAIT_S = 0.2
+        for stuck in (1, None):
+            seen.clear()
+            input_reset.in_flight = lambda: stuck
+            a = input_reset.at_handoff(["ssh"])
+            line = handoff.reset_line(a, "Claude")
+            check(f"…when one is still running after the wait ({stuck}): nothing removed, the message says it's pending "
+                  "and how to make it", a[0] == "pending" and seen == [] and "weren't removed" in line
+                  and "metacomputer input-reset" in line, (a, seen, line))
+        input_reset.in_flight = lambda: 0
+        input_reset.run_guest = lambda t, check=False, **kw: 1 / 0
+        a = input_reset.at_handoff(["ssh"])
+        check("an unexpected error is a failed reset, never a failed handoff", a[0] == "failed", a)
+        check("without a transport (handoff.py run by itself) nothing is tried", input_reset.at_handoff([])[0] == "skipped")
+    finally:
+        input_reset.in_flight, input_reset.run_guest, input_reset.INFLIGHT_WAIT_S, input_reset.POLL_S = real
+    clear()
+
+    # view --open's reset (for_view): the policy, with the hub, the guest and who's at the terminal stood in for.
+    real = (owners.at_user_terminal, owners.others, input_reset.in_flight, input_reset.run_guest)
+    said, ran = [], []
+
+    def guest(t, check=False, **kw):
+        fdl = os.open(owners.dispatch_path(), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            import fcntl
+            fcntl.flock(fdl, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            held = False
+        except BlockingIOError:
+            held = True
+        finally:
+            os.close(fdl)
+        ran.append(held)
+        return guest.answer
+
+    def case(user, busy, flight, answer=(2, None), handoff_open=False):
+        said.clear(), ran.clear()
+        owners.at_user_terminal = lambda fds=(0,): user
+        owners.others = lambda *a, **k: [{"kind": "session", "active": True}] if busy else []
+        input_reset.in_flight = lambda: flight
+        guest.answer = answer
+        clear()
+        if handoff_open:
+            t = time.time()
+            handoff.write_record({"v": 1, "id": "h-eeeeeeeeeeee", "status": "open", "why": "login", "say": "x",
+                                  "opened": t, "deadline": t + 60, "timeout_s": 60, "cwd": TD, "claude_pid": None})
+        rc = input_reset.for_view(["ssh"], out=said.append)
+        clear()
+        return rc, list(said), list(ran)
+    try:
+        input_reset.run_guest = guest
+        got = case(False, False, 0)
+        check("view --open with nobody else active and nothing in flight: resets under the dispatch lock held "
+              "exclusively and says so", got[0] == 0 and got[2] == [True] and "Removed 2" in got[1][0], got)
+        got = case(False, True, 0)
+        check("...another controller active (one controller at a time): left as they are, and says what to run",
+              got[2] == [] and "another session" in got[1][0] and "metacomputer input-reset" in got[1][0], got)
+        got = case(True, True, 0)
+        check("...but a person at their own terminal takes the computer whatever session is active", got[2] == [True], got)
+        for flight, word in ((1, "still running"), (None, "couldn't tell")):
+            for user in (False, True):
+                got = case(user, False, flight)
+                check(f"...an agent call in flight ({flight}): never, not even for the person at the terminal", got[2] == []
+                      and word in got[1][0], got)
+        got = case(False, False, 0, handoff_open=True)
+        check("...a handoff open, not the user's terminal (the agent, the dialog's button): nothing run, nothing said "
+              "(opening it reset them)", got[2] == [] and got[1] == [], got)
+        got = case(True, False, 0, handoff_open=True)
+        check("...a handoff open, at the user's own terminal: their reset runs", got[2] == [True], got)
+        got = case(False, False, 0, answer=(0, None))
+        check("...nothing to remove: nothing said", got[2] == [True] and got[1] == [], got)
+        got = case(False, False, 0, answer=(None, "couldn't reach the VM over SSH"))
+        check("...a failed reset says so and what to run; view --open goes on (exit 0)", got[0] == 0
+              and "Couldn't remove" in got[1][0] and "metacomputer input-reset" in got[1][0], got)
+        input_reset.in_flight = real[2]
+        os.environ["MCOMP_MCP_HUB"] = "off"
+        try:
+            owners.at_user_terminal = lambda fds=(0,): True
+            owners.others = lambda *a, **k: []
+            said.clear(), ran.clear()
+            input_reset.for_view(["ssh"], out=said.append)
+        finally:
+            os.environ.pop("MCOMP_MCP_HUB", None)
+        check("...with MCP_HUB=off (the bridges' calls can't be seen): never, and says so", ran == []
+              and said and "couldn't tell" in said[0], (ran, said))
+    finally:
+        (owners.at_user_terminal, owners.others, input_reset.in_flight, input_reset.run_guest) = real
+        os.environ.pop("FAKE_RESET_LOG", None)
+        clear()
+
+
 VAULT_STUB = """#!/bin/sh
 case "$1" in
   version) echo '{"build":"test"}'; exit 0 ;;
@@ -743,6 +1036,61 @@ def fill_checks():
     r = subprocess.run([mc, "input-reset"], env=e, capture_output=True, text=True, timeout=60)
     check("input-reset (it acts on the desktop) stops too", r.returncode == 4 and "the user has the computer" in r.stderr,
           (r.returncode, r.stderr[-300:]))
+    # ...except from the user's own terminal: it gives back their own mouse and keyboard during their handoff. A
+    # stand-in ssh answers the guest's input-reset with a count (the VM's part is tests/test_handoff_vm.py's).
+    sd = os.path.join(fd, "sshstub")
+    os.makedirs(sd)
+    sshlog = os.path.join(fd, "ssh.log")
+    open(os.path.join(sd, "ssh"), "w").write('#!/bin/sh\necho "$*" >> "%s"\ncase "$*" in *input-reset*) echo 1 ;; esac\n'
+                                             % sshlog)
+    os.chmod(os.path.join(sd, "ssh"), 0o755)
+    eu = dict(e, PATH=sd + os.pathsep + os.environ.get("PATH", ""))
+    stamp = os.path.join(ENV["MCOMP_RUN_DIR"], "owners", owners.INPUT_RESET_FILE)
+    if os.path.lexists(stamp):
+        os.remove(stamp)
+
+    def at_pty(argv):
+        m, s = pty.openpty()
+        p = userterm.spawn(argv, env=eu, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        os.close(s)
+        try:
+            o, er = p.communicate(timeout=60)
+        finally:
+            os.close(m)
+        return p.returncode, o.decode(errors="replace"), er.decode(errors="replace")
+    rc, o, er = at_pty([mc, "input-reset"])
+    check("input-reset from the user's own terminal goes ahead while their handoff is open: the guest's reset runs, "
+          "its count is printed and the reset is recorded for the hub", rc == 0 and o.strip() == "1"
+          and "your handoff is open" in er and "input-reset" in read(sshlog) and os.path.exists(stamp)
+          and owners.open_handoff(), (rc, o, er[-300:], read(sshlog)[-200:]))
+    open(sshlog, "w").close()
+    agent = userterm.fake_agent("codex")
+    if agent:
+        rc, o, er = at_pty([agent, mc, "input-reset"])
+        check("...but not from an agent session, even with a terminal of its own (exit 4, the guest isn't asked)",
+              rc == 4 and "the user has the computer" in er and "input-reset" not in read(sshlog), (rc, er[-300:]))
+    else:
+        print("SKIP input-reset from an agent with a terminal: no C compiler for the stand-in agent")
+    r = subprocess.run([mc, "input-reset"], env=eu, capture_output=True, text=True, timeout=60)
+    check("...nor without a terminal (exit 4)", r.returncode == 4 and "input-reset" not in read(sshlog),
+          (r.returncode, r.stderr[-200:]))
+    t0 = owners.input_reset_at()
+    r = subprocess.run([mc, "input-reset", "--check"], env=eu, capture_output=True, text=True, timeout=60)
+    check("--check only reads: it runs for anyone, and records nothing", r.returncode == 0 and "--check" in read(sshlog)
+          and owners.input_reset_at() == t0, (r.returncode, r.stderr[-200:]))
+    # Not while an agent call may still be running in the VM: with MCP_HUB=off nothing says, so it refuses (exit 3).
+    open(sshlog, "w").close()
+    eu_off = dict(eu, MCOMP_MCP_HUB="off")
+    m, s = pty.openpty()
+    p = userterm.spawn([mc, "input-reset"], env=eu_off, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    os.close(s)
+    try:
+        o, er = p.communicate(timeout=60)
+    finally:
+        os.close(m)
+    check("input-reset refuses (exit 3) when it can't be known whether an agent call is still running (MCP_HUB=off), "
+          "even at the user's own terminal; the guest isn't asked", p.returncode == 3
+          and "couldn't tell" in er.decode() and "input-reset" not in read(sshlog), (p.returncode, er[-300:]))
     # `secrets approve` of a waiting one-time code request fills once allowed: it stops too, however its arguments are
     # ordered, and when the vault's list can't be read (it may fill). Only an approval the list shows as another kind
     # (one that answers a fill already on its way) goes straight on.
@@ -881,6 +1229,9 @@ STUBS = {
                  'case "$1" in login-keychain) [ -f "$STUB/kcpath" ] && printf \'    "%s"\\n\' "$(cat "$STUB/kcpath")" ;; esac'),
     "tailscale": ('echo "tailscale $*" >> "$STUB/argv.log"; '
                   'case "$1" in status) echo \'{"Self": {"DNSName": "box.example-tailnet.ts.net."}}\' ;; esac'),
+    # the VM's input reset over SSH (view --open, lib/input_reset.py): the count in $STUB/reset_out, else 0
+    "ssh": ('case "$*" in *input-reset*) echo "ssh input-reset" >> "$STUB/argv.log"; '
+            'cat "$STUB/reset_out" 2>/dev/null || echo 0 ;; *) echo "ssh $*" >> "$STUB/argv.log" ;; esac'),
 }
 
 
@@ -903,7 +1254,7 @@ def view_setup(name="view"):
     return vd, stub, lume, ssh
 
 
-def view(vd, stub, lume, ssh, *args, store="file", extra_cfg="", **extra):
+def view(vd, stub, lume, ssh, *args, store="file", extra_cfg="", stdin=None, **extra):
     cfg = os.path.join(vd, "test.env")
     open(cfg, "w").write(f'VM_NAME=hvtest\nBASELINE_NAME=hvtest-baseline\nSSH_DIR="{ssh}"\nSSH_PORT=59872\n'
                          f'VNC_PORT=59871\nRUN_DIR="{vd}/run"\nLOG_DIR="{vd}/logs"\nLUME="{lume}"\n'
@@ -912,7 +1263,7 @@ def view(vd, stub, lume, ssh, *args, store="file", extra_cfg="", **extra):
             MCOMP_VIEW_CLIPBOARD_S=extra.pop("clear", 1), **extra)
     for k in ("MCOMP_RUN_DIR", "MCOMP_LOG_DIR", "MCOMP_SSH_DIR", "MCOMP_VM_NAME"):
         e.pop(k, None)
-    return subprocess.run([os.path.join(LAB, "bin", "metacomputer"), "view"] + list(args), env=e,
+    return subprocess.run([os.path.join(LAB, "bin", "metacomputer"), "view"] + list(args), env=e, stdin=stdin,
                           capture_output=True, text=True, timeout=60)
 
 
@@ -999,6 +1350,31 @@ def view_checks():
              extra_cfg=f'VNC_PASSWORD_GET="cat {secret}"\nVNC_PASSWORD_SET="cat >/dev/null"\n')
     check("your own command's store: onto the clipboard, not the output", r.returncode == 0
           and read(clip) == "Cm5Store" and "Cm5Store" not in r.stdout + r.stderr, (r.stdout, r.stderr))
+    # The driver's leftover input devices go before Screen Sharing opens (lib/input_reset.py; its rules are
+    # input_reset_checks'): the guest's input-reset over SSH (the stand-in answers $STUB/reset_out).
+    open(os.path.join(stub, "reset_out"), "w").write("1\n")
+    open(argv, "w").close()
+    stamp = os.path.join(vd, "run", "owners", owners.INPUT_RESET_FILE)
+    r = view(vd, stub, lume, ssh, "--open", stdin=subprocess.DEVNULL)
+    order = [l.split()[0] + (" " + l.split()[1] if l.startswith("ssh") else "") for l in read(argv).splitlines()
+             if l.startswith(("ssh", "open"))]
+    check("view --open removes the driver's leftover input devices before Screen Sharing opens, says so, and records "
+          "it for the hub", r.returncode == 0 and "Removed 1 leftover virtual input device pair(s)" in r.stdout
+          and order == ["ssh input-reset", "open"] and os.path.exists(stamp), (r.stdout, order))
+    now = time.time()
+    os.makedirs(os.path.join(vd, "run", "owners"), exist_ok=True)
+    with open(os.path.join(vd, "run", "owners", owners.HANDOFF_FILE), "w") as f:
+        json.dump({"v": 1, "id": "h-ffffffffffff", "status": "open", "why": "login", "say": "x", "opened": now,
+                   "deadline": now + 60, "timeout_s": 60, "cwd": vd, "claude_pid": None}, f)
+    open(argv, "w").close()
+    r = view(vd, stub, lume, ssh, "--open", stdin=subprocess.DEVNULL)
+    os.remove(os.path.join(vd, "run", "owners", owners.HANDOFF_FILE))
+    check("...not while a handoff is open, from anything but the user's own terminal (the dialog's button, an "
+          "agent): opening the handoff did it; Screen Sharing still opens", r.returncode == 0
+          and "ssh input-reset" not in read(argv) and "open vnc://127.0.0.1:59871" in read(argv)
+          and "virtual input" not in r.stdout, (r.stdout, read(argv)))
+    open(os.path.join(stub, "reset_out"), "w").write("0\n")
+
     # Over SSH, or outside the screen session: instructions instead, nothing touched.
     open(clip, "w").write("untouched")
     open(argv, "w").close()
@@ -1640,6 +2016,7 @@ def main():
         lifecycle_checks()
         web_cleanup_checks()
         fill_checks()
+        input_reset_checks()
         view_checks()
         remember_checks()
         remember_helper_checks()

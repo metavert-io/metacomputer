@@ -282,7 +282,12 @@ against 20.2 turns, no refusals; per-task records in
   until its script is written, by the GUI tests' own SSH commands, by the
   lifecycle commands after their question, and by the fills for their whole
   command (and a `secrets settle` when the vault couldn't confirm a stop); opening
-  a handoff takes it exclusively. The hub keeps its driver connection while one is
+  a handoff takes it exclusively. Opening one also removes the driver's leftover
+  virtual input devices (below; `lib/input_reset.py`), still under that lock, after
+  the record and once acting calls already in the driver have ended (when one is
+  still running after 10 s, or that can't be known, it leaves them and says the
+  reset is pending), so the live view's mouse and keyboard work; `view --open` does
+  the same when no agent call is in flight. The hub keeps its driver connection while one is
   open (no idle exit, restart or lease kill). It ends with `handoff done`, `handoff cancel` or
   its time limit; a record that can't be read counts as open, for at most 2 hours.
 - **Chrome** (docs/chrome-investigation.md). When the driver delivers
@@ -309,11 +314,42 @@ against 20.2 turns, no refusals; per-task records in
     `delivery_mode: "foreground"`;
   - refuses `set_value` and `run_script` aimed at Chrome;
   - notices virtual-device routes in results (`path=mpx_*`), and before the
-    next Chrome keyboard input runs `metacomputer input-reset` (the guest's
-    `input-reset`, `xinput remove-master`), noting it in that result.
+    next Chrome keyboard input removes the pairs (the guest's `input-reset`,
+    `xinput remove-master`) as every reset is made, noting it in that result.
 
-  A driver session whose pair was removed can't use the background keyboard
-  route again until it reconnects; its next such call returns an error.
+  The driver keeps a pair between actions (Cua Driver 0.53.0 never removes one), and
+  a driver process whose pair was removed ends at its next pointer action through it
+  (XI_BadDevice). So every reset (`lib/input_reset.py` reset_now) is made under the
+  dispatch lock held exclusively, never while an agent call is still running in the
+  driver (or that can't be known: `MCP_HUB=off`), and recorded before the guest is
+  asked (`owners.mark_input_reset`). Right before a call that may use the driver's own
+  devices (`may_use_devices`, each step by its effective mode) is sent, in the same
+  critical section as the send (the dispatch lock and the hub's send gate,
+  `before_send`), the hub compares that record with when its connection began using
+  them (`reset_seen`) and, when it's later, starts a fresh driver connection first
+  (`renew_after_reset`): only after everything sent on the old one has ended (else the
+  call is refused, `input_reset_busy`), and, with every completion's bookkeeping
+  published (`settle_lock`), not while a driver recording runs or a browser
+  `browser_prepare` launched is open (`input_reset_recording`; foreground input goes
+  on). The element tokens and snapshot ids clients see are the hub's own, one per (driver
+  runtime, driver snapshot id), unique for the hub's lifetime and in the driver's shape
+  (`tag_ids` on every answer, `untag_ids` on every call before any guard): an id of another
+  runtime, or one the hub never handed out, is refused (`element_token_stale`), so a token
+  kept across a reconnect can't name another element. Only snapshot ids are translated,
+  in the driver's named fields (`snapshot_id`, `since`, `element_token`, `data` included)
+  and its own text lines, never the envelope or other strings, at most `TAG_MAX_IDS` per
+  answer (more: the answer is refused whole); in `run_script`'s script, only whole ids the
+  hub issued (a token built from pieces, or an id a script returns as a plain value, stays
+  the driver's and is refused when used); the mappings an answer uses are pinned while its
+  new ones are made. Reads never renew or claim: their tokens are refused after the first
+  renewing input, and the agent reads again. The final critical section also checks again
+  that the calling client still holds the computer (`check_and_claim`) before any renewal
+  or send, and a successful `stop_recording` clears every session's recording marker. A driver session the hub ends itself releases its browser,
+  and a driver connection the shared hub doesn't own counts as calls that can't be seen
+  (`input_reset.outside_connections`). Nothing else tears the connection down for a reset. One caveat from Cua's own notes: removing
+  a master device crashes Qt 6.5+ clients on the display (QTBUG-146876), which is why the
+  driver never removes one itself; Ubuntu 24.04's own Qt 6 is 6.4, but a Qt 6.5+ app added
+  to the VM (a Flatpak or AppImage) could close at a reset.
 - **Bounded mode** (SECURITY.md): `launch_app` by name is rewritten to the
   absolute path the manifest allows; a refusal that repeats tells the user
   (events); when the bounded session ends, every client attached to it is told

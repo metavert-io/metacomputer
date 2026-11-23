@@ -119,6 +119,7 @@ with clean_env():
     import vm_shell  # noqa: E402
     import wirelimits  # noqa: E402
     import handoff  # noqa: E402
+    import input_reset  # noqa: E402
 
 PROXY, CMDS, IMPORT, APPROVALS, CRYPTO, SERVER = (f"vault/{f}.swift" for f in
                                                   ("Proxy", "Commands", "Import", "Approvals", "Crypto", "Server"))
@@ -600,7 +601,7 @@ def pacing_after_guards():
     c = raw("lib/mcp_hub.py")
     body = c[c.index("    def on_tools_call("):c.index("    def session_for(")]
     order = [body.find(x) for x in ("self.coord_guard(", "self.chrome_guard(", "self.pace(name, args, sess)",
-                                    "with owners.acting():")]
+                                    "with owners.acting(), self.send_gate:")]
     rx = mcp_hub.BROWSER_RE
     return all(i > 0 for i in order) and order == sorted(order) and bool(rx.search("firefox")) \
         and bool(rx.search("Google-chrome")) and not rx.search("Mousepad") and not rx.search("libreoffice")
@@ -1372,8 +1373,61 @@ CLAIMS = [
          "Paused: the user has the computer")),
     ("SECURITY.md", r"`metacomputer sh` refuses every run that isn't `--read-only`, with or without `--override`",
      lambda m: handoff_before_override()),
-    ("SECURITY.md", r"`secrets fill`, `login` and `session load` refuse, and so does `input-reset`",
+    ("SECURITY.md", r"`secrets fill`, `login` and `session load` refuse, and so does `input-reset`, except at your own "
+                    r"terminal \(it gives\s+your mouse and keyboard back; an agent session's run still refuses, terminal "
+                    r"or not\)",
      lambda m: fills_guarded() and input_reset_guarded()),
+    # The driver's leftover input devices (lib/input_reset.py): how every reset is made, and what the hub does after one
+    ("SECURITY.md", r"opening a\s+handoff removes them \(the guest's `input-reset`, `lib/input_reset.py`\): after its "
+                    r"record is written, under the\s+dispatch lock it holds exclusively \(below\), so no agent call can "
+                    r"be sent meanwhile",
+     lambda m: reset_at_open()),
+    ("SECURITY.md", r"Every reset is made that way:\s+under that lock held exclusively, recorded before the guest is asked "
+                    r"\(an answer that's lost counts as a reset\), and\s+never while an agent call is still running in "
+                    r"the driver or when that can't be known \(`MCP_HUB=off`, a driver\s+connection the shared hub "
+                    r"doesn't own, a hub that doesn't answer\)",
+     lambda m: every_reset_rules()),
+    ("SECURITY.md", r"Opening a handoff waits up to (\d+) s for calls\s+already in the driver; if one is still running "
+                    r"then, it leaves the devices and its message says the reset is pending\s+and how to make it",
+     lambda m: int(m[1]) == input_reset.INFLIGHT_WAIT_S and reset_pending_says()),
+    ("SECURITY.md", r"If the reset fails, the handoff opens anyway and its message tells you to end it and run\s+"
+                    r"`metacomputer input-reset`",
+     lambda m: reset_failure_says()),
+    ("SECURITY.md", r"`metacomputer view --open` removes them too,\s+but, unless you run it at your own terminal, not while "
+                    r"another controller is active or a handoff is open; the hub's\s+Chrome guard makes its own reset "
+                    r"the same way",
+     lambda m: view_reset_rules() and hub_reset_rules()),
+    ("SECURITY.md", r"before a call that may go through the driver's own devices is sent, the hub checks,\s+under the "
+                    r"dispatch lock and in the same step as the send, whether a reset came after its connection began "
+                    r"using\s+them, and if so starts a fresh driver connection first \(`renew_after_reset`\): only once "
+                    r"nothing it sent is still\s+running \(else the call is refused\), and not while a driver recording "
+                    r"runs or a browser `browser_prepare` launched is\s+open \(either would end with it\): such input is "
+                    r"refused then, and foreground input goes on. In that same step, before\s+any of it, the hub checks "
+                    r"again that the calling session still holds the computer, as it did when it took the call; if\s+"
+                    r"another controller has it by then, the call is refused and nothing is restarted or sent. A "
+                    r"`stop_recording` from any\s+session ends the driver's recording, so it counts for all of them",
+     lambda m: hub_renews_after_reset() and owner_rechecked_at_dispatch()),
+    ("SECURITY.md", r"A token built inside a script from pieces, or a snapshot id a\s+script returns as a plain value, "
+                    r"stays the driver's own: the hub refuses it as stale when it's used, so it never\s+reaches a wrong "
+                    r"element. While an answer's ids are translated, every mapping it uses is kept; when the hub couldn't"
+                    r"\s+make room for a new one without forgetting one of them, the answer is refused whole",
+     lambda m: "if e and e[0] == gen:" in hub_fn("untag_ids") and "if old in pinned:\n                return None"
+     in hub_fn("_hub_sid") and "self.sid_in.move_to_end(h)" in hub_fn("tag_ids")
+     and "h = self._hub_sid(gen, d, pinned)" in hub_fn("tag_ids")),
+    ("SECURITY.md", r"The element tokens and\s+snapshot ids the hub hands out are its own, tied to the driver runtime "
+                    r"that made them \(Cua Driver numbers its\s+snapshots from the start in every process\): one from "
+                    r"another runtime, or one the hub never handed out, is refused\s+\(`element_token_stale`\) before "
+                    r"any guard looks at the call, and the driver only ever gets its own back",
+     lambda m: tokens_per_runtime()),
+    ("SECURITY.md", r"Only the\s+snapshot id is translated, and only where the driver names one \(its `snapshot_id`, `since` "
+                    r"and `element_token` fields\s+and its own text lines\): never the protocol envelope or other text; "
+                    r"an answer naming more snapshots than the hub\s+translates at once is refused whole, never passed on "
+                    r"half translated; in a script, only whole ids the hub handed out\s+are translated, every other string "
+                    r"is left alone",
+     lambda m: tag_rules()),
+    ("SECURITY.md", r"Reads never restart the driver and never claim the computer \(they\s+don't use its input devices\)",
+     lambda m: "renew_for_read" not in raw("lib/mcp_hub.py") and "TOKEN_READS" not in raw("lib/mcp_hub.py")
+     and "self.renew_after_reset()" in hub_fn("before_send") and raw("lib/mcp_hub.py").count("self.renew_after_reset()") == 1),
     ("SECURITY.md", r"The fills check this VM's handoff, so their `--vm` must name this VM",
      lambda m: 'secrets_vm_is_this "$@" || die' in raw("bin/metacomputer")),
     ("SECURITY.md", r"Opening a handoff holds the lock exclusively, so it waits for those to finish \(up to (\d+) s, "
@@ -1720,9 +1774,10 @@ CLAIMS = [
     ("SECURITY.md", r"Only then does it stop what runs for the VM \(its event watcher, its hub\)",
      lambda m: 0 <= vm_delete_src().find('[ "$DP_SIG" = "$first" ] || die') < vm_delete_src().find("events_watcher_stop")
      and vm_delete_src().find("lock_fd_take 6") < vm_delete_src().find("hub_stop")),
-    ("SECURITY.md", r"every command it runs \(its connection to the driver, `input-reset`\) carries them",
+    ("SECURITY.md", r"every command it runs \(its connection to the driver, its input reset's SSH command\) carries\s+them",
      lambda m: "def cli_env" in raw("lib/mcp_hub.py") and 'env=self.cli_env(' in raw("lib/mcp_hub.py")
-     and "env=self.env)" not in raw("lib/mcp_hub.py")),
+     and "env=self.env)" not in raw("lib/mcp_hub.py")
+     and 'input_reset.reset_now([MCOMP_CLI, "ssh", "ops"],\n                                                   env=self.cli_env(' in raw("lib/mcp_hub.py")),
     ("SECURITY.md", r"for a `config/vms/` VM it must be that VM's own vault folder, so it can't be another VM's vault either",
      lambda m: 0 < load_settings_src().find('mc_canon MCOMP_VAULT_DIR "$MCOMP_VAULT_DIR"') < load_settings_src().find("isn't the vault folder of config/vms/$name.env")
      < load_settings_src().find("mc_identity_check ||")),
@@ -2142,15 +2197,146 @@ def lifecycle_held():
                           r"\s+handoff_hold_unless_override\n\s+restore_from", b) is not None)
 
 
+def ir_fn(name):
+    m = re.search(r"^def %s\(.*?\n(.*?)^def " % re.escape(name), raw("lib/input_reset.py"), re.S | re.M)
+    return m.group(1) if m else ""
+
+
+def hub_fn(name):
+    m = re.search(r"^    def %s\(.*?\n(.*?)^    def " % re.escape(name), raw("lib/mcp_hub.py"), re.S | re.M)
+    return m.group(1) if m else ""
+
+
+def reset_at_open():
+    """Opening a handoff resets the guest's input devices after writing the record, before letting go of the dispatch
+    lock it holds exclusively (lib/handoff.py open_and_wait), over the SSH command bin/metacomputer passes."""
+    h = raw("lib/handoff.py")
+    i, w, x = h.find("input_reset.at_handoff(TRANSPORT))"), h.find("write_record(rec)\n"), \
+        h.find("held.__exit__(None, None, None)")
+    return (0 < w < i < x
+            and 'exec "$PY" "$LAB_ROOT/lib/handoff.py" --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"'
+            in raw("bin/metacomputer") and 'exec "$PY" "$LAB_ROOT/lib/handoff.py" --transport 0 "$@"' in raw("bin/metacomputer"))
+
+
+def every_reset_rules():
+    """reset_now records before it asks the guest and puts the record back only on a confirmed 0 (nothing when it can't
+    record); every caller runs it under the dispatch lock held exclusively after an in-flight check that fails closed
+    (in_flight: None for MCP_HUB=off), and the guest's answer is only ever a count (no stamping in run_guest)."""
+    rn, rg, inf = ir_fn("reset_now"), ir_fn("run_guest"), ir_fn("in_flight")
+    oc = ir_fn("outside_connections")
+    ah, fv, fc, hb = ir_fn("at_handoff"), ir_fn("for_view"), ir_fn("for_cli"), hub_fn("input_reset")
+    return (rn.index("owners.mark_input_reset(") < rn.index("run_guest(") and "if n == 0:\n        owners.restore_input_reset(prev)" in rn
+            and "return None, \"couldn't record the reset for the hub, so it wasn't made\"" in rn
+            and "mark_input_reset" not in rg and 'if mcp_hub.mode() == "off":\n            return None' in inf
+            and "if outside_connections(hub) is not False:\n            return None" in inf
+            and inf.index("outside_connections(hub)") < inf.index("if not hub:\n            return 0")
+            and "if hub_pid and hub_pid in owners.ancestors(pid, table):" in oc and "return None" in oc
+            and "if busy != 0:" in ah and ah.index("if busy != 0:") < ah.index("reset_now(transport)")
+            and all("owners.dispatch(shared=False" in f and f.index("owners.dispatch(shared=False") < f.index("reset_now(")
+                    for f in (fv, fc, hb))
+            and fv.index("if n is None or n > 0:") < fv.index("reset_now(") and fc.index("if busy is None or busy > 0:") < fc.index("reset_now(")
+            and "if self.local or input_reset.outside_connections(self.pid) is not False:" in hb and 'if any(p.get("acting") for p in list(self.pending.values())):' in hb
+            and hb.index('if any(p.get("acting")') < hb.index("reset_now(")
+            and "input_reset.at_handoff(TRANSPORT)" in raw("lib/handoff.py")
+            and raw("lib/handoff.py").find("owners.dispatch(shared=False, timeout=OPEN_WAIT_S)")
+            < raw("lib/handoff.py").find("input_reset.at_handoff(TRANSPORT)"))
+
+
+def reset_pending_says():
+    line = handoff.reset_line(("pending", "x", False), "Claude")
+    return "weren't removed" in line and "metacomputer input-reset" in line and "own terminal" in line
+
+
+def reset_failure_says():
+    """A failed reset is a line in the handoff's message, never a failed handoff: it says to end the handoff and run
+    input-reset (lib/handoff.py reset_line), and at_handoff never raises."""
+    line = handoff.reset_line(("failed", "x", False), "Claude")
+    return ("end the handoff" in line and "metacomputer input-reset" in line
+            and "except Exception as e:  # the handoff opens whatever happens here" in ir_fn("at_handoff"))
+
+
+def view_reset_rules():
+    """view --open's reset (lib/input_reset.py for_view): unless at the user's own terminal, no other active controller
+    and no open handoff; bin/metacomputer runs it before Screen Sharing opens."""
+    fv = ir_fn("for_view")
+    b = fn_src("bin/metacomputer", "view_open")
+    return ("if h and not user:" in fv and "if not h and not user:" in fv
+            and "lib/input_reset.py\" view --transport" in b and b.index("input_reset.py") < b.index('open "vnc://'))
+
+
+def hub_reset_rules():
+    """The hub's Chrome-guard reset: dispatch lock exclusively, the handoff, its own running calls, reset_now."""
+    hb = hub_fn("input_reset")
+    return ("owners.dispatch(shared=False" in hb and "if owners.open_handoff():" in hb and "with self.send_gate:" in hb
+            and 'subprocess.run([MCOMP_CLI, "input-reset"]' not in raw("lib/mcp_hub.py"))
+
+
+def hub_renews_after_reset():
+    """The reset decision is made in the dispatch critical section (owners.acting() and the send gate, before_send);
+    renew_after_reset waits for the connection's calls, publishes completions first (settle_lock), refuses rather than
+    cut anything off; tokens from another runtime are refused; there's no renew request."""
+    hub, bs, rn = raw("lib/mcp_hub.py"), hub_fn("before_send"), hub_fn("renew_after_reset")
+    return ("with owners.acting(), self.send_gate:\n                # Ownership again" in hub
+            and "if self.stale_after_reset():" in bs and bs.index("self.renew_after_reset()") > bs.index("may_use_devices(")
+            and "if self.up_gen != gen0 and uses_ids:" in bs
+            and "with self.settle_lock:" in rn and rn.index("with self.settle_lock:") < rn.index("self._kill_leader(proc)")
+            and "return RESET_BUSY" in rn and "if self.recordings or self.driver_browsers:" in rn
+            and "metacomputer/renew" not in hub and "with self.settle_lock:" in hub_fn("on_upstream"))
+
+
+def owner_rechecked_at_dispatch():
+    """The final critical section (owners.acting() and the send gate) runs check_and_claim again, refusing as at
+    admission, before before_send (renewal) and the send; a successful stop_recording clears every session's marker."""
+    ot = hub_fn("on_tools_call")
+    crit = ot[ot.index("with owners.acting(), self.send_gate:"):]
+    return ("if self.refuse_unless_owner(client, msg, name, self.check_and_claim(client, name)):" in crit
+            and crit.index("self.check_and_claim(client, name)") < crit.index("self.before_send(")
+            < crit.index("self.forward(client, msg, extra, pre=pre)")
+            and "self.recordings.clear()" in hub_fn("observe"))
+
+
+def tag_rules():
+    """tag_ids works on result.content text items and result.structuredContent only (never the envelope), by named
+    fields and the driver's exact lines, counts distinct ids against TAG_MAX_IDS before translating any and refuses the
+    answer past it; untag_ids translates script ids only when the hub issued them for this runtime."""
+    t, u = hub_fn("tag_ids"), hub_fn("untag_ids")
+    return ('res = out.get("result") if isinstance(out, dict) else None' in t and "if over[0]:" in t
+            and t.index("if over[0]:") < t.index("table, pinned = {}, set()")
+            and '"code": "snapshot_ids_too_many"' in t and "TEXT_FORMS" in t and "SID_RE" not in raw("lib/mcp_hub.py")
+            and mcp_hub.TAG_MAX_IDS < mcp_hub.SID_MAP_MAX
+            and "v[k] = SID_WORD.sub(issued, x)" in u and "if e and e[0] == gen:" in u)
+
+
+def tokens_per_runtime():
+    """The hub's ids: made per (generation, driver id), unique for the hub's lifetime, same shape as the driver's; every
+    answer tagged before it reaches a client; every call untagged at entry, before the guards, refusing ids of another
+    runtime or never handed out."""
+    hub, ot = raw("lib/mcp_hub.py"), hub_fn("on_tools_call")
+    m = mcp_hub.SID_FULL
+    return (m.fullmatch("s1234abcd") is not None and mcp_hub.TOKEN_FULL.fullmatch("s1234abcd:7") is not None
+            and "key = (gen, dsid)" in hub_fn("_hub_sid") and "self.sid_next += 1" in hub_fn("_hub_sid")
+            and "if not e or e[0] != gen:" in hub_fn("untag_ids")
+            and 'self.tag_ids(out, pend.get("gen"))' in hub
+            and "ok, uses_ids = self.untag_ids(name, args)" in ot
+            and ot.index("self.untag_ids(name, args)") < ot.index("self.check_and_claim(client, name)")
+            and ot.index("self.untag_ids(name, args)") < ot.index("self.chrome_guard(name, args)")
+            and "if self.up_gen != gen0 and uses_ids:" in hub_fn("before_send"))
+
+
 def input_reset_guarded():
-    """bin/metacomputer's input-reset (but --check) holds the dispatch lock and looks for a handoff first."""
-    return '[ "${1:-}" = --check ] || handoff_hold' in raw("bin/metacomputer")
+    """bin/metacomputer's input-reset hands over to lib/input_reset.py for_cli: --check only counts; otherwise, while a
+    handoff is open, only the user's own terminal (owners.at_user_terminal) goes ahead, anyone else exits 4."""
+    fc = ir_fn("for_cli")
+    return ('exec "$PY" "$LAB_ROOT/lib/input_reset.py" reset ${1:+"$1"} --transport' in fn_src("bin/metacomputer", "do_input_reset")
+            and "user = owners.at_user_terminal((0,))" in fc and "if h and not user:" in fc
+            and fc.index("if h and not user:") < fc.index("reset_now(") and "return 4" in fc)
 
 
 def dispatch_gates():
     """Each of the places the doc names wraps its step in owners.acting(), the dispatch lock held shared."""
     hub, sh, bt = raw("lib/mcp_hub.py"), raw("lib/vm_shell.py"), raw("lib/browser_tools.py")
-    return (hub.count("with owners.acting():") >= 3 and "with owners.acting():\n                self.forward(" in hub
+    return (hub.count("with owners.acting()") >= 3
+            and "with owners.acting(), self.send_gate:\n                # Ownership again" in hub
             and "with owners.acting():\n                yield" in sh and "with owners.acting():" in bt)
 
 

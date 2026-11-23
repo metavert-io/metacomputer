@@ -102,7 +102,10 @@ FORMS = [
     # whole commands that only read the VM or who controls it, whatever their arguments
     ("who", [], "read"), ("who", ["--json"], "read"), ("status", ["--json"], "read"),
     ("inspect", ["windows", "--json", "--top", "5"], "read"), ("logs", ["40"], "read"), ("get", ["x", "d", "--task", "t"], "read"),
-    ("shot", ["out.png", "--task", "t"], "read"), ("view", ["--print"], "read"), ("view", ["--open", "--no-remember"], "read"),
+    ("shot", ["out.png", "--task", "t"], "read"), ("view", ["--print"], "read"), ("view", ["--tailnet"], "read"),
+    # view --open (and plain view, which opens at a terminal on the Mac's screen) removes the agent's input devices first
+    ("view", ["--open", "--no-remember"], "act"), ("view", [], "act"), ("view", ["--no-remember"], "act"),
+    ("view", ["--remember", "--open"], "act"), ("view", ["--forget"], "exempt"), ("view", ["--remember"], "exempt"),
     # commands that act on no one computer, name their own, or are plumbing
     ("list", ["--json"], "exempt"), ("vm", ["delete", "x", "--confirm", "x"], "exempt"), ("default", ["x"], "exempt"),
     ("each", ["a,b", "--", "stop"], "exempt"), ("mcp", [], "exempt"), ("mcp-lazy", [], "exempt"), ("help", [], "exempt"),
@@ -172,7 +175,7 @@ FORMS = [
     ("secrets", ["revoke", "--all"], "act"), ("secrets", ["audit-sink", "add", "s"], "act"),
     ("secrets", ["audit-sink", "remove", "s"], "act"), ("secrets", ["test-legacy-totp-link"], "act"),
 ]
-ORDER_FREE = sessionvm.READS | {"security", "recordings"}
+ORDER_FREE = sessionvm.READS | {"security", "recordings", "view"}
 
 
 def orders(args):

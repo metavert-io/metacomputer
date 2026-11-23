@@ -572,6 +572,63 @@ def handoff_describe(h, now=None):
             f"they run `metacomputer handoff done` (or `cancel`), {left} at most [ACTIVE]")
 
 
+# --- the driver's virtual input devices were removed (lib/input_reset.py) -----------------------------
+# Every reset writes the time here before it asks the guest (lib/input_reset.py reset_now: `input-reset`, opening a
+# handoff, view --open, the hub's Chrome guard), under the dispatch lock held exclusively, and puts the earlier time
+# back only when the guest confirmed it found nothing. A driver connection that held a pair keeps its id after the pair
+# is gone, and its next pointer action through it ends the driver; the hub compares this time with when its connection
+# began using the devices (Hub.reset_seen) and reconnects first.
+INPUT_RESET_FILE = "input-reset.stamp"
+
+
+def input_reset_path():
+    return os.path.join(OWNERS_DIR, INPUT_RESET_FILE)
+
+
+def mark_input_reset(now=None):
+    """Record a reset of the guest's virtual input devices (before it's made: then it may have happened). Written
+    whole, as a new 0600 file renamed over the old one (a link there is replaced, never followed). False when it
+    couldn't be written: then the reset isn't made."""
+    now = time.time() if now is None else now
+    tmp = None
+    try:
+        os.makedirs(OWNERS_DIR, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=OWNERS_DIR, prefix=".input-reset-", suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            f.write(repr(float(now)))
+        os.replace(tmp, input_reset_path())
+        return True
+    except (OSError, ValueError):
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return False
+
+
+def restore_input_reset(prev):
+    """Put back the earlier record (prev from input_reset_at()) after a reset that found nothing to remove: the hub has
+    nothing to renew for it. Only under the dispatch lock held exclusively, as the reset was made (lib/input_reset.py
+    reset_now), so no hub read it meanwhile. Best effort."""
+    return mark_input_reset(prev)
+
+
+def input_reset_at():
+    """When the last reset that removed a pair was recorded; 0.0 when never, or when it can't be read."""
+    try:
+        fd = os.open(input_reset_path(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return 0.0
+    try:
+        t = float(os.read(fd, 64).decode("ascii").strip())
+    except (OSError, ValueError, UnicodeDecodeError):
+        return 0.0
+    finally:
+        os.close(fd)
+    return t if _finite(t) else 0.0
+
+
 class HandoffOpen(Exception):
     """An acting step found the user holding the computer (rec: the open handoff)."""
 

@@ -721,7 +721,7 @@ unless a flag asks ([guide](docs/guide.md#run-a-second-vm-side-by-side)).
 | Screen Sharing rejects your password | It wants the live-view password, not your Mac's: `metacomputer view --open` brings the one Screen Sharing remembers up to date; `view --open --no-remember` puts it on the clipboard instead (paste with Cmd+V). |
 | A site's "Verify you are human" check keeps failing | Sites with bot checks may refuse the VM's automated browser, even when you tick the box yourself: page-mode Chrome is driven through DevTools, which they detect. metacomputer doesn't disguise it, and the agent hands such checks to you rather than trying to get past them. If one keeps failing, do that step on your own computer. |
 | A sign-in looks different from usual (no code box, "check your email" but nothing arrives) | The site has likely flagged an automated browser: page-mode Chrome is driven through DevTools. Account pages start in human mode (the VM's Firefox, real clicks and keys); when a flow looks degraded anyway, the agent switches to human mode and tries once more. |
-| Chrome ignores typing | `metacomputer input-reset`. |
+| Chrome ignores typing, or the live view ignores your mouse or keyboard | `metacomputer input-reset` (in your own terminal it also runs while a handoff is open). |
 | The vault says it's locked | Run `metacomputer secrets unlock` in your own terminal, and keep it open. |
 | The install stops | Fix what it names and run it again; finished steps are skipped and it never deletes a VM. |
 

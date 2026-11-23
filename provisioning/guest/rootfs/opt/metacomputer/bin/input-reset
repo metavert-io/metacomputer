@@ -1,10 +1,12 @@
 #!/bin/sh
 # input-reset [--check]: remove the virtual master pointer/keyboard pairs
 # ("CUA v1.…") that Cua Driver's background input route leaves in the X
-# session. While one exists, Google Chrome ignores all keyboard input
-# (Firefox and GTK apps don't care). Removing them restores Chrome at once.
-# A driver session that created a pair can't use its background keyboard
-# route again until it reconnects (its next such action errors, nothing else).
+# session (it keeps them between actions). While one exists, Google Chrome
+# ignores all keyboard input, and Firefox has been seen ignoring a person's
+# mouse and keyboard in the live view. Removing them fixes both at once; their
+# slaves are left floating. A driver process that held a pair has to restart
+# before its next background input (the host's hub reconnects it: its next
+# pointer action through the removed pair would end it).
 # --check only counts them. Prints the number found (and removed).
 S=/opt/metacomputer/bin/session-run
 command -v xinput >/dev/null || { echo "xinput not installed" >&2; exit 2; }

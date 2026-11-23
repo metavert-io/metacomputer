@@ -507,7 +507,7 @@ same limits. `metacomputer call` escapes control characters, C1 controls and
 bidirectional overrides when it prints to a terminal (`lib/termsafe.py`, shared
 with `metacomputer sh`); `--raw` and `--json` print the result exactly. Other
 commands that show the VM's words on a terminal (`inspect`, `record start`,
-`record status`, `status`, `logs`, `who`, `input-reset`, and the stderr of every
+`record status`, `status`, `logs`, `who`, and the stderr of every
 SSH command they run)
 escape them the same way, as the text arrives (never held whole in memory);
 `status` shows the guest's load, memory and disk figures only as numbers;
@@ -751,7 +751,8 @@ notice (`--say` cleaned like every event) and writes a record,
   `stop`), with or without `--override` (`start` before any token is asked for;
   `stop --revoke` still revokes the token), and the inner Claude's keeper renews
   nothing, so its claim isn't kept fresh by what changes on its screen meanwhile;
-- `secrets fill`, `login` and `session load` refuse, and so does `input-reset`; so do the one-time code
+- `secrets fill`, `login` and `session load` refuse, and so does `input-reset`, except at your own terminal (it gives
+  your mouse and keyboard back; an agent session's run still refuses, terminal or not); so do the one-time code
   commands that fill (`secrets code`, `relay`, `give`, and `approve` of a waiting code request, which fills once
   allowed; the code dialog never fills by itself, its value waits for `fill --request`);
   `metacomputer web` leaves the Firefox windows it opened instead of closing them,
@@ -759,6 +760,40 @@ notice (`--say` cleaned like every event) and writes a record,
 - `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
   unless you add `--override`, and look again right before they change anything,
   after any question they ask; `release` doesn't end it.
+
+**Your mouse and keyboard in the live view.** The driver's background input goes through a pair of virtual
+input devices of its own ("CUA v1.…", XInput2 multi-pointer), which it keeps between actions; while one exists,
+Chrome ignores the keyboard, and Firefox has been seen ignoring the live view's mouse and keyboard too. So opening a
+handoff removes them (the guest's `input-reset`, `lib/input_reset.py`): after its record is written, under the
+dispatch lock it holds exclusively (below), so no agent call can be sent meanwhile. Every reset is made that way:
+under that lock held exclusively, recorded before the guest is asked (an answer that's lost counts as a reset), and
+never while an agent call is still running in the driver or when that can't be known (`MCP_HUB=off`, a driver
+connection the shared hub doesn't own, a hub that doesn't answer), since removing the devices could cut that call off. Opening a handoff waits up to 10 s for calls
+already in the driver; if one is still running then, it leaves the devices and its message says the reset is pending
+and how to make it. If the reset fails, the handoff opens anyway and its message tells you to end it and run
+`metacomputer input-reset` (or to run that in your own terminal now). `metacomputer view --open` removes them too,
+but, unless you run it at your own terminal, not while another controller is active or a handoff is open; the hub's
+Chrome guard makes its own reset the same way. The driver keeps the id of a pair it used, and its next pointer action
+through a removed one ends it, so before a call that may go through the driver's own devices is sent, the hub checks,
+under the dispatch lock and in the same step as the send, whether a reset came after its connection began using
+them, and if so starts a fresh driver connection first (`renew_after_reset`): only once nothing it sent is still
+running (else the call is refused), and not while a driver recording runs or a browser `browser_prepare` launched is
+open (either would end with it): such input is refused then, and foreground input goes on. In that same step, before
+any of it, the hub checks again that the calling session still holds the computer, as it did when it took the call; if
+another controller has it by then, the call is refused and nothing is restarted or sent. A `stop_recording` from any
+session ends the driver's recording, so it counts for all of them. The element tokens and
+snapshot ids the hub hands out are its own, tied to the driver runtime that made them (Cua Driver numbers its
+snapshots from the start in every process): one from another runtime, or one the hub never handed out, is refused
+(`element_token_stale`) before any guard looks at the call, and the driver only ever gets its own back. Only the
+snapshot id is translated, and only where the driver names one (its `snapshot_id`, `since` and `element_token` fields
+and its own text lines): never the protocol envelope or other text; an answer naming more snapshots than the hub
+translates at once is refused whole, never passed on half translated; in a script, only whole ids the hub handed out
+are translated, every other string is left alone. A token built inside a script from pieces, or a snapshot id a
+script returns as a plain value, stays the driver's own: the hub refuses it as stale when it's used, so it never
+reaches a wrong element. While an answer's ids are translated, every mapping it uses is kept; when the hub couldn't
+make room for a new one without forgetting one of them, the answer is refused whole. Reads never restart the driver and never claim the computer (they
+don't use its input devices): a token read before the restart is refused at its first use after it, and reading
+again then gives tokens that work. Nothing else restarts the driver for a reset.
 
 **No action slips in while it opens.** A call is checked when the hub takes it,
 but its guards can then wait on the VM (a window list, an input reset). So every
@@ -768,8 +803,8 @@ by `sh` and `metacomputer claude`'s acting steps until the whole script has been
 written to SSH, by the inner Claude's keeper while it renews its claim, by the
 hub's cleanup and input reset and the GUI tests' commands while they run, by the
 lifecycle commands from their last look to their end, and by `secrets fill`,
-`login`, `session load` and `input-reset` for the whole command, including a wait
-for your approval. The hub's own teardown is decided under it too, from its last
+`login` and `session load` for the whole command, including a wait
+for your approval; every input reset holds it exclusively (above). The hub's own teardown is decided under it too, from its last
 look until the connection is closed: the exit when idle, the restart for a client
 with other settings, the end of a connection whose leased calls outlived their
 limit, and, with `MCP_HUB=off`, the end of the bridge's own connection once its
@@ -1571,7 +1606,7 @@ another VM:
   they are, and `MCOMP_VAULT_DIR` must be absolute; for a `config/vms/` VM it must be that
   VM's own vault folder, so it can't be another VM's vault either.
 - **A hub serves the VM it started with, and only it.** It pins that VM's name, SSH port and
-  host key, and every command it runs (its connection to the driver, `input-reset`) carries
+  host key, and every command it runs (its connection to the driver, its input reset's SSH command) carries
   them. If its settings file goes away, or comes to name another VM, port or host key,
   each one is refused with the reason, never redirected to the defaults' VM
   (`metacomputer hub stop` ends it). `build --replace` ends the VM's hub first.

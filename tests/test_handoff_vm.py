@@ -11,6 +11,13 @@ session that asked can't say "done" for the user. Then the
 user's "done" (scripted at a pseudo-terminal, standing in for the user's own terminal) ends it: the waiting
 command returns 0 with the user's note, and the same acting call goes through.
 
+The driver's leftover input devices (lib/input_reset.py): a background scroll in Mousepad leaves a "CUA v1.…" pair;
+a handoff opened while slow background typing still runs removes nothing (the typing finishes) and says the reset is
+pending; opening the main handoff removes it and says so; the user's own `input-reset` runs during the handoff (an agent's is
+refused); after "done" the same driver session's next background input works at once (the hub has a fresh driver
+connection; without one, Cua Driver 0.53.0 ends at its next pointer action through the removed pair) and leaves a
+new pair, which `input-reset` removes again at the end.
+
 It starts the VM if it's off (and stops it again afterwards), uses the VM's own settings file only, and sends its
 events to a temporary folder, so no event sink of yours hears it. A test VM only: it acts on the desktop (the
 driver's agent-cursor setting).
@@ -22,13 +29,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import userterm  # noqa: E402
+
 MC = os.path.join(LAB, "bin", "metacomputer")
 FAILS = []
 PASSES = [0]
 ACT = ("set_agent_cursor_enabled", '{"session": "handoff-vm-test", "enabled": false}')
+SESSION = "handoff-vm-test"
 
 
 def check(name, cond, detail=""):
@@ -43,12 +55,61 @@ def mc(env, *args, stdin=subprocess.DEVNULL, timeout=180):
     return subprocess.run([MC] + list(args), env=env, stdin=stdin, capture_output=True, text=True, timeout=timeout)
 
 
+def as_user(env, *args):
+    """A command at the user's own terminal: a pseudo-terminal, in a process no agent session is above
+    (tests/userterm.py), so this test can be run by an agent too. (returncode, stdout, stderr)"""
+    m, s = pty.openpty()
+    p = userterm.spawn([MC] + list(args), env=env, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    os.close(s)
+    try:
+        o, e = p.communicate(timeout=180)
+    finally:
+        os.close(m)
+    return p.returncode, o.decode(errors="replace"), e.decode(errors="replace")
+
+
+def pairs(env):
+    r = mc(env, "input-reset", "--check")
+    return int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else None
+
+
+def mousepad(env):
+    """Mousepad's window (pid, window_id), launched when it isn't running."""
+    for attempt in range(2):
+        r = mc(env, "call", "--json", "list_windows", "{}")
+        try:
+            ws = json.loads(r.stdout).get("structuredContent", {}).get("windows") or []
+        except ValueError:
+            ws = []
+        w = next((w for w in ws if "mousepad" in str(w.get("app_name", "")).lower()), None)
+        if w:
+            return w["pid"], w["window_id"]
+        if attempt == 0:
+            mc(env, "call", "launch_app", '{"name": "mousepad"}')
+            time.sleep(4)
+    return None
+
+
+def scroll(env, target):
+    """A background scroll in Mousepad: Cua Driver sends it through its own virtual pointer (a "CUA v1.…" pair)."""
+    t0 = time.time()
+    r = mc(env, "call", "--session", SESSION, "--timeout", "60", "scroll",
+           json.dumps({"pid": target[0], "window_id": target[1], "direction": "down", "amount": 2}), timeout=120)
+    return r, time.time() - t0
+
+
 def main():
     if not os.environ.get("MCOMP_CONFIG"):
         print("set MCOMP_CONFIG to a test VM's settings file (this test acts on that VM's desktop)")
         return 2
     td = tempfile.mkdtemp(prefix="mchandoff-")
-    env = dict(os.environ, MCOMP_EVENTS_DIR=os.path.join(td, "events"), MCOMP_EVENTS_SPOOL=os.path.join(td, "spool"))
+    env = dict(os.environ, MCOMP_EVENTS_DIR=os.path.join(td, "events"))
+    try:
+        names_spool = any(line.startswith("EVENTS_SPOOL=") for line in open(os.environ["MCOMP_CONFIG"]))
+    except OSError:
+        names_spool = False
+    if not names_spool:                  # a VM's own settings file that names its spool keeps it (two would refuse)
+        env["MCOMP_EVENTS_SPOOL"] = os.path.join(td, "spool")
     r = mc(env, "where")
     vm = next((line.split()[1] for line in r.stdout.splitlines() if line.startswith("vm ")), "")
     if vm in ("", "metacomputer"):
@@ -65,6 +126,40 @@ def main():
         mc(env, "release")
         r = mc(env, "call", *ACT)
         check("before the handoff, an acting call goes through", r.returncode == 0, (r.stdout[-300:], r.stderr[-300:]))
+        target = mousepad(env)
+        check("Mousepad runs (the window the background input goes to)", target is not None)
+        if target:
+            r, took = scroll(env, target)
+            check("a background scroll leaves the driver's virtual pointer pair behind", r.returncode == 0
+                  and (pairs(env) or 0) >= 1, (r.stdout[-200:], r.stderr[-200:], pairs(env)))
+            # A handoff opened while an agent call still runs in the driver (slow background typing) waits 10 s for it,
+            # then leaves the devices (removing them could cut the call off) and says the reset is pending.
+            box = {}
+            typing = threading.Thread(target=lambda: box.update(r=mc(env, "call", "--session", SESSION, "--timeout", "120",
+                                                                    "type_text", json.dumps({
+                                                                        "pid": target[0], "window_id": target[1],
+                                                                        "text": "x" * 300, "delay_ms": 60}))))
+            typing.start()
+            time.sleep(1.5)
+            plog = open(os.path.join(td, "pending.out"), "w+")
+            popen = subprocess.Popen([MC, "handoff", "--why", "other", "--say", "pending check", "--timeout", "1m"],
+                                     env=env, stdin=subprocess.DEVNULL, stdout=plog, stderr=subprocess.STDOUT)
+            end = time.time() + 60
+            while time.time() < end:
+                plog.seek(0)
+                if "Waiting up to" in plog.read():
+                    break
+                time.sleep(0.25)
+            still_pairs = pairs(env)
+            typing.join(120)
+            mc(env, "handoff", "cancel")
+            popen.wait(30)
+            plog.seek(0)
+            said = plog.read()
+            check("a handoff opened while an agent call is still running: nothing removed (the call isn't cut off and "
+                  "finishes), and it says the reset is pending and how to make it", (still_pairs or 0) >= 1
+                  and "weren't removed" in said and "metacomputer input-reset" in said and box.get("r") is not None
+                  and box["r"].returncode == 0, (still_pairs, said[:600], box.get("r") and box["r"].stderr[-200:]))
 
         log = open(os.path.join(td, "opener.out"), "w+")
         opener = subprocess.Popen([MC, "handoff", "--why", "captcha", "--say",
@@ -78,6 +173,16 @@ def main():
                 break
             time.sleep(0.2)
         check("Claude's handoff opens (no terminal) and waits", h and h["why"] == "captcha" and opener.poll() is None, h)
+        end = time.time() + 60
+        while time.time() < end:
+            log.seek(0)
+            if "Waiting up to" in log.read():
+                break
+            time.sleep(0.25)
+        log.seek(0)
+        said = log.read()
+        check("opening it removed the driver's leftover input devices, and says so", pairs(env) == 0
+              and "Removed Claude's leftover virtual input devices" in said, (pairs(env), said[:600]))
 
         r = mc(env, "call", *ACT)
         check("while it's open, an acting call through the hub is refused: the user has the computer",
@@ -102,6 +207,9 @@ def main():
         check("input-reset is refused (exit 4); input-reset --check only reads and runs",
               r.returncode == 4 and "the user has the computer" in r.stderr and r2.returncode == 0,
               (r.returncode, r.stderr[-200:], r2.returncode, r2.stderr[-200:]))
+        rc, o, e = as_user(env, "input-reset")
+        check("...but the user's own input-reset runs during their handoff (exit 0, it says why)", rc == 0
+              and o.strip().isdigit() and "your handoff is open" in e, (rc, o, e[-300:]))
         r = mc(env, "stop")
         check("stop is refused while the user has the computer", r.returncode != 0
               and "the user has the computer" in r.stderr, (r.returncode, r.stderr[-300:]))
@@ -113,14 +221,10 @@ def main():
         check("the session that asked can't say done for the user (exit 3)", r.returncode == 3
               and opener.poll() is None, (r.returncode, r.stderr[-300:]))
 
-        # The user's "done", from a terminal: a pseudo-terminal stands in for the user's own.
-        m, s = pty.openpty()
-        r = subprocess.run([MC, "handoff", "done", "--note", "ticked it"], env=env, stdin=s, capture_output=True,
-                           text=True, timeout=60)
-        os.close(s)
-        os.close(m)
-        check("the user's done (at a terminal) is taken", r.returncode == 0 and "Handed the virtual computer back"
-              in r.stdout, (r.returncode, r.stdout, r.stderr))
+        # The user's "done", from their own terminal (a pseudo-terminal no agent session is above).
+        rc, o, e = as_user(env, "handoff", "done", "--note", "ticked it")
+        check("the user's done (at a terminal) is taken", rc == 0 and "Handed the virtual computer back"
+              in o, (rc, o, e))
         rc = opener.wait(30)
         log.seek(0)
         out = log.read()
@@ -132,6 +236,11 @@ def main():
               "metacomputer view --open" in out and "clipboard" in out and "metacomputer handoff done" in out, out[:600])
         r = mc(env, "call", *ACT)
         check("after done, the same acting call goes through", r.returncode == 0, (r.stdout[-300:], r.stderr[-300:]))
+        if target:
+            r, took = scroll(env, target)
+            check("the same driver session's next background input works at once and makes a new pair (the hub "
+                  "reconnected the driver after the reset)", r.returncode == 0 and took < 30 and (pairs(env) or 0) >= 1,
+                  (r.returncode, round(took, 1), r.stdout[-200:], r.stderr[-200:]))
         evs = []
         try:
             evs = [json.loads(x) for x in open(os.path.join(env.get("MCOMP_LOG_DIR") or "", "events.jsonl"))]
@@ -148,6 +257,8 @@ def main():
         if opener and opener.poll() is None:
             opener.terminate()
             subprocess.run([MC, "handoff", "cancel"], env=env, capture_output=True, timeout=60)
+        mc(env, "call", "end_session", json.dumps({"session": SESSION}))
+        mc(env, "input-reset")                       # leave no pair behind
         mc(env, "release")
         if started:
             mc(env, "stop", timeout=300)

@@ -127,7 +127,13 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   inner Claude's keeper renews nothing. Anything new that acts on the VM or holds it for
   Claude (a hub cleanup or teardown, a raw SSH mutation, a CLI command, a claim renewal) looks again right before it leaves the Mac
   under `owners.acting()` (bash: `handoff_hold`), the dispatch lock that opening a handoff
-  takes exclusively; never act between a check and a dispatch. Never try to pass a check, switch
+  takes exclusively; never act between a check and a dispatch. Every input reset (`lib/input_reset.py` reset_now:
+  opening a handoff, `view --open`, `input-reset`, the hub's Chrome guard) holds that lock exclusively, is recorded
+  before the guest is asked, and never runs while an agent call is still in the driver or that can't be known
+  (`MCP_HUB=off`); the hub decides a reconnect after one in the same critical section as the send (`before_send`),
+  never cuts a running call off; element tokens and snapshot ids are the hub's own per driver runtime (`tag_ids` /
+  `untag_ids`; another runtime's are refused before any guard); `input-reset` runs during a handoff only at the user's
+  own terminal (`for_cli`). Never try to pass a check, switch
   browsers or profiles to get around one, or run `handoff done` for the user. Live
   view for the user: `metacomputer view --open` (Screen Sharing's remembered password in the
   login keychain, written by osascript, or the clipboard; never in argv, output, logs or events;
