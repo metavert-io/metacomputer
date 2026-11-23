@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Test checkout (test cards only)</title></head>
+<body>
+<h1>Test checkout</h1>
+<p>A fixture for metacomputer's payment tests (tests/test_payments_vm.py): use test card numbers only. Nothing is sent
+anywhere; the page shows only the lengths of what was typed, and whether the number passes the card check.</p>
+<p id="order-total">Total $12.34</p>
+<form id="pay" onsubmit="return placed()">
+  <p><label>Card number <input id="cc-number" autocomplete="cc-number" inputmode="numeric"></label></p>
+  <p><label>Expiry <input id="cc-exp" autocomplete="cc-exp" placeholder="MM/YY"></label></p>
+  <p><label>Security code <input id="cc-csc" autocomplete="cc-csc" inputmode="numeric"></label></p>
+  <p><label>Name on the card <input id="cc-name" autocomplete="cc-name"></label></p>
+  <p><label>ZIP <input id="postal" autocomplete="postal-code"></label></p>
+  <p><button id="place" type="submit">Place order</button></p>
+</form>
+<p id="result"></p>
+<script>
+function luhn(s) {
+  let sum = 0;
+  for (let i = 0; i < s.length; i++) {
+    let d = s.charCodeAt(s.length - 1 - i) - 48;
+    if (i % 2 === 1) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+  }
+  return s.length > 0 && /^[0-9]+$/.test(s) && sum % 10 === 0;
+}
+function placed() {
+  const v = (id) => document.getElementById(id).value;
+  const n = v('cc-number'), e = v('cc-exp'), c = v('cc-csc'), nm = v('cc-name'), z = v('postal');
+  document.getElementById('result').textContent = 'Order placed (test page): number ' + n.length + ' digits, card check '
+    + (luhn(n) ? 'passes' : 'fails') + ', expiry ' + (/^[0-9][0-9]\/[0-9][0-9]$/.test(e) ? 'MM/YY' : 'other') + ', security code '
+    + c.length + ' digits, name ' + nm.length + ' characters, ZIP ' + z.length + ' characters.';
+  return false;
+}
+</script>
+</body>
+</html>

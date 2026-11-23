@@ -1004,6 +1004,28 @@ def fill_checks():
                        capture_output=True, text=True, timeout=60)
     check("--vm naming this VM goes ahead", r.returncode == 0 and any("--vm=fltest" in x for x in lines()),
           (r.returncode, r.stderr, lines()))
+    # Paying (R30): only exactly `pay --purchase KEY --done` (with at most --vm naming this VM), read word by word, skips
+    # the checks; every other form, whatever its words hold, is checked like a fill.
+    key = "ab" * 16
+    open(log, "w").close()
+    rs = {n: subprocess.run([mc, "secrets", "pay"] + a, env=e, capture_output=True, text=True, timeout=60) for n, a in (
+        ("a new purchase with --done added", ["card", "--vm", "othervm", "--origin", "https://shop.example", "--total-selector", "#total",
+                                              "--fill", "number=#cc", "--done"]),
+        ("a selector holding --done", ["--purchase", key, "--vm", "othervm", "--field", "number", "--selector", "#cc /* --done */"]),
+        ("--done naming another VM", ["--purchase", key, "--done", "--vm", "othervm"]),
+        ("--done with a fill", ["--purchase", key, "--done", "--field", "number", "--vm", "othervm"]))}
+    check("R30: secrets pay with --done somewhere in it (a new purchase, a selector, another VM, a fill) gets every check: "
+          "refused before the vault when it names another VM", all(x.returncode != 0 and "acts on this VM (fltest)" in x.stderr
+                                                                   for x in rs.values()) and not lines(),
+          ({n: (x.returncode, x.stderr[-160:]) for n, x in rs.items()}, lines()))
+    r1 = subprocess.run([mc, "secrets", "pay", "--purchase", key, "--done"], env=e, capture_output=True, text=True, timeout=60)
+    r2 = subprocess.run([mc, "secrets", "pay", "--vm", "fltest", "--done", "--purchase", key], env=e, capture_output=True, text=True,
+                        timeout=60)
+    check("R30: ...and exactly `pay --purchase KEY --done` (at most with --vm naming this VM) ends it straight away",
+          r1.returncode == 0 and r2.returncode == 0 and [x for x in lines() if x.startswith("start")]
+          == [f"start pay --purchase {key} --done", f"start pay --vm fltest --done --purchase {key}"],
+          (r1.returncode, r2.returncode, r1.stderr[-200:], lines()))
+    open(log, "w").close()
     # A fill that waits (for an approval, say) keeps the computer: a handoff can't open until it's done.
     open(log, "w").close()
     p = subprocess.Popen([mc, "secrets", "fill", "site", "--field", "password"], env=dict(e, STUB_FILL_S="3"),

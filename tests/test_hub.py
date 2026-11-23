@@ -3019,12 +3019,14 @@ def stderr_checks():
         h = client(r)
         res = h.call("stderrflood", {"size": 64})        # 4 MB on stderr
         time.sleep(0.5)
-        size = os.path.getsize(mcp_hub.paths(r.env)["stderr"])
-        tail = r.hub.stderr_tail.text() if r.hub.stderr_tail else ""
-        check("4 MB on the driver's stderr: the call is answered and the log file stops at its cap",
-              not res.is_error and (256 << 10) <= size < (256 << 10) + 200, size)
-        check("…and only a short tail of it is kept in memory for error messages",
-              0 < len(tail) <= wirelimits.STDERR_KEEP and r.hub.stderr_tail.total >= 4 << 20, len(tail))
+        spath = mcp_hub.paths(r.env)["stderr"]
+        size = os.path.getsize(spath)
+        st = r.hub.stderr_tail
+        classes = st.classes(wait=2.0) if st else {}
+        check("4 MB on the driver's stderr: the call is answered, and its log keeps none of the text: a time and a fixed class per "
+              "line (64 long lines), a few KB", not res.is_error and size < 16 << 10 and "eee" not in open(spath).read(), size)
+        check("…and in memory only counts: every byte counted, the lines by class, no text (SECURITY.md: it can echo a card's details)",
+              st is not None and st.total >= 4 << 20 and classes.get("long line") == 64 and "eee" not in st.text(), (classes, st.total if st else None))
         h.close()
         r.stop()
     finally:
