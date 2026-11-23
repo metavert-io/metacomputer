@@ -14,7 +14,7 @@ appended to this VM's local log ($LOG_DIR/events.jsonl).
   events.py emit FAMILY TYPE --message TEXT [--severity S] [--action TEXT] [--data JSON] [--debounce S] [--quiet]
                                                      (origin script, also for metacomputer's shell hooks;
                                                       metacomputer's own types are refused)
-  events.py notify TEXT [--why login|captcha|2fa|dialog|approval|other] [--action TEXT]
+  events.py notify TEXT [--why login|captcha|2fa|dialog|approval|payment|other] [--action TEXT]
   events.py status [--json|--line]
   events.py drain [--now]                            the spool, then every sink's backlog
   events.py watch [--once [--health]]                the watcher (`metacomputer start` runs it)
@@ -68,7 +68,7 @@ DEFAULT_SEVERITY = {"needs_you": "warn", "task": "info", "security": "warn", "li
 SEVERITIES = ("info", "warn", "error")
 SEV_RANK = {s: i for i, s in enumerate(SEVERITIES)}
 KINDS = ("webhook", "otlp", "syslog", "ntfy")
-WHY = ("login", "captcha", "2fa", "dialog", "approval", "other")
+WHY = ("login", "captcha", "2fa", "dialog", "approval", "payment", "other")
 TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")

@@ -16,7 +16,8 @@ or the tasks you give it send it, as described below.
   settings, which computer each coding-agent session uses (process ids, VM names and settings paths, removed once the
   session ends), and the lessons `metacomputer learn` proposes. `learn` reads your Claude Code, Codex and Gemini CLI session files
   on your Mac and keeps only structured fields (classes of mistakes, counts, tool and app names), never their text.
-- **The secrets vault:** the passwords, one-time-code seeds and API keys you add, encrypted on your Mac. The vault
+- **The secrets vault:** the passwords, one-time-code seeds, API keys and payment cards you add, encrypted on your Mac,
+  with a record of what each card spent (for its caps). The vault
   types a value into a page in the VM, or uses a key for a request the VM makes through its proxy; it never gives a
   value to your coding agent, and values never appear in its output or logs.
 
@@ -74,6 +75,12 @@ in), and `EGRESS=off` turns its internet off, package updates included.
 - Claude Code inside the VM (`metacomputer claude`): the VM downloads Claude Code from Anthropic, and it talks to
   Anthropic through that proxy, with its nonessential traffic turned off.
 - S3-backed folders: rclone on your Mac keeps a folder in step with the bucket you name.
+- Paying for things ([docs/payments.md](docs/payments.md)): before a card purchase, the vault on your Mac reads the
+  store's `/agents.md` and `/.well-known/ucp` from the store's own site (no cookies; with a Web Bot Auth signature only
+  if you turned that on). `metacomputer shop` runs Shopify's `shop` CLI on your Mac, which talks to Shop with the
+  account you signed in (completing a checkout and reading a spend request's card, the vault runs the copy you pinned
+  with `secrets shop-cli set`, in a macOS sandbox: of your files it reads only that CLI's sign-in file). Payments themselves go between the store, its payment provider and your card or Shop account;
+  metacomputer and Metavert take no part in them.
 
 ## What Metavert receives
 

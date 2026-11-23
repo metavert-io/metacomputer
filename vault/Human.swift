@@ -20,13 +20,18 @@ import Foundation
 
 /// The VM side of a human-mode fill. Python 3 standard library plus python3-dbus (Ubuntu's, in the VM image), run with
 /// `python3 -I` as the desktop user. Request on stdin (one JSON line): {"mode": "check" | "fill", "field": "password" |
-/// "username" | "otp", "origins": [...], "window_id": N or null, "value": "..." (fill only)}. Answer on stdout (one line):
+/// "username" | "otp" | "card", "origins": [...], "window_id": N or null, "value": "..." (fill only)}. Answer on stdout (one line):
 /// {"ok": true, "mode", "field", "origin", "chars", "route": "keyboard"} or {"ok": false, "denied": bool, "reason"}.
+/// A purchase's total (PaymentServer.swift): {"mode": "total", "origins": [...], "label": "Total", "window_id": N or null} answers
+/// {"ok": true, "mode": "total", "origin", "texts": [...], "befores": [...]}: for every place the label is (at most 10), at
+/// most 120 characters of the page's showing text from there and 40 before it; the vault takes the amount right after the
+/// label where the words before it don't make it a part of the price, and refuses unless exactly one place has one.
 let humanFillScript = #"""
 # mcomp-human-fill: a human-mode fill, the VM side (vault/Human.swift). Runs as the desktop user.
 import json, os, re, select, signal, subprocess, sys, time, urllib.parse
 
-FIELD_ROLES = {"password": {"password text"}, "username": {"entry"}, "otp": {"entry", "spin button"}}
+FIELD_ROLES = {"password": {"password text"}, "username": {"entry"}, "otp": {"entry", "spin button"},
+               "card": {"entry", "spin button", "password text"}}
 BROWSERS = {"firefox", "google chrome", "google-chrome", "chrome", "chromium", "chromium-browser"}
 BAR_NAMES = ("search with", "or enter address", "search or enter address", "address and search bar", "address bar")
 DOC_ROLES = {"document web", "document frame"}
@@ -167,6 +172,63 @@ def pick_frame(tree, frames, title, geom):
     if len(active) == 1:
         return active[0]
     raise Refused("no browser window is active (click into the field in the browser first)")
+
+
+def page_text(tree, pid, title, origins, label, geom=None):
+    """(origin, texts, befores): the site from the address bar (as inspect checks it) and, for each place `label` is (at
+    most 10), up to 120 characters of the page's text from there and 40 before it (a purchase's total). Only the top
+    document's showing text, in order; nothing is focused."""
+    apps = [ref for ref, p in tree.apps() if p == pid]
+    if not apps:
+        raise Refused("no accessibility tree for that browser (is it a Firefox or a Chrome started normally?)")
+    app = apps[0]
+    if tree.name(app).lower() not in BROWSERS:
+        raise Refused("the window isn't a browser (Firefox, or a Chrome started normally)")
+    frame = pick_frame(tree, [f for f in tree.children(app) if tree.role(f) == "frame"], title, geom)
+    bars, docs, texts = [], [], []
+    seen = [0]
+
+    def walk(ref, depth, in_toolbar, in_doc):
+        seen[0] += 1
+        if seen[0] > MAX_NODES or depth > 60:
+            return
+        role, st = tree.role(ref), tree.states(ref)
+        if depth > 1 and not (st >> SHOWING) & 1:
+            return
+        if role in DOC_ROLES:
+            if in_doc:
+                return                      # a frame's document: not the page whose site the bar shows
+            docs.append(ref)
+            in_doc = True
+        if in_toolbar and not in_doc and role in ("combo box", "entry") and (st >> EDITABLE) & 1:
+            bars.append(ref)
+        kids = tree.children(ref)
+        if in_doc and not kids and sum(len(t) for t in texts) < 65536:
+            try:
+                t = tree.text(ref)
+            except Exception:
+                t = ""
+            t = (t or tree.name(ref) or "").replace("\ufffc", " ").strip()
+            if t:
+                texts.append(t)
+        for c in kids:
+            walk(c, depth + 1, in_toolbar or role == "tool bar", in_doc)
+
+    walk(frame, 0, False, False)
+    if len(bars) > 1:
+        bars = [b for b in bars if any(n in tree.name(b).lower() for n in BAR_NAMES)] or bars
+    if len(bars) != 1 or len(docs) != 1:
+        raise Refused("the address bar can't be matched to one page")
+    origin = bar_origin(tree.text(bars[0]), tree.doc_url(docs[0]))
+    if origin not in origins:
+        raise Refused("the human-mode site is " + origin + ", which isn't allowed here")
+    whole = " \n ".join(texts)
+    hits = [m.start() for m in re.finditer(r"(?<![A-Za-z])" + re.escape(label) + r"(?![A-Za-z])", whole, re.I)]
+    if not hits:
+        raise Refused("the page shows no \"" + label + "\"")
+    if len(hits) > 10:
+        raise Refused("the page shows \"" + label + "\" more than 10 times")
+    return origin, [whole[h:h + 120] for h in hits], [whole[max(0, h - 40):h] for h in hits]
 
 
 def inspect(tree, pid, title, field, origins, geom=None):
@@ -329,6 +391,21 @@ class Driver:
 def run(req, tree=None, env=None, info=None, driver=None):
     mode, field = req.get("mode"), req.get("field")
     origins = [o for o in (parse_origin(x) for x in req.get("origins") or []) if o]
+    if mode == "total":
+        label = req.get("label")
+        wid = req.get("window_id")
+        if not isinstance(label, str) or not 0 < len(label) <= 40 or not origins or (wid is not None and (not isinstance(wid, int) or isinstance(wid, bool) or wid <= 0)):
+            raise Failed("bad request")
+        env = env if env is not None else session_env()
+        if tree is None:
+            os.environ["DBUS_SESSION_BUS_ADDRESS"] = env.get("DBUS_SESSION_BUS_ADDRESS", "")
+            try:
+                tree = Tree()
+            except Exception:
+                raise Failed("no accessibility bus in the desktop session")
+        window_id, pid, title, geom = info if info is not None else window_info(env, wid)
+        origin, texts, befores = page_text(tree, pid, title, origins, label, geom)
+        return {"ok": True, "mode": "total", "origin": origin, "texts": texts, "befores": befores}
     if mode not in ("check", "fill") or field not in FIELD_ROLES or not origins:
         raise Failed("bad request")
     value = req.get("value") if mode == "fill" else None
@@ -362,7 +439,9 @@ def run(req, tree=None, env=None, info=None, driver=None):
     except Refused:
         return {"ok": False, "denied": False, "origin": origin,
                 "reason": "the page changed during the fill; the value may have gone elsewhere (check the page)"}
-    if (origin2, path2) != (origin, path):
+    # The same field: the same accessible object, or the same place in the tree (a browser's own autocomplete list can
+    # appear while typing and move the field's place without moving the focus).
+    if origin2 != origin or (path2 != path and ref2 != ref):
         return {"ok": False, "denied": False, "origin": origin,
                 "reason": "the focus moved while filling; the text may have gone to another field (check the page)"}
     if count2 != len(value):
@@ -376,6 +455,7 @@ def out_of_time(signum, frame):
 
 def main():
     value = None
+    req = None
     try:
         signal.signal(signal.SIGALRM, out_of_time)
         signal.alarm(40)
@@ -393,7 +473,10 @@ def main():
     except Exception as e:  # noqa: BLE001 - never a traceback (it could hold the value)
         out = {"ok": False, "denied": False, "reason": "guest error: " + type(e).__name__}
     signal.alarm(0)
-    if isinstance(value, str) and value and any(isinstance(v, str) and value in v for v in out.values()):
+    # (A card's short part, like a month or a security code, can be in a site's address by chance: the vault cuts the answer
+    # to fixed forms anyway, so those aren't withheld here.)
+    short_card = isinstance(req, dict) and req.get("field") == "card" and isinstance(value, str) and len(value) < 6
+    if isinstance(value, str) and value and not short_card and any(isinstance(v, str) and value in v for v in out.values()):
         out = {"ok": False, "denied": False, "reason": "result withheld (it contained the value)"}
     sys.stdout.write(json.dumps(out, ensure_ascii=True, separators=(",", ":")) + "\n")
     sys.stdout.flush()
@@ -409,7 +492,8 @@ func humanFillRemote() -> String { "exec /usr/bin/python3 -I -c " + shellQuote(h
 extension GuestRunner {
     /// One human-mode request (check, or fill with the value on ssh's stdin), as the desktop account. The answer is
     /// held to the form a page-mode fill's is (GuestRunner.fill), with the same rules: nothing the VM chose goes on.
-    func human(_ t: GuestTarget, request: [String: Any], value: [UInt8]?, timeout: TimeInterval) throws -> [String: Any] {
+    func human(_ t: GuestTarget, request: [String: Any], value: [UInt8]?, timeout: TimeInterval, minWithhold: Int = 1,
+               release: (() -> String?)? = nil) throws -> [String: Any] {
         var req = request
         var valueString: String?
         if let v = value { valueString = String(decoding: v, as: UTF8.self); req["value"] = valueString }
@@ -418,7 +502,7 @@ extension GuestRunner {
         var inputBytes = Array(encoded) + [0x0A]
         wipe(&encoded)
         defer { wipe(&inputBytes) }
-        let r = try opsSSH(t, remote: humanFillRemote(), input: inputBytes, timeout: timeout)
+        let r = try opsSSH(t, remote: humanFillRemote(), input: inputBytes, timeout: timeout, release: release)
         var stderr = String(decoding: r.stderr, as: UTF8.self)
         if let v = valueString, !v.isEmpty { stderr = stderr.replacingOccurrences(of: v, with: "[redacted]") }
         if r.cancelled { return ["ok": false, "status": "cancelled", "reason": requesterLeftReason] }
@@ -432,7 +516,7 @@ extension GuestRunner {
         guard let raw = parseJSONObject(Array(last.utf8)), raw["ok"] is Bool else {
             return ["ok": false, "status": "error", "reason": "the VM side failed (its own output isn't passed on)"]
         }
-        if let v = valueString, !v.isEmpty, containsString(raw, v) {
+        if let v = valueString, !v.isEmpty, v.count >= minWithhold, containsString(raw, v) {
             return ["ok": false, "status": "error", "reason": "result withheld (it contained the value)"]
         }
         guard var out = fillResultSchema(raw) else {
@@ -450,5 +534,37 @@ extension GuestRunner {
         out["route"] = ok && valueString != nil ? "keyboard" : nil
         out = out.filter { ["ok", "status", "reason", "origin", "chars", "mode", "field", "route"].contains($0.key) }
         return out
+    }
+}
+
+extension GuestRunner {
+    /// A purchase's total in a human-mode browser: (the site from its address bar, the page's text from each place the label
+    /// is, why not). The text is untrusted, kept in memory only for the amount it holds.
+    func humanTotal(_ t: GuestTarget, origins: [String], label: String, windowID: Int?, timeout: TimeInterval) -> (String?, [String]?, [String]?, String?) {
+        var req: [String: Any] = ["mode": "total", "origins": origins, "label": label]
+        if let w = windowID { req["window_id"] = w }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: req),
+              let r = try? opsSSH(t, remote: humanFillRemote(), input: Array(encoded) + [0x0A], timeout: timeout, maxStdout: 64 << 10) else {
+            return (nil, nil, nil, "the VM couldn't be reached")
+        }
+        if r.cancelled { return (nil, nil, nil, requesterLeftReason) }
+        if r.timedOut || r.interrupted { return (nil, nil, nil, "the VM didn't answer in time") }
+        if r.status == 255 && String(decoding: r.stderr, as: UTF8.self).contains("Permission denied") {
+            return (nil, nil, nil, "the VM refused the desktop account's key, which human-mode browsers need (SSH_AUTH=key)")
+        }
+        let last = String(decoding: r.stdout, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
+        guard let raw = parseJSONObject(Array(last.utf8)), let okN = raw["ok"] as? NSNumber, CFGetTypeID(okN) == CFBooleanGetTypeID() else {
+            return (nil, nil, nil, "the VM side failed (its own output isn't passed on)")
+        }
+        guard okN.boolValue else { return (nil, nil, nil, (raw["reason"] as? String).map(fillReason) ?? "the VM couldn't read the page") }
+        let origin = (raw["origin"] as? String).flatMap { o in origins.first { $0 == o } }
+        guard let arr = raw["texts"] as? [Any], !arr.isEmpty, arr.count <= 10, arr.allSatisfy({ $0 is String }) else {
+            return (origin, nil, nil, "the VM side answered in an unexpected form")
+        }
+        guard let bs = raw["befores"] as? [Any], bs.count == arr.count, bs.allSatisfy({ $0 is String }) else {
+            return (origin, nil, nil, "the VM side answered in an unexpected form")
+        }
+        return (origin, arr.compactMap { ($0 as? String).map { String($0.prefix(120)) } }, bs.compactMap { ($0 as? String).map { String($0.suffix(40)) } },
+                origin == nil ? "the page isn't on the purchase's site" : nil)
     }
 }

@@ -1,15 +1,15 @@
 # Secrets: `metacomputer secrets`
 
-The user keeps passwords, one-time-code seeds, saved browser logins and API keys in a vault on the Mac. You use them in the VM without the values passing through the conversation. Background: SECURITY.md, "Secrets and logins", in the project folder (`metacomputer where`).
+The user keeps passwords, one-time-code seeds, saved browser logins, API keys and payment cards in a vault on the Mac. You use them in the VM without the values passing through the conversation. Background: SECURITY.md, "Secrets and logins", in the project folder (`metacomputer where`).
 
 ## Who runs what
 
-- **Only the user, in their own terminal window:** `init`, `set`, `delete`, `policy`, `bind`, `unlock`, `rekey`, `recover`, `rotate-session-key`, `session policy`, `session delete`, `import-passwords`, `import-session`, `audit-sink add|remove|show --key`. These ask for the vault passphrase or a value (the imports also show macOS's question about Chrome's key).
+- **Only the user, in their own terminal window:** `init`, `set` (cards too: `set NAME --kind card`), `delete`, `policy` (a card's `--pay` and caps too), `bind`, `unlock`, `rekey`, `recover`, `rotate-session-key`, `session policy`, `session delete`, `import-passwords`, `import-session`, `audit-sink add|remove|show --key`, `ap2 init`, `shop-cli set`, `wba init|on|off`. These ask for the vault passphrase or a value (the imports also show macOS's question about Chrome's key).
   - To bring saved logins in, suggest: `metacomputer secrets import-passwords --browser chrome` (or `--csv FILE` for a Chrome, Passwords app, 1Password or Bitwarden export; `--dry-run` first shows what would come in). To bring a signed-in session for one site from their Chrome: `metacomputer secrets import-session --browser chrome --site SITE --name NAME --to-profile PROFILE` (cookies only; localStorage doesn't come along). Then load it like any sealed session (below).
   - Never run them, never try, and never ask for the passphrase, a password, a code or a key in chat. Give the user the exact command to run in their own terminal (not a `!` command here: its output lands in this conversation).
   - If the user offers a value in chat, ask them to keep it out and store it themselves: `metacomputer secrets set NAME --kind password --origin https://site --username U` (`--kind totp` for a 2FA seed, `--kind api --api-host api.example.com` for an API key).
 - **Only the user, from any terminal:** `approve ID`, `rule add` (including `rule add code|relay`), `give ID` and `presence on|off|auto`. They show macOS's Touch ID / password dialog (or ask for the passphrase, or read the code they type): never run them yourself, even though you could make the dialog appear. Tell the user the command.
-- **You:** `list`, `fill`, `login`, `session save|load`, `token`, `token renew`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`, `settle`, and for one-time codes `ask`, `code` (only with a value a script produces, never one you typed), `relay` and `fill --request`. `lock` only if the user asks you to lock the vault. And `metacomputer claude` (below), which asks for its own token.
+- **You:** `list`, `merchant-rules`, `pay` (a purchase: the user approves it), `ap2 key|sign`, `wba status|directory|sign`, `metacomputer shop status|login|complete|card`, `fill`, `login`, `session save|load`, `token`, `token renew`, `tokens`, `revoke`, `requests`, `deny ID` (to withdraw a request of yours), `rule list`, `status`, `audit`, `audit-sink list|test`, `settle`, and for one-time codes `ask`, `code` (only with a value a script produces, never one you typed), `relay` and `fill --request`. `lock` only if the user asks you to lock the vault. And `metacomputer claude` (below), which asks for its own token.
 
 ## First: what's stored
 
@@ -113,8 +113,61 @@ When the user asks for Claude inside the VM ("Claude inside the metacomputer", "
 6. **When done:** `metacomputer claude stop --revoke` ends the session and its token. While the inner Claude works, the computer counts as in use by your session (`metacomputer who` shows it), so other sessions are refused: stop it when you're finished. If `stop` exits non-zero, something was left undone (the VM unreachable, the revocation unconfirmed): run it again. The hub's guards apply to what you send it, not to what it does in the VM with its own tools.
 7. **Answers:** exit 3 the vault is locked (ask the user to unlock); 125 refused (another session, `VM_SHELL`/bounded mode, the vault's answer, a secret Claude Code can't use: pass the reason on); 6 the session isn't running or Claude Code ended (its last screen comes with it); 124 `--wait` timed out (it's still working: `claude wait`); 255 couldn't run (the VM is off, an install failed).
 
+## Paying for things
+
+The user's cards are in the vault (`kind: card` in `secrets list`, with a label and how it pays: `pay: ask` asks the user
+for every purchase, `pay: agent` pays without asking within its caps). The vault never gives you a card's number, expiry
+or code, and you never type, read or ask for one; the hub masks them in what you read back, but not in every form (pixels,
+a number spelled out), so don't look. Approval gates disclosure, not the charge: a site that gets a reusable card can
+charge it again, so when the user is choosing how to pay at a store not on Shopify, a single-use card from a Shop spend
+request is the better route where they use Shop. Background: docs/payments.md in the project folder.
+
+1. **The store's rules first.** `metacomputer secrets merchant-rules https://shop.example` (no unlock needed). If it says
+   `card fill: forbidden` (Shopify's stores do, and so does a store that asks for the buyer to complete checkout), never
+   fill a card there: fill the cart and the address, stop at the review step and hand payment to the user:
+   `metacomputer handoff --why payment --say "Please enter the payment details at shop.example and place the order"`.
+   `card fill: unclear` (rules it can't read whole): an agent card refuses; with a card that asks, the user decides from
+   the question. A Shopify store can go through the user's own Shop account instead, if they use one and pinned Shop's CLI
+   (`metacomputer secrets shop-cli set`, theirs to run): `metacomputer shop status`, `shop login` (they approve on Shop's
+   page), then `metacomputer shop complete CHECKOUT --shop DOMAIN --instrument @FILE` once the checkout is
+   `ready_for_complete`; the vault asks the user, completes it only if it's unchanged when read again, and checks what Shop
+   says it charged (`outcome` other than `completed`, or `verified: false`: tell the user to check the order in Shop).
+2. **Everything but the card**, as usual: cart, address, shipping. Check the total on the page against what the user
+   asked for.
+3. **`pay`.** In page-mode Chrome, with the tab alone on its site:
+   `metacomputer secrets pay CARD --origin https://shop.example --total-selector '#order-total' --fill number='#cc-number' --fill exp='#cc-exp' --fill cvc='#cc-csc' [--fill name=... --fill zip=...] [--browser-pid PID]`
+   (parts: `number`, `exp` MM/YY, `exp-long` MM/YYYY, `exp-month`, `exp-year`, `exp-year2`, `cvc`, `name`, `zip`).
+   `--total-selector` names a shown element whose text has the order total right after the word "Total", in one place only
+   (point it at the total's row, not the amount alone, and not a container that also shows a "Sub-total" or a second
+   total; `--total-label "Order total"` for other words, which must say "total" or "due"). It waits while the user approves
+   (run it in the background or with a long timeout, and tell the user it's waiting for their approval of the purchase),
+   then prints `purchase_id` (a key: keep it in this session, it's how you fill and end this purchase) and `filled`.
+   - Card fields inside a payment provider's frame: add `--frame-origin https://js.stripe.com` (the frame's site, at most
+     three; the approval names it, and an agent card refuses one the user didn't allow), leave out `--fill`, then click
+     into each field and run `metacomputer secrets pay --purchase KEY --field number`.
+   - In Firefox (human mode): `metacomputer secrets pay CARD --origin https://shop.example --human` (the total is read
+     after "Total"; `--total-label` for other words), then click into each field and run
+     `pay --purchase KEY --field PART --human`.
+4. **Place the order**, check the result page, then `metacomputer secrets pay --purchase KEY --done`.
+
+Rules:
+- **A refusal is the user's decision**: exit 2 (denied by the user, a cap, the store's rules, a card limited to other
+  stores, a total that went up, a policy the user changed) or a purchase that wasn't approved. Stop, say what happened,
+  and don't try another card, store, route or a smaller order to get around it. Exit 3: the vault is locked (ask the user
+  to unlock). A `handoff` field in the answer is the command to run.
+- **When unsure** (the total doesn't match or is refused as unclear, the store looks wrong, a field you can't name, an
+  expiry drop-down), hand payment to the user.
+- Don't take screenshots of, read back, or record a filled card form: the hub hides card details in what you read, but
+  pixels show them. Stop a recording before paying.
+- Each purchase fills each part once, for 10 minutes, only into the tab on the site that was approved.
+- A single-use card from a Shop spend request (for a store not on Shopify): the user approves the spend request in Shop;
+  then `metacomputer shop card NAME --spend-request ID` puts its card in the vault, and you pay with `pay NAME` as above.
+- AP2: only where a store asks for AP2 mandates and gives a checkout JWT: `metacomputer secrets ap2 sign CARD --origin
+  URL --checkout-jwt FILE` (it asks like a purchase; an agent card refuses). Almost no stores accept AP2: never assume
+  one does.
+
 ## Never
 
 - Read a secret, or a filled field's value: no snapshot that includes a field's value, no "show password" buttons, no Chrome developer tools (F12, `devtools://`), no `javascript:` addresses, no querying or posing as Chrome's DevTools through `metacomputer sh` or `metacomputer ssh ops`. If a page shows a secret anyway, don't read it out, and tell the user.
-- Type a secret with `type_text`, `browser_type` or a shell command, or a one-time code (unless the user set `CODES_VIA=claude`).
+- Type a secret with `type_text`, `browser_type` or a shell command, or a one-time code (unless the user set `CODES_VIA=claude`). Type or read a card number, expiry or security code, or fill a card where the store's rules forbid it.
 - Record sign-in steps unless the user wants that: password fields show dots, but usernames and codes are visible on screen.

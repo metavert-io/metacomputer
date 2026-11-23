@@ -1160,7 +1160,7 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (226 checks, about two minutes): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (228 checks, about two minutes): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
@@ -1948,7 +1948,7 @@ writes the lists with cloud-init's key options, `provision.sh` installs them roo
 before the config that names them, and `finalize.sh` removes the homes' copies only
 after `sshd -T` shows the lists in use.
 
-## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_codes.py`, `tests/test_vault_vm.py`, `tests/test_vault_codes_vm.py`, `tests/test_secret_fill.py`
+## Secrets vault: `tests/test_secrets.py`, `tests/test_vault_ops.py`, `tests/test_vault_tokens.py`, `tests/test_vault_approvals.py`, `tests/test_vault_import.py`, `tests/test_vault_codes.py`, `tests/test_vault_vm.py`, `tests/test_vault_codes_vm.py`, `tests/test_secret_fill.py`, `tests/test_vault_payments.py`, `tests/test_payments_vm.py`
 
 Both need no VM, and every value in them is a dummy.
 
@@ -2311,7 +2311,7 @@ refused on a text field and filled on the password field; a page whose title nam
 it). A VM built before the relay's read and the link's open has an older secret-fill: for those two modes
 only, the test's ssh stand-in runs this repository's secret-fill as the desktop user over the real ssh.
 
-`python3 tests/test_secret_fill.py` (185 checks) covers the VM side,
+`python3 tests/test_secret_fill.py` (201 checks) covers the VM side,
 `provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill`, in three parts.
 - **Its helpers:**
   - sites and field types;
@@ -2335,6 +2335,9 @@ only, the test's ssh stand-in runs this repository's secret-fill as the desktop 
   - the keyboard route when a page won't take `execCommand`;
   - focus moving or lost, length limits and invalid selectors;
   - no known desktop user (nothing filled), and a hung browser (the deadline);
+  - a purchase's `top_origins`: the tab held to the shop while a card field is in a payment form's frame (the fill says
+    `top_checked`), a tab on the payment form's own site refused, `top_origins` outside `origins` refused; and
+    `what: total`, the shown element's text, with a hidden one reported as not shown;
   - open mode (a one-time sign-in link), with the fake's `Fetch` interception: a link that lands on the site; a server
     redirect to another site, a hop through another site and back, and the page's own move soon after it loads and two
     seconds later, each stopped before the tab visits it (unnamed); a protocol error while it watches with a move to
@@ -2345,6 +2348,16 @@ only, the test's ssh stand-in runs this repository's secret-fill as the desktop 
   (`MCOMP_TEST_CHROME`, Google Chrome, or Playwright's copy). It:
   - fills a dummy login page, through the element itself, with fields in a same-origin
     frame, a srcdoc frame, a cross-origin frame and a shadow root;
+  - reads a purchase's total as shown only when a person would see it (not inside a see-through or hidden parent, off
+    the page, clipped away by overflow, paint containment, clip, an inset or a clip-path polygon with no area (mixed
+    units, a collapsing inset), an even-odd polygon tracing its square twice, a circle or polygon outside the element, or a
+    path, in 1px or transparent text, under an opacity filter), and shown with a clip-path that leaves an area (an inset,
+    a polygon partly outside, a circle); clips taken together (R23): a total outside its parent's clip, inside two clips
+    that leave nothing between them, outside an L-shaped polygon's arms, or under a clip-path on a scaled box is hidden,
+    and one inside its parent's clip, an L's arm, or under a clip-path on a translated box is shown; overflow by axis (R29):
+    a total below an `overflow-x:clip` box or in a sticky order summary hanging below one is shown, as is one in a
+    sideways-scrolling table and a summary further down a page whose body has `overflow-x:hidden`, while one scrolled out
+    of that table or below an `overflow-y:clip` box is hidden;
   - finds the profile from the browser's own command line, with no `/proc`;
   - checks a page that redefines `type`, `activeElement` and `self.origin` in its own
     world.
@@ -2362,6 +2375,103 @@ accounts on a VM built with this version, changing nothing. It covers:
 
 What these can't cover is the VM's own Chrome, launched by the driver; see the
 manual steps below.
+
+### Paying for things: `tests/test_vault_payments.py`, `tests/test_payments_vm.py`
+
+`python3 tests/test_vault_payments.py` (194 checks, 195 with the AP2 SDK, 196 with `MCOMP_TEST_PUBLIC_NET=1` too; about 4 minutes with its build; no VM) runs itself inside a
+stand-in agent session (a process named `claude`), so it doesn't matter what runs it. It uses a TEST build of the vault, an ssh stub
+for the VM, a stand-in merchant on this Mac's loopback (its `/agents.md` and UCP profile, served as the check says; the
+test build fetches loopback origins only with `MCOMP_VAULT_TEST_FETCH_LOOPBACK=1`) and a stand-in for Shopify's `shop`
+CLI: a Node script (Node 22.15 or newer: `MCOMP_TEST_NODE`, `node` on PATH or Homebrew's; without one the Shop checks are
+skipped) run by a copy of that Node, in a package with a module planted in a `node_modules` folder above it, recording its
+arguments, environment, working folder and Node's own flags. Card numbers are test numbers only. It covers: adding a card at a terminal (and refusing one from a pipe, a
+number that fails the card check, an expiry in the past; a reusable card's warning that approval gates disclosure, not
+the charge); a purchase that asks (the question's site, payment-form sites, total, label, rules and the "can be charged
+again" line; the five parts filled once each after the total is read again and a check, the tab held to the shop; the
+audit records by short id and events), one refused, one part by part, a tab that moved to another site, a key from
+another VM, mode or session, the short id refused as a key; a purchase started outside any agent session (refused unless
+its `pay` names every part; its key then resumes it for nobody) and one from a stand-in for Codex's app server (bound to
+that process); a store whose `/agents.md` forbids scripted checkout or asks
+for the buyer (refused before anything is asked or read), and rules that can't be read (too large, a web page, no
+answer: "can't tell", which an agent card refuses and an ask card's question shows); an agent card (no question within
+its caps; refused over a purchase, period and store cap, in another or an unsupported currency, with no currency, with
+open purchases holding their amount, at a payment form's site it wasn't allowed); tightening a policy ending an approved
+purchase; totals (the amount after "Total", never "Total savings"; a hidden element, two amounts or zero refused); the
+spending record (counted before a part leaves and kept when the fill fails; a write that fails refuses the part; at its
+limit, set low with `MCOMP_VAULT_TEST_LEDGER_MAX`, purchases refused); a VM whose helper doesn't hold the tab to the shop
+(refused); human mode (the total after its label, the focused field); the Shop CLI (nothing run before the user pins it,
+a request naming a program refused, a clean environment, a changed package refused); a Shop spend request's single-use
+card (its store and request id required, straight from the CLI's file into the vault, its limit as a cap, deleted after
+its purchase); `shop complete` (approved under the shop entry, read again and refused when repriced, an instrument the
+checkout doesn't offer refused); AP2 mandates (ES256 checked with openssl, their disclosures and hashes, `risk_data`, a
+checkout naming another site, with `alg: none`, no merchant, two payable totals, a duplicate field or no checkout id
+refused, an agent card refusing an unverified checkout, one signature per checkout); Web Bot Auth (off, then on: the
+merchant gets the signature headers; the directory's signed headers); locking ending purchases; the hub's masks (card
+numbers with any separators, split across strings, as JSON numbers and in every message type; an open purchase's expiry,
+code, postal code and name; a message too large to check withheld; the mask before the hub's own tracing); and no card
+part in any output, the unlock terminal or the audit log. Checks named F1-F16, N1-N7 and R1-R42 are the payment audits' findings
+(the re-checks added N1-N7, R1-R7, R8-R13, R14-R19, R20-R26, R27-R29, R30-R35, R36-R39, then R40-R42): each fails on the
+build before that fix. R40-R42: a failed read of the hub's file letting none of 70 held masks go; and in real Chrome, a
+total with a hidden or invisible numeric span still shown (only digits that render are hit-tested) while one covered by
+a box or an iframe inside it is hidden. R36-R39: 70 purchases in the hub's file all keeping their masks (and only those held acknowledged); a
+purchase whose time runs out inside the write to ssh (MCOMP_VAULT_TEST_SLOW_HOOK stands in for its wait hook's work)
+sending nothing; 300 entries still in their window surviving an unlock; and the browser's hit test hiding a fixed total
+clipped by a `transform-style: preserve-3d` ancestor, a covered total and one with `pointer-events: none`, the page's
+scroll put back after each read (test_secret_fill). R30-R35: the vault refusing `--done` with anything but `--purchase KEY` (and its own `--vm`), and
+tests/test_handoff.py's check that `metacomputer secrets pay` lets only that exact form skip the fill's checks (a new
+purchase with `--done` added, a selector holding it, another VM all refused before the vault); masks kept once read,
+with the clock a week on and the file's window past, in the hub and in the action log's error messages; a purchase
+whose time runs out during a slow step right before its part goes (MCOMP_VAULT_TEST_SLOW_RELEASE stands in for a
+provider's check) sending nothing; a new unlock keeping an earlier one's masks through a lock, an empty unlock and a
+new purchase; fixed and absolute totals clipped only by their containing blocks (test_secret_fill); and the guard
+treating `wba directory --headers` as acting (test_session_guard). R27: a
+fill held past its purchase's time (a test build's short purchases, MCOMP_VAULT_TEST_PURCHASE_SECONDS, and the stand-in's
+`hold-fill`) stays masked while it runs and after the purchase ends, a purchase ended right after a fill stays masked, and
+one whose time ends while its page is checked sends nothing. A thread plays the
+hub's part for the stand-in VM (the same code: lib/cardmask.py, ack_purchases), acknowledging open purchases while it
+holds a hub lock of its own; R21-R26: forged acknowledgements refused (naming another live process, a process that
+started at another time, a lock nobody holds, a folder others can read), a driver line shaped like metacomputer's own
+refusal carrying a card number and CVC that reach neither the answer nor the log, only Shop's own "nothing sent" codes
+settling a completion as failed (a bare `{"ok":false}`, a transport error, a checkout not completed and an unknown code
+stay unsettled), the hub's ack worker finding a vault set up after it started, and (selftest) the proxy's shutdown
+leaving alone a socket whose number was taken again while it ran; R14-R19:
+the hub's stderr counter keeping no text, the vault refusing a part without the hub's acknowledgement, the action log
+reading purchases fresh, a replayed record of an earlier attempt not settling a later one (after a restart), an
+unreadable completion leaving its entry unsettled, the proxy's secret (407) and connection cap (503), and (selftest) IPv4
+addresses in IPv6 forms. R8-R13: a forged pending
+record never lowering spending (the vault file made immutable with `chflags` so an outcome goes to spend-pending.jsonl,
+then a forged line added), an unsettled completion blocking across a restart until `spend-resolve`, the sandbox's
+network (a local HTTP server and the vault's Unix socket refused; through the run's proxy a loopback and a private
+address refused, only the stand-in merchant a test-build file allows tunnelled; `MCOMP_TEST_PUBLIC_NET=1` adds a real
+HTTPS request through it), stderr withheld during a purchase, an AP2 total in another currency, and an instrument
+matched by its exact text. The R checks: the Shop CLI under
+`sandbox-exec` (an eval worker importing a file outside its package, a child process and a read of a planted file all
+denied; no sandbox-exec, or a profile that doesn't apply, and nothing runs; the stand-in's records go to a folder the
+test build adds to the profile, `MCOMP_VAULT_TEST_SHOP_SPY`, whose `sandbox-exec` and `sandbox-break` files stand in for
+those two failures); aggressive masks while a purchase is open (`CVC:123`, a number run into words, any 12-digit run,
+JSON blobs and JSON text) and precise ones outside; a number crossing a long stderr line's cut; the action log's keyed
+result fingerprint (all 1000 codes tried); an AP2 checkout that expires while the approval waits; a Shop answer with
+two currencies; Shop's extra charge while the vault can't be written (`chmod`), blocking the entry until it's recorded. Among them: the Shop CLI pinned with
+its runtime's libraries and its sign-in file (the runtime found from an entry script's first line over 256 bytes), run
+confined (its own home and working folder, no add-ons, module hooks: a planted module stops it, a library planted on an
+earlier @rpath or changed refuses it, a link out of the package isn't pinned); a policy tightened while a part's check
+waits (a held stand-in), and while a Shop approval waits; Shop checkouts compared exactly (a quantity of 1.1 then 1.9)
+and their charges checked (higher, unverified, another currency); AP2 checkouts with a field twice deeper in, expired,
+addressed elsewhere, or re-written for a second signature; totals ("Sub-total", two agreeing places, a label for a part
+of the price, a human-mode "Sub-" before it); approval summaries with every payment-form site in full or nothing asked;
+merchant rules served as a web page or with one past the first 4 KiB; the masks' structured forms (a float, a split
+list, numeric fields, an accessibility node, a name with an initial, a top-level key) and what they leave alone (ports,
+element references, hashes, years, images); and the action log, the driver's stderr and a failed connection's error,
+masked. With `MCOMP_AP2_SDK_PYTHON` (a Python with the AP2 SDK's dependencies) and
+`MCOMP_AP2_SDK_PATH` (AP2's `code/sdk/python`), AP2's own verifier checks the mandates too.
+
+`MCOMP_CONFIG=test-vm.env python3 tests/test_payments_vm.py` (a test VM built with this version: older VMs' fill helper
+can't hold the tab to the shop, so they refuse to pay; a settings file outside `config/vms/`, since the test uses a vault
+folder of its own) serves `tests/fixtures/site/checkout.html` in the VM, opens it in page-mode Chrome through the hub, and pays with a test card (4242 4242 4242 4242): the page's total in
+the question, `approve ID` through the test build's stand-in for Touch ID, the five parts filled, the order placed (the
+page shows only lengths and whether the number passes the card check). A second purchase whose tab moved to another site
+is refused with nothing typed; a third goes through the VM's Firefox (human mode), where a window read afterwards shows
+the hub's mask instead of the number.
 
 ### In the VM (manual)
 

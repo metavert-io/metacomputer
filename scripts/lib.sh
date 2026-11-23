@@ -975,7 +975,8 @@ export_options() {
          MCOMP_VM_SHELL="${VM_SHELL:-auto}" MCOMP_SHELL_LOG="${SHELL_LOG:-auto}" \
          MCOMP_STORAGE_DIR="${STORAGE_DIR:-}" MCOMP_VOLUMES="${VOLUMES:-}" MCOMP_REFDISKS="${REFDISKS:-}" \
          MCOMP_VM_EVENTS_SPOOL="${EVENTS_SPOOL:-}" \
-         MCOMP_HOSTKEY_NAME="$(mc_hostkey_name)"     # this VM's spool (empty: lib/events.py's default); its pinned host key's name
+         MCOMP_VM_VAULT_DIR="${VAULT_DIR:-}" \
+         MCOMP_HOSTKEY_NAME="$(mc_hostkey_name)"     # this VM's spool and vault folder (empty: the defaults); its pinned host key's name
   # Dialogs on this Mac that wait for the user (a handoff's "Open live view"): off unless the user turned them on.
   export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"
   # The hub (lib/mcp_hub.py), its coordinate guard, its hidden-text marks and its human pacing (lib/pacing.py).

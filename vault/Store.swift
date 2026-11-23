@@ -19,8 +19,8 @@ import Darwin
 import Foundation
 
 struct Secret: Codable {
-    var kind: String                // password | totp | text | api
-    var value: String               // totp: the seed in base32
+    var kind: String                // password | totp | text | api | card | shop
+    var value: String               // totp: the seed in base32; card: its parts as JSON (Payments.swift); shop: empty
     var username: String?
     var origins: [String]           // password/totp/text: the sites it fills into
     var approval: String            // session | each
@@ -36,6 +36,14 @@ struct Secret: Codable {
     var totp_for: String? = nil     // totp: the `id` of the password secret whose account this code belongs to (import-passwords)
     var id: String? = nil           // random, made once and kept through --replace: what a 2FA code's totp_for names
     var api_answer_timeout_s: Int? = nil   // api: how long one proxied answer may take (nil: the default, 600 s)
+    var card_label: String? = nil   // card|shop: what approvals, lists and the audit log call it (never the number)
+    var pay: String? = nil          // card|shop: "ask" (nil: every purchase asks) | "agent" (within the caps, purchases don't ask)
+    var caps: CardCaps? = nil       // card|shop: limits the unlock process enforces (Payments.swift)
+    var single_use: Bool? = nil     // card: one purchase only (a Shop spend request's card); deleted when that purchase ends
+    var spent: Bool? = nil          // single-use card: a purchase has filled it
+    var source: String? = nil       // card: "shop-spend-request" when it came from Shop, nil when typed
+    var merchant_locked: Bool? = nil   // card: the user says it's locked to its origins at the bank (a statement, not checked)
+    var allowed_frames: [String]? = nil   // card: payment-form sites an agent card may give parts to without a question
 }
 
 func newSecretID() -> String { randomBytes(8).map { String(format: "%02x", $0) }.joined() }
@@ -162,6 +170,12 @@ struct Payload: Codable {
     var rules: [UnattendedRule]? = nil      // unattended rules (Approvals.swift): uses that don't ask, until they expire
     var require_presence: String? = nil     // "on" | "off": the unlock's presence mode when no flag says; nil: on where Touch ID is
     var biometry_seen: String? = nil        // when an unlock first found Touch ID enrolled: presence mode then stays on by default
+    var spend: [SpendEntry]? = nil          // purchases that filled a card, for the period caps (Payments.swift); pruned by age
+    var ap2_key: String? = nil              // base64: the P-256 key that signs AP2 mandates (AP2.swift); made by `ap2 init`
+    var wba: WebBotAuthKey? = nil           // Web Bot Auth (Merchant.swift): an Ed25519 key and where its directory is; off unless set
+    var shop_cli: ShopCLIPin? = nil         // Shopify's shop CLI as the user set it (`shop-cli set`): the only one the vault runs
+    var unresolved: [UnresolvedSpend]? = nil // Shop completions whose final spending isn't recorded yet: they block their entry
+    var spend_key: String? = nil            // base64, 32 bytes: the MAC on spend-pending.jsonl's records (PaymentServer.swift)
 
     /// A new vault. `boundary`: the audit log's last seq now (records before the vault are legacy).
     static func fresh(boundary: Int) -> Payload {

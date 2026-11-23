@@ -195,7 +195,7 @@ struct ApprovalOutcome {
 let requesterLeftReason = "stopped: the program that asked went away or withdrew the request, so nothing further was done (a step in progress was ended)"
 /// The requests whose requester may withdraw them while they run (Commands.swift, request(): cancellable).
 let withdrawableOps: Set<String> = ["fill", "login", "session_save", "session_load", "token", "renew", "code_give", "code_put", "code_relay",
-                                     "code_fill"]
+                                     "code_fill", "pay", "pay_fill", "shop_complete", "shop_card", "ap2_sign"]
 
 /// A connection read while the unlock process waited for an answer, served once it's free.
 struct DeferredRequest {
@@ -229,6 +229,13 @@ final class UnlockServer {
     var promptOpen = false              // a question waits on the terminal, its cursor at the end of the prompt
     var codeRequests: [String: CodeRequest] = [:]   // one-time code requests (Codes.swift): in memory only, gone at lock
     var codeInFlight: String?           // the code request a step in the VM is serving right now
+    var purchases: [String: Purchase] = [:]          // approved purchases (PaymentServer.swift): in memory only, gone at lock
+    var endedPurchases: [Purchase] = []              // ended ones whose card details the hub still masks (maskUntil)
+    var inheritedMasks: [[String: Any]] = []         // an earlier unlock's entries still in their window (importActivePurchases)
+    var activeFileProblem: String? = nil             // purchases-active.json there but unreadable: no purchase, no rewrite
+    var pendingSettle: [PendingSpendRecord] = []     // Shop completions settled while the vault couldn't be written
+    var pendingBadSeen = ""                          // the unverifiable spend-pending.jsonl lines last reported
+    var lastShopRaw: [UInt8] = []                    // the pinned Shop CLI's last answer, as it wrote it (exact comparisons)
     let interactivePrompts: Bool        // INTERACTIVE_PROMPTS=on at unlock: `ask` also shows a dialog on this Mac
     lazy var hub = ProxyHub(paths: paths, key: key, sshPath: runner.sshPath)
     // The audit log and its sinks. The audit key (from the vault) MACs every record this
@@ -368,21 +375,23 @@ final class UnlockServer {
         if let u = usernameHint { rec["username_hint"] = u }
         if identityProvider { rec["identity_provider"] = true }
         if ["fill", "login"].contains(use) { rec["event"] = "login.request" }
+        if use == "pay" { rec["event"] = "payment.request" }
         record(rec)
         dropEvent(type: "approval_waiting", severity: "warn", vm: vm,
                   message: "Vault approval waiting: \(kind.replacingOccurrences(of: "_", with: " ")) of \(name)" + (site.map { " into \($0)" } ?? "")
                     + " on VM \(vm), asked by \(who.describe)",
                   action: "Type \(name) in the vault's terminal to allow", project: who.project,
                   data: ["op": kind, "name": name, "site": site ?? "", "request_id": id])
-        let q = question.components(separatedBy: "\n").prefix(4).map { clean($0, max: 500) }.joined(separator: "\n")
+        // A purchase's question names every site that gets a card part, the total, what approving means and the rules.
+        let q = question.components(separatedBy: "\n").prefix(use == "pay" ? payQuestionLines : 4).map { clean($0, max: 500) }.joined(separator: "\n")
             + "\n  Request \(id): or approve it from any terminal with `metacomputer secrets approve \(id)` (Touch ID or your login password)"
             + (identityProvider ? "\n  An identity provider's sign-in (or one that may hold one): what you allow covers this one use." : "")
-            + (singleUse && !identityProvider ? "\n  A one-time code or link: what you allow covers this one use." : "")
+            + (singleUse && !identityProvider ? (use == "pay" ? "\n  A purchase: what you allow covers this one purchase." : "\n  A one-time code or link: what you allow covers this one use.") : "")
         var prompt: String?
         if terminalOK && requirePresence {
-            prompt = presencePrompt(q, name: name, id: id)
+            prompt = presencePrompt(q, name: name, id: id, purchase: use == "pay")
         } else if terminalOK {
-            prompt = approvalPrompt(q, name: name)
+            prompt = approvalPrompt(q, name: name, purchase: use == "pay")
         } else {
             say(q + "\n  This terminal runs inside \(multiplexer ?? "a multiplexer"), so typed answers are refused here: confirm with Touch ID or your login password in the dialog, or `deny \(id)`.")
         }
@@ -396,7 +405,7 @@ final class UnlockServer {
                 say("  (an identity provider's sign-in: allowed for this use only)")
                 return oneUse
             case _ where singleUse && scope != .use:
-                say("  (a one-time code or link: allowed for this use only)")
+                say(use == "pay" ? "  (a purchase: allowed for this one purchase only)" : "  (a one-time code or link: allowed for this use only)")
                 return oneUse
             case .unlock:
                 grants.append(Grant(kind: kind, name: name, claudePID: nil, claudeStart: nil))
@@ -434,6 +443,7 @@ final class UnlockServer {
         if let s = site { auth["origin"] = s }
         if let u = usernameHint { auth["username_hint"] = u }
         if ["fill", "login"].contains(use) { auth["event"] = "login.authorize" }
+        if use == "pay" { auth["event"] = "payment.authorize" }
         record(auth)
         return ApprovalOutcome(yes: true, how: how, why: "", requestID: id)
     }
@@ -484,6 +494,7 @@ final class UnlockServer {
             if stopReason != nil { result = .denied("the vault was locked"); return result }
             if let d = p.decision { result = d; return d }
             codeExpirySweep()               // one-time code requests expire on time, even while this question waits
+            purchaseSweep()                 // and purchases
             if requesterGone() {
                 // The program that asked went away (or withdrew it): nobody is left to act for, so no approval is taken.
                 say("  (request \(p.id) withdrawn: the program that asked went away)")
@@ -513,7 +524,10 @@ final class UnlockServer {
                 p.autoLocalAuth = false
             }
             if prompt != nil, !promptOpen, stdinOpen {
-                eprintRaw(requirePresence
+                eprintRaw(p.use == "pay"
+                    ? (requirePresence ? "  (still waiting) the dialog or the passphrase confirms this purchase; anything typed refuses: "
+                       : "  (still waiting) Type \(name) to allow this one purchase; anything else refuses: ")
+                    : requirePresence
                     ? "  (still waiting) \(name), \(name) session or \(name) unlock chooses how far it reaches; the dialog or the passphrase confirms; anything else refuses: "
                     : "  (still waiting) Type \(name) to allow (\(name) session / \(name) unlock); anything else refuses: ")
                 promptOpen = true
@@ -999,6 +1013,7 @@ final class UnlockServer {
         chmod(paths.socket, 0o600)
         guard listen(fd, 8) == 0 else { close(fd); unlink(paths.socket); throw VaultError("cannot listen on \(paths.socket)") }
         listenFD = fd
+        importActivePurchases()             // an earlier unlock's masks still in their window stay listed
 
         let h: @convention(c) (Int32) -> Void = { sig in receivedSignal = sig }
         signal(SIGINT, h)
@@ -1009,6 +1024,7 @@ final class UnlockServer {
         say("metacomputer secrets: unlocked until \(clockTime(expires))" + (mins > 0 ? " (\(mins) min)" : "")
             + (confirmEach ? "; every use asks here first" : "; secrets and sessions set to 'each' ask here first"))
         say("  Requests and their outcomes appear here (never values). Ctrl-C locks the vault.")
+        reconcilePendingSpend()                 // Shop completions a locked or stopped vault couldn't record (PaymentServer.swift)
         if let m = multiplexer {
             say("  WARNING: this terminal runs inside \(m). Any program of yours can type into it (for example")
             say("  `tmux send-keys` or `screen -X stuff`), including the answer to a confirmation.")
@@ -1050,6 +1066,7 @@ final class UnlockServer {
             if let s = stopReason { why = s; break }
             if Date() >= expires { why = "time is up"; break }
             codeExpirySweep()
+            purchaseSweep()
             // Requests that arrived while a question waited, in the order they came.
             if !deferred.isEmpty {
                 let d = deferred.removeFirst()
@@ -1081,6 +1098,7 @@ final class UnlockServer {
         listenFD = -1
         unlink(paths.socket)
         codeLockdown()
+        purchaseLockdown()
         hub.shutdown()
         record(["op": "lock", "result": "ok", "reason": why])
         flushSinks(force: true)
@@ -1172,6 +1190,14 @@ final class UnlockServer {
         case "code_put": res = opCodePut(req, who)
         case "code_relay": res = opCodeRelay(req, who)
         case "code_fill": res = opCodeFill(req, who)
+        case "pay": res = opPay(req, who)
+        case "pay_fill": res = opPayFill(req, who)
+        case "pay_end": res = opPayEnd(req, who)
+        case "shop_complete": res = opShopComplete(req, who)
+        case "shop_card": res = opShopCard(req, who)
+        case "ap2_key": res = opAP2Key()
+        case "ap2_sign": res = opAP2Sign(req, who)
+        case "wba": res = opWBA(req, who)
         case "settle":
             // Answered only here, in order: every request that reached this process before it has finished (requests
             // that arrive during a question wait behind it). A requester that couldn't confirm its own request stopped
@@ -1190,7 +1216,10 @@ final class UnlockServer {
     }
 
     func reply(_ c: Int32, _ obj: [String: Any]) {
-        let safe = (cleanAll(obj) as? [String: Any]) ?? ["ok": false, "status": "error"]
+        // Signed mandates and a key directory are long by nature: those fields keep their length (still made printable).
+        let long: Set<String> = ["checkout_mandate", "payment_mandate", "directory", "headers", "continue_url"]
+        var safe = (cleanAll(obj.filter { !long.contains($0.key) }) as? [String: Any]) ?? ["ok": false, "status": "error"]
+        for (k, v) in obj where long.contains(k) { safe[k] = cleanAll(v, max: 70_000) }
         _ = writeAll(c, Array((jsonLine(safe) + "\n").utf8))
     }
 
@@ -1243,7 +1272,24 @@ final class UnlockServer {
             var d: [String: Any] = ["name": n, "kind": s.kind, "origins": s.origins, "approval": s.approval,
                                     "created": s.created, "uses": s.uses,
                                     "fields": s.kind == "password" ? (s.username == nil ? ["password"] : ["password", "username"])
-                                        : (s.kind == "totp" ? ["otp"] : (s.kind == "api" ? ["token"] : ["text"]))]
+                                        : (s.kind == "totp" ? ["otp"] : (s.kind == "api" ? ["token"] : (s.kind == "card" ? ["card"] : (s.kind == "shop" ? [] : ["text"]))))]
+            if s.kind == "card" || s.kind == "shop" {
+                // What the card is called and how it pays; never a part of it (not even its last digits).
+                d["label"] = s.card_label ?? n
+                d["pay"] = s.pay ?? "ask"
+                d["caps"] = s.caps?.words ?? "no caps"
+                d["approval"] = s.pay == "agent" ? "policy:agent" : "each purchase"
+                if s.single_use == true { d["single_use"] = true }
+                if s.spent == true { d["spent"] = true }
+                if let src = s.source { d["source"] = src }
+                if let c = s.caps, !c.isEmpty {
+                    let now = Date().timeIntervalSince1970
+                    if let ps = c.period_s {
+                        d["spent_in_period"] = formatMoney((p.spend ?? []).filter { $0.card == (s.id ?? n) && $0.currency == c.currency && $0.t >= now - Double(ps) }
+                            .reduce(0) { $0 + $1.amount }, c.currency)
+                    }
+                }
+            }
             if let u = s.username { d["username"] = u }
             if let l = s.last_used { d["last_used"] = l }
             if let r = s.rotated { d["rotated"] = r }
@@ -1399,6 +1445,9 @@ final class UnlockServer {
         }
         if s.kind == "api" {
             return finish("fill", fields, denied("\(name) is an api secret: use `metacomputer secrets token \(name)` and the proxy in the VM"), who, approval: "-")
+        }
+        if s.kind == "card" || s.kind == "shop" {
+            return finish("fill", fields, denied("\(name) is a \(s.kind): a purchase goes through `metacomputer secrets pay \(name)`, which asks for it"), who, approval: "-")
         }
         let allowedFields = s.kind == "password" ? ["password", "username"] : (s.kind == "totp" ? ["otp"] : ["text"])
         guard allowedFields.contains(field) else {

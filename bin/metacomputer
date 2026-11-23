@@ -90,7 +90,7 @@
 #   ssh [ops|admin] [CMD...]       shell into the guest
 #   notify "TEXT" [--why login|captcha|2fa|dialog|approval|other] [--action "what to do"]
 #                                  tell the user Claude is blocked on them (through the event sinks)
-#   handoff --why captcha|login|2fa|other --say "what to do" [--timeout 15m] [--json]
+#   handoff --why captcha|login|2fa|payment|other --say "what to do" [--timeout 15m] [--json]
 #                                  hand the computer to the user and wait (Claude's actions pause meanwhile);
 #                                  exit 0 done, 4 cancelled, 124 time limit
 #   handoff done [--note TEXT] | cancel [--note TEXT] | wait | status   (done: the user, in their own terminal)
@@ -124,7 +124,14 @@
 #           | ask --site S --kind code|link --why TEXT [--into TAB/FIELD | --human] [--wait 5m] | give ID (stdin only)
 #           | code --site S (--into TAB/FIELD | --human) < value | relay --from TAB/ELEMENT --to TAB/FIELD --site S
 #           | fill --request ID | rule add code|relay ...   one-time codes and sign-in links (SECURITY.md)
+#           | pay CARD --origin URL (--total-selector CSS | --human) [--fill PART=CSS ...] | pay --purchase ID --field PART
+#           | pay --purchase KEY --done | merchant-rules URL | ap2 key|sign | wba status|directory|sign | shop-card NAME --spend-request ID
+#           | shop-complete CHECKOUT --shop DOMAIN --instrument FILE|-
+#                                  paying for things (docs/payments.md); `set NAME --kind card`, `policy CARD --pay ...`,
+#                                  `ap2 init`, `shop-cli set` and `wba init|on|off` are yours, in your own terminal
 #                                  use it from a session, without seeing values
+#   shop status | login [--wait 90] | complete CHECKOUT --shop DOMAIN --instrument @FILE|- | card NAME --spend-request ID
+#                                  Shopify stores through your own Shop account and Shopify's shop CLI (docs/payments.md)
 #   learn report [--since 7d] [--project PATH] [--json] [--draft-with-claude] | review | list
 #   agents [--json] | agents check [--json]
 #                                  the coding agents metacomputer is set up for (Claude Code, Codex, OpenClaw,
@@ -267,7 +274,7 @@ esac
 case "$cmd" in
   start|stop|restart|reset|restore|baseline|checkpoint|build|desktop-restart|test) vm_notice ;;
   security) [ "${1:-}" != apply ] || vm_notice ;;
-  secrets) vm_notice vault ;;
+  secrets|shop) vm_notice vault ;;
   claude) case "${1:-}" in read|wait|status|_probe|_keeper|-h|--help|help) ;; *) vm_notice vault ;; esac ;;   # its token is the vault's
 esac
 
@@ -2610,7 +2617,9 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
       exec "$VAULT_BIN" ask "$@" ;;
     status)
       "$VAULT_BIN" status "$@"; rc=$?
-      case " $* " in *" --json "*) ;; *)
+      local w json=0
+      for w in "$@"; do [ "$w" = --json ] && json=1; done
+      case "$json" in 1) ;; *)
         echo "codes:    $([ "${CODES_VIA:-vault}" = claude ] && echo "Claude may read and type one-time codes itself (CODES_VIA=claude; guidance, not enforced)" || echo "through the vault: secrets code, relay or ask (CODES_VIA=vault)"); dialogs: ${INTERACTIVE_PROMPTS:-off} (INTERACTIVE_PROMPTS, read at unlock)" ;;
       esac
       return $rc ;;
@@ -2628,6 +2637,20 @@ do_secrets() { # the vault's commands, with this VM's name, port, keys, host key
         return $?
       fi
       exec "$VAULT_BIN" approve "$@" ;;
+    pay)
+      # Ending a purchase acts on nothing: only exactly `pay --purchase KEY --done` (with at most --vm naming this VM),
+      # read word by word, goes straight on. Anything else, starting one or filling a part, acts on the VM like a fill.
+      if secrets_pay_is_end "$@"; then exec "$VAULT_BIN" pay "$@"; fi
+      secrets_vm_is_this "$@" || die "secrets pay acts on this VM ($VM_NAME), whose handoff it checks; for another VM, use that VM's settings (MCOMP_CONFIG=its settings file) instead of --vm"
+      handoff_hold
+      [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"
+      secrets_run_acting secrets_pay "$RUN_DIR/owners/vault-inflight.$$" pay "$@"
+      return $? ;;
+    shop-complete|ap2)
+      # Approvals that fill nothing (a Shop checkout, AP2 mandates): named for this VM, like any purchase. The vault runs
+      # only the Shop CLI you pinned (`secrets shop-cli set`, your own terminal), never one a request names.
+      if [ "$sub" = shop-complete ] || [ "${1:-}" = sign ]; then [ "$has_vm" = 1 ] || set -- "$@" --vm "$VM_NAME"; fi
+      exec "$VAULT_BIN" "$sub" "$@" ;;
     fill|login|session|token|code|relay|give)
       local kind="secrets_$sub"
       [ "$sub" = token ] && [ "${1:-}" = renew ] && kind=secrets_token_renew
@@ -2713,6 +2736,19 @@ secrets_vm_is_this() { # ARGS...: 0 when every --vm among them names this VM (th
     case "$a" in --vm) want=1 ;; --vm=*) [ "${a#--vm=}" = "$VM_NAME" ] || return 1 ;; esac
   done
   [ "$want" = 0 ]
+}
+secrets_pay_is_end() { # ARGS...: 0 when they're exactly --purchase KEY --done, in any order, with at most one --vm naming
+  # this VM; any other word (a card, a fill, a selector, a second key) and it isn't, and the pay goes through every check
+  local key=0 done=0 vm=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --purchase) [ "$key" = 0 ] && [ $# -ge 2 ] && [[ "$2" =~ ^[0-9a-f]{32}$ ]] || return 1; key=1; shift 2 ;;
+      --done) [ "$done" = 0 ] || return 1; done=1; shift ;;
+      --vm) [ "$vm" = 0 ] && [ $# -ge 2 ] && [ "$2" = "$VM_NAME" ] || return 1; vm=1; shift 2 ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$key" = 1 ] && [ "$done" = 1 ]
 }
 secrets_metadata() { # the vault's result JSON (stdin) without the token value
   "$PY" -c 'import json,sys
@@ -2836,6 +2872,7 @@ case "$cmd" in
   actions)    export_options; exec "$PY" "$LAB_ROOT/lib/actionlog.py" "$@" ;;
   security)   do_security "$@" ;;
   secrets)    do_secrets "$@"; exit $? ;;
+  shop)       export_options; MCOMP_VAULT_BIN="$VAULT_BIN" MCOMP_VM_NAME="$VM_NAME" MCOMP_SELF="$0" exec "$PY" "$LAB_ROOT/lib/shop.py" "$@" ;;
   learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
   agents)     exec "$PY" "$LAB_ROOT/lib/agents.py" "$@" ;;
   cloud)      [ $# -ge 2 ] || die "usage: metacomputer cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG] [--forget OP]   (PROVIDER: oci, sprites, hetzner, digitalocean, vultr)"

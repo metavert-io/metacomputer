@@ -3394,9 +3394,10 @@ def hub_pin(td):
               and pin.get("MCOMP_EXPECT_SSH_PORT") == "2481" and "AAAAPINNED" in pin.get("MCOMP_EXPECT_HOSTKEY", ""), pin)
         check("...and connects to it as started (it's off here: the usual answer, no refusal)",
               "refusing" not in steps["as started"] and steps["as started"], steps["as started"])
-        for name, words in (("settings file gone", "is gone, and without it the settings name 'metacomputer'"),
-                            ("settings name another VM", "now name the VM 'metacomputer', not 'pinned'"),
-                            ("another SSH port", "the SSH port 2482, not 2481"),
+        # (in the hub's own words, from what it pinned: none of the driver stream's text is kept, refusals included)
+        for name, words in (("settings file gone", "the settings file for the VM 'pinned' is gone"),
+                            ("settings name another VM", "now name another VM, not 'pinned'"),
+                            ("another SSH port", "another SSH port, not 2481"),
                             ("another host key", "pinned host key")):
             check(f"a reconnect when the {name}: refused, saying why (never the other VM)",
                   "refusing" in steps[name] and words in steps[name] and "hub stop" in steps[name], steps[name][-400:])

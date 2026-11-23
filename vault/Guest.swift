@@ -13,6 +13,7 @@ struct ProcResult {
     var interrupted = false
     var tooLarge = false
     var cancelled = false       // the program whose request this step serves went away (requesterProbe): ended
+    var refused: String? = nil  // its `release` said no right before stdin was written: nothing written, the child ended
 }
 
 /// Whether the request this process is serving was withdrawn (only the unlock process's own thread asks).
@@ -24,8 +25,10 @@ func requesterLeft() -> Bool {
 /// Run a program with the given stdin bytes, collecting stdout and stderr. The child
 /// gets only fds 0-2, default signal handling and its own process group (so Ctrl-C
 /// in the unlock terminal reaches the vault, which then stops the child).
+/// `release`, when given, is asked right before each write of `input` to the child's stdin (after every other step,
+/// the wait hook's work included): a reason stops it there, with nothing (more) written and the child ended.
 func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [UInt8],
-                timeout: TimeInterval, maxStdout: Int = 1 << 20) -> ProcResult {
+                timeout: TimeInterval, maxStdout: Int = 1 << 20, cwd: String? = nil, release: (() -> String?)? = nil) -> ProcResult {
     var res = ProcResult()
     // A request whose requester went away starts no further step.
     if requesterLeft() { res.cancelled = true; return res }
@@ -38,6 +41,7 @@ func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [U
     posix_spawn_file_actions_adddup2(&fa, inPipe[0], 0)
     posix_spawn_file_actions_adddup2(&fa, outPipe[1], 1)
     posix_spawn_file_actions_adddup2(&fa, errPipe[1], 2)
+    if let d = cwd { posix_spawn_file_actions_addchdir_np(&fa, d) }
 
     var attr: posix_spawnattr_t?
     posix_spawnattr_init(&attr)
@@ -74,12 +78,24 @@ func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [U
     var outOpen = true, errOpen = true
     let deadline = Date().addingTimeInterval(timeout)
     var buf = [UInt8](repeating: 0, count: 1 << 16)
+    #if MCOMP_VAULT_TESTING
+    var slowed = false
+    #endif
     while outOpen || errOpen {
         if Thread.isMainThread, let hook = waitHook {
             waitHook = nil              // never nested
             hook()
             waitHook = hook
         }
+        #if MCOMP_VAULT_TESTING
+        // A stand-in for a slow wait hook (audit records, an expiry sweep), before a value is written: seconds, from a file.
+        if release != nil, !slowed, written == 0, let f = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_SLOW_HOOK"],
+           let b = try? readFileBytes(f, max: 16),
+           let s = Double(String(decoding: b, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)), s > 0, s < 60 {
+            slowed = true
+            usleep(UInt32(s * 1_000_000))
+        }
+        #endif
         if receivedSignal != 0 { res.interrupted = true; break }
         if requesterLeft() { res.cancelled = true; break }
         if Date() > deadline { res.timedOut = true; break }
@@ -91,6 +107,8 @@ func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [U
         if r < 0 { if errno == EINTR { continue }; break }
         for f in fds where f.revents != 0 {
             if f.fd == inFD {
+                // The last word before anything of the input goes: asked here, after the hook and the poll.
+                if let why = release?() { res.refused = why; break }
                 let n = input.withUnsafeBytes { p in write(inFD, p.baseAddress! + written, min(input.count - written, 1 << 16)) }
                 if n > 0 { written += n }
                 if (n < 0 && errno != EAGAIN && errno != EINTR) || written >= input.count {
@@ -110,11 +128,12 @@ func runProcess(_ path: String, _ args: [String], env: [String], stdin input: [U
                 }
             }
         }
+        if res.refused != nil { break }
     }
     if inFD >= 0 { close(inFD) }
     close(outPipe[0]); close(errPipe[0])
     wipe(&buf)
-    if res.timedOut || res.interrupted || res.tooLarge || res.cancelled {
+    if res.timedOut || res.interrupted || res.tooLarge || res.cancelled || res.refused != nil {
         kill(-pid, SIGKILL)         // its own process group (ssh and anything it started), then the child itself
         kill(pid, SIGKILL)
     }
@@ -239,9 +258,11 @@ final class GuestRunner {
                       allowedNames: listenerNames)
     }
 
-    /// ssh to the pinned endpoint as user with key, running `remote`, with `input` on its stdin.
+    /// ssh to the pinned endpoint as user with key, running `remote`, with `input` on its stdin. `release`, when given, is
+    /// asked last, after every slow step (the provider's check included), right before `input` goes to ssh: a reason
+    /// stops it there, with nothing sent (a purchase whose time ran out meanwhile).
     func ssh(_ t: GuestTarget, user: String, key: String, remote: String, input: [UInt8], timeout: TimeInterval,
-             maxStdout: Int = 1 << 20) throws -> ProcResult {
+             maxStdout: Int = 1 << 20, release: (() -> String?)? = nil) throws -> ProcResult {
         let b = t.binding
         guard let pin = pinnedHostKeyOptions(binding: b) else {
             throw VaultError("the pinned host key for VM \(t.vm) is damaged: bind it again", code: Exit.error)
@@ -254,19 +275,36 @@ final class GuestRunner {
         if let problem = providerProblem(b) {
             throw VaultError(problem.reason, code: problem.denied ? Exit.denied : Exit.error)
         }
+        if let release = release {
+            #if MCOMP_VAULT_TESTING
+            // A stand-in for a slow provider check (tests/test_vault_payments.py): seconds to wait, from a file.
+            if let f = ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_SLOW_RELEASE"], let b = try? readFileBytes(f, max: 16),
+               let s = Double(String(decoding: b, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)), s > 0, s < 60 {
+                usleep(UInt32(s * 1_000_000))
+            }
+            #endif
+            if let why = release() { throw VaultError(why, code: Exit.denied) }
+        }
         let args = sshBaseOptions(key: key, port: b.ssh_port, remote: b.isRemote, proxy: proxy) + pin
             + ["-T", "-o", "ClearAllForwardings=yes", "-o", "LogLevel=ERROR", "\(user)@\(b.sshDestination)", remote]
-        return runProcess(sshPath, args, env: helperEnv(), stdin: input, timeout: max(1, timeout), maxStdout: maxStdout)
+        let r = runProcess(sshPath, args, env: helperEnv(), stdin: input, timeout: max(1, timeout), maxStdout: maxStdout, release: release)
+        if let why = r.refused { throw VaultError(why, code: Exit.denied) }
+        return r
     }
 
     /// The desktop account (sealed browser sessions).
-    func opsSSH(_ t: GuestTarget, remote: String, input: [UInt8], timeout: TimeInterval, maxStdout: Int = 1 << 20) throws -> ProcResult {
-        try ssh(t, user: t.binding.guest_user, key: t.binding.ops_key_path, remote: remote, input: input, timeout: timeout, maxStdout: maxStdout)
+    func opsSSH(_ t: GuestTarget, remote: String, input: [UInt8], timeout: TimeInterval, maxStdout: Int = 1 << 20,
+                release: (() -> String?)? = nil) throws -> ProcResult {
+        try ssh(t, user: t.binding.guest_user, key: t.binding.ops_key_path, remote: remote, input: input, timeout: timeout, maxStdout: maxStdout,
+                release: release)
     }
 
     /// One request to the VM's secret-fill, as the fill account. The value (if any) goes
     /// only to ssh's standard input.
-    func fill(_ t: GuestTarget, request: [String: Any], value: [UInt8]?, timeout: TimeInterval) throws -> [String: Any] {
+    /// `minWithhold`: an answer holding the value is withheld only when the value is at least this long. A card's short
+    /// parts (a month, a security code) can turn up in a site's address by chance; the answer is cut to fixed forms anyway.
+    func fill(_ t: GuestTarget, request: [String: Any], value: [UInt8]?, timeout: TimeInterval, minWithhold: Int = 1,
+              release: (() -> String?)? = nil) throws -> [String: Any] {
         guard let user = t.binding.fill_user, let key = t.binding.fill_key_path else {
             return ["ok": false, "status": "error",
                     "reason": "VM \(t.vm) was bound by an earlier version without the fill account: run `metacomputer secrets bind` again"]
@@ -281,7 +319,7 @@ final class GuestRunner {
         var inputBytes = Array(encoded) + [0x0A]
         wipe(&encoded)
         defer { wipe(&inputBytes) }
-        let r = try ssh(t, user: user, key: key, remote: secretFillCommand, input: inputBytes, timeout: timeout)
+        let r = try ssh(t, user: user, key: key, remote: secretFillCommand, input: inputBytes, timeout: timeout, release: release)
         var stderr = String(decoding: r.stderr, as: UTF8.self)
         if let v = valueString, !v.isEmpty { stderr = stderr.replacingOccurrences(of: v, with: "[redacted]") }
         if r.cancelled { return ["ok": false, "status": "cancelled", "reason": requesterLeftReason] }
@@ -299,7 +337,7 @@ final class GuestRunner {
             return ["ok": false, "status": "error", "reason": "the VM side failed (its own output isn't passed on)"]
         }
         // Never pass the value on, whatever came back: anything holding it, at any depth or length.
-        if let v = valueString, !v.isEmpty, containsString(raw, v) {
+        if let v = valueString, !v.isEmpty, v.count >= minWithhold, containsString(raw, v) {
             return ["ok": false, "status": "error", "reason": "result withheld (it contained the value)"]
         }
         // Keep only the fields a fill answers with, each of its type; anything else is dropped,
@@ -323,7 +361,9 @@ final class GuestRunner {
         out["field"] = request["field"] as? String
         out["profile"] = nil
         if let r = out["route"] as? String, r != "element" && r != "keyboard" { out["route"] = nil }
-        out = out.filter { ["ok", "status", "reason", "origin", "chars", "mode", "field", "route"].contains($0.key) }
+        // top_checked: the VM's helper held the tab itself to the request's top_origins (a purchase needs that said).
+        if out["top_checked"] as? Bool != true || request["top_origins"] == nil { out["top_checked"] = nil }
+        out = out.filter { ["ok", "status", "reason", "origin", "chars", "mode", "field", "route", "top_checked"].contains($0.key) }
         return out
     }
 
@@ -360,7 +400,10 @@ final class GuestRunner {
             }
             links = arr.compactMap { $0 as? String }
         }
-        return GuestRead(ok: origin != nil, origin: origin, text: text, links: links, reason: origin == nil ? "the VM reported a page outside --from's site" : nil)
+        var gr = GuestRead(ok: origin != nil, origin: origin, text: text, links: links, reason: origin == nil ? "the VM reported a page outside --from's site" : nil)
+        if let v = o["visible"] as? NSNumber, CFGetTypeID(v) == CFBooleanGetTypeID() { gr.visible = v.boolValue }
+        if let tc = o["top_checked"] as? NSNumber, CFGetTypeID(tc) == CFBooleanGetTypeID(), request["top_origins"] != nil { gr.topChecked = tc.boolValue }
+        return gr
     }
 }
 
@@ -371,6 +414,8 @@ struct GuestRead {
     var text: String
     var links: [String]
     var reason: String?
+    var visible: Bool? = nil        // a total's element is shown (what=total), as the VM's helper says
+    var topChecked = false          // the helper held the tab itself to top_origins
 }
 
 /// Why a fill or a check failed, in this process's words: the reasons secret-fill gives, matched by what they say,
@@ -432,7 +477,7 @@ func fillReason(_ guest: String) -> String {
 
 /// The answer secret-fill may give: these fields, each a scalar of its type (nil: wrong form).
 func fillResultSchema(_ raw: [String: Any]) -> [String: Any]? {
-    let bools: Set<String> = ["ok", "denied"]
+    let bools: Set<String> = ["ok", "denied", "top_checked"]
     let strings: Set<String> = ["mode", "field", "origin", "route", "reason", "profile"]
     let ints: Set<String> = ["chars"]
     // The fields that name one of a few things take only those: anything else is dropped, here, before it's kept anywhere.

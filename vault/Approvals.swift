@@ -650,6 +650,9 @@ func buildRule(_ p: Payload, use: String, secret: String?, site: String?, sessio
     var u = use
     if let s = secret {
         guard let sec = p.secrets[s] else { return (nil, "no secret named \(s)") }
+        if sec.kind == "card" || sec.kind == "shop" {
+            return (nil, "\(s) is a \(sec.kind): no rule covers purchases. A card that pays without asking is an agent card, with caps: `metacomputer secrets policy \(s) --pay agent --max-purchase ...`, in your own terminal")
+        }
         if sec.kind == "api" {
             u = "token"
             if isIdentityProviderHost(originHost(sec.api_host ?? "")) { return (nil, "\(s) goes to an identity provider, which always asks: no rule can cover it") }
@@ -864,8 +867,14 @@ func cmdCodeRuleAdd(_ paths: Paths, _ kind: String, _ a: Args) throws -> Int32 {
 
 func cmdPolicy(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let usage = "usage: policy NAME [--approval session|each] [--answer-timeout 30m|default]"
-    let a = try parseArgs(argv, values: ["approval", "answer-timeout"], flags: [])
+        + " | policy CARD [--pay ask|agent] [--label L] [--currency USD] [--max-purchase 50] [--max-per 200/30d] [--merchant-max https://site=100/30d ...] [--no-caps]"
+    let a = try parseArgs(argv, values: Set(["approval", "answer-timeout"]).union(cardValueFlags), flags: cardBoolFlags)
     let ap = a.last("approval"), at = a.last("answer-timeout")
+    let cardGiven = !Set(a.values.keys).intersection(cardValueFlags).isEmpty || !a.flags.intersection(cardBoolFlags).isEmpty
+    if cardGiven {
+        guard a.positional.count == 1, validName(a.positional[0]), ap == nil, at == nil else { throw usageError(usage) }
+        return try cmdCardPolicy(paths, a.positional[0], a)
+    }
     guard a.positional.count == 1, validName(a.positional[0]), ap != nil || at != nil, ap.map({ ["session", "each"].contains($0) }) ?? true else {
         throw usageError(usage)
     }
@@ -878,6 +887,7 @@ func cmdPolicy(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     let (key, existing) = try unlockKey(paths)
     defer { key.wipeKey() }
     guard let s = existing.secrets[name] else { throw VaultError("no secret named \(name)") }
+    if s.kind == "card" || s.kind == "shop" { throw usageError("\(name) is a \(s.kind): its purchases follow --pay ask|agent and its caps (policy \(name) --pay ...)") }
     if at != nil && s.kind != "api" { throw usageError("--answer-timeout is for api secrets (\(name) is a \(s.kind) secret)") }
     try updateVault(paths, key) { p in
         if let ap { p.secrets[name]?.approval = ap }
@@ -897,5 +907,43 @@ func cmdPolicy(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         oprint("Each proxied answer for \(name) may take up to \(durationWords(timeout ?? defaultAnswerTimeout))"
                + (timeout == nil ? " (the default)." : ". Tokens already given use it from their next request."))
     }
+    return Exit.ok
+}
+
+/// `policy CARD --pay ask|agent ...`: a card's (or Shop entry's) pay policy, label and caps, at the user's own terminal.
+func cmdCardPolicy(_ paths: Paths, _ name: String, _ a: Args) throws -> Int32 {
+    try requireTTY("policy")
+    installPromptSignalHandlers()
+    let (key, existing) = try unlockKey(paths)
+    defer { key.wipeKey() }
+    guard let s = existing.secrets[name] else { throw VaultError("no secret named \(name)") }
+    guard s.kind == "card" || s.kind == "shop" else {
+        throw usageError("--pay, --label, --currency and the caps are for cards and shop entries (\(name) is a \(s.kind) secret)")
+    }
+    let o = try parseCardOptions(a, existing: s.caps)
+    if o.pay == "agent" && s.source == "shop-spend-request" { throw usageError("\(name) is a single-use card from a Shop spend request: its purchase always asks") }
+    if s.kind == "shop" && (o.singleUse || o.merchantLocked || o.allowFrames != nil) {
+        throw usageError("--single-use, --merchant-locked and --allow-frame go with cards")
+    }
+    if o.merchantLocked && s.origins.isEmpty { throw usageError("--merchant-locked: the card needs its merchant (set it again with --origin https://shop)") }
+    // Any change here invalidates purchases already approved under the old policy (their generation no longer matches).
+    try updateVault(paths, key) { p in
+        if let v = o.pay { p.secrets[name]?.pay = v }
+        if let l = o.label { p.secrets[name]?.card_label = l }
+        if o.clearCaps { p.secrets[name]?.caps = nil } else if let c = o.caps { p.secrets[name]?.caps = c }
+        if o.singleUse { p.secrets[name]?.single_use = true }
+        if o.merchantLocked { p.secrets[name]?.merchant_locked = true }
+        if let fr = o.allowFrames { p.secrets[name]?.allowed_frames = fr.isEmpty ? nil : fr }
+        p.secrets[name]?.gen = randomBytes(8).map { String(format: "%02x", $0) }.joined()
+    }
+    let saved = (try? loadPayload(paths, key))?.secrets[name]
+    audit(paths, ["op": "policy", "result": "ok", "name": name, "label": saved?.card_label ?? name, "pay": saved?.pay ?? "ask",
+                  "caps": saved?.caps?.words ?? "no caps"], macKey: vaultAuditKey(paths, key))
+    oprint(payPolicyWords(name, saved, saving: "Changed"))
+    if saved?.pay == "agent" && s.kind == "card" {
+        if let w = reusableCardWarning(saved) { oprint(w) }
+        oprint(virtualCardAdvice)
+    }
+    oprint("Purchases already approved with \(name) and still open end at their next part (the policy changed).")
     return Exit.ok
 }

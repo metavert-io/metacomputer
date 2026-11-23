@@ -72,7 +72,8 @@ With the log on, a relay there writes one file per connection to
 `logs/actions/DAY/TIME-PID.jsonl` (private to you, 0600). The file holds:
 - who connected, from which project, and the VM's settings;
 - every tool call exactly as it was sent;
-- each result's error flag, hash, image count and timing;
+- each result's error flag, a keyed fingerprint (HMAC-SHA256 under a per-install secret, taken after card details
+  are masked), image count and timing;
 - every call the hub refused, and for whom.
 
 How it resists tampering:
@@ -2435,11 +2436,12 @@ it a degraded sign-in; a regular browser gets the normal one. Page-mode fills st
   page; a bar with no scheme counts only when the page's own address is https.
 - **The field is the focused element**, which must be in that page's top document (not in the browser's own controls
   and not in a frame, whose site the bar doesn't show) and be the expected kind: a password text for `password`, an
-  entry for `username` and `otp` (or a spin button for a numeric code), editable and not read-only.
+  entry for `username` and `otp` (or a spin button for a numeric code), and for a card's part (a purchase) an entry, a
+  spin button or a password text, editable and not read-only.
 - **The value is typed as real foreground keystrokes through Cua Driver** (`type_text`, `delivery_mode:
   "foreground"`), never handed to Claude; a field that already holds text is selected first, so the value replaces it.
-  Then the same field must still have the focus, on the same site, and hold that many characters (the browser's count,
-  never its text). The answer is held to the form a page-mode fill's is, and nothing the VM says after the value is
+  Then the same field (the same accessible object, or the same place in the tree) must still have the focus, on the
+  same site, and hold that many characters (the browser's count, never its text). The answer is held to the form a page-mode fill's is, and nothing the VM says after the value is
   passed on: the reason is one of the vault's own sentences.
 - It's checked before every use (a human-mode fill always checks first, then asks where the secret or the unlock says
   to), and the value then goes only to the site that check named.
@@ -2856,6 +2858,292 @@ what that user can:
 - **The inner Claude's answers are the VM's text.** The outer Claude treats them as data,
   never as your instructions (the skill says so), but no model is immune.
 
+### Paying for things (`secrets pay`)
+
+**Approval gates disclosure, not the charge.** What you approve is the vault handing a card's details to a site. Once a
+reusable card's number, expiry and code have reached a site, that site (and anything in the VM that saw them) can charge
+it again, for any amount, as often as it likes; no approval, cap or later step of the vault can take them back. For a
+card not marked single-use or merchant-locked, every card purchase's question says so ("a reusable card can be charged
+again by this site"), at the unlock terminal and in the summary that Touch ID's dialog shows, `requests` lists and a
+passphrase approval signs; `set --kind card` and `policy --pay agent` warn about it too. Where you can, use a card the
+issuer itself limits: a single-use number, or one locked to a merchant (mark it `--single-use` or `--merchant-locked`). A
+Shop spend request's card (`metacomputer shop card`) is both, and capped at the amount you approve in Shop: it's the
+route to prefer where it's available. Virtual cards stay a recommendation, never a requirement.
+
+**Accepted limits.** Three things the vault can't hold, by how payments work today: (1) the charge itself, once a card's
+details have gone to a site (above). The page's total is the page's own claim: the total check is a consistency check (the
+amount you approve is the one a person sees on that page), not proof against a deceptive page, which can show any total it
+likes; your approval of the amount shown and a single-use or merchant-locked card are the controls there. (2) a Shop checkout's completion, which Shop's CLI takes as a checkout id, a store and
+an instrument, with no amount or version the vault could bind it to. On that route the provider-side controls are Shop's
+own approval and your Shop spending limits; the vault reads the whole checkout twice and compares it, and checks what
+Shop reports charging afterwards (below). (3) Masking card details in what the agent reads is a defense against
+accidental exposure to an agent that works with you, not against a malicious process running as you on this Mac. Such a
+process can already change the hub's code, forge the hub's word that it masks (the ack file, its lock, its process), empty
+the open purchases' shapes the hub reads, or take a screenshot of the filled form (screenshots and recordings show what
+was typed, as documented below). What bounds the harm a purchase can do is your approval of each purchase and a card the
+issuer limits (single-use or merchant-locked). Everything else here is a check the vault makes.
+
+A payment card is a secret of kind `card` (docs/payments.md): its number (12-19 digits starting 2-6 that pass the card
+check), expiry, security code, name and billing postal code, typed by you at your own terminal (`secrets set NAME --kind
+card`), or read straight from a Shop spend request's card file by the unlock process (`secrets shop-card`). It has a label
+(what approvals, lists and the audit log call it), a pay policy (`ask`, the default, or `agent`), optional caps, and for an
+agent card the payment-form sites it may give parts to without a question (`--allow-frame`). `fill` refuses a card; only
+a purchase sends one.
+
+**A purchase** (`secrets pay CARD --origin https://shop`) goes in this order, in the unlock process:
+
+1. **The merchant's rules.** It reads the store's `/agents.md` and `/.well-known/ucp` from this Mac (no cookies, no
+   cache, redirects only within that site, at most 256 KiB, a few seconds each). Where `/agents.md` forbids scripted
+   checkout or entering card details, or asks agents to have the buyer complete checkout, the purchase is refused before
+   anything is asked or read in the VM, and the agent is told to hand payment to you (`metacomputer handoff --why
+   payment`). Only a file that's plainly an agents.md counts as rules: served as text or Markdown (or with no type),
+   whole, valid text with no control characters, and no web page's markers anywhere in it (`<html`, `<script`, `<meta`
+   and the like, looked for in the whole answer). Only a 404 or 410 counts as none. Anything else (a larger file, a web
+   page, another type, another answer, no answer) is "can't tell", never permission: an agent card refuses then, and an
+   asking card's question and its summary (Touch ID, `requests`, a passphrase approval) say "can't tell". A UCP profile
+   counts only when it's served as JSON. Only fixed rule names, payment-handler ids of a fixed shape and yes/no answers
+   come out of what's read.
+2. **The total.** In page mode, the element `--total-selector` names, read by the fill account in the one tab on that
+   site (held to the shop as the tab's own site): its rendered text, and only if a person would see it (a box of at least
+   2x2 pixels, and what's left of it once every clip on the way up is applied together has an area: the page, each
+   ancestor that clips (overflow on the axes it clips: `overflow-x` alone leaves the height alone) or contains its paint,
+   the root's or the body's overflow as the viewport's (which cuts only an axis that can't be scrolled, to what's in
+   view), an ancestor cutting a fixed or absolutely positioned total only when it's in that total's chain of containing
+   blocks (for a fixed one, an ancestor with a transform, filter, perspective, containment or the like; for an absolute
+   one, a positioned ancestor too), and each clip-path on it or an ancestor placed on that element's own box,
+   all intersected in page coordinates, leaving at least 4 square pixels that aren't a sliver. A clip-path counts only
+   when it can be placed exactly: an inset (rounded corners taken as straight cuts inside them), a simple polygon (no edge
+   crossing or running along another), a circle or ellipse (as a 16-sided polygon inside it), in px or %, and at most one
+   polygon that isn't convex; any other shape, unit or box, or a transform other than a move on the way up (a scale,
+   rotation, zoom or motion path; with only overflow clips, a rotation or skew) counts as hidden. Neither it nor any
+   ancestor may be hidden or see-through, and its text not transparent or too small to read. And since those rules are
+   a list a page could fall outside of, the browser's own hit test must agree: with the total scrolled into view (every
+   scroll put back after), points inside each text that holds its digits and renders (one hidden or invisible isn't in
+   the text read either) must land on that text's own element or one of its ancestors within the total; covered by
+   anything (a box or frame inside the total too), clipped away by anything, out of view or `pointer-events: none`, and
+   it isn't shown). In human mode, the browser's showing text at each place the label is,
+   with the words before it (the address bar names the site). Either way a place counts when the label stands as whole
+   words (default "Total"; `--total-label` must name the payable total: it says "total" or "due", and nothing like
+   "sub", "savings", "tax" or "shipping"), isn't a part of the price ("Sub-total", "Sub total", "Items total": the word
+   right before it), and is followed directly by the amount ("Total savings $1.00" isn't). Exactly one place may count:
+   none, or several (even showing the same amount), is unclear and refused, and the agent hands payment to you. A zero
+   amount is refused. Only an amount and a currency come out of that text. An explicit currency is kept as written: one
+   this doesn't support is refused, never read as the card's; with no currency at all the amount has none, which a card
+   with caps refuses.
+3. **The caps.** Per purchase, per rolling period and per merchant, checked against what the card spent in each period
+   (kept in the vault) plus the purchases still open. A purchase over a cap, a total the vault couldn't read, or a total
+   in another currency than the caps' is refused before anything is asked. The spending record keeps everything inside
+   the longest period a cap can have (366 days); at its limit (20000 entries) purchases are refused, never older ones
+   forgotten. Spending the caps' currency can't count (Shop charging in another currency) refuses further purchases with
+   that card or entry until it ages out of the caps' period.
+4. **The approval.** An `ask` card asks you, for this one purchase: typed at the unlock terminal, macOS's Touch ID or
+   login-password dialog, `secrets approve ID`, or the passphrase, as for any approval (presence mode included). The
+   question names every site that will get a card part (the shop, and each payment form's site `--frame-origin` named),
+   the total as the page's own claim, the card's label and the merchant's rules. The summary that Touch ID's dialog
+   shows, `requests` lists and a passphrase approval signs names every one of those sites in full, then what approving
+   means and anything uncertain (rules it can't read, an AP2 checkout whose signature isn't verified); if it can't all be
+   shown within what the dialog shows, nothing is asked and the purchase is refused. So a purchase names at most three
+   payment-form sites, each address at most 100 characters. No grant or unattended rule covers a card (`rule add
+   --secret` refuses one), and a `session` or `unlock` answer doesn't widen it. An `agent` card doesn't ask, unless the
+   unlock says `--confirm each`; its authorization is recorded as `policy:agent`, and it gives parts to a payment form's
+   site only when you allowed that site for the card (`policy CARD --allow-frame URL`). Right after the approval the card
+   is read again: a card or policy changed meanwhile ends it there.
+5. **The fills.** For 10 minutes (at most until the vault locks), the purchase types the card's parts into the tab on
+   the approved site, each part at most once (3 tries). Before each part: the card and its policy must still be the ones
+   approved (any `policy` change ends the purchase), the total is read again (a page whose total went up since you
+   approved gets nothing more), and a check without the value finds the field. In page mode the fill account's
+   secret-fill holds the tab itself to the shop (`top_origins`) and a frame's site to the ones approved, and says it did;
+   a VM whose helper doesn't say so (an older image) is refused before anything is typed. That answer comes from the VM:
+   it shows the genuine helper and browser did the checks, against a hostile page; a VM whose own software is hostile
+   could forge it (the threat model below). In human mode the desktop account's script reads the address bar and the
+   focused field in the top document. The hub for that VM must have said it has seen this purchase: it writes which open
+   purchases it has seen, read fresh, to `hub-acks/VM.json` in the vault folder (a 0700 folder of yours, the file 0600),
+   with its pid, when that process started and its lock (`RUN_DIR/hub/hub.pid`). The vault takes that word only from a
+   private file in a private folder, naming a process of yours that started exactly then, whose lock is held now and
+   names that same process; it waits up to 5 s for it and otherwise sends nothing, so the hub's masks are on before
+   anything of the card can come back. A process running as you could forge all of this (Accepted limits, above): it
+   guards against a hub that isn't running, a stale word and mistakes. Payments need the hub (`MCP_HUB=on`), which
+   keeps trying to find the vault folder if it starts before the vault is set up. Each fill gets a masking window of its
+   own, written for the hub with a new ack id before anything leaves: the ack wait, the fill's time limit and a settle
+   margin of a minute, whenever the purchase ends meanwhile, then a minute from when the attempt ends, however it ends; a
+   purchase that ended after trying a part stays masked that minute too (at a lock as well), and a new unlock keeps an
+   earlier one's entries in the file until their time passes (it never drops or removes them, however many; past 1000
+   purchases still in their window new purchases are refused until older ones pass, and a file that can't be read is
+   left as it is and stops new purchases), so whatever the fill made the page show has passed through the hub first. If that window can't be written, nothing is typed. The purchase's own
+   time is checked again after the page's checks, and once more after every slow step on the way, the provider's check
+   of a computer elsewhere included, and last inside the step that writes to ssh, after its own housekeeping and right
+   before the part's bytes are written: a purchase whose time ran out meanwhile sends nothing (ssh is ended unwritten). Then, before any part leaves the vault, the purchase goes in the spending record,
+   in one step under the vault's lock with a last check that the card, its policy and its caps still allow it (a policy
+   tightened while the page was being checked refuses it); a single-use card is spent from then on; if that can't be
+   written, nothing is sent. It's never taken back: a fill that reports a failure may still have handed the part over.
+6. **Who holds it.** `pay` gives its requester a 32-hex-digit key (`purchase_id`); the audit log and the terminal show
+   only a short id derived from it, which isn't a key. A purchase started from an agent session (Claude Code, Codex,
+   OpenClaw, Hermes Agent, Gemini CLI) belongs to that session; one started from an agent's shared process (Codex's app
+   server, an OpenClaw or Hermes Agent gateway: every conversation in one process) belongs to that process, so its
+   conversations aren't kept apart from each other. One started from outside any agent session has nothing to bind
+   to, so it can't be resumed: its own `pay` call fills the parts it names (`--fill`) and the key only ends it; a `pay`
+   from there that would need resuming (no `--fill`, or human mode) is refused before anything is asked. Ending a
+   purchase is exactly `pay --purchase KEY --done`, with at most `--vm` naming its own VM: the vault refuses `--done` with
+   any other word or without a key, and `metacomputer secrets pay` reads its arguments word by word, letting only that
+   exact form skip the checks a fill gets (this VM's handoff and the computer it acts on).
+
+**Card details in what the agent reads.** The hub masks every message the driver sends first thing in `on_upstream`,
+before its guards, traces, notes, events and every client get it (`lib/cardmask.py`). The action-log relay, which sees
+the connection before the hub, masks each record the same way before it's written (a call's arguments, a result's text,
+an error's message), and fingerprints a result only after masking it, with an HMAC under a per-install secret beside
+the log's signing key, so a short value (a security code, a postal code) can't be found from the log by trying every
+candidate. The hub keeps none of the driver's
+stderr, purchase or not: only how many lines and bytes there were and, for each line, a fixed class it derives itself
+(driver error, driver warning, VM not running, an SSH problem, a long line); its log and a failed connection's answer give
+those, never a line's text. A line that matches one of metacomputer's own refusals from before any VM is reached (a hub
+pinned to its VM, whose settings changed) is kept only as which refusal it was; the hub says it in its own words, with
+the VM name and port it pinned when it started, never anything from the line. Both the hub and the action log read the open purchases fresh for every result (nothing
+cached), and the vault sends no card part until the hub for that VM has said it has seen the purchase (below). Once
+read, a purchase's masks stay: the hub, and the action-log relay, keep applying them for the rest of their process's
+life (every purchase still in the file, however many, and the newest 64 of those no longer in it; a read of the file
+that fails lets none go), whatever the file's
+window or the clock says later; the window only adds masks, its expiry never removes ones already read, and the hub
+acknowledges a purchase only once it holds its masks. An error's message in the action log is masked like everything else. Always: a run of 12-19 digits that starts like a card number (2-6) and passes the card
+check, whole or in groups with up to three separators of any kind between them, standing on its own (not inside a word,
+a hash or an identifier), and a JSON number of that shape (a whole number or a float like `4242424242424242.0`), becomes
+`[card number hidden by metacomputer]`, in answers, errors and notifications, keys and values (the top level's keys too),
+at any depth. While a purchase is open on that VM, and through each fill's masking window and a minute after a purchase
+that tried a part ends (above), the vault leaves the hub its shapes in `purchases-active.json` (0600, each with its time;
+removed when none is left, and ignored once its time has passed): the security code's length, the postal code's shape and a salted fingerprint of the name,
+never a part. The hub then masks aggressively in that VM's results: any run of 12 or more digits, whole or in groups with
+up to three separators between them, whatever is around it and whether or not it passes the card check (a long id or a
+timestamp is masked too while the purchase is open; that's the trade), a card number split across nearby text or
+neighbouring values of one object or list, anything shaped like an expiry (and the value of a field named like one), the security code and the postal code in
+a field named like one, as the value of an object that names one (an accessibility node "Security code" and its value) or
+after such a name in text (`CVC:123` and `Security code=123` too), a postal code with letters anywhere, and the name's
+words (initials and punctuation between them don't matter). Text that is JSON, and a resource's JSON blob, are masked as
+JSON, so their fields' names count. It leaves identifiers alone (element references, ports, words with digits in them) and never touches
+encoded binary data (an image's or audio's base64, a resource's non-text blob, a media data: URL); a resource's text blob
+is decoded, masked and encoded again. If a check can't finish, the message isn't passed on (an answer becomes an error
+that says so), and a log record keeps only its type and timing. These are patterns and shapes: they keep details out of
+an honest agent's transcript in the forms a browser shows them; pixels aren't masked (a screenshot or a recording shows a
+filled field), and a VM that means to spell a number some other way can. The card's own limits are what hold against a
+hostile VM.
+
+**The threat model.**
+
+- **A hostile page.** It receives what's typed into its fields, which is the point of a checkout; it's the merchant you
+  approved, on the site you approved, and it can charge a reusable card again (see the first paragraph). It can't make
+  the vault type into another site's tab, a frame from a site that wasn't approved, or a field outside the top document
+  in human mode; its own scripts can't redefine what the checks read (secret-fill reads in isolated worlds; human mode
+  reads the browser's own address bar). It can show text that addresses the agent; the hidden-text marks apply, and
+  `pay`'s refusals and your approval don't depend on what the page says about itself, only on its site and its total.
+- **A fake total.** The total in your approval is the page's own claim, and the caps check that claim. A dishonest page
+  can show less than it charges. The vault can't tell, except that a total that goes up between your approval and a card
+  part is refused; you can, in the live view, before you approve. The card's own limit at your bank, and your statement,
+  are the backstop; a single-use or merchant-locked card makes that limit small. Where a merchant supports AP2, the signed
+  mandate binds the merchant's own checkout and amount.
+- **A swapped site.** A look-alike site shows its real origin in your approval, since the site comes from the browser
+  (DevTools' frame tree in page mode, the address bar checked against the page's own address in human mode), never from
+  the agent or the page. A tab that moves to another site after you approve is refused at its next part, with nothing
+  typed, and a tab that moves to a payment form's own site is refused by the VM's helper itself, which never takes that
+  site as the tab (tests/test_payments_vm.py and tests/test_secret_fill.py). A card limited with `--origin` pays only there.
+- **A prompt-injected agent.** It can ask for purchases, and pick a merchant and an amount within what a page shows. An
+  `ask` card puts every one in front of you, with every recipient named; an agent card's caps bound what it can spend
+  without you; it can't read a card from the vault, and the hub masks details it reads back in the forms above. A card
+  fill the merchant forbids is refused whatever the agent says.
+- **A hostile VM.** Software in the VM running as the desktop user sees what's typed there, and can forge what the VM's
+  helpers answer (the tab's site, `top_checked`); masking can't stop it encoding a number.
+- **A program of yours on this Mac changing what the vault runs.** The pinned Shop CLI runs in a Seatbelt sandbox that
+  lets it read only its own pinned files and the system's: a module, library or file an agent plants or changes outside
+  those can't be read by it, and a change inside them stops the run at the next check (a change made and undone between
+  the check and Node reading the file isn't seen). Approval and the caps still
+  decide whether a card goes to the VM at all; once it has, the card's own limits hold.
+
+**What it doesn't stop:** a site charging a reusable card again once it has it (approval gates disclosure, not the
+charge); a Shop checkout changed by the merchant in the moment between the vault's second read and the completion (Shop's
+approval and limits hold there); a page in the VM, a program running there as the desktop user, a screenshot or a
+recording seeing the parts once they're typed (as for passwords; the desktop account sees a human-mode fill on its way);
+an agent card's purchases within its caps, by your choice; Shopify's `shop` CLI on your Mac being run by an agent
+directly, past metacomputer's approval (Shop's own approval and spending limits hold there); a program running as you
+changing the pinned CLI's files, or reading a spend-request card's file, in the moment between the vault's check and
+Node reading them (a change made and undone between two checks isn't seen); the merchant-rules check misreading what a
+store publishes (toward refusing).
+
+**Shop's CLI.** The vault runs only the `shop` CLI you pinned in your own terminal (`secrets shop-cli set`), never a
+program or folder a request names, and only confined. The pin holds everything Node loads: the runtime (`node`) and every
+library it loads that isn't the system's (Homebrew's libnode, libuv, OpenSSL, ICU and the rest, found the way the loader
+finds them, by the path it loads each from), the CLI's entry script and every file of its package (a link out of the
+package isn't pinned), each by its SHA-256, and the one file of yours the CLI may use, its sign-in
+(`SHOP_AUTH_FILE`, from your terminal: by default `~/.config/shop-node-wasm/credentials.json`). Before every run it
+checks them all again (owned by you or root, not writable by other users, unchanged, the libraries found in the same
+places), and refuses on any difference; a pin made before this needs `shop-cli set` again. **The OS confines it:** the
+vault runs it through macOS's `sandbox-exec` with a Seatbelt profile it writes for that run (given inline, so no file of
+it can be changed), in the way OpenAI's Codex CLI confines commands on macOS. Everything is denied but: reading and
+mapping the pinned runtime and the libraries it loads, and the system's own libraries and frameworks; reading the pinned
+package; reading and writing its own fresh folder (its home, temporary and working folder, removed afterwards) and the
+sign-in file (with the `.shop-auth-*.tmp` files beside it that Shop's CLI writes it through); looking up files' metadata;
+and one TCP connection target: a proxy of that run's own on 127.0.0.1, which the vault runs and gives the CLI as
+`HTTPS_PROXY` with a secret of that run's in its userinfo (Node sends it as Proxy-Authorization; without it the proxy
+answers 407, so nothing else on this Mac can use it). The proxy tunnels only to port 443 of public addresses: it resolves
+names itself, refuses loopback, private, link-local, shared and other special ranges and this Mac's own addresses
+(whatever a name resolves to, and in whatever form an address is written: an IPv4 address in an IPv6 form is checked as
+IPv4), and connects to the address it checked. It serves at most 8 connections at once, 256 MiB each way per
+connection, with deadlines on every read and write, and when the run ends it shuts every connection it still has: each
+socket is held as an object and closed once, so the shutdown never reaches a descriptor number that has since gone to
+something else. Seatbelt itself can't name address
+ranges, so the proxy is where "public only" is enforced; the sandbox makes it the only way out. No Unix socket (the
+vault's own included), no other local service. It may start no program and fork nothing. So a module planted anywhere,
+a file outside those, a child process, a worker importing a path outside the package, or a connection to anything on
+this Mac or its network all fail, whatever Node does. Without `/usr/bin/sandbox-exec`, or when the profile fails to apply, the vault doesn't
+run the CLI at all. Inside the sandbox, as a second layer, Node runs with a fixed command and only `PATH=/usr/bin:/bin`,
+`LANG`, `NO_COLOR`, `OPENSSL_CONF=/dev/null` and `SHOP_AUTH_FILE` (no `NODE_OPTIONS`, `NODE_PATH` or npm settings),
+`--no-addons`, and a `data:` preload whose module hooks stop the CLI if it resolves a module outside its package; those
+hooks alone don't cover every worker (an eval worker can get past them), which is why the sandbox is the boundary. A
+Node without the hooks (older than 22.15) is refused too.
+A spend request's card is imported only when Shop's answer says it was issued for exactly that request and names the
+store's site, an approved limit and a supported currency; anything missing refuses the import. A Shop checkout (`secrets
+shop-complete`, which `metacomputer shop complete` uses) is read, approved under the shop entry's policy, read again right
+before it's completed and completed only when the whole checkout is the same, compared as the CLI wrote it, every
+number by its exact text, never converted (only fields about the read itself, like its link and expiry, are left out),
+its terms read the same way again, and the instrument one it offers; the reservation checks the entry's policy and caps
+under the vault's lock. After it completes, what Shop reports charging is checked: one total, every currency the answer
+names the same one and the approved one, at most the approved amount. A higher amount is reported
+(`completed_with_a_higher_total`) and the difference goes in the spending record; another currency is reported
+(`completed_in_another_currency`) and stops that entry's purchases until it ages out of the caps' period; currencies
+that disagree are never verified (`completed_unverified`) and stop it the same way; no clear total is reported as
+unverified. A completion is settled in the vault: its reservation writes a marker, with an id of its own, into the
+vault's sealed state before the CLI completes it, and that marker goes only in the same write that records what Shop
+charged beyond it, and only for a definite outcome (Shop completed it and said plainly what it charged, or Shop's CLI
+said nothing was done: its own refusal of the arguments before sending, `usage` or `invalid_input`, or `auth_required`,
+Shop refusing the request for want of a valid sign-in). A timeout, an answer that can't be read,
+one that doesn't say what was charged, and any other failure (a bare `{"ok": false}`, a transport or upstream error, a
+checkout not completed, a code it doesn't know) settles nothing: the entry
+buys nothing until you settle it (`spend-resolve`), across a lock or a restart. If that write fails, the outcome waits in memory and in
+`spend-pending.jsonl`, each record carrying an HMAC under a key only the unlocked vault holds; every purchase and unlock
+records what checks out (the right MAC, naming the very reservation still waiting, the same entry, positive amounts,
+sane times; a record of an earlier attempt can't settle a later one), and
+anything else in that file is never imported: it's reported in the audit log (`payment.pending_rejected`) and stops every
+purchase until you look (`secrets spend-resolve`, your own terminal: settle an entry by hand with `--extra AMOUNT`, or
+drop what can't be verified with `--discard-pending`). Spending is never undercounted and a record can't lower it. The
+completion can't carry an amount (the accepted limit above).
+
+**AP2.** After a purchase is approved by you, `secrets ap2 sign` signs AP2 v0.2 Checkout and Payment Mandates (SD-JWTs,
+ES256) with a P-256 key that only the vault holds (made by `secrets ap2 init`, in your own terminal). It signs only a
+checkout JWT with a merchant's algorithm (never `none`), at most 32 KiB, no field given twice at any depth (checked on
+the raw JSON, before it's read), the merchant's id, name and website (which must be the site named), its own id, exactly
+one payable total in whole minor units and one supported currency (the payable total's own currency, when it names one,
+must be the checkout's), every form of the total agreeing; a checkout that
+says when it expires (`exp`) or starts (`nbf`) must be valid, when it's read and again right before it's signed (after
+however long the approval took), and one that names an audience (`aud`) must name this vault's AP2 key id. The merchant's signature on it can't be verified here (its key isn't known), so the payment mandate
+says so (`risk_data.checkout_signature_verified: false`), the question and its summary say so, and an agent card refuses
+to sign. Each checkout (its merchant and its id, however the JWT is written or signed) is signed once, and counts against
+the caps before it's signed. No Metavert server takes part, and almost no merchants accept AP2 yet.
+
+**Web Bot Auth** is off until you run `secrets wba init` and `wba on` in your own terminal: an Ed25519 key in the vault
+signs the vault's requests to merchants, and `wba sign` gives a request's headers (60 s). The key never leaves the vault;
+the VM's browsers don't sign. Its signatures cover the site and the agent's identity, not a purchase.
+
+**The audit log** records each step with the card's label, the site, the total, the purchase's short id and the outcome
+(events `payment.request`, `payment.authorize`, `payment.fill`, `payment.denied`, `payment.end`, `payment.mandate`), and
+its sinks get them all. A card's parts and a purchase's key are never in a record, an event, output, or a command line:
+the parts go to the VM only on ssh's standard input, like every value.
+
 ### Keys, the Secure Enclave and rotation
 
 - **How the vault is keyed.** `vault.json` is encrypted (AES-256-GCM) with a random
@@ -2918,12 +3206,12 @@ no spaces, ASCII), and each event is chained to the one before:
 | `prev` | the previous event's `hash` (64 zeros for the first) |
 | `hash` | SHA-256 of this event's canonical JSON without `hash` |
 | `mac` | the creation MAC: HMAC-SHA256 under the vault's audit key over the event's canonical JSON without `mac` and `hash`. Absent on a refusal written while the vault was locked |
-| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `renew`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `import_passwords`, `import_session`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper`, `code_request`, `code_give`, `code_fill`, `code_relay`, `code_refuse`, `code_expire` |
+| `op` | `unlock`, `lock`, `fill`, `login`, `session_save`, `session_load`, `token`, `renew`, `api`, `revoke`, `begin`, `request`, `authorize`, `approve`, `set`, `rotate`, `delete`, `policy`, `rule_add`, `rule_remove`, `import_passwords`, `import_session`, `bind`, `init`, `rekey`, `recover`, `rotate_session_key`, `session_policy`, `session_delete`, `audit_sink_add`, `audit_sink_remove`, `audit_sink_test`, `audit_tamper`, `code_request`, `code_give`, `code_fill`, `code_relay`, `code_refuse`, `code_expire`, `pay`, `pay_fill`, `pay_end`, `shop_card`, `shop_cli`, `ap2`, `ap2_sign`, `wba`, `wba_sign` |
 | `result` | `ok`, `denied`, `locked`, `error`; `pending` for `begin` and `request` |
 | `name`, `vm`, `field`, `origin`, `profile` | which secret, where |
 | `approval` | `session` (no question), `each:yes` / `each:no` (asked), `each:session` / `each:unlock` (a scope granted), `each:local-auth` (Touch ID or the login password) / `each:passphrase` (`approve --passphrase`), `grant:session` / `grant:unlock` (covered by one), `rule:ID` (an unattended rule), `-` |
 | `request_id`, `use` | the request a use waited on (`request` when it was filed, `authorize` when you allowed it), and what it was for |
-| `event` | the name other password vaults give site-login events, beside `op`: `login.request` and `login.authorize` (a fill's or sign-in's request), `login.fill` (filled), `login.denied` (refused, or locked) |
+| `event` | the name other password vaults give site-login events, beside `op`: `login.request` and `login.authorize` (a fill's or sign-in's request), `login.fill` (filled), `login.denied` (refused, or locked); for purchases `payment.request`, `payment.authorize`, `payment.fill`, `payment.denied`, `payment.end` and `payment.mandate` |
 | `username_hint` | a password secret's username, masked (`a***@example.com`) |
 | `totp_for`, `totp_for_id` | the login an imported 2FA code belongs to (its name, and its id) |
 | `totp_unlinked` | on `delete` or a `set --replace` of another kind: the 2FA codes no longer tied to that login |

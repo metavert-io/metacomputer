@@ -335,6 +335,8 @@ class FakeChrome:
                 if not fr.get("active"):
                     return {"result": {"type": "object", "subtype": "null", "value": None}}
                 return {"result": {"type": "object", "subtype": "node", "objectId": "el:" + fid}}
+            if "mcomp:total" in e:
+                return {"result": {"type": "object", "value": {"n": 1, "text": page.get("total_text", ""), "visible": page.get("total_visible", True)}}}
             if "mcomp:frame-origin" in e:
                 return {"result": {"type": "string", "value": fr.get("self_origin", fr["origin"])}}
             if "mcomp:focus-selector" in e:
@@ -505,6 +507,27 @@ def fake_suite(td):
              lambda r, c: r.get("denied") and "not a password field" in r["reason"] and not c.inserted)
     scenario("username into an email field", [page(frames={"F0": {"origin": SITE, "url": SITE, "active": {"element": {"tag": "input", "type": "email"}}}})],
              {"field": "username", "value": "dummy-user-qx7"}, lambda r, c: r.get("ok") and c.inserted == [("A", "dummy-user-qx7")])
+    # A purchase's payment frame (top_origins): the frame's site may hold the field, never be the tab itself.
+    PAY = "https://pay.example"
+    TXT = {"tag": "input", "type": "text"}
+    scenario("top_origins: a tab on the payment frame's own site isn't a destination: refused, nothing typed",
+             [page(url=PAY + "/card", frames={"F0": {"origin": PAY, "url": PAY + "/card", "active": {"element": dict(TXT)}}})],
+             {"field": "text", "origins": [SITE, PAY], "top_origins": [SITE]},
+             lambda r, c: r.get("denied") and "no open tab on " + SITE in r["reason"] and not c.inserted and "top_checked" not in r)
+    scenario("top_origins: ...a tab that is on the shop, whose frame holds the field, is filled, and the answer says top_checked",
+             [page(frames={"F0": {"origin": SITE, "url": SITE + "/pay", "active": {"iframe": "F1"}},
+                           "F1": {"origin": PAY, "url": PAY + "/card", "parent": "F0", "active": {"element": dict(TXT)}}})],
+             {"field": "text", "origins": [SITE, PAY], "top_origins": [SITE]},
+             lambda r, c: r.get("ok") is True and r.get("top_checked") is True and r.get("origin") == SITE and c.inserted == [("A", VALUE)])
+    scenario("top_origins: a top_origins naming a site the request's origins don't hold is refused as a bad request",
+             [page()], {"origins": [SITE], "top_origins": [PAY]},
+             lambda r, c: r.get("ok") is False and r.get("reason") == "bad request" and not c.inserted)
+    scenario("read total: the element's rendered text and whether it's shown", [page(total_text="Total $12.34")],
+             {"mode": "read", "what": "total", "selector": "#total", "value": None, "top_origins": [SITE]},
+             lambda r, c: r.get("ok") is True and r.get("text") == "Total $12.34" and r.get("visible") is True and r.get("top_checked") is True)
+    scenario("read total: an element that isn't shown says so", [page(total_text="Total $1.00", total_visible=False)],
+             {"mode": "read", "what": "total", "selector": "#total", "value": None},
+             lambda r, c: r.get("ok") is True and r.get("visible") is False)
     # Open mode (a one-time sign-in link): every navigation of the tab's page to a site the vault didn't name is stopped
     # before it's sent (Fetch interception), for the whole window; the tab must end on a named site.
     link = SITE + "/verify?t=" + VALUE
@@ -651,6 +674,63 @@ LOGIN_HTML = """<!doctype html><meta charset="utf-8"><title>dummy login</title>
 FRAME_HTML = """<!doctype html><meta charset="utf-8"><input id="fpw" type="password">"""
 # A page that lies to scripts in its own world: every input claims to be a password field,
 # the focused element is always #pw2, and self.origin names another site.
+# Totals a person can't see, each a different way (F12): the read must say they aren't shown; only #shown is.
+TOTALS_HTML = """<!doctype html><meta charset="utf-8"><title>totals</title><style>body{font:16px sans-serif}</style>
+<p id="shown">Total $12.34</p>
+<div style="opacity:0"><p id="opa">Total $1.00</p></div>
+<div style="visibility:hidden"><p id="vis">Total $1.00</p></div>
+<p id="off" style="position:absolute; left:-10000px; top:0">Total $1.00</p>
+<p id="sr" style="position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0)">Total $1.00</p>
+<div style="height:0; overflow:hidden"><p id="zero">Total $1.00</p></div>
+<p id="tiny" style="font-size:1px">Total $1.00</p>
+<p id="clear" style="color:transparent">Total $1.00</p>
+<div style="filter:opacity(0)"><p id="filt">Total $1.00</p></div>
+<div style="clip-path:inset(50%)"><p id="cpath">Total $1.00</p></div>
+<div style="clip-path:polygon(0 0, 10px 0, 20px 0)"><p id="cpoly">Total $1.00</p></div>
+<div style="clip-path:path('M0 0 L1 0 Z')"><p id="cpathfn">Total $1.00</p></div>
+<div style="width:300px; height:0; contain:paint"><p id="contain">Total $1.00</p></div>
+<div style="width:200px; height:100px; clip-path:polygon(0px 0px, 50% 100%, 100px 100px)"><p id="mixpoly">Total $1.00</p></div>
+<div style="clip-path:inset(0px 100% 0px 0px)"><p id="collapse">Total $1.00</p></div>
+<div style="clip-path:inset(0px 10px 0px 0px)"><p id="okclip">Total $2.00</p></div>
+<div style="width:200px; height:100px; clip-path:polygon(evenodd, 0px 0px, 100% 0px, 100% 100%, 0px 100%, 0px 0px, 100% 0px, 100% 100%, 0px 100%)"><p id="evenodd">Total $1.00</p></div>
+<div style="width:200px; height:100px; clip-path:circle(10px at 10000px 10000px)"><p id="farcircle">Total $1.00</p></div>
+<div style="width:200px; height:100px; clip-path:polygon(500px 500px, 600px 500px, 550px 600px)"><p id="outpoly">Total $1.00</p></div>
+<div style="width:200px; height:100px; clip-path:polygon(-50px -50px, 150px -50px, 150px 150px, -50px 150px)"><p id="partpoly">Total $2.00</p></div>
+<div style="width:200px; height:100px; clip-path:circle(80px at 50% 50%)"><p id="okcircle">Total $2.00</p></div>
+<div style="position:relative; width:200px; height:100px; clip-path:inset(0px 50% 0px 0px)"><p id="r23half" style="position:absolute; left:120px; top:10px; margin:0">Total $1.00</p></div>
+<div style="width:200px; height:100px; clip-path:inset(0px 50% 0px 0px)"><div style="width:200px; height:100px; clip-path:inset(0px 0px 0px 50%)"><p id="r23opp" style="margin:0">Total $1.00</p></div></div>
+<div style="position:relative; width:200px; height:100px; clip-path:polygon(0px 0px, 200px 0px, 200px 40px, 40px 40px, 40px 100px, 0px 100px)"><p id="r23ell" style="position:absolute; left:60px; top:55px; margin:0">Total $1.00</p></div>
+<div style="width:200px; height:100px; clip-path:inset(0px 50% 0px 0px)"><p id="r23left" style="margin:0; width:90px">Total $2.00</p></div>
+<div style="position:relative; width:200px; height:100px; clip-path:polygon(0px 0px, 200px 0px, 200px 40px, 40px 40px, 40px 100px, 0px 100px)"><p id="r23top" style="position:absolute; left:60px; top:5px; margin:0">Total $2.00</p></div>
+<div style="width:200px; height:100px; transform:translateX(10px); clip-path:inset(0px 10px 0px 0px)"><p id="r23shift" style="margin:0">Total $2.00</p></div>
+<div style="width:200px; height:100px; transform:scale(2); transform-origin:0 0; clip-path:circle(10px at 300px 50px)"><p id="r23scale" style="margin:0">Total $1.00</p></div>
+<div style="height:220px"></div>
+<div style="overflow-x:clip; height:20px"><p id="r29clipx" style="margin:0; position:relative; top:40px">Total $2.00</p></div>
+<div style="overflow-x:clip; height:30px"><div style="display:flex"><div style="width:100px; height:120px"></div><aside style="position:sticky; top:0; align-self:flex-end; width:140px"><p id="r29sticky" style="margin:0">Total $2.00</p></aside></div></div>
+<div style="height:120px"></div>
+<div style="overflow-x:auto; width:300px"><table><tr><td>Item</td><td id="r29scroll">Total $2.00</td></tr></table></div>
+<div style="overflow-x:auto; width:150px"><table><tr><td style="min-width:400px">Item</td><td id="r29scrolled">Total $1.00</td></tr></table></div>
+<div style="overflow-y:clip; height:20px"><p id="r29clipy" style="margin:0; position:relative; top:40px">Total $1.00</p></div>
+"""
+# R29: the body's overflow-x is the viewport's (a common way to stop sideways scrolling): it doesn't cut what's below.
+TOTALS2_HTML = """<!doctype html><meta charset="utf-8"><title>totals2</title><style>body{font:16px sans-serif; margin:0; overflow-x:hidden}</style>
+<div style="height:40px">Shop</div>
+<aside style="position:absolute; top:1500px; right:20px; width:200px"><p id="r29abs">Total $2.00</p></aside>
+<div style="height:20px; overflow:hidden"><p id="r34fixed" style="position:fixed; top:250px; left:20px; margin:0">Total $2.00</p></div>
+<div style="height:20px; overflow:hidden; transform:translateX(0px)"><p id="r34fixedcb" style="position:fixed; top:100px; left:300px; margin:0">Total $1.00</p></div>
+<div style="height:20px; overflow:hidden"><p id="r34abs" style="position:absolute; top:400px; left:20px; margin:0">Total $2.00</p></div>
+<div style="position:relative; height:20px; overflow:hidden"><p id="r34abscb" style="position:absolute; top:60px; left:0px; margin:0">Total $1.00</p></div>
+<div style="height:20px; overflow:hidden; transform-style:preserve-3d"><p id="r39p3d" style="position:fixed; top:300px; left:20px; margin:0">Total $1.00</p></div>
+<div style="position:relative; margin-left:300px; width:200px"><p id="r39covered" style="margin:0">Total $1.00</p><div style="position:absolute; inset:0; background:white"></div></div>
+<div style="margin-left:300px"><p id="r39nopointer" style="margin:0; pointer-events:none">Total $1.00</p></div>
+<p id="r41hiddenspan" style="margin:0; margin-left:300px">Total $2.00<span hidden>$3.00</span><span style="visibility:hidden">$4.00</span></p>
+<p id="r42coverdiv" style="position:relative; margin:0; margin-left:300px; width:200px">Total $1.00<span style="position:absolute; inset:0; background:white"></span></p>
+<p id="r42coverframe" style="position:relative; margin:0; margin-left:300px; width:200px">Total $1.00<iframe srcdoc="&lt;body style='margin:0;background:white'&gt;" style="position:absolute; left:0; top:0; width:100%; height:100%; border:0"></iframe></p>
+<p id="r42inline" style="margin:0; margin-left:300px">Total <b>$2</b><span>.00</span></p>
+"""
+
+SHOWN_TOTALS = ("#shown", "#okclip", "#partpoly", "#okcircle", "#r23left", "#r23top", "#r23shift", "#r29clipx", "#r29sticky", "#r29scroll")
+
 TAMPER_HTML = """<!doctype html><meta charset="utf-8"><input id="plain" type="text"><input id="pw2" type="password">
 <script>
 Object.defineProperty(HTMLInputElement.prototype, 'type', {get() { return 'password'; }});
@@ -679,6 +759,8 @@ def chrome_suite(td, chrome):
     pa, pb = sa.server_address[1], sb.server_address[1]
     open(os.path.join(a_dir, "login.html"), "w").write(LOGIN_HTML % {"other": pb})
     open(os.path.join(a_dir, "tamper.html"), "w").write(TAMPER_HTML)
+    open(os.path.join(a_dir, "totals.html"), "w").write(TOTALS_HTML)
+    open(os.path.join(a_dir, "totals2.html"), "w").write(TOTALS2_HTML)
     for d in (a_dir, b_dir):
         open(os.path.join(d, "frame.html"), "w").write(FRAME_HTML)
     site, other = f"http://127.0.0.1:{pa}", f"http://127.0.0.1:{pb}"
@@ -798,6 +880,64 @@ def chrome_suite(td, chrome):
               and h.value("document.getElementById('plain').value === '' && document.getElementById('pw2').value === ''"), r)
         r = fill("document.getElementById('pw2').focus()")
         check("chrome: ...and the real password field still fills (self.origin rewritten by the page)", r.get("ok") and r.get("origin") == site, r)
+
+        # A purchase's total (F12): shown to a person, or not, whatever hides it.
+        h.call("Page.navigate", {"url": f"{site}/totals.html"})
+        wait_for("location.pathname === '/totals.html' && document.readyState === 'complete'")
+        seen = {}
+        for sel in ("#shown", "#opa", "#vis", "#off", "#sr", "#zero", "#tiny", "#clear", "#filt", "#cpath", "#cpoly", "#cpathfn", "#contain",
+                    "#mixpoly", "#collapse", "#okclip", "#evenodd", "#farcircle", "#outpoly", "#partpoly", "#okcircle",
+                    "#r23half", "#r23opp", "#r23ell", "#r23left", "#r23top", "#r23shift", "#r23scale",
+                    "#r29clipx", "#r29sticky", "#r29scroll", "#r29scrolled", "#r29clipy"):
+            res, raw = run_script({"mode": "read", "what": "total", "field": "text", "origins": [site], "top_origins": [site], "selector": sel},
+                                  [net], uid=os.getuid(), proc_root="/nonexistent")
+            seen[sel] = (res.get("ok"), res.get("visible"), res.get("text"))
+        check("chrome: a total is read as shown only when a person sees it: not inside a see-through or hidden ancestor, off the page, "
+              "clipped away (an sr-only box, a zero-height ancestor, clip-path inset, a polygon with no area or a path, a zero-height "
+              "paint-contained ancestor, a polygon of mixed units with no area, an inset that collapses its width, an even-odd "
+              "polygon that traces its square twice, a circle or polygon outside the element), in 1px or transparent text, or "
+              "under an opacity filter; a clip-path that leaves an area (an inset, a polygon partly outside, a circle) doesn't hide it",
+              seen["#shown"] == (True, True, "Total $12.34") and all(seen[k][:2] == (True, True) for k in SHOWN_TOTALS[1:])
+              and all(v[0] is True and v[1] is False for k, v in seen.items() if k not in SHOWN_TOTALS), seen)
+        check("chrome (R23): what's shown is the total's box cut by every clip on the way up, together: a total outside its "
+              "parent's clip, inside two clips that leave nothing between them, outside an L-shaped polygon's arms, or under a "
+              "clip-path on a scaled box (the shape can't be placed exactly) is hidden; one inside its parent's clip, inside an "
+              "L's arm, or under a clip-path on a moved (translated) box is shown",
+              all(seen[k][:2] == (True, False) for k in ("#r23half", "#r23opp", "#r23ell", "#r23scale"))
+              and all(seen[k][:2] == (True, True) for k in ("#r23left", "#r23top", "#r23shift")),
+              {k: v for k, v in seen.items() if k.startswith("#r23")})
+        h.call("Page.navigate", {"url": f"{site}/totals2.html"})
+        wait_for("location.pathname === '/totals2.html' && document.readyState === 'complete'")
+        before_scroll = h.value("window.scrollX + ',' + window.scrollY")
+        for sel in ("#r29abs", "#r34fixed", "#r34fixedcb", "#r34abs", "#r34abscb", "#r39p3d", "#r39covered", "#r39nopointer",
+                    "#r41hiddenspan", "#r42coverdiv", "#r42coverframe", "#r42inline"):
+            res, raw = run_script({"mode": "read", "what": "total", "field": "text", "origins": [site], "top_origins": [site], "selector": sel},
+                                  [net], uid=os.getuid(), proc_root="/nonexistent")
+            seen[sel] = (res.get("ok"), res.get("visible"), res.get("text"))
+        check("chrome (R29): overflow clips only the axes it names: a total below an overflow-x:clip box, or in a sticky order "
+              "summary that hangs below one, is shown, as is one inside a sideways-scrolling table; one scrolled out of that table, or "
+              "below an overflow-y:clip box, is hidden; and the body's overflow-x:hidden (the viewport's) doesn't hide a summary "
+              "further down the page", all(seen[k][:2] == (True, True) for k in ("#r29clipx", "#r29sticky", "#r29scroll", "#r29abs"))
+              and all(seen[k][:2] == (True, False) for k in ("#r29scrolled", "#r29clipy")),
+              {k: v for k, v in seen.items() if k.startswith("#r29")})
+        check("chrome (R34): an ancestor clips a fixed or absolute total only when it's in the total's chain of containing "
+              "blocks: a fixed total below a 20px overflow:hidden wrapper, and an absolute one below such a wrapper that isn't "
+              "positioned, are shown; under a transformed wrapper (fixed) or a positioned one (absolute) they're hidden",
+              seen["#r34fixed"][:2] == (True, True) and seen["#r34abs"][:2] == (True, True)
+              and seen["#r34fixedcb"][:2] == (True, False) and seen["#r34abscb"][:2] == (True, False),
+              {k: v for k, v in seen.items() if k.startswith("#r34")})
+        after_scroll = h.value("window.scrollX + ',' + window.scrollY")
+        check("chrome (R39): the browser's own hit test must agree with the geometry: a fixed total clipped by a transform-style: "
+              "preserve-3d ancestor (a containing block the rules didn't list), one covered by another element, and one with "
+              "pointer-events: none are hidden; the shown ones above stay shown, and the page's scroll is put back after each read",
+              all(seen[k][:2] == (True, False) for k in ("#r39p3d", "#r39covered", "#r39nopointer"))
+              and before_scroll == after_scroll, ({k: v for k, v in seen.items() if k.startswith("#r39")}, before_scroll, after_scroll))
+        check("chrome (R41, R42): the hit test looks only at digits that render (a hidden or invisible span's aren't in the text "
+              "read, so a total with one is shown), and the point must land on the digits' own element or an ancestor in the "
+              "total: covered by a descendant (an opaque box or iframe inside the total), it's hidden; digits split across "
+              "inline elements are still shown", seen["#r41hiddenspan"][:2] == (True, True) and seen["#r41hiddenspan"][2] == "Total $2.00"
+              and seen["#r42coverdiv"][:2] == (True, False) and seen["#r42coverframe"][:2] == (True, False)
+              and seen["#r42inline"][:2] == (True, True), {k: v for k, v in seen.items() if k.startswith(("#r41", "#r42"))})
         h.close()
     finally:
         proc.terminate()

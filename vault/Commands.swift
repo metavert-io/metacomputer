@@ -15,6 +15,12 @@ In your own terminal (these ask for the vault passphrase):
       [--api-path-prefix /v1] [--answer-timeout 30m] [--approval session|each] [--project DIR ...] [--replace]
                                          store a secret (the value is typed, not echoed); --replace rotates it;
                                          --answer-timeout: how long one proxied answer may take (default 10m, at most 1h)
+  set NAME --kind card [--label "Agent Visa"] [--pay ask|agent] [--origin https://shop ...] [--currency USD]
+      [--max-purchase 50] [--max-per 200/30d] [--merchant-max https://shop=100/30d ...] [--project DIR ...] [--replace]
+                                         a payment card: number, expiry, security code, name and postal code are typed
+                                         (hidden); every purchase asks you unless --pay agent (then the caps hold it)
+  set NAME --kind shop [--label L] [--pay ask|agent] [caps as above]
+                                         the policy and caps for purchases through your own Shop account
   delete NAME                            remove a secret
   bind VM --port P --host-key-line LINE --fill-key PATH --fill-user U --ops-key PATH --ops-user U
       [--proxy-key PATH --proxy-user U --proxy-port N] --gateway PATH
@@ -31,6 +37,17 @@ In your own terminal (these ask for the vault passphrase):
   policy NAME [--approval session|each] [--answer-timeout 30m|default]
                                          whether a secret's uses ask first; an api secret's answer time limit
                                          (without typing its value again)
+  policy CARD [--pay ask|agent] [--label L] [--currency USD] [--max-purchase 50] [--max-per 200/30d]
+      [--merchant-max https://shop=100/30d ...] [--no-caps]
+                                         a card's (or shop entry's) pay policy and caps
+  ap2 init [--replace]                   make the key that signs AP2 mandates (prints its public half)
+  shop-cli set [--cli PATH] [--runtime PATH] [--auth-file PATH] | shop-cli show
+                                         pin Shopify's shop CLI (and node) for the vault: the only one it runs
+  spend-resolve [NAME [--extra AMOUNT] | --discard-pending]
+                                         Shop completions the vault couldn't record: list them, settle NAME's by hand
+                                         (after checking the order in Shop), or drop records the vault can't verify
+  wba init --agent https://your.site [--replace] | wba on | wba off
+                                         a Web Bot Auth key (off until `wba on`): see docs/payments.md
   presence on|off|auto                   presence mode by default (auto: on where this Mac has Touch ID)
   import-passwords --browser chrome [--profile NAME] [--site HOST ...] [--dry-run]
   import-passwords --csv FILE [--site HOST ...] [--dry-run]
@@ -78,6 +95,22 @@ From anywhere (Claude uses these; they work only while the vault is unlocked):
   session load NAME --vm VM [--profile P] [--site HOST ...]
                                          put a sealed profile back, under its own name (--site: only those
                                          sites' cookies, from an imported session)
+  pay CARD --vm VM --origin https://shop (--total-selector CSS | --human [--total-label TEXT]) [--frame-origin URL ...]
+      [--profile P] [--browser-pid PID] [--fill PART=CSS ...]
+                                         start a purchase: the merchant's agent rules, the page's total, the caps, then
+                                         your approval (unless an agent card); prints a purchase id (it lasts 10 min)
+  pay --purchase KEY --vm VM --field number|exp|exp-long|exp-month|exp-year|exp-year2|cvc|name|zip [--selector CSS] [--human]
+                                         one part of the card into the tab on that site (each part once; KEY: pay's purchase_id)
+  pay --purchase KEY --done              end it
+  shop-complete CHECKOUT --vm VM --shop DOMAIN --instrument FILE|- [--account SHOP]
+                                         a Shop checkout through your Shop account: read, approved, read again (unchanged),
+                                         then completed by the vault with the Shop CLI you set
+  shop-card NAME --spend-request ID [--wait 90]
+                                         a Shop spend request's single-use card, read by the vault from Shop's CLI file
+  ap2 key [--json] | ap2 sign CARD --vm VM --origin https://shop --checkout-jwt FILE|- [--ttl 15m]
+                                         AP2 checkout and payment mandates for an approved checkout (the card's policy)
+  wba status | wba directory [--headers] | wba sign https://site
+  merchant-rules https://shop [--json]   what a merchant publishes for agents (/agents.md, UCP profile); no unlock needed
   token NAME --vm VM [--ttl 15m]         a short-lived token for an api secret, and the proxy URL in the VM
   token renew ID|--all --vm VM [--ttl 15m]
                                          keep live tokens going (the same token in the VM): asks like a new token,
@@ -137,6 +170,14 @@ func runMain(_ argv: [String]) -> Int32 {
         case "ask": return try cmdAsk(paths, rest)
         case "give": return try cmdGive(paths, rest)
         case "code": return try cmdCode(paths, rest)
+        case "pay": return try cmdPay(paths, rest)
+        case "shop-complete": return try cmdShopComplete(paths, rest)
+        case "shop-cli": return try cmdShopCLI(paths, rest)
+        case "spend-resolve": return try cmdSpendResolve(paths, rest)
+        case "shop-card": return try cmdShopCard(paths, rest)
+        case "ap2": return try cmdAP2(paths, rest)
+        case "wba": return try cmdWebBotAuth(paths, rest)
+        case "merchant-rules": return try cmdMerchantRules(paths, rest)
         case "relay": return try cmdRelay(paths, rest)
         case "requests": return try cmdRequests(paths, rest)
         case "settle": return try cmdSettle(paths, rest)
@@ -274,16 +315,27 @@ func age(_ iso: String?) -> String? {
 // MARK: - set / delete
 
 func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
-    let a = try parseArgs(argv, values: ["kind", "origin", "username", "approval", "project", "api-host", "header", "api-path-prefix",
-                                         "answer-timeout"],
-                          flags: ["replace"])
+    let a = try parseArgs(argv, values: Set(["kind", "origin", "username", "approval", "project", "api-host", "header", "api-path-prefix",
+                                             "answer-timeout"]).union(cardValueFlags),
+                          flags: Set(["replace"]).union(cardBoolFlags))
     guard a.positional.count == 1 else {
-        throw usageError("usage: set NAME --kind password|totp|text|api ... (mcomp-vault help)")
+        throw usageError("usage: set NAME --kind password|totp|text|api|card|shop ... (mcomp-vault help)")
     }
     let name = a.positional[0]
     guard validName(name) else { throw usageError("names: letters, digits, '.', '_' and '-' (1-64), not starting with '-'") }
     let kind = a.last("kind") ?? ""
-    guard ["password", "totp", "text", "api"].contains(kind) else { throw usageError("--kind password, totp, text or api") }
+    guard ["password", "totp", "text", "api", "card", "shop"].contains(kind) else { throw usageError("--kind password, totp, text, api, card or shop") }
+    let isPay = kind == "card" || kind == "shop"
+    let cardOpts = try parseCardOptions(a, existing: nil)
+    if kind != "card" && (cardOpts.singleUse || cardOpts.merchantLocked || cardOpts.allowFrames != nil) {
+        throw usageError("--single-use, --merchant-locked and --allow-frame go with --kind card")
+    }
+    if !isPay && (cardOpts.given || a.has("no-caps")) {
+        throw usageError("--pay, --label, --currency, --max-purchase, --max-per, --merchant-max and --no-caps go with --kind card or shop")
+    }
+    if isPay && a.last("approval") != nil {
+        throw usageError("a card's purchases follow --pay ask|agent (every purchase asks you by default), not --approval")
+    }
     var origins: [String] = []
     for o in a.all("origin") {
         guard let c = canonicalOrigin(o) else {
@@ -318,7 +370,12 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
         guard a.last("api-host") == nil, a.last("header") == nil, a.last("api-path-prefix") == nil, a.last("answer-timeout") == nil else {
             throw usageError("--api-host, --header, --api-path-prefix and --answer-timeout go with --kind api")
         }
-        guard !origins.isEmpty else { throw usageError("at least one --origin https://site is needed: a secret fills only into the sites it names") }
+        // A card pays wherever the user's agent shops unless --origin limits it to some merchants; a Shop entry has no site.
+        if kind == "shop" && !origins.isEmpty { throw usageError("--origin goes with cards; a shop entry is the policy for purchases through your Shop account") }
+        guard isPay || !origins.isEmpty else { throw usageError("at least one --origin https://site is needed: a secret fills only into the sites it names") }
+        if cardOpts.merchantLocked && origins.isEmpty {
+            throw usageError("--merchant-locked: name the merchant the card is locked to, with --origin https://shop")
+        }
     }
     let approval = a.last("approval") ?? "session"
     guard ["session", "each"].contains(approval) else { throw usageError("--approval session or each") }
@@ -345,6 +402,10 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     }
     var value: [UInt8]
     switch kind {
+    case "card":
+        value = Array(try readCardFromTerminal(name).encoded().utf8)
+    case "shop":
+        value = Array("-".utf8)         // nothing secret: it holds the policy and caps only
     case "password":
         value = try readHidden("Password for \(name): ")
         var again = try readHidden("The same password again: ")
@@ -387,6 +448,18 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
                                  totp_for: (sameKind && kind == "totp") ? old?.totp_for : nil,
                                  id: sameKind ? (old?.id ?? newSecretID()) : newSecretID(),
                                  api_answer_timeout_s: answerTimeout)
+        if isPay {
+            p.secrets[name]?.value = kind == "shop" ? "" : stored
+            p.secrets[name]?.card_label = cardOpts.label ?? (sameKind ? old?.card_label : nil) ?? name
+            p.secrets[name]?.pay = cardOpts.pay ?? (sameKind ? old?.pay : nil)
+            p.secrets[name]?.caps = cardOpts.caps ?? (sameKind && !cardOpts.clearCaps ? old?.caps : nil)
+            if kind == "card" {
+                p.secrets[name]?.single_use = cardOpts.singleUse ? true : nil
+                p.secrets[name]?.merchant_locked = cardOpts.merchantLocked ? true : nil
+                p.secrets[name]?.allowed_frames = cardOpts.allowFrames.flatMap { $0.isEmpty ? nil : $0 }
+            }
+            p.secrets[name]?.approval = "each"
+        }
     }
     unlinked.sort()
     var rec: [String: Any] = ["op": old == nil ? "set" : "rotate", "result": "ok", "name": name, "kind": kind, "approval_mode": approval]
@@ -395,6 +468,18 @@ func cmdSet(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     if let t = answerTimeout { rec["answer_timeout_s"] = t }
     if !projects.isEmpty { rec["projects"] = projects }
     if !unlinked.isEmpty { rec["totp_unlinked"] = unlinked }
+    if isPay {
+        let saved = (try? loadPayload(paths, key))?.secrets[name]
+        rec["label"] = saved?.card_label ?? name
+        rec["pay"] = saved?.pay ?? "ask"
+        rec["caps"] = saved?.caps?.words ?? "no caps"
+        rec["approval_mode"] = nil
+        audit(paths, rec, macKey: vaultAuditKey(paths, key))
+        oprint(payPolicyWords(name, saved, saving: old == nil ? "Saved" : "Replaced"))
+        if let w = reusableCardWarning(saved) { oprint(w) }
+        if kind == "card" { oprint(virtualCardAdvice) }
+        return Exit.ok
+    }
     audit(paths, rec, macKey: vaultAuditKey(paths, key))
     if !unlinked.isEmpty { oprint("No longer tied to a login (\(name) now holds another account): \(unlinked.joined(separator: ", ")). A later import gives the new account a code of its own.") }
     let where_ = kind == "api" ? "https://\(apiHost!)" + (apiPrefix ?? "") : origins.joined(separator: ", ")
@@ -1094,6 +1179,14 @@ func cmdList(_ paths: Paths, _ argv: [String]) throws -> Int32 {
     oprint(secrets.isEmpty ? "No secrets yet (metacomputer secrets set ...)." : "Secrets:")
     for s in secrets {
         let kind = s["kind"] as? String ?? ""
+        if kind == "card" || kind == "shop" {
+            let sites = (s["origins"] as? [String] ?? [])
+            oprint(clean("  \(s["name"] ?? "")  \(kind) \"\(s["label"] ?? "")\"  pays \(s["pay"] as? String == "agent" ? "without asking (agent card)" : "after your approval")"
+                         + "  caps: \(s["caps"] ?? "none")" + ((s["spent_in_period"] as? String).map { " (\($0) in the period)" } ?? "")
+                         + (sites.isEmpty ? "" : "  only at \(sites.joined(separator: " "))") + ((s["single_use"] as? Bool) == true ? "  single-use" : "")
+                         + "  \(s["uses"] ?? 0) uses", max: 600))
+            continue
+        }
         let use = kind == "api" ? "[token] https://\(s["api_host"] ?? "")\(s["api_path_prefix"] ?? "") (\(s["api_header"] ?? "") header)"
             : "[--field \((s["fields"] as? [String] ?? []).joined(separator: "/"))] sites \((s["origins"] as? [String] ?? []).joined(separator: " "))"
         let user = (s["username"] as? String).map { " user \($0)" } ?? ""
@@ -1320,6 +1413,7 @@ func selftest() -> Int32 {
           == "{\"a\":[true,false,\"x\\\"y\\\\z\\n\\u007f\\u00e9\\ud83d\\ude00\"],\"b\":1,\"c\":{\"n\":-2}}")
     check("API header templates", splitTemplate("Authorization: Bearer {value}").map { "\($0.0)|\($0.1)|\($0.2)" } == "Authorization|Bearer |"
           && splitTemplate("x-api-key: {value}") != nil && splitTemplate("x: {value}{value}") == nil && splitTemplate("x: none") == nil)
+    paymentSelftest(check)
     oprint(failures == 0 ? "selftest: all passed (\(Build.kind) build)" : "selftest: \(failures) failed")
     return failures == 0 ? Exit.ok : Exit.failed
 }

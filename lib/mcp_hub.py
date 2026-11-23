@@ -48,6 +48,7 @@ import itertools
 import json
 import math
 import os
+import pwd
 import re
 import secrets
 import select
@@ -66,6 +67,7 @@ import batch_steps  # noqa: E402
 import driver_profiles  # noqa: E402
 import hidden_text  # noqa: E402
 import botcheck  # noqa: E402
+import cardmask  # noqa: E402
 import traces  # noqa: E402
 import hub_notes  # noqa: E402
 import labconfig  # noqa: E402
@@ -184,6 +186,11 @@ BOUNDED_REFUSED_RE = re.compile(r"outside the capability manifest", re.I)
 REPEAT_S = 300              # a bounded-mode refusal that repeats within 5 min tells the user (once per 5 min)
 REFUSAL_KINDS = (("app", ("app", "launch", "executable", "bundle")), ("path", ("path", "folder", "file", "director")),
                  ("site", ("origin", "url", "site", "domain")), ("tool", ("tool",)))
+CARD_NOTE = ("metacomputer hid card details in this result: the agent doesn't read a card's number, nor (while a purchase "
+             "is open) its expiry, code, postal code or name, even once the vault has typed them into a page "
+             "(SECURITY.md, \"Paying for things\")")
+CARD_CHECK_FAILED = ("metacomputer couldn't check this answer for card numbers, so it isn't passed on. Call the tool again; "
+                     "if it keeps failing, the hub log says why (metacomputer hub status)")
 BOUNDED_END = (
     "metacomputer bridge: Cua Driver's bounded session has ended (DRIVER_MODE=bounded; DRIVER_EXPIRES / "
     "DRIVER_IDLE in the virtual computer's config). Tell the user; they can start a new one by reconnecting the "
@@ -852,7 +859,12 @@ class Hub:
         self.started = time.time()
         self.last_activity = time.time()
         self.up_since = None
-        self.stderr_tail = None     # the driver connection's stderr (wirelimits.StderrTail)
+        self.stderr_tail = None     # the driver connection's stderr, counted (wirelimits.StderrCounter)
+        self._ack_stop = threading.Event()
+        self.sticky_hints = cardmask.StickyHints()   # every purchase's masks this hub has read (card_hints)
+        self.ack_lock = None        # RUN_DIR/hub/hub.pid once the hub's Server holds it (what its purchase acks name)
+        if not local:               # a core without the hub (MCP_HUB=off) never says it masks: payments need the hub
+            threading.Thread(target=self._ack_purchases_run, daemon=True, name="hub-purchase-ack").start()
         # What the hub learns from results is capped (the driver could send endless ids): oldest out first.
         self.app_of = collections.OrderedDict()      # guest pid -> app name (results, list_windows)
         self.window_pid = collections.OrderedDict()  # window id -> guest pid
@@ -1503,14 +1515,14 @@ class Hub:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=env, close_fds=True, start_new_session=True)
         proc.mcomp_pgid = proc.pid
-        # SSH carries the VM's stderr: drained with a fixed memory tail and a capped log file, so a VM that writes
-        # there without end can't fill the Mac's disk or memory (wirelimits.StderrTail).
-        self.stderr_tail = wirelimits.StderrTail(proc.stderr, self._stderr_path())
+        # SSH carries the VM's stderr: drained and counted, none of its text kept (it can echo what a page showed, a
+        # card's details among it), only fixed classes in a capped log (wirelimits.StderrCounter).
+        self.stderr_tail = wirelimits.StderrCounter(proc.stderr, self._stderr_path())
         return proc
 
     def _stderr_text(self):
         tail = self.stderr_tail
-        return tail.text(wait=2.0).strip() if tail is not None else ""
+        return tail.text(wait=2.0, pin=self.pin).strip() if tail is not None else ""
 
     def connected(self):
         """Without reaping the process (only _end_transport does): its reader marks the end of its output."""
@@ -1595,11 +1607,13 @@ class Hub:
                 self._end_transport(proc, False)     # (its reader may be doing the same: it's done once)
                 if self.up is proc:
                     self.up = None
-                err = self._stderr_text()
+                tail = self.stderr_tail
+                classes = tail.classes(wait=2.0) if tail is not None else {}
+                err = tail.text(pin=self.pin) if tail is not None else ""
                 self.note(f"connect failed: {err[:200]}")
-                if "not running" in err:
+                if "vm not running" in classes:
                     return OFF_MSG
-                return ("Could not connect to the virtual computer (" + (err[-300:] or "no answer from Cua Driver")
+                return ("Could not connect to the virtual computer (" + (err or "no answer from Cua Driver")
                         + f"). Check `{CLI} status`.")
             self.live_init = r["result"]
             self.send_up({"jsonrpc": "2.0", "method": "notifications/initialized"})
@@ -1740,7 +1754,7 @@ class Hub:
                 usable = False
                 if isinstance(msg, dict) and msg.get("method") == "notifications/metacomputer/closing":
                     p = msg.get("params")
-                    why = str((p.get("reason") if isinstance(p, dict) else None) or "closed")[:40]   # the relay's
+                    why = cardmask.mask_text(str((p.get("reason") if isinstance(p, dict) else None) or "closed")[:200], self.card_hints())[:40]   # the relay's
                     continue
                 if isinstance(msg, dict):
                     try:
@@ -1880,6 +1894,18 @@ class Hub:
             return False
         if "params" in msg and msg["params"] is not None and not isinstance(msg["params"], dict):
             return False
+        # Card details first, before anything else sees the message: the hub's own reads, guards, traces, notes, events
+        # and every client. A message the check can't finish isn't passed on (an answer becomes an error saying so).
+        try:
+            card_n = cardmask.mask_message(msg, self.card_hints())
+        except Exception as e:                      # never pass a message on as checked when the check failed
+            self.note(f"card-number check failed: {type(e).__name__}", kind="card numbers")
+            if method is not None or mid is None:
+                return True                         # a notification that can't be checked: dropped
+            msg = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": CARD_CHECK_FAILED}}
+            card_n = 0
+        if card_n:
+            self.note(f"hid {card_n} card detail(s) in a message from the driver", kind="card numbers")
         if method is None and mid is not None:
             if not isinstance(mid, (str, int)) or isinstance(mid, bool):
                 return False
@@ -1910,6 +1936,8 @@ class Hub:
                     self.note(f"observe failed: {e!r}")
             if pend.get("orphan"):
                 return True
+            if card_n and isinstance(msg.get("result"), dict):
+                hub_notes.add(msg["result"], CARD_NOTE, front=True)
             out = dict(msg)
             out["id"] = pend["id"]
             self.tag_ids(out, pend.get("gen"))   # the hub's runtime-specific ids, never the driver's (same length)
@@ -3336,6 +3364,45 @@ class Hub:
                         return w["window_id"], self.bot_marks[w["window_id"]][0]
         return None
 
+    # --- card details (lib/cardmask.py; SECURITY.md "Paying for things") ------------------------------------------------
+    def card_hints(self, fresh_out=None):
+        """The masks for this hub's VM: the open purchases' shapes (the vault's purchases-active.json), read now, and
+        every purchase this hub has read before, for the rest of its life (cardmask.StickyHints: an expired window or a
+        clock that jumps never removes them). A purchase on another VM sharing the vault doesn't change this one's
+        results. `fresh_out`: a list given what was read now (the ack worker acknowledges only those)."""
+        vd = (self.env.get("MCOMP_VAULT_DIR") or self.env.get("MCOMP_VM_VAULT_DIR")
+              or os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "Library", "Application Support", "metacomputer"))
+        fresh = cardmask.active_purchases(vd, self.env.get("VM_NAME") or self.env.get("MCOMP_VM_NAME") or None)
+        held, kept = self.sticky_hints.update_kept(fresh)
+        if fresh_out is not None:
+            fresh_out.extend(kept)                   # only what it holds now: the ack names nothing else
+        return held
+
+    def _ack_purchases_run(self):
+        """Says, for this hub's VM, which open purchases it has seen: the vault doesn't send a card's first part until the
+        hub has (so its masks are on before anything of the card can come back). Read fresh every 50 ms; written when the
+        set changes, with this process's start time and the lock it holds (ack_lock, set once Server.run holds
+        RUN_DIR/hub/hub.pid): a core without the hub's lock (MCP_HUB=off) says nothing. Until the vault folder exists
+        (a vault set up after the hub started) it looks again every half second."""
+        ps = cardmask.process_start(os.getpid())
+        start = ps[0] if ps else None
+        last = None
+        while not self._ack_stop.is_set():
+            vd = (self.env.get("MCOMP_VAULT_DIR") or self.env.get("MCOMP_VM_VAULT_DIR")
+                  or os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "Library", "Application Support", "metacomputer"))
+            vm = self.env.get("VM_NAME") or self.env.get("MCOMP_VM_NAME")
+            if not vm or not self.ack_lock or not os.path.isdir(vd):
+                last = None
+                self._ack_stop.wait(0.5)
+                continue
+            try:
+                fresh = []
+                self.card_hints(fresh)               # loaded (and kept) before it's acknowledged
+                last = cardmask.ack_purchases(vd, vm, last, lock=self.ack_lock, start=start, hints=fresh)
+            except Exception:
+                last = None
+            self._ack_stop.wait(0.05)
+
     # --- hidden page text (HIDDEN_TEXT; lib/hidden_text.py, SECURITY.md "Hidden page text") -------------------------
     def hidden_text_prepare(self, name, args):
         """Before a window read goes up: the driver is asked for its element list too (their frames show hidden
@@ -3458,6 +3525,7 @@ class Hub:
 
     def shutdown(self):
         """End the core: close the driver connection (the VM's driver runtime ends with it)."""
+        self._ack_stop.set()                         # and its purchase acks (_ack_purchases_run)
         proc, self.up, self.ready = self.up, None, False
         if proc:
             try:
@@ -3995,8 +4063,11 @@ class Server:
         except OSError:
             pass
         os.ftruncate(fd, 0)
+        ps = cardmask.process_start(os.getpid())
         os.write(fd, json.dumps({"pid": os.getpid(), "socket": self.paths["sock"], "started": self.hub.started,
-                                 "vm": self.hub.settings.get("vm_name"), "code": self.code}).encode())
+                                 "vm": self.hub.settings.get("vm_name"), "code": self.code,
+                                 "start": ps[0] if ps else None}).encode())
+        self.hub.ack_lock = os.path.realpath(self.paths["pid"])   # its purchase acks name this lock (cardmask.ack_purchases)
         try:
             os.unlink(self.paths["sock"])
         except FileNotFoundError:
@@ -4061,6 +4132,7 @@ class Server:
         finally:
             if self.teardown_hold is not None:
                 self.teardown_hold.close()   # the connection has ended: a handoff may open now
+        self.hub.ack_lock = None             # no more purchase acks from a hub that's going
         if self.lock_fd is not None:
             try:
                 os.ftruncate(self.lock_fd, 0)

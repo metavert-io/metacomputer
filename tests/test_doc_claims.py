@@ -2158,8 +2158,10 @@ CLAIMS = [
     ("SECURITY.md", r"`CODES_VIA=vault` \(the default\) is guidance for Claude", lambda m: D["CODES_VIA"] == "vault"),
     ("SECURITY.md", r"must agree with the address the browser\s+reports for the page's document \(AT-SPI's `DocURL`\)",
      lambda m: 'GetAttributeValue("DocURL"' in human_script() and "the page's address and the address bar disagree" in human_script()),
-    ("SECURITY.md", r"a password text for `password`, an\s+entry for `username` and `otp` \(or a spin button for a numeric code\)",
-     lambda m: 'FIELD_ROLES = {"password": {"password text"}, "username": {"entry"}, "otp": {"entry", "spin button"}}' in human_script()),
+    ("SECURITY.md", r"a password text for `password`, an\s+entry for `username` and `otp` \(or a spin button for a numeric code\), and for a card's part \(a purchase\) an entry, a spin button or a password text",
+     lambda m: 'FIELD_ROLES = {"password": {"password text"}, "username": {"entry"}, "otp": {"entry", "spin button"},\n               "card": {"entry", "spin button", "password text"}}' in human_script()),
+    ("SECURITY.md", r"Then the same field \(the same accessible object, or the same place in the tree\) must still have the focus, on the same site",
+     lambda m: "if origin2 != origin or (path2 != path and ref2 != ref):" in human_script()),
     ("SECURITY.md", r"\*\*The value is typed as real foreground keystrokes through Cua Driver\*\*",
      lambda m: 'target = {"pid": pid, "window_id": window_id, "delivery_mode": "foreground"}' in human_script()
      and '"name": "type_text"' in human_script()),
@@ -2507,6 +2509,273 @@ CLAIMS = [
     ("docs/sprites.md", r"The hub sends keys, typing and pixel clicks in the foreground \(the desktop's own pointer and keyboard, XTEST\) and says so in the result, keys and typing aimed at an element too; clicks on an element \(`element_token`\) still go through accessibility",
      lambda m: 'return t in KEY_TOOLS or not a.get("element_token")' in raw("lib/mcp_hub.py") and 'self.foreground_only = self.env.get("MCOMP_BACKGROUND_INPUT", "on") == "off"' in raw("lib/mcp_hub.py")
      and "sprites) printf off" in raw("scripts/lib.sh") and 'input={"background": False' in raw("lib/cloud/sprites.py")),
+    # Paying for things (vault/Payments.swift, PaymentServer.swift, Merchant.swift, AP2.swift; lib/cardmask.py, lib/mcp_hub.py,
+    # lib/actionlog.py, lib/wirelimits.py; the guest's secret-fill)
+    ("SECURITY.md", r"No grant or unattended rule covers a card \(`rule add --secret` refuses one\), and a `session` or `unlock` answer doesn't widen it",
+     lambda m: "no rule covers purchases" in raw("vault/Approvals.swift")
+     and 'use: "pay", summary: summary,\n                        proposedID: proposedID, singleUse: true)' in raw("vault/PaymentServer.swift")
+     and 'case _ where singleUse && scope != .use:' in raw("vault/Server.swift")),
+    ("SECURITY.md", r"Approval gates disclosure, not the charge\.\*\* What you approve is the vault handing a card's details to a site",
+     lambda m: "a reusable card can be charged again by this site, for any amount." in raw("vault/PaymentServer.swift")
+     and "WARNING: approval gates disclosure, not the charge." in raw("vault/Payments.swift")
+     and "if let w = reusableCardWarning(saved) { oprint(w) }" in raw("vault/Commands.swift")
+     and "if let w = reusableCardWarning(saved) { oprint(w) }" in raw("vault/Approvals.swift")),
+    ("SECURITY.md", r"at the unlock terminal and in the summary that Touch ID's dialog shows, `requests` lists and a\s+passphrase approval signs",
+     lambda m: 'summary += " Approves giving the card, not the charge: a reusable card can be charged again by "' in raw("vault/PaymentServer.swift")
+     and 'p.dialogSummary ?? p.summary' in raw("vault/Server.swift")),
+    ("SECURITY.md", r"An `agent` card doesn't ask, unless the\s+unlock says `--confirm each`",
+     lambda m: 'if s.pay == "agent" && !confirmEach {' in raw("vault/PaymentServer.swift")),
+    ("docs/payments.md", r"`unlock --confirm each` makes agent cards ask too",
+     lambda m: 'if s.pay == "agent" && !confirmEach {' in raw("vault/PaymentServer.swift")),
+    ("README.md", r"\*\*asks you\*\*, for this one purchase, by default",
+     lambda m: 'var pay: String? = nil          // card|shop: "ask" (nil: every purchase asks)' in raw("vault/Store.swift")
+     and 'if s.pay == "agent" && !confirmEach {' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"For (\d+) minutes \(at most until the vault locks\), the purchase types the card's parts into the tab on\s+the approved site, each part at most once \((\d+) tries\)",
+     lambda m: int(m[1]) * 60 == swift_num("vault/Payments.swift", r"let purchaseSeconds = ([^\n]+)")
+     and int(m[2]) == swift_num("vault/Payments.swift", r"let purchasePartTries = ([^\n]+)")
+     and "purchaseLockdown()" in raw("vault/Server.swift")),
+    ("docs/payments.md", r"A purchase lasts (\d+) minutes, fills each part at most once \(a part the page refused can be tried (\d+) times\)",
+     lambda m: int(m[1]) * 60 == swift_num("vault/Payments.swift", r"let purchaseSeconds = ([^\n]+)")
+     and int(m[2]) == swift_num("vault/Payments.swift", r"let purchasePartTries = ([^\n]+)")),
+    ("SECURITY.md", r"at most (\d+) KiB, a few seconds each",
+     lambda m: f"let f = SiteFetch(origin: origin, maxBytes: {m[1]} << 10)" in raw("vault/Merchant.swift")),
+    ("SECURITY.md", r"Only a file that's plainly an agents\.md counts as rules: served as text or Markdown \(or with no type\),\s+whole, valid text with no control characters, and no web page's markers anywhere in it",
+     lambda m: 'if !["", "text/plain", "text/markdown", "text/x-markdown"].contains(ctype) {' in raw("vault/Merchant.swift")
+     and "} else if htmlMarkers.contains(where: { low.contains($0) }) {" in raw("vault/Merchant.swift")
+     and "let low = text.lowercased()" in raw("vault/Merchant.swift") and "text.prefix(4096)" not in raw("vault/Merchant.swift")
+     and 'var known: Bool { agentsMD == "found" || agentsMD == "none" }' in raw("vault/Merchant.swift")
+     and "if !rules.known && agent {" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"an\s+asking card's question and its summary \(Touch ID, `requests`, a passphrase approval\) say \"can't tell\"",
+     lambda m: 'notes: rules.known ? [] : ["Store\'s agent rules: can\'t tell"]' in raw("vault/PaymentServer.swift")
+     and 'for n in notes { summary += " " + n + "." }' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"Where `/agents.md` forbids scripted\s+checkout or entering card details, or asks agents to have the buyer complete checkout, the purchase is refused before\s+anything is asked or read in the VM",
+     lambda m: "var forbidden: Bool { !forbids.isEmpty || buyerContinues }" in raw("vault/Merchant.swift")
+     and raw("vault/PaymentServer.swift").index("if rules.forbidden {") < raw("vault/PaymentServer.swift").index("let (moneyOpt, mwhy) = readTotal(")
+     < raw("vault/PaymentServer.swift").index("let auth = authorizePurchase(s, p, name: name, origin: origin, frames: frames")),
+    ("SECURITY.md", r"Exactly one place may count:\s+none, or several \(even showing the same amount\), is unclear and refused",
+     lambda m: "guard found.count == 1 else {" in raw("vault/Payments.swift")
+     and "if nonPayableTotalWords.contains(wordBefore(String(before.suffix(40)))) { continue }" in raw("vault/Payments.swift")
+     and "if let w = payableLabelProblem(totalLabel) { return payFinish(" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"and only if a person would see it \(a box of at least\s+2x2 pixels, and what's left of it once every clip on the way up is applied together has an area",
+     lambda m: "for (let e = el; e && e.nodeType === 1; e = up(e)) {" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and "if (r.width < 2 || r.height < 2) return false;" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and 'guard read.visible == true else { return (nil, "the element --total-selector names isn\'t shown on the page") }' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"if it can't all be\s+shown within what the dialog shows, nothing is asked and the purchase is refused\. So a purchase names at most (\w+)\s+payment-form sites, each address at most (\d+) characters",
+     lambda m: "guard dialogPrefix.count + summary.count <= maxConfirmText, clean(summary, max: maxConfirmText) == summary else {" in raw("vault/PaymentServer.swift")
+     and {"three": 3}.get(m[1]) == swift_num("vault/Payments.swift", r"let payFramesMax = ([^\n]+)")
+     and int(m[2]) == swift_num("vault/Payments.swift", r"let payOriginMax = ([^\n]+)")),
+    ("SECURITY.md", r"Always: a run of 12-19 digits that starts like a card number \(2-6\) and passes the card\s+check, whole or in groups with up to three separators of any kind between them, standing on its own",
+     lambda m: 'return 12 <= len(digits) <= 19 and digits.isdigit() and digits[0] in CARD_START and luhn(digits)' in raw("lib/cardmask.py")
+     and 'CARD_START = "23456"' in raw("lib/cardmask.py") and "return 1 <= len(gap) <= 3 and not any(c.isalnum() for c in gap)" in raw("lib/cardmask.py")
+     and "if is_card(digits) and _bounded(text, run[a][0], run[b][1]):" in raw("lib/cardmask.py")
+     and "if isinstance(v, float) and v == v and abs(v) < 1e20 and v.is_integer() and is_card(str(int(abs(v)))):" in raw("lib/cardmask.py")
+     and 'CARD_MASK = "[card number hidden by metacomputer]"' in raw("lib/cardmask.py")
+     and '("2"..."6").contains(f), luhnOK(digits)' in raw("vault/Payments.swift")),
+    ("SECURITY.md", r"The hub masks every message the driver sends first thing in `on_upstream`,\s+before its guards, traces, notes, events and every client get it",
+     lambda m: raw("lib/mcp_hub.py").index("card_n = cardmask.mask_message(msg, self.card_hints())") < raw("lib/mcp_hub.py").index("slot = self.internal.pop(key, None)")
+     < raw("lib/mcp_hub.py").index("self.observe(pend, msg, key)")),
+    ("SECURITY.md", r"The action-log relay, which sees\s+the connection before the hub, masks each record the same way before it's written",
+     lambda m: "    def _add(self, rec):\n        rec = mask_record(rec)\n" in raw("lib/actionlog.py")
+     and "cardmask.mask_value(rec, _card_hints())" in raw("lib/actionlog.py")),
+    ("SECURITY.md", r"The hub keeps none of the driver's\s+stderr, purchase or not: only how many lines and bytes there were and, for each line, a fixed class it derives itself",
+     lambda m: "self.stderr_tail = wirelimits.StderrCounter(proc.stderr, self._stderr_path())" in raw("lib/mcp_hub.py")
+     and 'rec = f"{time.strftime(\'%Y-%m-%dT%H:%M:%S\')} {cls}\\n"' in raw("lib/wirelimits.py")
+     and "_mask_stderr" not in raw("lib/mcp_hub.py") and "_purchase_open" not in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"Both the hub and the action log read the open purchases fresh for every result \(nothing\s+cached\)",
+     lambda m: "_CARD_HINTS" not in raw("lib/actionlog.py") and "return cardmask.hints_for(os.environ)" in raw("lib/actionlog.py")),
+    ("SECURITY.md", r"whose lock is held now and\s+names that same process; it waits up to 5 s for it and otherwise sends nothing",
+     lambda m: "let deadline = Date().addingTimeInterval(5)" in raw("vault/PaymentServer.swift")
+     and 'guard privatePath(dir, folder: true) else { return "its ack folder isn\'t a private folder of this user\'s" }' in raw("vault/PaymentServer.swift")
+     and "guard let p = procStartUID(pid), p.uid == getuid(), p.sec == s0, p.usec == s1 else {" in raw("vault/PaymentServer.swift")
+     and "if flock(fd, LOCK_SH | LOCK_NB) == 0 {" in raw("vault/PaymentServer.swift")
+     and '(rec["pid"] as? NSNumber)?.int32Value == pid,' in raw("vault/PaymentServer.swift")
+     and 'self.hub.ack_lock = os.path.realpath(self.paths["pid"])' in raw("lib/mcp_hub.py")
+     and raw("vault/PaymentServer.swift").index("if let why = hubAckProblem(pu) {") < raw("vault/PaymentServer.swift").index("if let why = reserveSpend(pu) {")
+     and "threading.Thread(target=self._ack_purchases_run, daemon=True" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"If a check can't finish, the message isn't passed on \(an answer becomes an error\s+that says so\), and a log record keeps only its type and timing",
+     lambda m: "return True                         # a notification that can't be checked: dropped" in raw("lib/mcp_hub.py")
+     and '"error": {"code": -32000, "message": CARD_CHECK_FAILED}}' in raw("lib/mcp_hub.py")
+     and 'raise Unfinished("too many values to check")' in raw("lib/cardmask.py") and 'kept["withheld"] = WITHHELD' in raw("lib/actionlog.py")),
+    ("SECURITY.md", r"While a purchase is open on that VM",
+     lambda m: 'fresh = cardmask.active_purchases(vd, self.env.get("VM_NAME") or self.env.get("MCOMP_VM_NAME") or None)' in raw("lib/mcp_hub.py")
+     and "held, kept = self.sticky_hints.update_kept(fresh)" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"Once\s+read, a purchase's masks stay: the hub, and the action-log relay, keep applying them for the rest of their process's\s+life \(every purchase still in the file, however many, and the newest (\d+) of those no longer in it; a read of the file\s+that fails lets none go\)",
+     lambda m: f"STICKY_MAX = {m[1]}" in raw("lib/cardmask.py") and "self.sticky_hints = cardmask.StickyHints()" in raw("lib/mcp_hub.py")
+     and "gone = [k for k in self.seen if k not in now]       # oldest first" in raw("lib/cardmask.py")
+     and "for k in gone[:max(0, len(gone) - self.limit)]:" in raw("lib/cardmask.py")
+     and "if not once:                # a read that failed says nothing about what's gone: nothing is let go then" in raw("lib/cardmask.py")
+     and "fresh_out.extend(kept)                   # only what it holds now: the ack names nothing else" in raw("lib/mcp_hub.py")
+     and "return st.update(active_purchases(vd, vm))" in raw("lib/cardmask.py")
+     and 'rec["rpc_error"] = cardmask.mask_text(str((msg.get("error") or {}).get("message", ""))[:300], _card_hints())' in raw("lib/actionlog.py")
+     and "self.card_hints(fresh)               # loaded (and kept) before it's acknowledged" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"a new unlock keeps an\s+earlier one's entries in the file until their time passes \(it never drops or removes them, however many; past (\d+)\s+purchases still in their window new purchases are refused until older ones pass, and a file that can't be read is\s+left as it is and stops new purchases\)",
+     lambda m: "importActivePurchases()             // an earlier unlock's masks still in their window stay listed" in raw("vault/Server.swift")
+     and f"let activePurchasesMax = {m[1]}" in raw("vault/Payments.swift") and ".prefix(" not in raw("vault/PaymentServer.swift").split("func importActivePurchases")[1].split("func activeFileCapacityProblem")[0]
+     and "if let why = activeFileCapacityProblem() { return payFinish(\"pay\", fields, denied(why), who, approval: \"-\") }" in raw("vault/PaymentServer.swift")
+     and "if activeFileProblem != nil { return false }           // never over what can't be read" in raw("vault/PaymentServer.swift")
+     and "guard !all.isEmpty || !inheritedMasks.isEmpty else { unlink(path); return true }" in raw("vault/PaymentServer.swift")
+     and "let list: [[String: Any]] = inheritedMasks + all.map" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"once more after every slow step on the way, the provider's check\s+of a computer elsewhere included, and last inside the step that writes to ssh, after its own housekeeping and right\s+before the part's bytes are written",
+     lambda m: "if let why = release() { throw VaultError(why, code: Exit.denied) }" in raw("vault/Guest.swift")
+     and "if let why = release?() { res.refused = why; break }" in raw("vault/Guest.swift")
+     and raw("vault/Guest.swift").index("hook()\n") < raw("vault/Guest.swift").index("if let why = release?() { res.refused = why; break }")
+     < raw("vault/Guest.swift").index("let n = input.withUnsafeBytes { p in write(inFD")
+     and raw("vault/Guest.swift").index("if let problem = providerProblem(b) {") < raw("vault/Guest.swift").index("if let why = release() {")
+     < raw("vault/Guest.swift").index("let r = runProcess(sshPath, args, env: helperEnv(), stdin: input, timeout: max(1, timeout), maxStdout: maxStdout, release: release)")
+     and 'let rel = value == nil ? nil : release' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"Ending a\s+purchase is exactly `pay --purchase KEY --done`, with at most `--vm` naming its own VM",
+     lambda m: 'if secrets_pay_is_end "$@"; then exec "$VAULT_BIN" pay "$@"; fi' in raw("bin/metacomputer")
+     and 'case " $* " in *" --done "*)' not in raw("bin/metacomputer")
+     and 'let others = Set(a.values.keys).subtracting(["purchase", "vm"]).union(a.flags.subtracting(["done"]))' in raw("vault/Payments.swift")
+     and 'if let vm = req["vm"] as? String, vm != pu.vm {' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"the browser's own hit test must agree: with the total scrolled into view \(every\s+scroll put back after\), points inside each text that holds its digits and renders \(one hidden or invisible isn't in\s+the text read either\) must land on that text's own element or one of its ancestors within the total",
+     lambda m: "  return hit(); })();" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and "if (!h || !h.contains(n) || !el.contains(h)) { ok = false; break; }" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and "const pe = n.parentElement; if (!pe || getComputedStyle(pe).visibility !== 'visible') continue;" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and "   if (!tested) ok = false;" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and "el.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")),
+    ("SECURITY.md", r"an ancestor cutting a fixed or absolutely positioned total only when it's in that total's chain of containing\s+blocks",
+     lambda m: "const cb = e === el || need === null || (need === 'abs' ? cs.position !== 'static' || fixedCB(cs) : fixedCB(cs));" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and "if (e !== el && cb && e !== de" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")),
+    ("SECURITY.md", r"never touches\s+encoded binary data \(an image's or audio's base64, a resource's non-text blob, a media data: URL\)",
+     lambda m: 'if t in ("image", "audio") and "data" in d:' in raw("lib/cardmask.py") and "skip = _binary_fields(v)" in raw("lib/cardmask.py")),
+    ("docs/payments.md", r"A purchase counts against them from before its first part leaves the vault, and stays counted even if that fill\s+then fails",
+     lambda m: raw("vault/PaymentServer.swift").index("if let why = reserveSpend(pu) {") < raw("vault/PaymentServer.swift").index('rq["mode"] = "fill"')
+     and "pu.counted = false" not in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"in one step under the vault's lock with a last check that the card, its policy and its caps still allow it",
+     lambda m: "if let why = stillAuthorized(p) { refused = why; throw VaultError(why) }" in raw("vault/PaymentServer.swift")
+     and "if !pu.counted, let why = capsProblem(s, p, name: pu.name, origin: pu.origin, money: pu.money, excluding: pu.key)" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"at its limit \((\d+) entries\) purchases are refused, never older ones\s+forgotten",
+     lambda m: f"    return {m[1]}\n" in raw("vault/PaymentServer.swift") and "guard l.count < ledgerLimit() else { throw" in raw("vault/PaymentServer.swift")
+     and "l = Array(l.suffix" not in raw("vault/PaymentServer.swift") and "l.removeFirst" not in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"In page mode the fill account's\s+secret-fill holds the tab itself to the shop \(`top_origins`\) and a frame's site to the ones approved, and says it did;\s+a VM whose helper doesn't say so \(an older image\) is refused before anything is typed",
+     lambda m: "if origin not in (self.top_origins if fid == self.top else self.origins):" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and '"top_origins": [pu.origin]]' in raw("vault/PaymentServer.swift")
+     and 'if !pu.human && c["top_checked"] as? Bool != true {' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"the audit log and the terminal show\s+only a short id derived from it, which isn't a key",
+     lambda m: "id = String(sha256Hex(Array(key.utf8)).prefix(8))" in raw("vault/PaymentServer.swift")
+     and 'func validPurchaseKey(_ s: String) -> Bool { matches(s, "^[0-9a-f]{32}$") }' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"one started from an agent's shared process \(Codex's app\s+server, an OpenClaw or Hermes Agent gateway: every conversation in one process\) belongs to that process, so its\s+conversations aren't kept apart from each other\. One started from outside any agent session has nothing to bind\s+to, so it can't be resumed",
+     lambda m: 'return (nil, "purchase \\(pu.id) belongs to another \\(pu.agentName ?? "agent process")")' in raw("vault/PaymentServer.swift")
+     and "} else if !ending {" in raw("vault/PaymentServer.swift")
+     and "if who.claudePID == nil && who.hostPID == nil && (human || fills.isEmpty) {" in raw("vault/PaymentServer.swift")
+     and "agent: shared, hostPID: p, hostStart: e.start)" in raw("vault/Util.swift")
+     and '"OpenClaw gateway"' in raw("vault/Util.swift") and 'return "Hermes Agent gateway"' in raw("vault/Util.swift")),
+    ("SECURITY.md", r"Node runs with a fixed command and only `PATH=/usr/bin:/bin`,\s+`LANG`, `NO_COLOR`, `OPENSSL_CONF=/dev/null` and `SHOP_AUTH_FILE`",
+     lambda m: 'var env = ["PATH=/usr/bin:/bin", "HOME=\\(run)", "TMPDIR=\\(run)/", "LANG=C.UTF-8", "NO_COLOR=1", "OPENSSL_CONF=/dev/null",' in raw("vault/PaymentServer.swift")
+     and '"SHOP_AUTH_FILE=\\(pin.auth_file ?? "")"]' in raw("vault/PaymentServer.swift")
+     and 'req["shop_cli"] == nil, req["path"] == nil' in raw("vault/PaymentServer.swift")
+     and "if let why = verifyShopPin(pin) { return (-1, nil, why) }" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"`--no-addons`, and a `data:` preload whose module hooks stop the CLI if it resolves a module outside its package",
+     lambda m: 'return ["--no-addons", "--import", "data:text/javascript;base64," + Data(js.utf8).base64EncodedString()]' in raw("vault/Payments.swift")
+     and "mod.registerHooks({" in raw("vault/Payments.swift")
+     and 'let r = runProcess(sbx, ["-p", profile, pin.runtime] + shopConfinementArgs(root: pin.root) + [pin.script] + args + extra, env: env,' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"\*\*The OS confines it:\*\* the\s+vault runs it through macOS's `sandbox-exec` with a Seatbelt profile it writes for that run \(given inline",
+     lambda m: "(deny default)" in raw("vault/Payments.swift") and '(allow process-exec (literal \\(rtS)))' in raw("vault/Payments.swift")
+     and "(allow file-read* file-write* (subpath \\(runS)))" in raw("vault/Payments.swift")
+     and '(allow network-outbound (remote tcp "localhost:\\(proxyPort)"))' in raw("vault/Payments.swift")
+     and "(allow network-outbound)" not in raw("vault/Payments.swift")),
+    ("SECURITY.md", r"The proxy tunnels only to port 443 of public addresses: it resolves\s+names itself, refuses loopback, private, link-local, shared and other special ranges and this Mac's own addresses",
+     lambda m: 'guard port == 443 || testAllowed else { refuse("403 Forbidden"); return }' in raw("vault/PaymentServer.swift")
+     and "guard testAllowed || proxyDestinationAllowed(bytes, own: own) else { continue }" in raw("vault/PaymentServer.swift")
+     and "let c = canonicalAddress(bytes)" in raw("vault/PaymentServer.swift")
+     and "case (172, let x, _) where x & 0xF0 == 16: return false" in raw("vault/PaymentServer.swift")
+     and 'env += ["HTTPS_PROXY=\\(proxy.url)", "HTTP_PROXY=\\(proxy.url)"]' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"without it the proxy\s+answers 407",
+     lambda m: 'guard constantTimeEqual(given, want) else { refuse("407 Proxy Authentication Required"' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"It serves at most (\d+) connections at once, (\d+) MiB each way per\s+connection",
+     lambda m: f"static let maxConnections = {m[1]}" in raw("vault/PaymentServer.swift") and f"static let maxBytes = {m[2]} << 20" in raw("vault/PaymentServer.swift")
+     and "for sock in all { sock.shut() }" in raw("vault/PaymentServer.swift") and "private var live = [ObjectIdentifier: ProxySocket]()" in raw("vault/PaymentServer.swift")
+     and "if !closed { shutdown(fd, SHUT_RDWR) }" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"Without `/usr/bin/sandbox-exec`, or when the profile fails to apply, the vault doesn't\s+run the CLI at all",
+     lambda m: 'return (-1, nil, "Shop\'s CLI wasn\'t run: macOS\'s sandbox-exec isn\'t available here, and the vault doesn\'t run it unconfined")' in raw("vault/PaymentServer.swift")
+     and 'hasPrefix("sandbox-exec:")' in raw("vault/PaymentServer.swift") and 'sbx == "/usr/bin/sandbox-exec" && runPathProblem(sbx) == nil' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"every\s+library it loads that isn't the system's .{0,200}\(a link out of the\s+package isn't pinned\)",
+     lambda m: "let (libs, lwhy) = dylibClosure(pin.runtime)" in raw("vault/Payments.swift")
+     and "guard let real = realPath(full), real == realRoot || real.hasPrefix(realRoot + \"/\") else {" in raw("vault/Payments.swift")),
+    ("SECURITY.md", r"A\s+Node without the hooks \(older than 22\.15\) is refused too",
+     lambda m: 'if (typeof mod.registerHooks !== "function") {' in raw("vault/Payments.swift")
+     and 'if r.status == 97 && err.contains("metacomputer-confinement: no module.registerHooks") {' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"the payment mandate\s+says so \(`risk_data\.checkout_signature_verified: false`\), the question and its summary say so, and an agent card refuses\s+to sign",
+     lambda m: '"risk_data": ["checkout_signature_verified": false, "approved_by": approvedBy]' in raw("vault/AP2.swift")
+     and "is an agent card: it signs AP2 mandates only for a checkout whose merchant signature is verified" in raw("vault/PaymentServer.swift")
+     and "notes: [\"AP2 mandates; the merchant's signature on the checkout isn't verified\"]" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"no field given twice at any depth \(checked on\s+the raw JSON, before it's read\)",
+     lambda m: "guard jsonKeysUnique(pb) == true, jsonKeysUnique(hb) == true else {" in raw("vault/AP2.swift")
+     and raw("vault/AP2.swift").index("guard jsonKeysUnique(pb) == true") < raw("vault/AP2.swift").index('if let c = obj["currency"]')),
+    ("SECURITY.md", r"Each checkout \(its merchant and its id, however the JWT is written or signed\) is signed once",
+     lambda m: 'let tag = "ap2:" + String(sha256Hex(Array((claim.merchantID + "\\u{0}" + claim.website + "\\u{0}" + claim.checkoutID).utf8)).prefix(16))' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"completed only when the whole checkout is the same, compared as the CLI wrote it, every\s+number by its exact text, never converted",
+     lambda m: "guard let again = co2, checkoutFingerprint(raw: raw2) == fp, m2?.minor == money.minor, m2?.currency == cur, offers(raw2) else {" in raw("vault/PaymentServer.swift")
+     and "return sha256Hex(Array(lexCanonical(.obj(fields.filter { !drop.contains($0.0) })).utf8))" in raw("vault/PaymentServer.swift")
+     and "case .num(let n): return n" in raw("vault/Util.swift") and "func exactJSON" not in raw("vault/Util.swift")),
+    ("SECURITY.md", r"A higher amount is reported\s+\(`completed_with_a_higher_total`\) and the difference goes in the spending record; another currency is reported\s+\(`completed_in_another_currency`\)",
+     lambda m: 'outcome = "completed_with_a_higher_total"' in raw("vault/PaymentServer.swift")
+     and 'extra(a - money.minor, c, ":extra", unaccounted: false)' in raw("vault/PaymentServer.swift")
+     and 'outcome = "completed_in_another_currency"' in raw("vault/PaymentServer.swift")
+     and "if let odd = (p.spend ?? []).first(where: { $0.card == id && $0.unaccounted == true" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"currencies\s+that disagree are never verified \(`completed_unverified`\)",
+     lambda m: "let c3: String? = declared.count == named.count && !declared.isEmpty && Set(declared).count == 1 ? declared[0] : nil" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"its reservation writes a marker, with an id of its own, into the\s+vault's sealed state before the CLI completes it",
+     lambda m: 'let rid = "res:" + randomBytes(16)' in raw("vault/PaymentServer.swift")
+     and "guard pu.cardID != \"shop-default\", let tag = pu.reservation else { return nil }" in raw("vault/PaymentServer.swift")
+     and raw("vault/PaymentServer.swift").index("if s.id != \"shop-default\", let why = reserveSpend(pu, tag:") < raw("vault/PaymentServer.swift").index('runShop(["checkout", "complete", checkout')),
+    ("SECURITY.md", r"A timeout, an answer that can't be read,\s+one that doesn't say what was charged, and any other failure \(a bare `\{\"ok\": false\}`, a transport or upstream error, a\s+checkout not completed, a code it doesn't know\) settles nothing",
+     lambda m: 'let definite = ["completed", "completed_with_a_higher_total", "completed_in_another_currency", "failed"].contains(outcome)' in raw("vault/PaymentServer.swift")
+     and 'let shopNothingSentCodes: Set<String> = ["usage", "invalid_input", "auth_required"]' in raw("vault/PaymentServer.swift")
+     and ': (why3 == nil && shopNothingSent(ans3) ? "failed" : "not_confirmed")' in raw("vault/PaymentServer.swift")
+     and "} else if let nr = settleCompletion(pu, extras: extras) {" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"each record carrying an HMAC under a key only the unlocked vault holds",
+     lambda m: "constantTimeEqual(r.mac, pendingMAC(r, key: key))" in raw("vault/PaymentServer.swift")
+     and "var spend_key: String? = nil" in raw("vault/Store.swift")
+     and "e.card == r.card && e.amount > 0 && e.amount <= 1_000_000_000" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"anything else in that file is never imported: it's reported in the audit log \(`payment.pending_rejected`\) and stops every\s+purchase until you look",
+     lambda m: '"event": "payment.pending_rejected"' in raw("vault/PaymentServer.swift")
+     and "if !pendingJournal(p).1.isEmpty {" in raw("vault/PaymentServer.swift")
+     and 'try requireTTY("spend-resolve")' in raw("vault/Payments.swift")),
+    ("SECURITY.md", r"the payable total's own currency, when it names one,\s+must be the checkout's",
+     lambda m: 'if let c = payable[0]["currency"] { guard let cs = c as? String else' in raw("vault/AP2.swift")),
+    ("SECURITY.md", r"A clip-path counts only\s+when it can be placed exactly",
+     lambda m: "if ((clips && !ident) || (overflows && !aligned)) return false;" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and "if (!(a >= 4 && a / perim(V) >= 0.5)) return false;" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and "if (s.convex) wins.push(s.pts); else { if (concave) return false; concave = s.pts; } }" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and "for (const w of wins) { V = clipBy(V, w); if (!V.length) return false; }" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")),
+    ("SECURITY.md", r"Masking card details in what the agent reads is a defense against\s+accidental exposure to an agent that works with you, not against a malicious process running as you",
+     lambda m: 'could still forge all of it (SECURITY.md, "Accepted limits")' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"is kept only as which refusal it was; the hub says it in its own words, with\s+the VM name and port it pinned when it started, never anything from the line",
+     lambda m: "self.known = (self.known + [tid])[-3:]" in raw("lib/wirelimits.py") and "said = [refusal_text(t, pin) for t in known]" in raw("lib/wirelimits.py")
+     and "err = tail.text(pin=self.pin) if tail is not None else \"\"" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"Each fill gets a masking window of its\s+own, written for the hub with a new ack id before anything leaves: the ack wait, the fill's time limit and a settle\s+margin of a minute",
+     lambda m: "pu.maskUntil = max(pu.maskUntil, Date().addingTimeInterval(5 + to + TimeInterval(purchaseSettleSeconds)))" in raw("vault/PaymentServer.swift")
+     and "let purchaseSettleSeconds = 60" in raw("vault/Payments.swift") and "pu.ackID = newAckID()" in raw("vault/PaymentServer.swift")
+     and "endedPurchases.append(pu)" in raw("vault/PaymentServer.swift")
+     and raw("vault/PaymentServer.swift").index("pu.ackID = newAckID()") < raw("vault/PaymentServer.swift").index("if let why = hubAckProblem(pu) {")
+     and 'denied("purchase \\(pu.id) expired while its page was checked: nothing was typed; start another (it asks again)")' in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"the total check is a consistency check \(the\s+amount you approve is the one a person sees on that page\), not proof against a deceptive page",
+     lambda m: "the page's own claim" in raw("vault/PaymentServer.swift")),
+    ("SECURITY.md", r"overflow on the axes it clips: `overflow-x` alone leaves the height alone",
+     lambda m: "const cx = pc || cs.overflowX !== 'visible', cy = pc || cs.overflowY !== 'visible';" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")
+     and "fromBody = !!bd && dcs.overflowX === 'visible' && dcs.overflowY === 'visible'" in raw("provisioning/guest/rootfs/opt/metacomputer/bin/secret-fill")),
+    ("SECURITY.md", r"keeps trying to find the vault folder if it starts before the vault is set up",
+     lambda m: "if not vm or not self.ack_lock or not os.path.isdir(vd):" in raw("lib/mcp_hub.py") and "self._ack_stop.wait(0.5)" in raw("lib/mcp_hub.py")),
+    ("SECURITY.md", r"fingerprints a result only after masking it, with an HMAC under a per-install secret beside\s+the log's signing key",
+     lambda m: 'out["hmac"] = hmac.new(mac_key, canonical(res), hashlib.sha256).hexdigest()' in raw("lib/actionlog.py")
+     and raw("lib/actionlog.py").index("cardmask.mask_value(msg, _card_hints())") < raw("lib/actionlog.py").index('rec["result"] = summarize_result(msg.get("result"), self.keep_text, mk)')
+     and '"sha256": hashlib.sha256(canonical(res))' not in raw("lib/actionlog.py")),
+    ("SECURITY.md", r"The hub then masks aggressively in that VM's results: any run of 12 or more digits",
+     lambda m: "if sum(len(g[2]) for g in groups[i:j + 1]) >= 12:" in raw("lib/cardmask.py")
+     and "text, n = _replace(text, _active_card_spans(text, groups), CARD_MASK)" in raw("lib/cardmask.py")),
+    ("SECURITY.md", r"must be valid, when it's read and again right before it's signed",
+     lambda m: 'denied("the checkout is no longer valid (it expired while it asked): nothing was signed")' in raw("vault/PaymentServer.swift")
+     and raw("vault/PaymentServer.swift").index("the checkout is no longer valid") < raw("vault/PaymentServer.swift").index("if let why = reserveSpend(pu, tag: tag)")),
+    ("SECURITY.md", r"\*\*Web Bot Auth\*\* is off until you run `secrets wba init` and `wba on` in your own terminal",
+     lambda m: "WebBotAuthKey(key: sk.base64EncodedString(), agent: agent!, on: false" in raw("vault/Merchant.swift")
+     and 'guard let k = wba, k.on, let h = wbaSignatureHeaders' in raw("vault/Merchant.swift")
+     and 'try requireTTY("wba \\(sub)")' in raw("vault/Merchant.swift")),
+    ("docs/payments.md", r"gives signed headers for a request of your agent's own \(valid (\d+) s\)",
+     lambda m: f"ttl: Int = {m[1]}," in raw("vault/Merchant.swift") and f'"valid_s": {m[1]}' in raw("vault/PaymentServer.swift")),
+    ("docs/payments.md", r"Only you can add a card: the command needs your own terminal",
+     lambda m: 'try requireTTY("set")' in raw("vault/Commands.swift") and 'value = Array(try readCardFromTerminal(name).encoded().utf8)' in raw("vault/Commands.swift")),
 ]
 
 
