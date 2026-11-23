@@ -231,6 +231,11 @@ with your agent's normal tools.
   sign-in links filled by the vault too, bound to their site (`secrets ask`, `code`,
   `relay`), signed-in profiles sealed and restored, or you sign in yourself through
   the live view, in a handoff.
+- **Paying for things:** cards in the vault, typed into a checkout by the vault after
+  you approve each purchase (the site, the page's total and the card, shown with Touch
+  ID or at the vault's terminal), or within the caps of a card you mark as an agent
+  card; Shopify stores through your own Shop account; merchants' rules for agents
+  honoured ([Paying for things](#paying-for-things)).
 - **API keys:** short-lived tokens for a proxy on your Mac that adds the real key;
   a long job renews its token (`secrets token renew`) instead of getting a new one.
 - **Claude inside the metacomputer:** `metacomputer claude` installs and starts
@@ -564,6 +569,51 @@ teaches the agent this particular desktop. [architecture.md](architecture.md) ha
 the design, and [docs/commands.md](docs/commands.md#the-claude-code-plugin) the
 tool names and the plugin's updates.
 
+## Paying for things
+
+Your agent can buy things for you without the vault ever giving it your card. You add the card to the
+vault yourself, in your own terminal (`metacomputer secrets set agentvisa --kind card
+--label "Agent Visa"`; it asks for each part with the echo off). At a checkout, the agent
+asks the vault to pay (`metacomputer secrets pay agentvisa --origin https://shop.example
+--total-selector '#total' --fill number='#cc' ...`), and the vault:
+
+- reads the store's own rules for agents (its `/agents.md` and UCP profile) and refuses where
+  they forbid scripted checkout; the agent then hands payment to you (`metacomputer handoff
+  --why payment`);
+- reads the total from the page, in the one tab on that site;
+- checks the card's caps, if you set any (per purchase, per period, per store);
+- **asks you**, for this one purchase, by default: the question shows every site that will get
+  the card (the site the browser is really on, and any payment form's), the total (as the page's
+  own claim) and the card's label, and you answer with Touch ID or by typing the card's name at
+  the vault's terminal;
+- types the parts into the checkout's fields (page-mode Chrome, or the focused field in
+  Firefox), each once, only into that site's tab, and records every step in its audit log
+  (the site, the time, the outcome, the card's label; never a number).
+
+**Approval gates disclosure, not the charge.** What you approve is the vault giving the card to
+a site; a site that has a reusable card's details can charge it again, for any amount, and
+nothing the vault does afterwards can take them back. The approval question says so, and so do
+the summary Touch ID's dialog shows and adding a reusable card. Prefer a card its issuer limits: a single-use number, one locked to a
+merchant, or best, a single-use card from a Shop spend request (below). That's a recommendation,
+not a requirement.
+
+A card you mark as an **agent card** (`metacomputer secrets policy agentvisa --pay agent
+--max-purchase 50 --max-per 200/30d`) pays without asking, within its caps. The card's own limits
+are the backstop for anything a page claims. The agent never gets the card from the vault, and
+the hub hides card details in the forms a page shows them when the agent reads back from the VM
+(not in pixels: a screenshot shows a filled field).
+
+**Shopify stores** ask agents not to script their checkout forms, so there your agent checks
+out through your own Shop account, with Shopify's MIT-licensed `shop` CLI and Shop Pay
+(`metacomputer shop login`, then `shop complete`), with metacomputer's approval on top of
+Shop's own; the vault runs only the CLI you pinned, in a macOS sandbox confined to its own files. Shop's CLI can't
+be told the approved amount, so on that route Shop's own approval and spending limits are what
+hold the charge, and the vault checks what Shop reports charging afterwards. For other stores, a single-use card from a Shop spend request goes straight into
+the vault. After a purchase is approved, the vault can also sign **AP2** mandates on your Mac
+(`secrets ap2 sign`), though almost no merchants accept AP2 yet. Metavert never touches your
+money: there's no payment service or server of ours in any of this. Details, and what was
+tested: [docs/payments.md](docs/payments.md); the threat model: [SECURITY.md](SECURITY.md#paying-for-things-secrets-pay).
+
 ## Security in brief
 
 An agent that uses a computer reads whatever is on the screen, and some of it is
@@ -799,6 +849,7 @@ sinks and volumes stay until you delete them
 - [architecture.md](architecture.md): the design, pinned versions, the hub, the network, recording and the event spool.
 - [docs/storage.md](docs/storage.md): volumes, folders, S3 and reference disks.
 - [docs/shell.md](docs/shell.md): `metacomputer sh` and how it treats the VM.
+- [docs/payments.md](docs/payments.md): paying for things: cards in the vault, approvals, caps, Shopify through your Shop account, AP2, Web Bot Auth.
 - [docs/events.md](docs/events.md): the event stream, every event, wire formats and receivers.
 - [docs/learn.md](docs/learn.md): lessons from your own sessions.
 - [docs/codex.md](docs/codex.md): using it from Codex: setup, its sandbox and the rules, and where it differs.

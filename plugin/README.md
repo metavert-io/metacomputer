@@ -75,10 +75,13 @@ metacomputer has no server, account, telemetry or analytics; Metavert receives n
   usage reports are turned off.
 - **Only if you set them up:** event and audit sinks (a webhook, an OpenTelemetry Collector, syslog or ntfy), the
   vault's API proxy (it forwards a VM program's requests to the provider you bound your key to), Claude Code inside
-  the VM, and S3-backed folders (rclone, to the bucket you name).
+  the VM, S3-backed folders (rclone, to the bucket you name), and paying for things: before a card purchase the vault
+  reads the store's published rules for agents from its site, and `metacomputer shop` runs Shopify's `shop` CLI with the
+  Shop account you sign in.
 
-Passwords, one-time codes and API keys stay in the vault on your Mac, which you unlock in your own terminal. Claude
-asks the vault to type a sign-in into a page in the VM and never sees the value.
+Passwords, one-time codes, API keys and payment cards stay in the vault on your Mac, which you unlock in your own
+terminal. Claude asks the vault to type a sign-in, or a card you approve a purchase with, into a page in the VM and
+never sees the value.
 
 Privacy policy: [Metavert's](https://www.metavert.io/privacy-policy), whose "Self-hosted software" section covers
 metacomputer. [PRIVACY.md](https://github.com/metavert-io/metacomputer/blob/main/PRIVACY.md) lists what stays on your

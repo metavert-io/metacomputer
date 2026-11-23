@@ -210,8 +210,12 @@ server, the CLI and an SDK share, so references and state carry over.
   layouts keep the newest few thousand entries, and a layout keeps only checked
   geometry, at most 256 windows each (a longer list is marked incomplete) and
   32,768 in all. The driver connection's stderr
-  is drained on a thread into a 64 KB tail (what error messages quote) and at
-  most 1 MB per connection in `RUN_DIR/hub/upstream.stderr`.
+  is drained on a thread and none of its text is kept (it can echo what a page
+  showed, a card's details among it): only counts and a fixed class per line
+  (lib/wirelimits.py, StderrCounter), at most 1 MB per connection of time and
+  class in `RUN_DIR/hub/upstream.stderr`; one of metacomputer's own refusals
+  (STDERR_TEMPLATES) is kept only as which one it was, and the hub says it in
+  its own words with the VM it pinned (refusal_text).
 - **Reconnecting.** When the driver connection drops (the VM stopped or
   restarted), every pending request fails with a plain message, everything the
   hub learned about that runtime is forgotten, and the next call reconnects.

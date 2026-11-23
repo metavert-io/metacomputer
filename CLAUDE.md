@@ -64,6 +64,21 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   `import-passwords`, `import-session` and `audit-sink add|remove` (`approve` and `rule add`
   show a Touch ID dialog: never trigger it). Tests never read the real Chrome profile or its
   "Chrome Safe Storage" Keychain item: they use synthetic profiles and the test build's stand-ins.
+- Paying for things (docs/payments.md; `vault/Payments.swift`, `PaymentServer.swift`, `Merchant.swift`, `AP2.swift`,
+  `lib/shop.py`, `lib/cardmask.py`): only the user adds a card (`secrets set NAME --kind card`) or changes its
+  `policy --pay`/caps, `shop-cli set` (the only `shop` the vault runs, with its runtime's libraries and sign-in file, always
+  under sandbox-exec's Seatbelt profile: never a path or program a request names, never unconfined),
+  `ap2 init` and `wba init|on|off`. Approval gates disclosure, not the charge: keep the warnings for reusable cards and
+  the question's "can be charged again" line. Before a checkout run `secrets merchant-rules URL`; where a store forbids
+  scripted checkout or card entry, or its rules can't be read, never fill an agent card: hand payment to the user
+  (`handoff --why payment`) or use their Shop account (`metacomputer shop`). A purchase (`secrets pay`) asks the user for
+  that one purchase unless the card is an agent card; a refusal or a cap is the user's decision. Spending is counted
+  before any part leaves the vault and never uncounted; a full ledger refuses. Never type, read back, screenshot or
+  record card parts; the hub masks card details in every driver message before anything else sees it (guards, traces,
+  events, clients), and withholds one it can't finish checking: keep it first in `on_upstream`; the action log, driver
+  stderr and the hub's own error text mask too. Every approval summary names every recipient in full, or nothing is asked. No real card numbers or
+  purchases in tests: test numbers (4242 4242 4242 4242) and stand-in merchants only. Tests:
+  `python3 tests/test_vault_payments.py` (no VM), `tests/test_payments_vm.py` (test VM only: `MCOMP_CONFIG`).
 - The hub (`lib/mcp_hub.py`, `MCP_HUB=on`; architecture.md "The hub") is one
   process per VM holding the one driver connection; Claude Code's bridge,
   `metacomputer call`, `web`, the GUI test harness and scripts (`lib/mcomp_sdk.py`)
@@ -165,7 +180,7 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
 
 ```bash
 metacomputer start | stop | status | reset | test [A-F] | record start|stop|moments | recordings [--sync] | view [--open|--print|--tailnet|--forget] | where
-metacomputer handoff --why captcha|login|2fa|other --say "…" | handoff done|cancel|wait|status   # the user's step; Claude waits
+metacomputer handoff --why captcha|login|2fa|payment|other --say "…" | handoff done|cancel|wait|status   # the user's step; Claude waits
 metacomputer --vm NAME COMMAND | vm list | vm create NAME | vm delete NAME   # more than one VM (config/vms/NAME.env)
 metacomputer list [--on PLACE] | default [NAME] | --on mac COMMAND   # where each is, the default computer (config/default-vm)
 metacomputer inspect [windows|processes|ports|files|browser] [--json]   # read-only VM snapshot, no GUI
@@ -371,15 +386,15 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_actionlog.py`, `python3 tests/test_recording.py`, `python3 tests/test_vm_shell.py`,
   `python3 tests/test_vm_claude.py`,
   `python3 tests/test_ssh_options.py`, `python3 tests/test_hub.py`, `python3 tests/test_secrets.py`,
-  `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, and the boundary checks
+  `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, `python3 tests/test_vault_payments.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup`, `test_vault_payments` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
   `tests/test_chrome_guard.py`, `tests/test_vault_vm.py`, `tests/test_vault_codes_vm.py`, `tests/test_vm_claude_vm.py` and
-  `tests/test_hidden_text_vm.py` (test VM only: `MCOMP_CONFIG`). See TESTING.md.
+  `tests/test_hidden_text_vm.py` and `tests/test_payments_vm.py` (test VM only: `MCOMP_CONFIG`). See TESTING.md.
 - The secrets vault (`vault/`, Swift) runs from an installed copy,
   `~/.local/share/metacomputer/bin/mcomp-vault`: after changing `vault/`, rebuild
   it with `scripts/build-vault.sh`. Values must never reach output, logs or a

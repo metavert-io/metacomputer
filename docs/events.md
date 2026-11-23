@@ -70,8 +70,8 @@ Either reaches every sink that takes the `needs_you` family.
 | `events status [--json\|--line]` | Sinks, watcher, total backlog, failing sinks. |
 | `events drain [--now]` | Take the spool and retry every backlog (what the watcher does every 30 s); `--now` ignores the backoff. |
 | `events watcher start\|stop\|status` | The watcher by hand (`start` and `stop` do it for you). |
-| `notify "TEXT" [--why login\|captcha\|2fa\|dialog\|approval\|other] [--action "what to do"]` | A `needs_you` event: Claude is blocked on a human. The same message again within 5 minutes isn't sent. |
-| `handoff --why captcha\|login\|2fa\|other --say "TEXT"`, `handoff done\|cancel` | Claude hands the computer to you: the same `needs_you` event as `notify` (not sent when you ran it at your own terminal), then `lifecycle.handoff_opened`, and `handoff_done`, `handoff_cancelled` or `handoff_timed_out` when it ends. |
+| `notify "TEXT" [--why login\|captcha\|2fa\|dialog\|approval\|payment\|other] [--action "what to do"]` | A `needs_you` event: Claude is blocked on a human. The same message again within 5 minutes isn't sent. |
+| `handoff --why captcha\|login\|2fa\|payment\|other --say "TEXT"`, `handoff done\|cancel` | Claude hands the computer to you: the same `needs_you` event as `notify` (not sent when you ran it at your own terminal), then `lifecycle.handoff_opened`, and `handoff_done`, `handoff_cancelled` or `handoff_timed_out` when it ends. |
 
 Header values usually hold ingest tokens. `--header 'Authorization: Bearer …'`
 puts the token in your shell history; `--header-env` takes it from the
@@ -119,7 +119,7 @@ you about changes:
 
 | Family | Type | Severity | When | Data |
 | --- | --- | --- | --- | --- |
-| `needs_you` | `login`, `captcha`, `2fa`, `dialog`, `approval`, `other` | warn | Claude ran `metacomputer notify --why …`, or `metacomputer handoff --why …` (not when you ran it at your own terminal) | `why`, `declared_by: claude`; from a handoff also `handoff_id` and `timeout_s`, and its `action` names `metacomputer view --open` and `metacomputer handoff done`. The message is Claude's `--say`, cleaned. |
+| `needs_you` | `login`, `captcha`, `2fa`, `dialog`, `approval`, `payment`, `other` | warn | Claude ran `metacomputer notify --why …`, or `metacomputer handoff --why …` (not when you ran it at your own terminal) | `why`, `declared_by: claude`; from a handoff also `handoff_id` and `timeout_s`, and its `action` names `metacomputer view --open` and `metacomputer handoff done`. The message is Claude's `--say`, cleaned. |
 | `needs_you` | `in_use` | warn | Claude asked for the VM while another controller had it (the bridge refused the call); once per session per 5 min | the tool, the other controllers (project folder, idle time, last tool) |
 | `needs_you` | `refused` | warn | With `DRIVER_MODE=bounded`, Cua Driver refused the same tool twice within 5 min; then at most once per tool per 5 min. The message is fixed and names only the tool, since the driver's text comes from inside the VM | tool, count, `limit`: which kind of manifest limit (`app`, `path`, `site`, `tool` or `other`). None of the driver's text is sent. |
 | `needs_you` | `vault_locked` | warn | `metacomputer secrets fill`, `secrets session save\|load` or `secrets token` exited 3: the vault isn't unlocked, or doesn't exist yet (an exit hook in `bin/metacomputer`; it takes effect where the secrets vault is installed). Not when you ran the command at your own terminal; at most once in 5 min. The vault may also send its own events through the spool | the action says to run `metacomputer secrets unlock` (or `secrets init`) |

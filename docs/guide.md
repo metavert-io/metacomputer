@@ -382,6 +382,29 @@ metacomputer secrets relay --from mail.example.net/#code --to example.com/#otp -
 - `CODES_VIA=claude` is your opt-in to let Claude read and type codes itself instead (the code then
   lands in the transcript, with no site binding). It's guidance the skill follows, not enforced.
 
+### Pay for things
+
+Add a card to the vault yourself, in your own terminal, then ask:
+
+> "Buy the blue mug from shop.example with my agent card; ask me before you pay."
+
+```sh
+metacomputer secrets set agentvisa --kind card --label "Agent Visa" --single-use   # your terminal: each part typed hidden
+metacomputer secrets policy agentvisa --pay agent --max-purchase 30     # optional: pays without asking, within caps
+```
+
+At the payment step the agent runs `metacomputer secrets merchant-rules https://shop.example`, then
+`metacomputer secrets pay agentvisa --origin https://shop.example --total-selector '#order-total' --fill number='#cc' ...`.
+The vault asks you (the site, any payment frame's site, the page's total, the card's label; Touch ID or the card's name
+at its terminal), types the parts into that site's fields and records it all in its audit log.
+
+What you approve is the vault handing the card to that site, not the charge: a reusable card can be charged again by
+that site, for any amount, so `secrets set` and `policy --pay agent` warn about a card not marked `--single-use` or
+`--merchant-locked`. Use a virtual card that is one of those, or a Shop spend request's single-use card (`metacomputer
+shop card`). Where a store's rules forbid scripted checkout (Shopify's do), the agent hands payment to you; Shopify
+stores go through your own Shop account instead (`metacomputer shop`). Everything else, from AP2 to Web Bot Auth:
+[docs/payments.md](payments.md).
+
 ### Use an API key from the VM without the VM seeing it
 
 - "Use my OpenAI key from the VM without the VM seeing it: run this script against the API there."
