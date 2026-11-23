@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-22
+
 ### Added
 
 - **A default computer: `metacomputer default [NAME]`.** With more than one VM, pick the one a command acts on when it names none (a bare `metacomputer`, and the MCP server of sessions started afterwards). It's kept in `config/default-vm` (not committed), chosen exactly as `--vm NAME` would choose it, so every refusal of `--vm` applies; a default with no settings refuses instead of falling back to another VM, and says how to fix it. `default` with no name shows it and where its settings are; `default MAIN` (the main VM's name) goes back to `config/local.env`'s VM. It changes only that file, holding that VM's lock (so a VM being deleted never becomes the default): no VM is started, stopped or changed. The file is read once, by one reader for the shell and Python sides, without following a link or waiting on a FIFO; Python helpers get the settings exactly as the shell checked them (from a bash that runs no startup file); `vm delete` refuses while the file can't be read; and what a command chose is passed on to what it starts, so a default set meanwhile never moves a build or a hub to another VM. `--json` for agents.
