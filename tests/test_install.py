@@ -400,6 +400,9 @@ def test_get_dry_run():
         check("dry run --no-chrome --no-build --replace-vm: passes them on, and skips the VM checks",
               "install.sh --yes --no-chrome --no-build --replace-vm" in p.stdout and "skipped: --no-build" in p.stdout
               and "Google's terms" not in p.stdout, p.stdout)
+        p, _ = b.get("--dry-run", "--repo", repo, "--no-codex", "--no-openclaw", "--no-hermes", "--no-gemini")
+        check("dry run --no-codex --no-openclaw --no-hermes --no-gemini: passes each on to install.sh",
+              "install.sh --yes --no-codex --no-openclaw --no-hermes --no-gemini" in p.stdout, p.stdout[-600:])
         p, _ = b.get("--dry-run", "--repo", repo, "--ref", "v0.1.0", "--dir", os.path.join(b.t, "elsewhere"))
         check("dry run --ref --dir: uses them", "would check out v0.1.0, commit" in p.stdout and f"{b.t}/elsewhere" in p.stdout, p.stdout)
         p, _ = b.get("--dry-run", "--repo", repo, "--ref", "nonesuch")

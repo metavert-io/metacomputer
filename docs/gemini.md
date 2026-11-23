@@ -11,8 +11,8 @@ subscription (below).
 
 **Gemini CLI and Antigravity CLI.** Since 2026-06-18 Google serves free and Google AI Pro/Ultra users through its
 successor, Antigravity CLI (`agy`); Gemini CLI goes on for Gemini Code Assist Standard and Enterprise and for paid
-Gemini API keys, and is still released. Antigravity CLI keeps its own MCP configuration
-(`~/.gemini/config/mcp_config.json`) and plugins, and isn't set up by this install yet.
+Gemini API keys, and is still released. **Antigravity CLI is not yet supported**: it keeps its own MCP configuration
+(`~/.gemini/config/mcp_config.json`) and plugins, which this install doesn't set up.
 
 ## Set it up
 
@@ -106,21 +106,18 @@ in Terminal, iTerm or an SSH session, not through an agent.
 
 ## A benchmark run
 
-`bench/bench.py run --agent` runs Claude Code and Codex. Until it runs Gemini CLI, one benchmark task at a time can be
-run by hand on a test VM (`MCOMP_CONFIG`, which the MCP server inherits from Gemini CLI's environment) with your own
-Gemini API key: the task's setup, Gemini CLI headless on its prompt, then its check (no model is run here; Google's README
-asks not to use Gemini CLI to benchmark Gemini models, and this measures metacomputer, not the model):
+`bench/bench.py run --agent gemini` runs each task in `gemini -p ... -o stream-json --approval-mode yolo --skip-trust
+--allowed-mcp-server-names metacomputer`, with the work folder's own `.gemini/settings.json` (the server with the run's
+settings, trusted) and the skill in its `.agents/skills`, trusted for that run only. It needs your own Gemini API key or
+Code Assist sign-in, in your own terminal (not run here; Google's README asks not to use Gemini CLI to benchmark Gemini
+models, and this measures metacomputer, not the model):
 
 ```bash
-export MCOMP_CONFIG=/path/to/test-vm.env GEMINI_API_KEY=...     # your key, in your own terminal
-cd ~/metacomputer && bench/bench.py check mousepad-new --setup
-prompt="$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv[1],"rb"))["prompt"])' bench/tasks/mousepad-new.toml)"
-(cd "$(mktemp -d)" && gemini -p "Use your virtual computer (the metacomputer) for this. $prompt" -o stream-json \
-   --approval-mode yolo --skip-trust --allowed-mcp-server-names metacomputer > run.jsonl)
-bench/bench.py check mousepad-new
+export MCOMP_CONFIG=/path/to/test-vm.env
+cd ~/metacomputer && bench/bench.py run --agent gemini --run-id gemini-std
 ```
 
-`metacomputer learn report` then reads the session it left in `~/.gemini/tmp`.
+Gemini CLI reports tokens, not a cost: `--budget` and `--cap` don't apply, and each task keeps its timeout.
 
 ## If something doesn't work
 

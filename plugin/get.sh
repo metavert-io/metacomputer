@@ -49,8 +49,9 @@ Options:
   --no-chrome   Firefox only in the VM (by default Google Chrome is added too, which means
                 accepting Google's terms: https://www.google.com/chrome/terms/)
   --no-build    set everything up but don't build the VM yet (later: metacomputer build)
-  --no-claude   leave Claude Code alone; --no-codex  leave Codex alone (by default metacomputer is set up for
-                whichever of the two is installed; remembered for later updates: docs/codex.md)
+  --no-claude   leave Claude Code alone; --no-codex  leave Codex alone; --no-openclaw, --no-hermes, --no-gemini
+                likewise for OpenClaw, Hermes Agent and Gemini CLI (by default metacomputer is set up for each one
+                installed; remembered for later updates: docs/codex.md, docs/openclaw.md, docs/hermes.md, docs/gemini.md)
   --replace-vm  delete the VM and its clean snapshot and build them again (for a build that didn't
                 finish, or a VM without its snapshot); never implied by --yes
   --confirm     explain what it will do and ask before changing anything
@@ -561,6 +562,9 @@ install() {
   [ "$NO_BUILD" = 1 ] && args+=(--no-build)
   [ "$NO_CODEX" = 1 ] && args+=(--no-codex)
   [ "$NO_CLAUDE" = 1 ] && args+=(--no-claude)
+  [ "$NO_OPENCLAW" = 1 ] && args+=(--no-openclaw)
+  [ "$NO_HERMES" = 1 ] && args+=(--no-hermes)
+  [ "$NO_GEMINI" = 1 ] && args+=(--no-gemini)
   [ "$REPLACE_VM" = 1 ] && args+=(--replace-vm)
   if [ "$NO_CHROME" = 0 ]; then
     note "the VM gets Google Chrome next to Firefox, which means accepting Google's terms"
@@ -694,6 +698,7 @@ EOF
 
 main() {
   DIR=""; DIR_FROM=""; REF=""; REF_KIND=""; REF_COMMIT=""; REF_BRANCH=""; REPO="$MC_REPO"; NO_CHROME=0; NO_BUILD=0; NO_CODEX=0; NO_CLAUDE=0; REPLACE_VM=0
+  NO_OPENCLAW=0; NO_HERMES=0; NO_GEMINI=0
   DRY=0; YES=0; CONFIRM=0; HEALTH=""; VM_NEW=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -707,6 +712,9 @@ main() {
       --no-build) NO_BUILD=1 ;;
       --no-codex) NO_CODEX=1 ;;
       --no-claude) NO_CLAUDE=1 ;;
+      --no-openclaw) NO_OPENCLAW=1 ;;
+      --no-hermes) NO_HERMES=1 ;;
+      --no-gemini) NO_GEMINI=1 ;;
       --replace-vm) REPLACE_VM=1 ;;
       --confirm) CONFIRM=1 ;;
       -y|--yes) YES=1 ;;

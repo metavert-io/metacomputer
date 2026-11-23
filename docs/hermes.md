@@ -106,20 +106,18 @@ iTerm or an SSH session, not through an agent.
 
 ## A benchmark run
 
-`bench/bench.py run --agent` runs Claude Code and Codex. Until it runs Hermes Agent, one benchmark task at a time can be
-run by hand on a test VM with your own provider key: the task's setup, Hermes Agent headless on its prompt in a
-profile whose server points at the test VM (the server doesn't inherit `MCOMP_CONFIG`), then its check:
+`bench/bench.py run --agent hermes` runs each task in `hermes -p metacomputer-bench chat -q ... --format stream-json
+--yolo`: a profile of its own, made once as a copy of your active one (`hermes profile create --clone`, so it has your
+provider settings), given the run's server (with its settings in the entry's `env`, since Hermes passes its MCP servers
+no other variables), tool search off and the skill under test linked in. It needs your provider's key in that profile
+(not run here):
 
 ```bash
-cd ~/metacomputer && export MCOMP_CONFIG=/path/to/test-vm.env
-hermes profile create bench && hermes -p bench config set mcp_servers.metacomputer \
-  '{"command": "'"$HOME"'/.local/bin/metacomputer", "args": ["mcp-lazy"], "timeout": 600, "env": {"MCOMP_CONFIG": "'"$MCOMP_CONFIG"'"}}'
-ln -s ~/metacomputer/skills/metacomputer ~/metacomputer/.claude/skills/cua-driver ~/.hermes/profiles/bench/skills/
-bench/bench.py check mousepad-new --setup
-prompt="$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv[1],"rb"))["prompt"])' bench/tasks/mousepad-new.toml)"
-hermes -p bench chat -q "Use your virtual computer (the metacomputer) for this. $prompt" -Q --yolo --format stream-json > run.jsonl
-bench/bench.py check mousepad-new
+export MCOMP_CONFIG=/path/to/test-vm.env
+cd ~/metacomputer && bench/bench.py run --agent hermes --run-id hermes-std
 ```
+
+Hermes Agent reports tokens, not a cost: `--budget` and `--cap` don't apply, and each task keeps its timeout.
 
 ## If something doesn't work
 

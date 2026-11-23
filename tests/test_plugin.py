@@ -322,6 +322,9 @@ def test_setup():
         p = run([cached, "setup", "--yes", "--no-chrome", "--no-build", "--dir", "/tmp/x y", "--dry-run"], env)
         check("setup passes --yes --no-chrome --no-build --dir DIR --dry-run through, after --confirm",
               args() == ["--confirm", "--yes", "--no-chrome", "--no-build", "--dir", "/tmp/x y", "--dry-run"], (p.stderr, args()))
+        p = run([cached, "setup", "--no-codex", "--no-openclaw", "--no-hermes", "--no-gemini"], env)
+        check("...and each agent's --no-AGENT (get.sh passes them on to install.sh)",
+              args() == ["--confirm", "--no-codex", "--no-openclaw", "--no-hermes", "--no-gemini"], (p.stderr, args()))
         for bad in (["--repo", "https://example.com/other.git"], ["--ref", "main"], ["--repo=x"], ["anything"]):
             fresh()
             p = run([cached, "setup", *bad], env)

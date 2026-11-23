@@ -1261,7 +1261,11 @@ Each of these needs no VM and takes seconds.
 - `python3 tests/test_bench_workdir.py` (12 checks): the benchmark's work folder is a
   fresh private one, and a `claude` planted in the old shared path, the shim folder or a
   relative PATH entry is never run; after a Codex session, the trust table Codex saved for the
-  run's folder is undone (the file put back exactly, its mode kept) only when it's the only change.
+  run's folder is undone (the file put back exactly, its mode kept) only when it's the only change. `--agent gemini`,
+  `hermes` and `openclaw` against stand-ins: the switches (each agent's own default model, tokens not dollars), the work
+  folder (Gemini CLI's .gemini/settings.json server, OpenClaw's workspace skills), the command line each session runs,
+  the Hermes Agent profile (made once, its server with the run's environment, tool search off, the skill linked), and
+  their events read as Claude's (names, Bash for their shells, errors, tokens with no cost).
 - `python3 tests/test_bench_checks.py` (96 checks, a few seconds): the benchmark's check
   readers on made-up ODF and OOXML files (what shows in bold, sheets by name, a chart
   frame's size from LibreOffice's inches, a chart object that doesn't parse, `.xlsx`

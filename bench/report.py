@@ -150,9 +150,17 @@ def totals(rows):
             "invalid_share": s("invalid") / max(1, s("tool_calls")), "refused_share": s("refused") / max(1, s("tool_calls"))}
 
 
+AGENT_NAMES = {"codex": "Codex", "gemini": "Gemini CLI", "hermes": "Hermes Agent", "openclaw": "OpenClaw"}
+
+
+def agent_name(meta):
+    return AGENT_NAMES.get((meta.get("switches") or {}).get("agent"), "Claude Code")
+
+
 def is_codex(meta):
-    """A Codex run: it reports tokens, never a cost, so its cost cells read n/a rather than 0."""
-    return (meta.get("switches") or {}).get("agent") == "codex"
+    """A run of an agent that reports tokens, never a cost (Codex, Gemini CLI, Hermes Agent, OpenClaw: every one but
+    Claude Code), so its cost cells read n/a rather than 0. The name is older than the other agents."""
+    return ((meta.get("switches") or {}).get("agent") or "claude") != "claude"
 
 
 def money(v, codex, fmt="{:.2f}"):
@@ -165,14 +173,14 @@ def header(meta):
     return (f"- metacomputer `{(g.get('sha') or '')[:10]}` ({g.get('branch')}{', uncommitted changes' if g.get('dirty') else ''}); "
             f"VM `{meta.get('vm')}` (reset to `{meta.get('baseline')}` before each task: {sw.get('reset')})\n"
             f"- model `{sw.get('model')}`, effort {sw.get('effort') or 'default'}; "
-            f"{(meta.get('agent_version') or 'Codex, version not recorded') if is_codex(meta) else (meta.get('agent_version') or meta.get('claude_code'))}\n"
+            f"{(meta.get('agent_version') or agent_name(meta) + ', version not recorded') if is_codex(meta) else (meta.get('agent_version') or meta.get('claude_code'))}\n"
             f"- skill `{sw.get('skill')}` (hash {sw.get('skill_hash')}); shell {sw.get('shell')}; "
             f"coordinate guard {sw.get('coord_guard')}{'' if sw.get('coord_guard_in_bridge') else ' (the bridge does not read it yet)'}; "
             f"hub {sw.get('hub') or 'as configured'}; "
             f"screen {sw.get('screen') or 'VM default'}; "
             f"lessons {sw.get('lessons') or 'off'}"
             + (f" ({sw.get('lessons_count')}, hash {sw.get('lessons_hash')})" if sw.get("lessons_hash") else "") + "\n"
-            + ("- Codex reports tokens, not a cost: no budget or cap applies; " if is_codex(meta) else
+            + (f"- {agent_name(meta)} reports tokens, not a cost: no budget or cap applies; " if is_codex(meta) else
                f"- budget ${sw.get('budget')} per task (task files may differ), cap ${sw.get('cap')}; "
                f"spent ${meta.get('spent_usd', 0):.2f}; ")
             + f"{meta.get('started')} to {meta.get('finished', '?')}"

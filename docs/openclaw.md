@@ -102,18 +102,17 @@ or an SSH session, not through an agent.
 
 ## A benchmark run
 
-`bench/bench.py run --agent` runs Claude Code and Codex. Until it runs OpenClaw, one benchmark task at a time can be run
-by hand on a test VM with your own provider key: the task's setup, a one-off `openclaw agent exec` (no gateway; its
-configuration for that run only, tool search off), then its check:
+`bench/bench.py run --agent openclaw` runs each task as a one-off `openclaw agent exec ... --json` (no gateway), the
+work folder its workspace (the skill under test in its `skills/`), and for that run only the server with the run's
+settings and tool search off (`--config-override`, never saved). It needs your provider's key (not run here):
 
 ```bash
-cd ~/metacomputer && export MCOMP_CONFIG=/path/to/test-vm.env
-bench/bench.py check mousepad-new --setup
-prompt="$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv[1],"rb"))["prompt"])' bench/tasks/mousepad-new.toml)"
-openclaw agent exec "Use your virtual computer (the metacomputer) for this. $prompt" --json --model PROVIDER/MODEL \
-  --config-override '{"mcp": {"servers": {"metacomputer": {"command": "'"$HOME"'/.local/bin/metacomputer", "args": ["mcp-lazy"], "requestTimeoutMs": 600000, "env": {"MCOMP_CONFIG": "'"$MCOMP_CONFIG"'"}}}}, "tools": {"toolSearch": false}}' > run.json
-bench/bench.py check mousepad-new
+export MCOMP_CONFIG=/path/to/test-vm.env
+cd ~/metacomputer && bench/bench.py run --agent openclaw --run-id openclaw-std
 ```
+
+`agent exec --json` reports a summary of the tool calls, not each call, so these runs have the task checks, tokens and
+the call count, but not the per-call measures. OpenClaw reports tokens, not a cost: `--budget` and `--cap` don't apply.
 
 ## If something doesn't work
 
