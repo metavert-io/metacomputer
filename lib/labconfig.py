@@ -373,6 +373,11 @@ def load(env=None):
     return vals
 
 
+# The main computer's name when its settings don't give one (config/defaults.env says the same): every Python helper
+# that needs it falls back on this one (lib/storage.py vm_name, computers() below).
+DEFAULT_VM_NAME = "metacomputer"
+
+
 def _expand(value, root, home):
     """A folder setting as scripts/lib.sh would read it ($HOME, $LAB_ROOT and ~ only), or None when it says more."""
     if value is None:
@@ -413,7 +418,7 @@ def computers(root=None, home=None):
     main_file = os.path.join(root, "config", "local.env")
     main = dict(base)
     main.update(_parse_strict(main_file, missing_ok=True))
-    out = [{"name": main.get("VM_NAME") or "", "file": main_file,
+    out = [{"name": main.get("VM_NAME") or DEFAULT_VM_NAME, "file": main_file,
             "run_dir": _expand(main.get("RUN_DIR") or os.path.join(root, ".run"), root, home),
             "ssh_dir": _expand(main.get("SSH_DIR") or os.path.join(home, ".ssh", "metacomputer"), root, home),
             "provider": main.get("PROVIDER") or "", "place": main.get("PLACE") or ""}]

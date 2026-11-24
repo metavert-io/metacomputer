@@ -282,14 +282,44 @@ def take_hold(owners_dir=None):
 
 def look_once(owners_dir=None):
     """The gate for a long-running program (storage.py watch): one look when it starts, holding nothing afterwards (it
-    would keep every handoff from opening). A hold handed on counts, and this process's copy of it is closed then (the
-    command that handed it on keeps the lock); otherwise the lock is taken shared for the look and let go by closing.
-    Returns how it went ahead; exits 4 when it must wait."""
+    would keep every handoff from opening). A hold handed on counts, and every descriptor this process has on the lock
+    file is closed then (close_dispatch_fds: the command that handed it on keeps the lock); otherwise the lock is taken
+    shared for the look and let go by closing. Returns how it went ahead; exits 4 when it must wait."""
     _parse_only()
     use(owners_dir)
     fd, how = _hold()
     os.close(fd)
+    close_dispatch_fds()
     return how
+
+
+def close_dispatch_fds():
+    """Close every descriptor this process has on this computer's dispatch lock file (that very file: device and
+    inode), whichever its number: a copy left open (two descriptors handed on for one description, say 5 and 6) would
+    keep the lock held, and every handoff from opening, for as long as a long-running program (and anything it forks)
+    lives. Returns how many it closed."""
+    try:
+        want = os.lstat(owners.dispatch_path())
+    except OSError:
+        return 0
+    n = 0
+    for fd in _open_fds():
+        if fd < 3:
+            continue
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            continue
+        if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
+            try:
+                os.close(fd)
+                n += 1
+            except OSError:
+                pass
+    for path, held in list(_HELD.items()):
+        if path == owners.dispatch_path():
+            del _HELD[path]
+    return n
 
 
 def held_fds():

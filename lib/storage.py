@@ -102,7 +102,7 @@ def state_home():
 
 
 def vm_name():
-    return env("VM_NAME", "metacomputer") or "metacomputer"
+    return env("VM_NAME", labconfig.DEFAULT_VM_NAME) or labconfig.DEFAULT_VM_NAME
 
 
 def run_dir():
@@ -3426,7 +3426,7 @@ def folder_empty(path):
         return False
 
 
-def s3_sync(rec, reason="manual", force=False, rclone=None, security=None, resync=False, sandbox=True):
+def s3_sync(rec, reason="manual", force=False, rclone=None, security=None, resync=False, sandbox=True, users_check=None):
     """One sync of an S3 volume, serialized per volume: exchange (shared copy -> sync copy), rclone bisync
     (sync copy <-> bucket), exchange again (sync copy -> shared copy). Never raises; returns {"ok", "summary",
     "conflicts", ...} and records it (last-sync.json, the log, events).
@@ -3436,7 +3436,9 @@ def s3_sync(rec, reason="manual", force=False, rclone=None, security=None, resyn
       and it's stopped if the disk falls below the reserve anyway.
     - A resync (which picks one side where both changed) runs only when asked for (resync=True), never on its
       own, and the first sync of a copy that already holds files counts as one.
-    - Backups (older versions rclone replaced) are pruned to S3_BACKUP_MAX_GB before and after."""
+    - Backups (older versions rclone replaced) are pruned to S3_BACKUP_MAX_GB before and after.
+    - users_check (a manual sync's): called under the sync lock and the reservation, before each exchange with the
+      shared copy; HoldersUnknown from it stops the sync there, before that exchange writes anything ("refused")."""
     name, b = rec["name"], rec.get("s3") or {}
     d = s3_dir(name)
     os.makedirs(os.path.join(d, "bisync"), mode=0o700, exist_ok=True)
@@ -3454,6 +3456,8 @@ def s3_sync(rec, reason="manual", force=False, rclone=None, security=None, resyn
             copy_item = {"kind": "s3", "name": name, "path": path, "rw": False, "exclusive": False,
                          "lock": lock_key("s3copy", path)}
             with reserved([], "s3-sync", [copy_item, stage_item(rec)]):
+                if users_check:
+                    users_check()
                 root1 = open_copy_root(rec)
                 root2, sync = open_sync_root(name)
                 stage1 = open_stage(rec, root1)
@@ -3533,6 +3537,8 @@ def s3_sync(rec, reason="manual", force=False, rclone=None, security=None, resyn
                             hint = f"; if every file really changed, metacomputer volume sync {name} --force"
                         out["summary"] = f"sync failed ({out['error']})" + hint
                     # Whatever rclone managed (all of it, part, nothing) reaches the shared copy the same way.
+                    if users_check:
+                        users_check()
                     try:
                         after = Exchange({1: root1, 2: root2}, base, left, time.monotonic() + EXCHANGE_MAX,
                                          stage1, session).run()
@@ -3547,6 +3553,7 @@ def s3_sync(rec, reason="manual", force=False, rclone=None, security=None, resyn
         except (StorageError, ProtectionFailure) as e:
             out["ok"] = False
             out["error"] = str(e)
+            out["refused"] = isinstance(e, HoldersUnknown)
             out["summary"] = f"not synced: {e}"
         except OSError as e:
             out["ok"] = False
@@ -3730,17 +3737,70 @@ def cmd_volume_test(a):
     return 0
 
 
+class HoldersUnknown(StorageError):
+    """Who has a volume attached can't be told (a holder record, or their folder, that's there but can't be read), or
+    changed during a manual sync: its handoff gate refuses (exit 4)."""
+
+
+def holder_records():
+    """Every holder record, read strictly (volume_users, for the handoff gate): a missing locks folder is none, a record
+    removed meanwhile is gone, but a folder or a record that's there and can't be read or parsed raises HoldersUnknown,
+    never read as none."""
+    d = os.path.join(state_home(), "locks")
+    try:
+        names = os.listdir(d)
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        raise HoldersUnknown(f"the storage locks folder can't be read ({e.strerror or e})")
+    out = []
+    for f in sorted(names):
+        if not f.endswith(".json"):
+            continue
+        try:
+            fd = os.open(os.path.join(d, f), os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            continue                    # let go of meanwhile
+        except OSError as e:
+            raise HoldersUnknown(f"the storage lock record {f} can't be read ({e.strerror or e})")
+        try:
+            with os.fdopen(fd) as fh:
+                rec = json.loads(fh.read(1 << 20))
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            raise HoldersUnknown(f"the storage lock record {f} can't be read ({e})")
+        if not isinstance(rec, dict):
+            raise HoldersUnknown(f"the storage lock record {f} isn't one")
+        out.append(rec)
+    return out
+
+
+def _related(a, b):
+    """Two paths of which one is the other or inside it, compared as the filesystem compares names, links resolved."""
+    try:
+        a, b = os.path.realpath(a), os.path.realpath(b)
+    except (OSError, ValueError, TypeError):
+        return False
+    return inside(a, b) or inside(b, a)
+
+
 def volume_users(name, path=None):
-    """(VM, checkout) of every computer that has the volume attached now: the live records of its holders (an attached
-    disk, a shared folder, an S3 copy kept in sync), never a command's own operation record."""
+    """(VM, checkout) of every computer that has the volume, or what's inside or around its folder, attached now: the
+    live records of its holders (an attached disk, a shared folder, an S3 copy kept in sync, a folder volume whose path
+    is the copy, inside it or holding it), never a command's own operation record. Records that can't be read raise
+    HoldersUnknown (holder_records)."""
     out = set()
-    for r in all_locks():
+    for r in holder_records():
         vm = str(r.get("vm") or "")
         if not vm or vm.startswith(OPERATION) or not holder_alive(r):
             continue
-        if r.get("name") == name or (path and r.get("path") == path):
+        if r.get("name") == name or (path and r.get("path") and _related(str(r["path"]), path)):
             out.add((vm, str(r.get("lab") or "")))
     return out
+
+
+def _who(pairs):
+    """PAIRS with each checkout spelled one way (its real path; "" is this one)."""
+    return {(vm, os.path.realpath(lab) if lab else lab_root()) for vm, lab in pairs}
 
 
 def gate_computers(pairs):
@@ -3770,10 +3830,26 @@ def cmd_volume_sync(a):
     rec = reg_load("volume", check_name(a.name))
     if not rec or rec.get("kind") != "s3":
         raise StorageError(f"no S3 volume named {a.name} (metacomputer volume list)")
-    # What it syncs is what every computer that has it attached sees: each of them waits during its handoff, not only
-    # the one this command was run for (held by main() already).
-    gate_computers({(vm_name(), "")} | volume_users(rec["name"], rec.get("path")))
-    r = s3_sync(rec, reason="manual", force=a.force, resync=a.resync)
+    # What it syncs is what the computers that have it attached see (the copy, a folder inside it or around it): each
+    # of them waits during its handoff, not only the one this command was run for (held by main() already). Who they are
+    # is read again under the sync's own lock, before each exchange with the copy: one that attached meanwhile (whose
+    # handoff wasn't checked) stops it there, with exit 4; no dispatch lock is taken after the sync lock.
+    import handoff_gate
+    try:
+        gated = _who({(vm_name(), "")} | volume_users(rec["name"], rec.get("path")))
+    except HoldersUnknown as e:
+        handoff_gate.refuse(f"{e}, so which computers' handoffs to check for volume '{rec['name']}' can't be told; "
+                            "nothing was done")
+    gate_computers(gated)
+
+    def same_users():
+        now_ = _who(volume_users(rec["name"], rec.get("path")))
+        if not now_ <= gated:
+            raise HoldersUnknown("a computer attached it meanwhile (" + ", ".join(sorted(v for v, _ in now_ - gated))
+                                 + "), whose handoff this didn't check; run it again")
+    r = s3_sync(rec, reason="manual", force=a.force, resync=a.resync, users_check=same_users)
+    if r.get("refused"):
+        handoff_gate.refuse(f"volume '{rec['name']}' wasn't synced on: {r.get('error')}")
     print(("  ✓ " if r["ok"] else "  ! ") + esc(r["summary"]))
     for c in r["conflicts"][:20]:
         print(f"    conflict: {esc(c)} (both copies kept)")
