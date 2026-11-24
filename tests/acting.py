@@ -16,6 +16,10 @@ The labels:
             vault's fills: they wait (exit 4) even at the user's own terminal. A lifecycle command's `--override` (the
             user's own say-so) goes ahead, as it does for another session, holding the lock for what it runs
             (SECURITY.md, "What it is and isn't"); a fill has none: it waits until the handoff ends.
+  SHARED    changes what several computers use (a volume: the computers whose checkpoints keep it; a provider's network,
+            when its adapter says its setup rewrites it: every computer of this checkout's there): waits while any of
+            them has a handoff open (lib/handoff_gate.py wait_or_hold_all, in path order), and refuses when one of them
+            can't be told. tests/test_acting.py sets up such computers for each (SHARED_FIXTURES).
   RESET     an input reset (lib/input_reset.py): under the dispatch lock held exclusively; while a handoff is open only
             at the user's own terminal (exit 4, or `view --open`'s silent nothing), never under another's hold.
   USER      only at the user's own terminal, whatever any handoff says (it may act on any computer at a provider; or
@@ -36,9 +40,9 @@ A program's entry is a label, or {SUBCOMMAND: label}, where a label may be a fun
 that differs). The subcommand is the line's first word (two for a group: `volume sync`), after a `--transport N
 WORD...` the program takes first.
 """
-ACTS, LIFECYCLE, RESET, USER, PER_CALL, THROUGH, ONGOING, GUEST, NONE, SOURCED = (
-    "acts", "lifecycle", "reset", "user", "per-call", "through", "ongoing", "guest", "none", "sourced")
-LABELS = (ACTS, LIFECYCLE, RESET, USER, PER_CALL, THROUGH, ONGOING, GUEST, NONE, SOURCED)
+ACTS, LIFECYCLE, SHARED, RESET, USER, PER_CALL, THROUGH, ONGOING, GUEST, NONE, SOURCED = (
+    "acts", "lifecycle", "shared", "reset", "user", "per-call", "through", "ongoing", "guest", "none", "sourced")
+LABELS = (ACTS, LIFECYCLE, SHARED, RESET, USER, PER_CALL, THROUGH, ONGOING, GUEST, NONE, SOURCED)
 G, R, S = ("provisioning/guest/rootfs/opt/metacomputer/bin/", "provisioning/remote/rootfs/opt/metacomputer/bin/",
            "provisioning/sprite/rootfs/opt/metacomputer/sprite/")
 
@@ -130,13 +134,14 @@ PROGRAMS = {
         "checkpoint": when(has("create", "restore", "delete"), ACTS, NONE),
         "allow": when(has("--show"), NONE, ACTS),
         "egress": when(has("--set"), ACTS, NONE),
-        "cloud": when(lambda row: (("teardown" in row or any(w.startswith("--forget") for w in row))
-                                   and "sprites" not in row), USER, NONE)},
+        "cloud": lambda row: (USER if ("teardown" in row or any(w.startswith("--forget") for w in row))
+                              and "sprites" not in row else SHARED if "setup" in row else NONE)},
     "lib/safedelete.py": NONE,
     "lib/sessionvm.py": NONE,
     "lib/shop.py": NONE,
     "lib/storage.py": {
-        "volume create": NONE, "volume keys": NONE, "volume test": NONE, "volume list": NONE, "volume delete": NONE,
+        "volume create": NONE, "volume keys": NONE, "volume test": NONE, "volume list": NONE,
+        "volume delete": SHARED,                            # the snapshots computers' checkpoints keep of it
         "volume resize": NONE, "refdisk create": NONE, "refdisk list": NONE, "refdisk delete": NONE,
         "attached": NONE, "status": NONE,
         "volume sync": ACTS, "prepare": ACTS, "started": ACTS, "attach": ACTS, "release": ACTS, "kill-vm": ACTS,
@@ -195,18 +200,21 @@ BIN = {
     "browser": lambda a: ACTS if _first(a) == "profiles" and (a[1:2] in (["--new"], ["--delete"])) else NONE,
     "security": lambda a: ACTS if "apply" in a else NONE,
     "record": lambda a: ACTS if _first(a) in ("start", "stop") else NONE,
-    "volume": lambda a: ACTS if _first(a) == "sync" else NONE,
+    "volume": lambda a: ACTS if _first(a) == "sync" else SHARED if _first(a) == "delete" else NONE,
     "refdisk": NONE,
     "net": lambda a, remote=False: ((LIFECYCLE if remote else ACTS) if _first(a) in ("allow", "remove", "clear", "egress")
                                     else NONE),
     "vm": lambda a: ACTS if _first(a) == "delete" else THROUGH if _first(a) == "create" else NONE,
     "cloud": lambda a: (USER if ("teardown" in a or any(w.startswith("--forget") for w in a)) and "sprites" not in a
-                        else NONE),
+                        else SHARED if _first(a) == "setup" else NONE),
     "secrets": _secrets,
     "input-reset": lambda a: NONE if _first(a) == "--check" else RESET,
     "view": lambda a: RESET if "--open" in a or not [w for w in a if w not in ("--remember", "--no-remember")]
                       else NONE,
-    "sh": PER_CALL, "claude": PER_CALL, "mcp": PER_CALL,
+    "sh": PER_CALL, "claude": PER_CALL,
+    # mcp: per call through the relay; its start, with DRIVER_MODE=bounded and no manifest in the guest yet, writes one
+    # under handoff_hold_unless_user first (tests/test_acting.py mcp_manifest_checks)
+    "mcp": PER_CALL,
     "hub": lambda a: PER_CALL if _first(a) in ("start", "serve") else NONE,
     "call": THROUGH, "web": THROUGH, "mcp-lazy": THROUGH, "each": THROUGH, "update": THROUGH, "setup": THROUGH,
     "handoff": NONE,

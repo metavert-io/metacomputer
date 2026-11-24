@@ -41,7 +41,9 @@ FAILS = []
 COUNT = [0]
 WAITS = "the user has the computer"                 # owners.handoff_refusal's words (and owners_check's)
 GOES = "this runs at your own terminal: going ahead"
-HELD_FD = 21                                        # where the inherited hold is handed on (a script's own 5-9 stay free)
+# Where a caller's hold is handed on: bin/metacomputer's descriptor 6 (to the programs it runs, and to a metacomputer
+# command run under it), a script's 5 (scripts/lib.sh script_handoff_hold).
+HELD_FD_BIN, HELD_FD_SCRIPT = 6, 5
 # The copy's runner: its computers exist and run (so a command gets as far as its handoff check), every call recorded;
 # anything but a lookup is refused (97).
 RUNNER = r"""#!/usr/bin/env python3
@@ -51,7 +53,7 @@ with open(os.environ.get("MCOMP_HELP_CALLS") or os.devnull, "a") as f:
     f.write("standin mcomp-vm " + " ".join(a) + "\n")
 vms = [{"name": n, "status": s, "locationName": "home", "macAddress": "aa:bb:cc:dd:ee:01"}
        for n, s in (("helpvm", "running"), ("helpvm-baseline", "stopped"), ("helpvm-ckpt-ck", "stopped"),
-                    ("other", "running"), ("other-baseline", "stopped"))]
+                    ("other", "running"), ("other-baseline", "stopped"), ("bnd", "running"))]
 if a[:2] == ["config", "get"]:
     st = os.environ["FAKE_STORAGE"]
     print(f"Default VM storage: home ({st})\n\nConfigured VM storage locations:\n  - home: {st} (default)\n")
@@ -98,9 +100,9 @@ def acting_calls(called):
 # Runs a command with an alarm that ends it after N seconds (kept across exec): a line past the gate goes on with the
 # stand-ins, and must not outlive the test.
 ALARM = "import os, signal, sys; signal.alarm(int(sys.argv[1])); os.execv(sys.argv[2], sys.argv[2:])"
-# The same, with the hold handed on as descriptor HELD_FD (moved there in the child: the test's threads share theirs).
-ALARM_HELD = ("import os, signal, sys; signal.alarm(int(sys.argv[1])); fd = int(sys.argv[2]); "
-              "os.dup2(fd, %d); os.close(fd); os.execv(sys.argv[3], sys.argv[3:])" % HELD_FD)
+# The same, with a descriptor handed on as number N (moved there in the child: the test's threads share theirs).
+ALARM_HELD = ("import os, signal, sys; signal.alarm(int(sys.argv[1])); fd, n = int(sys.argv[2]), int(sys.argv[3]); "
+              "os.dup2(fd, n); fd != n and os.close(fd); os.execv(sys.argv[4], sys.argv[4:])")
 
 
 def check(name, cond, detail=""):
@@ -148,6 +150,12 @@ def table_checks(rows):
           sorted(set(acting.BIN) - cmds))
     bad = [(c, a) for _vm, c, a in FORMS if acting.classify_bin(c, [x for x in a if x != H]) not in acting.LABELS]
     check("each of bin/metacomputer's forms (tests/test_help.py FORMS) has a label", not bad, bad[:6])
+    # Every SHARED line has a fixture of its own here (it waits for computers its line doesn't name).
+    shared = {(k, acting.subcommand(k, r)) for k, rs in rows.items() for r in rs if acting.classify(k, r) == acting.SHARED}
+    shared |= {("bin/metacomputer", c) for _vm, c, a in FORMS
+               if acting.classify_bin(c, [x for x in a if x != H]) == acting.SHARED}
+    check("every SHARED line (what several computers use) has its fixture here (SHARED_FIXTURES)",
+          shared == set(SHARED_FIXTURES), (sorted(shared - set(SHARED_FIXTURES)), sorted(set(SHARED_FIXTURES) - shared)))
     # The programs' own lists of what changes a computer say what the table says (lib/remote.py, lib/storage.py):
     # imported here with a throwaway HOME and no runner, as tests/test_help.py imports them (nothing of this Mac's).
     sys.path.insert(0, os.path.join(LAB, "lib"))
@@ -255,9 +263,11 @@ def argv_of(lab, key, row):
     return ([PY, "-B", path] if sp["run"] == "py" else ["/bin/bash", path]) + fill
 
 
-def run_line(lab, argv, extra, mode, run_dir, secs=25):
-    """ARGV in the copy, as MODE: "plain" (no terminal), "user" (the user's own terminal) or "held" (under a hold on
-    RUN_DIR's dispatch lock handed on as descriptor HELD_FD). (rc, out, err, calls, written)."""
+def run_line(lab, argv, extra, mode, run_dir, secs=25, fd=HELD_FD_BIN):
+    """ARGV in the copy, as MODE: "plain" (no terminal), "user" (the user's own terminal), "held" (under a hold on
+    RUN_DIR's dispatch lock handed on as descriptor FD) or "unlocked" (a descriptor on that lock file handed on as FD
+    that never took the lock, while this test holds it shared on another: someone holds it, not that descriptor).
+    (rc, out, err, calls, written)."""
     calls = os.path.join(lab.calls_dir, f"acting-{lab.n}.log")
     lab.n += 1
     env = lab.env(calls)
@@ -279,13 +289,17 @@ def run_line(lab, argv, extra, mode, run_dir, secs=25):
         finally:
             os.close(m)
     else:
-        fds, hold = (), None
-        if mode == "held":
+        fds, hold, other = (), None, None
+        if mode in ("held", "unlocked"):
             import fcntl
             hold = os.open(os.path.join(run_dir, "owners", ".dispatch"), os.O_RDWR)
-            fcntl.flock(hold, fcntl.LOCK_SH)
+            if mode == "held":
+                fcntl.flock(hold, fcntl.LOCK_SH)
+            else:
+                other = os.open(os.path.join(run_dir, "owners", ".dispatch"), os.O_RDWR)
+                fcntl.flock(other, fcntl.LOCK_SH)
             fds = (hold,)
-            wrapped = [PY, "-c", ALARM_HELD, str(secs), str(hold)] + argv
+            wrapped = [PY, "-c", ALARM_HELD, str(secs), str(hold), str(fd)] + argv
         try:
             r = subprocess.run(wrapped, env=env, cwd=lab.box.co, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                                timeout=secs + 30, start_new_session=True, pass_fds=fds)
@@ -295,8 +309,9 @@ def run_line(lab, argv, extra, mode, run_dir, secs=25):
             out = x.stdout.decode("utf-8", "replace") if isinstance(x.stdout, bytes) else (x.stdout or "")
             err = x.stderr.decode("utf-8", "replace") if isinstance(x.stderr, bytes) else (x.stderr or "")
         finally:
-            if hold is not None:
-                os.close(hold)
+            for x in (hold, other):
+                if x is not None:
+                    os.close(x)
     after = lab.snapshot()
     called = open(calls).read().splitlines() if os.path.exists(calls) else []
     written = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p)
@@ -331,9 +346,15 @@ def entry_checks(td, rows):
             rc, out, err, called, _ = user
             check(f"{words}: ...at the user's own terminal it goes past the gate", GOES in err and rc not in (4,),
                   (rc, err[-300:]))
+            held, unlocked = held
+            n = HELD_FD_SCRIPT if key.startswith("scripts/") else HELD_FD_BIN
             rc, out, err, called, _ = held
-            check(f"{words}: ...under its caller's hold (an inherited descriptor on this VM's dispatch lock) it goes past "
-                  "the gate", rc != 4 and WAITS not in err and WAITS not in out, (rc, err[-300:]))
+            check(f"{words}: ...under its caller's hold (descriptor {n} on this VM's dispatch lock, as its callers hand it "
+                  "on) it goes past the gate", rc != 4 and WAITS not in err and WAITS not in out, (rc, err[-300:]))
+            rc, out, err, called, written = unlocked
+            check(f"{words}: ...but a descriptor {n} on that lock file that never took it, while someone else holds it, "
+                  "is no hold: exit 4, nothing called or written", rc == 4 and WAITS in err and not acting_calls(called)
+                  and not written, (rc, acting_calls(called)[:3], written[:3], err[-300:]))
         elif label == acting.RESET:
             check(f"{words}: an input reset while the user has the computer, by itself: nothing done (exit 4, or view's "
                   "silent nothing); nothing called or written", rc in (0, 4) and not acted and not written
@@ -363,7 +384,12 @@ def run_entries(td, items, tag):
             plain = run_line(lab, argv, extra, "plain", run_dir)
             user = run_line(lab, argv, extra, "user", run_dir)
             handoff_on(run_dir)     # (a line past the gate may have changed what's there: open again)
-            held = run_line(lab, argv, extra, "held", run_dir) if label == acting.ACTS else None
+            held = None
+            if label == acting.ACTS:
+                n = HELD_FD_SCRIPT if key.startswith("scripts/") else HELD_FD_BIN
+                held = (run_line(lab, argv, extra, "held", run_dir, fd=n),)
+                handoff_on(run_dir)
+                held += (run_line(lab, argv, extra, "unlocked", run_dir, fd=n),)
             out.append((key, row, label, (plain, user, held)))
     finally:
         lab.close()
@@ -418,9 +444,14 @@ def bin_checks(td):
             continue        # LIFECYCLE: even at the user's own terminal (their --override goes ahead): test_handoff's
         rc, out, err, called, _ = user
         check(f"{words}: ...at the user's own terminal it goes past the gate", GOES in err and rc != 4, (rc, err[-300:]))
+        held, unlocked = held
         rc, out, err, called, _ = held
-        check(f"{words}: ...under its caller's hold it goes past the gate", rc != 4 and WAITS not in err,
-              (rc, err[-300:]))
+        check(f"{words}: ...under its caller's hold (descriptor 6, as a metacomputer command run under another's gets "
+              "it) it goes past the gate", rc != 4 and WAITS not in err, (rc, err[-300:]))
+        rc, out, err, called, _ = unlocked
+        check(f"{words}: ...but a descriptor 6 on that lock file that never took it, while someone else holds it, is no "
+              "hold: exit 4, nothing called", rc == 4 and WAITS in err and not acting_calls(called),
+              (rc, acting_calls(called)[:3], err[-300:]))
 
 
 def incomplete(res):
@@ -458,11 +489,179 @@ def run_bin(td, items, tag):
             if label == acting.ACTS and not incomplete(plain):
                 user = run_line(lab, argv, {}, "user", run_dir, secs=20)
                 handoff_on(run_dir)
-                held = run_line(lab, argv, {}, "held", run_dir, secs=20)
+                held = (run_line(lab, argv, {}, "held", run_dir, secs=20, fd=HELD_FD_BIN),)
+                handoff_on(run_dir)
+                held += (run_line(lab, argv, {}, "unlocked", run_dir, secs=20, fd=HELD_FD_BIN),)
             out.append((vm, cmd, a, label, (plain, user, held)))
     finally:
         lab.close()
     return out
+
+
+# --- the computer a program acts on is the one whose handoff it checks ----------------------------------------------
+# The SHARED lines and the fixture that runs each (volume_checks, cloud_setup_checks; bin/metacomputer hands them on).
+SHARED_FIXTURES = {("lib/storage.py", "volume delete"): "volume_checks", ("lib/remote.py", "cloud"): "cloud_setup_checks",
+                   ("bin/metacomputer", "volume"): "volume_checks (storage.py)",
+                   ("bin/metacomputer", "cloud"): "cloud_setup_checks (remote.py)"}
+
+
+def storage_state(lab):
+    return os.path.join(lab.box.root, "storage")        # MCOMP_STORAGE_HOME (tests/test_multi_vm.py Box.env)
+
+
+def lstart(pid):
+    return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+
+def binding_checks(td):
+    """lib/storage.py and lib/guest_put.py look at the handoff of the computer they act on (codex re-check, P1-2): its
+    name and its run folder, or the SSH folder its transport names, and never the default folder for another."""
+    print("\nthe direct helpers check the handoff of the computer they act on")
+    lab = make_lab(td, "bind")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    try:
+        co, st = lab.box.co, storage_state(lab)
+        other_run, main_run = os.path.join(co, ".run-vms", "other"), os.path.join(co, ".run")
+        man = os.path.join(st, "checkpoints", "other", "saved.json")
+        write(man, json.dumps({"volumes": []}), 0o600)
+        handoff_on(other_run)
+        handoff_on(main_run)
+        os.remove(os.path.join(main_run, "owners", "handoff.state"))     # (only other has one)
+        sp = [PY, "-B", os.path.join(co, "lib", "storage.py"), "checkpoint", "delete", "saved"]
+        for extra, how in (({"MCOMP_VM_NAME": "other"}, "named, no run folder given"),
+                           ({"MCOMP_VM": "other"}, "chosen by MCOMP_VM, no run folder given"),
+                           ({"MCOMP_VM_NAME": "other", "MCOMP_RUN_DIR": main_run}, "named, with the main VM's run folder")):
+            rc, out, err, called, written = run_line(lab, sp, extra, "plain", other_run)
+            check(f"storage.py checkpoint delete saved for VM other ({how}), while other has a handoff open and the main "
+                  "VM doesn't: exit 4, its checkpoint kept", rc == 4 and os.path.exists(man) and not acting_calls(called),
+                  (rc, os.path.exists(man), err[-300:]))
+        os.remove(os.path.join(other_run, "owners", "handoff.state"))
+        rc, out, err, called, written = run_line(lab, sp, {"MCOMP_VM_NAME": "other"}, "plain", other_run)
+        check("...and with no handoff open there, the same deletes other's checkpoint (it acts on other's)",
+              rc == 0 and not os.path.exists(man), (rc, os.path.exists(man), err[-300:]))
+        handoff_on(other_run)
+        kh = os.path.join(lab.box.home, ".ssh", "metacomputer-other", "known_hosts")
+        put = [PY, "-B", os.path.join(co, "lib", "guest_put.py"), "--transport", "4", "ssh", "-o",
+               f"UserKnownHostsFile={kh}", "-T", os.path.join(co, "install.sh")]
+        for extra, how in (({}, "no run folder given"), ({"MCOMP_RUN_DIR": main_run}, "with the main VM's run folder")):
+            rc, out, err, called, written = run_line(lab, put, extra, "plain", other_run)
+            check(f"guest_put.py with a transport to VM other ({how}), while other has a handoff open: exit 4, nothing "
+                  "called", rc == 4 and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+        bare = [PY, "-B", os.path.join(co, "lib", "guest_put.py"), "--transport", "2", "ssh", "-T", os.path.join(co, "install.sh")]
+        rc, out, err, called, written = run_line(lab, bare, {"MCOMP_RUN_DIR": main_run}, "plain", other_run)
+        check("guest_put.py with a transport that names no computer and the main VM's run folder: refused (exit 4: "
+              "which computer can't be told), nothing called", rc == 4 and not acting_calls(called),
+              (rc, acting_calls(called)[:3], err[-300:]))
+    finally:
+        lab.close()
+
+
+def volume_checks(td):
+    """A volume sync waits for every computer that has the volume attached (P1-3), and a volume delete for every
+    computer whose checkpoints keep it (P2-4), not only the one the command was run for."""
+    print("\nwhat a volume's sync or delete changes: every computer that uses it")
+    lab = make_lab(td, "vol")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    keeper = subprocess.Popen(["/bin/sleep", "600"])
+    try:
+        co, st = lab.box.co, storage_state(lab)
+        other_run, main_run = os.path.join(co, ".run-vms", "other"), os.path.join(co, ".run")
+        copy = os.path.join(lab.box.root, "s3copy")
+        os.makedirs(copy, exist_ok=True)
+        write(os.path.join(st, "registry", "volumes", "shared.json"),
+              json.dumps({"name": "shared", "kind": "s3", "path": copy, "bucket": "b", "endpoint": "https://example.com"}))
+        write(os.path.join(st, "locks", "s3-test-shared.json"),
+              json.dumps({"kind": "s3", "name": "shared", "path": copy, "vm": "other", "lab": os.path.realpath(co),
+                          "pid": keeper.pid, "pstart": lstart(keeper.pid), "since": "now", "state": "running"}), 0o600)
+        handoff_on(other_run)
+        handoff_on(main_run)
+        os.remove(os.path.join(main_run, "owners", "handoff.state"))
+        sync = [PY, "-B", os.path.join(co, "lib", "storage.py"), "volume", "sync", "shared"]
+        rc, out, err, called, written = run_line(lab, sync, {"MCOMP_RUN_DIR": main_run}, "plain", other_run)
+        check("volume sync shared run for the main VM, while VM other has it attached and a handoff open: exit 4, nothing "
+              "called (no keys read, no sync)", rc == 4 and WAITS in err and not acting_calls(called),
+              (rc, acting_calls(called)[:3], err[-300:]))
+        img, snap = os.path.join(lab.box.root, "dv.img"), os.path.join(lab.box.root, ".dv.img.ckpt-other-ck")
+        write(img, "x" * 4096)
+        write(snap, "y" * 4096)
+        write(os.path.join(st, "registry", "volumes", "dv.json"), json.dumps({"name": "dv", "kind": "disk", "path": img}))
+        man = os.path.join(st, "checkpoints", "other", "ck.json")
+        write(man, json.dumps({"volumes": [{"name": "dv", "path": img, "snapshot": snap}]}))
+        before = open(man).read()
+        dele = [PY, "-B", os.path.join(co, "lib", "storage.py"), "volume", "delete", "dv", "--yes"]
+        rc, out, err, called, written = run_line(lab, dele, {"MCOMP_RUN_DIR": main_run}, "plain", other_run)
+        check("volume delete dv, which VM other's checkpoint keeps, while other has a handoff open: exit 4, the snapshot "
+              "and the checkpoint kept", rc == 4 and os.path.exists(snap) and open(man).read() == before
+              and os.path.exists(img), (rc, os.path.exists(snap), err[-300:]))
+        rc, out, err, called, written = run_line(lab, dele, {"MCOMP_RUN_DIR": main_run}, "user", other_run)
+        check("...at the user's own terminal it goes past the gate", GOES in err and rc != 4, (rc, err[-300:]))
+    finally:
+        keeper.kill()
+        keeper.wait()
+        lab.close()
+
+
+def cloud_setup_checks(td):
+    """A provider whose setup and creates rewrite a network its other computers share (lib/cloud/oci.py:
+    SHARED_NETWORK_CHANGES) waits for every computer of this checkout's there (P2-6); one whose setup only reads
+    doesn't."""
+    print("\na provider's shared network: its setup and creates wait for every computer there")
+    lab = make_lab(td, "cloud")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    try:
+        co = lab.box.co
+        for n, port in (("oc", 2405), ("oc2", 2407)):
+            lab.box.settings(f"config/vms/{n}.env", f"SSH_PORT={port}\nVNC_PORT={port + 3700}\nPLACE=oci\nPROVIDER=oci\n"
+                                                     "TRANSPORT=ssh\nEGRESS=internet\n")
+        oc_run = os.path.join(co, ".run-vms", "oc")
+        handoff_on(oc_run)
+        handoff_on(os.path.join(co, ".run-vms", "oc2"))
+        os.remove(os.path.join(co, ".run-vms", "oc2", "owners", "handoff.state"))
+        rp = os.path.join(co, "lib", "remote.py")
+        for args, what in ((["cloud", "setup", "oci"], "cloud setup oci"),
+                           (["create", "--vm", "oc2", "--op", "0" * 32], "create of another computer there (oc2)")):
+            rc, out, err, called, written = run_line(lab, [PY, "-B", rp, *args], {}, "plain", oc_run)
+            check(f"{what}, while computer oc there has a handoff open: exit 4 before the provider is asked anything",
+                  rc == 4 and WAITS in err and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+        rc, out, err, called, written = run_line(lab, [PY, "-B", rp, "cloud", "setup", "oci"], {}, "user", oc_run)
+        check("...cloud setup oci at the user's own terminal goes past the gate", GOES in err and rc != 4, (rc, err[-300:]))
+        rc, out, err, called, written = run_line(lab, [PY, "-B", rp, "cloud", "setup", "hetzner"], {}, "plain", oc_run)
+        check("cloud setup hetzner (it only reads: each computer has its own firewall) doesn't wait for oc's handoff",
+              rc != 4 and WAITS not in err, (rc, err[-300:]))
+    finally:
+        lab.close()
+
+
+def mcp_manifest_checks(td):
+    """With MCP_HUB=off and DRIVER_MODE=bounded, `metacomputer mcp` writes the driver's manifest to the guest before
+    its connection when the guest hasn't got it (P2-7): that write waits during a handoff (but at the user's own
+    terminal); the read that looks for it doesn't."""
+    print("\nmetacomputer mcp's manifest, with no hub and a bounded driver")
+    lab = make_lab(td, "mcp")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    try:
+        co = lab.box.co
+        lab.box.settings("config/vms/bnd.env", "SSH_PORT=2406\nVNC_PORT=6106\nDRIVER_MODE=bounded\nMCP_HUB=off\n")
+        run_dir = os.path.join(co, ".run-vms", "bnd")
+        handoff_on(run_dir)
+        argv = [lab.box.mc, "--vm", "bnd", "mcp"]
+        rc, out, err, called, written = run_line(lab, argv, {}, "plain", run_dir)
+        wrote = [c for c in called if c.startswith("standin ssh") and "cat >" in c]
+        check("metacomputer --vm bnd mcp while the user has it, the manifest not in the guest: exit 4 before the write",
+              rc == 4 and WAITS in err and not wrote and any("test -f" in c for c in called), (rc, wrote[:2], err[-300:]))
+        rc, out, err, called, written = run_line(lab, argv, {}, "user", run_dir)
+        wrote = [c for c in called if c.startswith("standin ssh") and "cat >" in c]
+        check("...at the user's own terminal it goes past the gate and writes it", GOES in err and wrote, (rc, err[-300:]))
+    finally:
+        lab.close()
 
 
 # --- the session guards fail closed --------------------------------------------------------------------------------
@@ -498,6 +697,10 @@ def main():
         rows = all_rows()
         table_checks(rows)
         session_guard_checks(td)
+        binding_checks(td)
+        volume_checks(td)
+        cloud_setup_checks(td)
+        mcp_manifest_checks(td)
         script_mark_checks(td)
         entry_checks(td, rows)
         bin_checks(td)
