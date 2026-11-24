@@ -10,6 +10,9 @@ fi
 # lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported
 # again into remote_py's one child (scripts/lib.sh). The shell keeps them as unexported variables.
 for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY; do export -n "$mc_k"; done; unset mc_k
+# script_handoff_hold's own mark (this script already holds the dispatch lock on descriptor 5): never taken from the
+# environment, where it would skip the script's handoff check.
+unset MC_SCRIPT_HELD
 
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -583,24 +586,47 @@ script_session_guard() { # SAID CMD [ARGS...]
   [ -z "$said" ] || return 0
   [ "${MCOMP_GUARD_VM:-}" != "$VM_NAME:$SSH_PORT" ] || return 0
   [ "${MC_FROM_DEFAULT:-0}" != 1 ] || chosen=default
+  # Its 2 ("couldn't tell") is also what Python says when it can't open the program: one that isn't there, or can't be
+  # read, refuses before it's run.
+  if [ ! -f "$LAB_ROOT/lib/sessionvm.py" ] || [ -L "$LAB_ROOT/lib/sessionvm.py" ] || [ ! -r "$LAB_ROOT/lib/sessionvm.py" ]; then
+    warn "the session check (lib/sessionvm.py) is missing or can't be read, so this doesn't go ahead; nothing was done"
+    return 1
+  fi
   "$PY" "$LAB_ROOT/lib/sessionvm.py" guard --vm "$VM_NAME" --ssh-port "$SSH_PORT" --chosen "$chosen" \
     --settings "${MC_SETTINGS_LABEL:-}" -- "$@" || rc=$?
   case "$rc" in
     0|2) ;;
     3) return 1 ;;
-    *) warn "couldn't check which computer this agent session holds (lib/sessionvm.py exit $rc); going on" ;;
+    # Anything else (a crash, a signal, parse-only's 99) is a check that wasn't made: refused, never taken for a pass.
+    *) warn "couldn't check which computer this agent session holds (lib/sessionvm.py ended with exit $rc), so this doesn't go ahead; nothing was done"
+       return 1 ;;
   esac
   export MCOMP_GUARD_VM="$VM_NAME:$SSH_PORT"
 }
+# Whether descriptor FD, already open in this shell, is a hold on this VM's dispatch lock that the command running this
+# one handed on (lib/handoff_gate.py inherited_hold: that very file, a description that has taken a flock, the lock held
+# shared and nobody's exclusively): 0 when it is, and then it's kept as it is. bin/metacomputer's handoff_hold (6) and
+# script_handoff_hold (5) look before they open that descriptor afresh, which would let that hold go in this process.
+inherited_dispatch_hold() { # FD
+  { true >&"$1"; } 2>/dev/null || return 1
+  "$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import handoff_gate
+sys.exit(0 if handoff_gate.inherited_hold(only=(int(sys.argv[2]),)) is not None else 1)' "$LAB_ROOT/lib" "$1" 2>/dev/null
+}
 # The handoff check (bin/metacomputer's handoff_hold_unless_user): lib/handoff.py guard --user-ok, with this VM's
 # dispatch lock taken shared on descriptor 5 for the rest of the script, so no handoff opens while it runs; while one
-# is open it stops (status 4, saying why), except at the user's own terminal.
+# is open it stops (status 4, saying why), except at the user's own terminal or under a hold its caller handed on.
+# What it runs (lib/remote.py, lib/storage.py, metacomputer's own commands) goes ahead under that hold
+# (lib/handoff_gate.py). vm delete takes it too, before its owners lock (the order: dispatch, then owners).
 script_handoff_hold() {
+  [ "${MC_SCRIPT_HELD:-}" = 1 ] && return 0
+  # A hold the command that runs this handed on as descriptor 5 itself is kept, not replaced (inherited_dispatch_hold).
+  if inherited_dispatch_hold 5; then MC_SCRIPT_HELD=1; return 0; fi
   local f="$RUN_DIR/owners/.dispatch"
   { mkdir -p "$RUN_DIR/owners" && ( umask 077; : >> "$f" ) && [ -f "$f" ] && [ ! -L "$f" ]; } 2>/dev/null \
     || { warn "couldn't open this VM's dispatch lock ($f)"; return 4; }
   exec 5>>"$f" || { warn "couldn't open this VM's dispatch lock ($f)"; return 4; }
   "$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 5 --user-ok || return 4
+  MC_SCRIPT_HELD=1
 }
 
 # One line on stderr, once per command, before a command acts on a VM: which VM and settings; "vault" adds the
@@ -1234,8 +1260,14 @@ driver_request() { # prints the SSH command line for the MCP role ("" = Cua's de
   local m sha
   m="$(export_options; "$PY" "$LAB_ROOT/lib/driver_profiles.py" render)" || exit 1
   sha="$(printf '%s\n' "$m" | shasum -a 256 | cut -d' ' -f1)"
-  printf '%s\n' "$m" | gssh ops "d=~/.config/metacomputer/manifests; f=\$d/$sha.yaml; [ -f \$f ] || { mkdir -p \$d && cat > \$f.tmp && mv \$f.tmp \$f; }" \
-    || die "could not upload the driver manifest to the VM"
+  # Named by its content: when the guest has it already (a read), there's nothing to write. Writing it acts in the
+  # guest, so it waits while the user has the computer (bin/metacomputer handoff_hold_unless_user: exit 4, but at their
+  # own terminal); this runs in its caller's command substitution, so that hold goes with it, before the connection.
+  if ! gssh ops "test -f ~/.config/metacomputer/manifests/$sha.yaml" </dev/null >/dev/null 2>&1; then
+    handoff_hold_unless_user
+    printf '%s\n' "$m" | gssh ops "d=~/.config/metacomputer/manifests; f=\$d/$sha.yaml; [ -f \$f ] || { mkdir -p \$d && cat > \$f.tmp && mv \$f.tmp \$f; }" \
+      || die "could not upload the driver manifest to the VM"
+  fi
   echo "bounded $sha"
 }
 

@@ -1425,7 +1425,9 @@ def guest_command_checks():
     # A stream that isn't up when recording.py save's hold ends (here after 1 s; a stand-in stream that would start
     # after 3 s) never starts: it's ended first, then the lock is let go, and nothing is saved.
     drv, late, child = (os.path.join(fd, n) for n in ("hold_driver.py", "stream.late", "stream.pid"))
-    lockf, outf = os.path.join(fd, "hold.lock"), os.path.join(fd, "held.mkv")
+    # (the hold is record start's own: a descriptor on this VM's dispatch lock that has taken it, handed on)
+    lockf, outf = os.path.join(ENV["MCOMP_RUN_DIR"], "owners", ".dispatch"), os.path.join(fd, "held.mkv")
+    os.makedirs(os.path.dirname(lockf), exist_ok=True)
     stream = os.path.join(fd, "slow_stream.py")
     open(stream, "w").write("import os, sys, time\nopen(%r, 'w').write(str(os.getpid()))\ntime.sleep(3)\n"
                             "sys.stdout.buffer.write(b'x' * 100); sys.stdout.flush()\nopen(%r, 'w').write('late')\n"

@@ -34,6 +34,11 @@ REC = os.path.join(LAB, "lib", "recording.py")
 CLI = os.path.join(LAB, "bin", "metacomputer")
 FAILS = []
 sys.path.insert(0, os.path.join(LAB, "lib"))
+# recording.py save looks at the handoff of the computer its stream comes from (lib/handoff_gate.py): here a run folder
+# of this test's own, where no handoff is open (never the checkout's .run, the main VM's). Removed at the end.
+_RUN = tempfile.mkdtemp(prefix="mcomp-rec-run-")
+os.environ["MCOMP_RUN_DIR"] = _RUN
+os.environ.pop("MCOMP_VM_NAME", None)
 
 
 def check(name, cond, detail=""):
@@ -1354,4 +1359,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        rc = main()
+    finally:
+        shutil.rmtree(_RUN, ignore_errors=True)
+    sys.exit(rc)

@@ -1,7 +1,8 @@
 """Read simple KEY=VALUE settings from config/defaults.env, then the one settings file scripts/lib.sh reads:
 $MCOMP_CONFIG, else config/vms/NAME.env for MCOMP_VM=NAME, else the default computer that config/default-vm names
-(unless MCOMP_NO_DEFAULT_VM is set), else this machine's config/local.env. Only plain values are understood (quotes
-stripped, no expansion), which is all the Python side needs (e.g. GUEST_USER). scripts/lib.sh refuses the unclear
+(unless MCOMP_NO_DEFAULT_VM is set), else this machine's config/local.env. Only plain values are understood (KEY=value,
+optionally after export; quotes stripped, no expansion), which is all the Python side needs (e.g. GUEST_USER); what
+the handoff gates tell computers by (computers()) is read more strictly, below. scripts/lib.sh refuses the unclear
 cases before anything runs, and bin/metacomputer passes the VM it chose on to what it starts (MCOMP_CONFIG, MCOMP_VM
 or MCOMP_NO_DEFAULT_VM), so this only has to pick the same file.
 
@@ -31,7 +32,7 @@ LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VMS_DIR = os.path.join(LAB, "config", "vms")
 MAIN_CONFIG = os.path.join(LAB, "config", "local.env")
 DEFAULT_VM_FILE = os.path.join(LAB, "config", "default-vm")
-_LINE = re.compile(r"^\s*([A-Z_][A-Z0-9_]*)=(\"[^\"]*\"|'[^']*'|[^\s#]*)")
+_LINE = re.compile(r"^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(\"[^\"]*\"|'[^']*'|[^\s#]*)")
 _NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 _KEY = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 # What makes a VM itself: a file in config/vms/ never takes these from the defaults (scripts/lib.sh).
@@ -371,6 +372,204 @@ def load(env=None):
         vals["VM_NAME"] = vals.get("VM_NAME") or vm
         vals["BASELINE_NAME"] = vals.get("BASELINE_NAME") or vals["VM_NAME"] + "-baseline"
     return vals
+
+
+# The main computer's name when its settings don't give one (config/defaults.env says the same): every Python helper
+# that needs it falls back on this one (lib/storage.py vm_name, computers() below).
+DEFAULT_VM_NAME = "metacomputer"
+
+# --- the settings a handoff gate tells computers by (computers()), read strictly ----------------------------------
+# scripts/lib.sh sources a settings file as bash. This reads it without running anything, and only when the whole file
+# is plain assignments: every line is blank, a comment, or exactly one
+#   [export ]NAME=VALUE, then optional spaces or tabs and an optional # comment,
+# whose VALUE is one unquoted word (letters, digits, / . _ - : @ % + , =, a leading ~ or ~/, $NAME or ${NAME}), one
+# "double-quoted" string (no backslash or backquote, $ only as $NAME or ${NAME}) or one 'single-quoted' string (or
+# several joined by \', as `vm create` writes a quote in a value). Any other line, anywhere in the file, raises Unclear:
+# a command, a $var command, control flow, a function, a here-document, a line continued or chained (\, &&, ||, |, ;,
+# &), a value with anything else in it (;&|<>() or a backquote, $(, a space, a ~ past the start, a backslash). So does
+# an assignment to a variable this reader puts into values (EXPANDED: HOME, LAB_ROOT), since bash would use the new
+# value from there on. A setting it can't read is never taken as missing (a default: another computer's folder). A
+# value's $HOME, $LAB_ROOT (and ~ where bash expands it) are read; a folder that uses any other variable, or isn't
+# absolute, is None (it can't be told), a name or place that does raises.
+EXPANDED = ("HOME", "LAB_ROOT")
+
+
+class Unclear(ValueError):
+    """A settings file that isn't plain assignments only (computers()): which computer it is can't be told."""
+
+
+_REF = r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
+_ASSIGN = re.compile(r"[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)="
+                     r"(\"(?:[^\"\\`$\n]|" + _REF + r")*\"|'[^'\n]*'(?:\\''[^'\n]*')*"
+                     r"|(?:~(?=/|[ \t]|$))?(?:[A-Za-z0-9_./:@%+,=-]|" + _REF + r")*)(?:[ \t]+(?:#.*)?)?")
+_BLANK = re.compile(r"[ \t]*(?:#.*)?")
+
+
+def _label(path):
+    home = os.environ.get("HOME") or ""
+    return "~" + path[len(home):] if home and path.startswith(home + "/") else path
+
+
+def _parse_strict(path, missing_ok=False):
+    """{NAME: its value as written} from the settings file at PATH, read as the notes above say: a file of plain
+    assignments only. A missing file is {} when MISSING_OK; one that is there but can't be read raises OSError; any
+    line that isn't blank, a comment or one plain assignment, an assignment to HOME or LAB_ROOT, and text that isn't
+    UTF-8 raise Unclear (a ValueError)."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        if missing_ok:
+            return {}
+        raise
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Unclear(f"{_label(path)} isn't UTF-8 text, so its settings can't be told") from None
+    vals = {}
+    for n, line in enumerate(text.split("\n"), 1):     # a carriage return is part of the line, as bash reads it
+        if _BLANK.fullmatch(line):
+            continue
+        m = _ASSIGN.fullmatch(line)
+        if not m:
+            raise Unclear(f"{_label(path)} line {n} isn't a plain assignment (only NAME=value, NAME=\"value\" or "
+                          "NAME='value' lines, optionally after export and with a # comment after; anything else "
+                          "refuses), so its settings can't be told without running it")
+        if m.group(1) in EXPANDED:
+            raise Unclear(f"{_label(path)} line {n} sets {m.group(1)}, which the settings' values are read with, so "
+                          "they can't be told without running it")
+        vals[m.group(1)] = m.group(2)
+    return vals
+
+
+def _value(token, root, home):
+    """A setting's value as bash would give it from its token (_ASSIGN's): a single-quoted one as written (pieces
+    joined by \\' with a quote); otherwise with $HOME and $LAB_ROOT (braced or not) put in, and an unquoted leading ~
+    as the home folder. None when it uses any other variable."""
+    if token[:1] == "'":
+        return token[1:-1].replace("'\\''", "'")
+    quoted = token[:1] == '"'
+    s = token[1:-1] if quoted else token
+    if not quoted and (s == "~" or s.startswith("~/")):
+        s = home + s[1:]
+    known = {"HOME": home, "LAB_ROOT": root}
+    if any(m.group(0).strip("${}") not in known for m in re.finditer(_REF, s)):
+        return None
+    return re.sub(_REF, lambda m: known[m.group(0).strip("${}")], s)
+
+
+def _folder(vals, key, default, root, home):
+    """A folder setting: DEFAULT when it's unset or empty (as scripts/lib.sh's ${KEY:-default}); None when its value
+    can't be told (another variable) or isn't an absolute path."""
+    if not vals.get(key) or vals[key] in ('""', "''"):
+        return default
+    v = _value(vals[key], root, home)
+    if v == "":
+        return default
+    return v if v and v.startswith("/") else None
+
+
+def _plain(vals, key, root, home, label):
+    """A setting that isn't a folder (a name, a provider, a place), "" when it's unset; Unclear when its value can't be
+    told."""
+    if key not in vals:
+        return ""
+    v = _value(vals[key], root, home)
+    if v is None:
+        raise Unclear(f"{label}: {key} uses a variable this doesn't read ({vals[key]})")
+    return v
+
+
+def _name(vals, root, home, label, default):
+    """The computer's name: DEFAULT when the settings don't set VM_NAME; Unclear when they set it to something that
+    isn't a VM name (scripts/lib.sh refuses it too), never the default."""
+    if "VM_NAME" not in vals:
+        return default
+    v = _plain(vals, "VM_NAME", root, home, label)
+    if not _NAME.fullmatch(v):
+        raise Unclear(f"{label}: VM_NAME isn't a VM name ({vals['VM_NAME']})")
+    return v
+
+
+def _selected_file(env, main, vms):
+    """The settings file MCOMP_CONFIG names (ENV's) as scripts/lib.sh chooses it, or None when it names none. With
+    MCOMP_VM set too, both must choose the same file (config/vms/NAME.env, else config/local.env when that's NAME's:
+    MAIN, the main computer); Unclear when they don't, or when the file isn't there (scripts/lib.sh then acts on no
+    computer)."""
+    cfg = env.get("MCOMP_CONFIG") or ""
+    if not cfg:
+        return None
+    if not os.path.isfile(cfg):
+        raise Unclear(f"MCOMP_CONFIG names {cfg}, which isn't a settings file (scripts/lib.sh then acts on none)")
+    name = env.get("MCOMP_VM") or ""
+    if name:
+        mine = os.path.join(vms, name + ".env") if _NAME.fullmatch(name) else ""
+        if mine and not os.path.isfile(mine):
+            mine = main["file"] if os.path.isfile(main["file"]) and main["name"] == name else ""
+        if not mine or os.path.realpath(mine) != os.path.realpath(cfg):
+            raise Unclear(f"MCOMP_CONFIG ({cfg}) and MCOMP_VM ({name}) choose different settings")
+    return cfg
+
+
+def computers(root=None, home=None, env=None):
+    """The computers a checkout (ROOT, this one by default) has settings for, each {name, file, run_dir, ssh_dir,
+    provider, place}: its main one (config/local.env, else the defaults), one per config/vms/NAME.env, whose folders
+    are fixed by its name (scripts/lib.sh mc_vm_default), and the one MCOMP_CONFIG chooses when that's another file
+    (compared by real path; ENV's, this process's environment for this checkout and none for another), read as
+    scripts/lib.sh reads it: the defaults, then that file, with MCOMP_VM naming the same file when it's set too. That
+    one comes first: where two settings files give one name, it's the one this process acts on. Every file is read
+    strictly (_parse_strict): one that is there but can't be read raises OSError, one that isn't plain assignments only
+    raises Unclear, and so does an MCOMP_CONFIG that isn't a file, that MCOMP_VM disagrees with, that names a
+    config/vms/ computer's name, or puts its computer elsewhere (only config/vms/ computers can be). What a gate uses
+    this for refuses then, never reading them as none. A folder its settings give in a way this can't tell is None.
+    What's missing is missing: no config/vms folder is no computers there, no file no settings in it."""
+    root = os.path.abspath(root or LAB)
+    home = home or os.environ.get("HOME") or os.path.expanduser("~")
+    if env is None:
+        env = os.environ if os.path.realpath(root) == os.path.realpath(LAB) else {}
+    base = _parse_strict(os.path.join(root, "config", "defaults.env"), missing_ok=True)
+    main_file = os.path.join(root, "config", "local.env")
+    vms = os.path.join(root, "config", "vms")
+
+    def kept(file, missing_ok=False):
+        s = dict(base)
+        s.update(_parse_strict(file, missing_ok=missing_ok))
+        label = _label(file)
+        return {"name": _name(s, root, home, label, DEFAULT_VM_NAME), "file": file,
+                "run_dir": _folder(s, "RUN_DIR", os.path.join(root, ".run"), root, home),
+                "ssh_dir": _folder(s, "SSH_DIR", os.path.join(home, ".ssh", "metacomputer"), root, home),
+                "provider": _plain(s, "PROVIDER", root, home, label), "place": _plain(s, "PLACE", root, home, label)}
+
+    out = [kept(main_file, missing_ok=True)]
+    try:
+        names = sorted(f[:-4] for f in os.listdir(vms) if f.endswith(".env") and _NAME.fullmatch(f[:-4]))
+    except FileNotFoundError:
+        names = []
+    for n in names:
+        f = os.path.join(vms, n + ".env")
+        s = {k: v for k, v in base.items() if k not in IDENTITY}
+        s.update(_parse_strict(f))
+        out.append({"name": n, "file": f, "run_dir": os.path.join(root, ".run-vms", n),
+                    "ssh_dir": os.path.join(home, ".ssh", "metacomputer-" + n),
+                    "provider": _plain(s, "PROVIDER", root, home, _label(f)),
+                    "place": _plain(s, "PLACE", root, home, _label(f))})
+    cfg = _selected_file(env, out[0], vms)
+    if cfg:
+        real = os.path.realpath(cfg)
+        vms_real = os.path.realpath(vms)
+        if real == os.path.realpath(main_file):
+            return out
+        if os.path.dirname(real) == vms_real and real.endswith(".env"):
+            if os.path.basename(real)[:-4] not in names:
+                raise Unclear(f"MCOMP_CONFIG ({cfg}) is in config/vms/ but isn't a VM's settings file")
+            return out
+        c = kept(os.path.abspath(cfg))
+        if c["name"] in names:
+            raise Unclear(f"MCOMP_CONFIG ({cfg}) names the VM {c['name']}, which config/vms/{c['name']}.env is")
+        if c["place"] not in ("", "mac"):
+            raise Unclear(f"MCOMP_CONFIG ({cfg}) says PLACE={c['place']}: only a config/vms/ computer can be elsewhere")
+        out.insert(0, c)
+    return out
 
 
 CONFIG = load()

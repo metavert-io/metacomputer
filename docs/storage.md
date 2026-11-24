@@ -53,8 +53,8 @@ metacomputer volume delete NAME [--yes] [--keep-image]   # asks first; its check
   the VM runs `e2fsck -p`; a filesystem it can't repair is refused.
 - **One VM at a time.** A lock, held by the VM's own process while it runs, keeps
   another VM (from this checkout or any other on this Mac) from attaching the same
-  image; that VM's `start` refuses and names the holder. A lock whose process is gone
-  (the VM crashed) no longer counts. A small `NAME.img.lock` file beside the image
+  image; that VM's `start` refuses and names the holder. A lock counts until its process
+  is certainly gone (the VM crashed): one whose process can't be told alive or gone still counts. A small `NAME.img.lock` file beside the image
   names this computer, so another Mac reading the same drive refuses too, but see
   the warning about network filesystems below.
 - **Its folder stays out of every VM.** The folder holding an image (and its checkpoint
@@ -354,7 +354,8 @@ none can change it. To update one, delete it and create it again.
 
 ## Attaching: VOLUMES and REFDISKS
 
-In `config/local.env` (or the file `MCOMP_CONFIG` names):
+In `config/local.env` (or the file `MCOMP_CONFIG` names), as plain assignments only; anything else refuses (a
+settings file with any other line makes the commands that change a computer refuse: SECURITY.md):
 
 ```bash
 VOLUMES="work"                          # ~/data/work in the VM
@@ -540,6 +541,9 @@ What isn't offered:
   `resources.files.read` and `.write`.
 - The lock files are in `~/.local/share/metacomputer/storage/locks/`; each names the VM,
   its checkout and its process (with the process's start time, so a reused pid doesn't
-  count), keyed by the item's canonical spelling, so two spellings of one image are one lock.
+  count; one whose start time can't be read isn't written: that `start` refuses), keyed by the item's canonical spelling, so two spellings of one image are one lock.
   `start` takes them before the VM boots, and `stop` (also `reset`, `restore`
-  and `baseline`) lets go of them after it's off.
+  and `baseline`) lets go of them after it's off. They're read strictly wherever something is decided from them (a
+  start, a reservation, a delete): a record, the folder or an image's `NAME.img.lock` that's there but can't be read
+  or parsed refuses, naming it; delete a stale record only when no VM is running with storage and no volume or
+  checkpoint command is working. `volume list` only shows what it can read.

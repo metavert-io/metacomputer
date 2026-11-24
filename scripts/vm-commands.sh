@@ -436,7 +436,7 @@ print(" ".join(out))') "
   {
     printf '%s\n' "# metacomputer settings for the VM $name, made by \`metacomputer vm create\` on $(date '+%Y-%m-%d')." \
       "# Used by: metacomputer --vm $name COMMAND (or MCOMP_VM=$name). Read after config/defaults.env, on its own:" \
-      "# config/local.env isn't read for this VM. Bash syntax. Its own names and ports:" \
+      "# config/local.env isn't read for this VM. Plain NAME=value lines only; anything else refuses. Its own names and ports:" \
       "VM_NAME=$name" "BASELINE_NAME=$name-baseline" "SSH_PORT=$ssh" "VNC_PORT=$vnc" \
       ${rprov:+"# Where it is: a computer reached over SSH (docs/remote.md, docs/sprites.md). SSH_PORT is kept only so no two"} \
       ${rprov:+"# computers here share a port; VNC_PORT is where its live view's SSH tunnel listens on this Mac."} \
@@ -562,6 +562,11 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
   vm_notice
   # The VM's lock from here to the end: no build, reset, restore or start of it (start takes it too) meanwhile.
   vm_lock_or_die "metacomputer vm delete $VM_NAME"
+  # While the user has it (a handoff), it waits, --force or not (but at their own terminal): this VM's dispatch lock
+  # is held from here to the end (scripts/lib.sh script_handoff_hold, descriptor 5), through the question, before its
+  # owners lock (dispatch first, then owners), so no handoff opens on what's being deleted; what it runs (lib/storage.py
+  # release, lib/remote.py delete) goes ahead under that hold.
+  script_handoff_hold || exit 4
   if [ "${MC_REMOTE:-0}" = 1 ]; then vm_delete_remote; return $?; fi
   [ "$remove_from_server" = 0 ] || die "--remove-from-server is for your own server (a computer reached over SSH); nothing was deleted"
   command -v "$LUME" >/dev/null 2>&1 || die "the VM runner $LUME isn't installed; nothing was deleted"

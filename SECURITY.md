@@ -774,6 +774,61 @@ notice (`--say` cleaned like every event) and writes a record,
   a build or at your own terminal, `_vnc-push` only at your terminal; and every value that reaches the recorder's
   shell in the VM is checked first (the name by the name rule, the frame rate a number from 1 to 60, the rest from
   fixed sets);
+- the programs of the repository that change a computer by themselves wait the same way, when they're run as
+  `metacomputer` and our scripts run them, or by hand with their own settings: `lib/remote.py` (`exec`, `create`,
+  `wake`, `sleep`, `delete`, `abort`, `checkpoint create|restore|delete`, `allow` but `--show`, `egress --set`,
+  `resolvers`), `lib/storage.py` (`kill-vm`, `volume sync`, `attach`, `prepare`, `started`, `release`, `checkpoint
+  save|restore|delete`, and the folder watcher, `watch`), `lib/netpolicy.py` (`allow`, `remove`, `clear`, `render`),
+  `lib/guest_put.py` and `lib/recording.py save` (the recorder's stream); so do `start`, a checkpoint on this Mac
+  (`checkpoint NAME`, `checkpoint --delete`), `net allow|remove|clear` and `vm delete` (`--force` or not). Each looks
+  right after its command line, before it asks a provider anything, runs anything in the guest or writes anything
+  (`lib/handoff_gate.py`), at the computer its own settings and transport name: the one its name and run folder say
+  (one computer's, by this checkout's settings: the main one, each config/vms/ one, and the one an `MCOMP_CONFIG` file
+  chooses, as scripts/lib.sh chooses it), or the one whose SSH folder its transport names (`put`, `attach`, the
+  recorder's stream); a transport that names none of this checkout's computers is checked at the run folder it's
+  given. Those settings are read without running them, from plain assignments only; anything else refuses: every line
+  of a settings file must be blank, a comment, or one `NAME=value`, `NAME="value"` or `NAME='value'`, optionally after
+  `export` and with a comment after, with `$HOME`, `$LAB_ROOT` and a leading `~` read. Any other line, anywhere in the
+  file, refuses the whole file, never read as unset: a command, control flow, a function, a here-document, a line
+  continued or chained (`\`, `&&`, `||`, `|`, `;`, `&`), an unquoted value with a space, a backslash, a backquote,
+  `$(`, one of `;&|<>()` or a `~` past its start, a double-quoted one with a backslash, a backquote or a `$` that isn't
+  `$NAME` or `${NAME}`, and an assignment to `HOME` or `LAB_ROOT` (the values are read with them); a folder given with
+  another variable can't be told and refuses where it's needed. So do names that disagree, and settings that can't be
+  read. It stops with exit 4 and the same words, and
+  otherwise holds the dispatch lock to the end of its run (the recorder's stream until it's up; the watcher, which
+  runs for as long as its VM does, looks once when it starts, then closes every descriptor it has on that lock file,
+  so neither it nor what it forks keeps one). Some changes reach several computers, and wait for each that can be told,
+  in one order: `volume sync` for every computer that the holder records show with the volume, or a folder inside or
+  around its copy, attached (records that are there and can't be read refuse, and so does a holder whose process can't
+  be told alive or gone: no valid pid or start time, or `ps` can't say; who they are is read again under the
+  sync's own lock before each exchange with the copy, and one that attached meanwhile stops it with exit 4: a computer
+  that attaches during that last exchange isn't seen), `volume delete` for every computer of this checkout's whose
+  checkpoints keep it (one of another checkout's refuses), and a provider whose setup and creates rewrite a network its
+  computers share (Oracle Cloud's VCN) for every computer of this checkout's there. It goes ahead at your own terminal,
+  or under the hold of the command that runs it: a descriptor on that very lock file (bin/metacomputer hands it on as 6, our scripts as
+  5, and a command run under one keeps it rather than opening its own), checked: the file's device and inode, a
+  description that has taken a flock (the kernel's FHASLOCK on it, read with `proc_pidfdinfo`), and the lock held
+  shared, never one being taken exclusively; never an environment variable. With `MCP_HUB=off` and
+  `DRIVER_MODE=bounded`, `metacomputer mcp` first looks whether the guest has its driver manifest (a read): writing one
+  waits the same way, so a connection whose manifest isn't there yet waits during a handoff (at your own terminal it
+  goes ahead), and once it's there connections start as before. `lib/remote.py cloud teardown` and `--forget` are
+  yours only, at your own terminal, run that way as through `metacomputer cloud`. A command whose check of which
+  computer the agent session holds can't be made (it crashed, or isn't there to run) refuses instead of going on.
+  What this doesn't cover, the same-account limit below: a helper given settings that name another computer's run
+  folder (`MCOMP_RUN_DIR`) with a hand-written transport, a descriptor handed on that once locked the lock and was let
+  go (FHASLOCK can't tell a past lock from a current one; the probes narrow it), the vault's own CLI run directly
+  (`mcomp-vault fill`: `metacomputer secrets fill`, `login` and `session load`, and the hub's fills, wait), and the S3
+  sync a computer's own `start` and `stop` make, which waits for that computer only: it's part of its start or stop, and
+  skipping it would keep that computer's changes from the bucket (`volume sync` waits for every computer that has the
+  volume). `tests/acting.py` sorts every program and subcommand by what it does to a computer (one that isn't sorted
+  fails `tests/test_acting.py`). The test runs each line of what's sorted as acting by itself while a handoff is open,
+  at your terminal, under a hold on descriptor 6 or 5, and with a descriptor on the lock file that never took it (no
+  hold); and the input resets, the commands that are yours only, bin/metacomputer's acting forms, and fixtures for what
+  changes several computers, for helpers run for another computer, for settings that can't be read or are written in
+  a way this doesn't read, and for an `MCOMP_CONFIG` computer. It doesn't
+  run what's sorted as reaching a computer only through other entries, as judged per call (the hub, the relay, the
+  shell channel, which take their computer from the run folder they're given, MCOMP_RUN_DIR: their own tests), or as
+  changing none: those rest on how they're sorted;
 - `metacomputer claude` refuses the steps that act (`start`, `send`, `keys`, `show`,
   `stop`), with or without `--override` (`start` before any token is asked for;
   `stop --revoke` still revokes the token), and the inner Claude's keeper renews
@@ -784,9 +839,10 @@ notice (`--say` cleaned like every event) and writes a record,
   allowed; the code dialog never fills by itself, its value waits for `fill --request`);
   `metacomputer web` leaves the Firefox windows it opened instead of closing them,
   and the GUI tests' own commands in the VM (setup, `pkill`, clean-up) stop;
-- `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
-  unless you add `--override`, and look again right before they change anything,
-  after any question they ask; so do a Fly Sprite's `checkpoint NAME` and
+- `stop` (your own server's too: it ends this Mac's hub, which keeps your browser alive), `reset`, `restore`,
+  `baseline`, `test` and `desktop-restart` refuse (exit 4) unless you add `--override`, and look again right before they
+  change anything, after any question they ask; with `--override` they still hold the dispatch lock to the end, so what
+  they run goes ahead under it and no handoff opens meanwhile; so do a Fly Sprite's `checkpoint NAME` and
   `checkpoint --delete` (a checkpoint of the running computer would keep what you
   did in it); `release` doesn't end it.
 
@@ -911,7 +967,10 @@ never to (no other browser, mode or profile, no retrying in a loop). Your
 are accepted, not oversights:
 - It isn't a barrier against a program running as you, which can run `handoff
   done`, remove the record or the vault marker, use the raw driver connection, or kill the helper that keeps
-  `metacomputer ssh`'s dispatch lock (the lock goes while that ssh goes on).
+  `metacomputer ssh`'s dispatch lock (the lock goes while that ssh goes on), or take that lock itself and hand it on
+  to a program (a hold is checked to be a description that took that lock at some time, not proven to hold it now nor
+  to come from a command that looked), or give a helper settings or a transport of its own writing (another
+  computer's run folder, a host alias), or run the vault's own CLI, the provider's own tool, the runner or ssh itself.
   `done` needs your own terminal (or the panel's click): no process without a terminal of yours says it, an agent host
   this check doesn't know by name included. A handoff is called off only by the agent session that opened it (its
   process, by pid and start time, both read: a start time that can't be read now, or a record from before they were
@@ -1553,7 +1612,9 @@ Common to every kind:
   folder any VM has read-write, and after the VM starts every attached path must still lead,
   through the same walk, to the file or folder that was checked. Operations on a volume (checkpoint, restore, checkpoint delete,
   resize, delete, an S3 sync) hold it until every change is made, so no VM can attach it, or
-  a read-write folder around it, halfway through.
+  a read-write folder around it, halfway through. Whether something is held is read strictly: a lock record, the
+  locks folder or an image's lock file that's there but can't be read or parsed refuses a start, an operation or a
+  delete, naming it and saying how to clear a stale one, never read as nobody's (`volume list` only shows).
 - **Failing closed means from the Mac.** A storage problem after the VM started (a path
   that changed, the watcher not starting, mounts failing) powers the VM off by ending its
   process on the Mac; the guest is never asked to shut down, so a guest that stalls can't

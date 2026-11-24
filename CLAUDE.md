@@ -147,7 +147,40 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   keeper renews nothing. Our own scripts that stop, delete or set up a computer (`scripts/build-vm.sh`, every build;
   `scripts/remote-build.sh`) run the same checks themselves, after their command-line check and before anything
   changes, whether bin/metacomputer runs them or something else does (scripts/lib.sh `script_session_guard`,
-  `script_handoff_hold`, held to the end). Every value that
+  `script_handoff_hold`, held to the end); so do the Python programs that change a computer by themselves, run as
+  metacomputer runs them or by hand with their own settings (`lib/remote.py`, `lib/storage.py` (the watcher too),
+  `lib/netpolicy.py`, `lib/guest_put.py`, `lib/recording.py save`: `lib/handoff_gate.py`, shared code with no provider
+  names, right after the command line: exit 4 with `owners.handoff_refusal`, your terminal goes ahead; never under
+  MCOMP_PARSE_ONLY, which ends at 99 first). `wait_or_hold` holds the lock for the run, `take_hold` until the program
+  closes it (the recorder's stream, once up), `look_once` only for the look (the long-running watcher; `started` hands
+  it its hold, and it then closes every descriptor it has on the lock file: `close_dispatch_fds`). The main computer's
+  name, when no settings file gives one, is `labconfig.DEFAULT_VM_NAME`. Each gates the computer its own settings and
+  transport name (`owners_dir_for`: name and run folder one computer's, or the SSH folder its transport names; a
+  transport naming none is checked at the run folder given; disagreement or unreadable settings refuse:
+  `labconfig.computers` raises on them. It lists the main computer, config/vms/ ones and the MCOMP_CONFIG one (as
+  scripts/lib.sh resolves it, first where names collide), reading each file strictly without running it
+  (`_parse_strict`: plain assignments only, anything else refuses: every line blank, a comment or one
+  `[export ]NAME=value` (`_ASSIGN`) with an optional comment; any other line anywhere, and an assignment to a variable
+  the values are read with (`labconfig.EXPANDED`: HOME, LAB_ROOT), raise `Unclear`; never a default for what it can't
+  read, and no tracking of bash constructs)); what reaches several computers gates each that can be told, in path
+  order (`wait_or_hold_all`: a volume sync's users by the holder records, read strictly (`all_locks(strict=True)`, as
+  every held decision reads them: acquire, a delete's `holder_of`; lenient only for `volume list` and a holder's own
+  records; a holder counts until `holder_state` says "dead", "unknown" refuses) and matched by name or a path inside
+  or around the copy, then read again under the sync lock before each exchange (`users_check`: a
+  newcomer refuses; one that attaches during the last exchange isn't seen); a volume delete's checkpoint owners in
+  this checkout; a provider's computers in this checkout when its adapter says `SHARED_NETWORK_CHANGES`). Never take a
+  dispatch lock after the sync lock. A caller's hold (bin/metacomputer's fd 6, a script's fd 5, kept by a command run
+  under it: scripts/lib.sh `inherited_dispatch_hold`; a recorder's `--hold-fd`) goes ahead only once its descriptor is
+  that very lock file, a description that has taken a flock (FHASLOCK, `proc_pidfdinfo`: it can't tell a past lock
+  from a current one, so never unlock a dispatch descriptor and keep it open; close it) and the lock held shared;
+  never an environment variable. bin/metacomputer gates `start`, `checkpoint`, `net` and `vm delete` (`--force` too),
+  and the bounded driver manifest's write before `mcp`. `--override` on a lifecycle command still holds the lock
+  (`dispatch_hold`) for what it runs. Not covered (the same-account limit): forged settings with a hand-written
+  transport, a handed-on descriptor that was unlocked, the vault's own CLI, and the S3 sync of a computer's own
+  start/stop (that computer only). Every program and subcommand is sorted by what it does to a computer in
+  `tests/acting.py` (the vault is listed in `tests/entrypoints.py` OUTSIDE); `tests/test_acting.py` runs each line of
+  the acting ones during a handoff (not the per-call, through-others or none ones) and fails on one that isn't sorted.
+  The session guards fail closed (a check that crashes, or is missing or unreadable, refuses). Every value that
   reaches a shell in the guest is checked first (`record_args_ok`), and file names go after `--`; a recording's
   stream is started by `record start` itself (`record_stream_start`: no internal command for it), keeping its
   dispatch lock until the stream is up (`daemonize --keep-fd 6`, `recording.py save --hold-fd 6`); the internal
@@ -427,7 +460,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, `python3 tests/test_vault_payments.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup`, `test_vault_payments`, `test_help` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup`, `test_vault_payments`, `test_help`, `test_acting` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and

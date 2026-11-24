@@ -556,6 +556,60 @@ else is not run). The vault's forms are walked by tests/test_vault_ops.py (each 
 `MCOMP_PARSE_ONLY=1` in a test build, every flag and value option misused, and its `_tunnel` mode), its dispatch
 scanned there too.
 
+## What waits during a handoff, whoever runs it: `tests/test_acting.py`
+
+`python3 tests/test_acting.py` (about 465 checks, two minutes) needs no VM. `tests/acting.py` sorts every program
+tests/entrypoints.py finds, each of its subcommands (its callers' lines and one for each subcommand or form its parser
+declares) and every command of bin/metacomputer's dispatch by what it does to a computer: it changes one itself (and
+must wait; the folder watcher and the recorder's stream among them), it changes what several computers use (a volume,
+a provider's shared network), it's a lifecycle command or a fill (waits even at your terminal, a lifecycle command's
+`--override` goes ahead), an input reset, yours only, judged per call (the hub, the relay, the shell channel), only
+through other entries, an allowlist's own end, the guest's, or nothing of a computer's. A program or subcommand that
+isn't sorted fails, and `lib/remote.py`'s and `lib/storage.py`'s own `changes_computer()` must say what the table says
+on every line. What's sorted as per call, through others, the guest's or none isn't run here: those rest on how
+they're sorted (the per-call ones have their own handoff checks in test_hub, test_handoff and test_vm_shell). The vault
+(compiled Swift, its every form walked by test_vault_ops) isn't one of the programs the scan finds: tests/entrypoints.py
+lists it in OUTSIDE, since its own CLI run directly isn't handoff-gated (metacomputer's `secrets` fills and the hub's
+are): the same-account limit, as are helpers given another computer's settings with a hand-written transport and a
+handed-on descriptor that was unlocked.
+
+Then, on copies of the checkout (tests/test_help.py's Lab, with a runner whose computers run and an ssh that answers
+only probes), with an open handoff record in the right computer's RUN_DIR, each line of each entry that changes a
+computer itself is run by itself: plainly (exit 4, the refusal's words, nothing called but the runner's lookups, nothing
+written), at your own terminal (tests/userterm.py: past the gate, saying so), under a hold handed on as descriptor 6 (5
+for the scripts) on that computer's dispatch lock, as bin/metacomputer and the scripts hand it on (past the gate), and
+with a descriptor 6 (or 5) on that lock file that never took it while the test holds the lock on another (no hold: exit
+4); a line made from a declaration that isn't whole (`save x`, no command) only has to be a usage error. The input
+resets and the commands that are yours only are run by their own rules, and every acting form of bin/metacomputer in
+tests/test_help.py's FORMS the same way (a line that isn't whole there, a word missing or a question with no terminal,
+only has to call nothing). Fixtures cover the rest: a storage command, `put` and `attach` for another VM (by its name,
+by `MCOMP_VM`, with the main VM's run folder, by a transport to it) look at that VM's handoff, and a transport naming no
+computer at the run folder given; a volume attached to another VM (its copy, or a folder inside it), or kept by its
+checkpoint, waits for that VM's handoff on `volume sync` and `volume delete`, a holder record or folder that can't be
+read refuses, and one that attaches after the gate (injected right after it) stops the sync under its lock before the
+exchange; `look_once` with a hold handed on as two descriptors keeps neither (real flocks: an exclusive lock is had
+while it still runs); with no settings files at all the main computer keeps its default name; an Oracle Cloud computer's
+handoff stops `cloud setup oci` and another's create there (Hetzner's setup doesn't wait); settings that can't be read
+(the config/vms folder, a file in it) make `cloud setup`, `put` and `kill-vm` refuse. Settings files are read as plain
+assignments only; anything else refuses: `export RUN_DIR=...` is that folder (`put` and `kill-vm` wait for the handoff
+there), `export PROVIDER=oci` puts a computer in Oracle's gate, a `'...'\''...'` value (as `vm create` writes a quote)
+reads as one string, a folder with a `~` inside quotes or a variable other than `$HOME` and `$LAB_ROOT` can't be told;
+a backslash, `+=`, `declare`, `readonly`, `local`, text after the value, a block, a function, a here-document,
+`source`, `.`, `eval`, `set -a`, a test, a command's output, a `$var` command (`loader=source`, then `$loader FILE`),
+`true ||` or `true &&` then an assignment, a line ending in `|`, `;`, `&` or `\`, a value with `~` past its start or
+with `()<>`, and `HOME=` or `LAB_ROOT=` (then used) refuse (`kill-vm` and `put` exit 4 with no handoff open for `true
+||`, `$loader` and `HOME=` too), while config/local.env.example's settings, uncommented, read cleanly. `volume resize`
+(sorted as changing no computer: its reservation keeps them off the volume) refuses with a running VM's holder record
+unreadable or not JSON, and with the locks folder unreadable (mode 000 or 300), naming it, the image not truncated. A computer chosen by `MCOMP_CONFIG`
+(the example's second VM, outside the checkout) is its own: a storage command for it goes ahead with only the main
+computer's handoff open and waits with its own, `put` with a transport to it waits, `MCOMP_VM` naming another computer
+refuses, and `MCOMP_CONFIG` naming config/local.env is the main computer. A volume sync refuses when a holder's process
+may be alive but can't be told (a `ps` that fails, a record with no start time, a pid that isn't a number), and doesn't
+wait for a holder whose process is gone or whose pid is now another process's. `metacomputer mcp` with no hub and a
+bounded driver waits before writing a missing manifest. Last, with a `lib/sessionvm.py` that crashes, is missing or
+can't be read, `metacomputer` and `scripts/build-vm.sh` refuse instead of going on, and `MC_SCRIPT_HELD=1` in a script's
+environment doesn't skip its handoff check.
+
 ## The Claude Code plugin: `tests/test_plugin.py`
 
 `python3 tests/test_plugin.py` (301 checks) needs no VM. `install.sh` runs against a
@@ -1613,7 +1667,12 @@ helper agrees on every mount point; the folders that may never go into the VM (p
 folders and their parents, Library and iCloud Drive, dot-folders, `SSH_DIR`, the checkout,
 system folders, the gateway's socket folders), with links resolved; locks (a live holder
 refuses and is named, a dead or reused pid doesn't count, the same VM may take its own
-again, a lock file from another computer refuses, release); the statfs network-filesystem
+again, a lock file from another computer refuses, release); holder records read strictly (a
+running VM's record unreadable, not JSON, not a record or with a `vm` that isn't text: a
+start's storage and `volume resize` refuse, naming it, nothing taken or truncated, while
+`volume list` still shows the volume; the locks folder unreadable and an image's lock file
+not JSON refuse the same; a folder volume's delete refuses with its holder's record not JSON;
+a holder lets go of its own records while another's can't be read); the statfs network-filesystem
 classifier and the warning, and a real network filesystem as a local stand-in (WebDAV served by
 the pinned rclone on 127.0.0.1, mounted with macOS's `mount_webdav`, no root): detected, warned
 about at create and start, and refused once unmounted (skipped until rclone is fetched); the plan for a start (missing images, read-only disk volumes,

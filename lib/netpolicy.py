@@ -556,6 +556,12 @@ def main(argv):
         a = ap.parse_args(["status"] + argv)
     try:
         p = paths()
+        # While the user has the computer (a handoff), a change of what it can reach waits (lib/handoff_gate.py): exit 4
+        # before the list or the rules are touched, except at the user's own terminal or under the hold of the command
+        # that runs this (start's render). The list's own end (_expire, its timer) isn't a change anyone makes now.
+        if a.cmd in ("allow", "remove", "clear", "render"):
+            import handoff_gate
+            handoff_gate.wait_or_hold(os.path.join(run_dir(), "owners"))
         return {"status": cmd_status, "allow": cmd_allow, "remove": cmd_remove, "clear": cmd_clear,
                 "render": cmd_render, "_expire": cmd_expire}[a.cmd](a, p)
     except Refused as e:

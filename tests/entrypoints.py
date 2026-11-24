@@ -22,6 +22,14 @@ import os
 import re
 import subprocess
 
+# Programs this scan doesn't find, and why they're outside tests/test_acting.py's sweep. The vault is compiled Swift
+# (scripts/build-vault.sh), run from an installed copy, and walked form by form by tests/test_vault_ops.py; its own CLI
+# run directly (`mcomp-vault fill ...`) isn't handoff-gated: `metacomputer secrets fill|login|session load` and the hub's
+# fills are (bin/metacomputer handoff_hold). A program running as you can call the vault's CLI as it can ssh: the
+# same-account limit (SECURITY.md).
+OUTSIDE = {"vault/ (mcomp-vault)": "compiled Swift, run from an installed copy; its own CLI isn't handoff-gated, "
+                                   "metacomputer's secrets commands and the hub's fills are (the same-account limit)"}
+
 TESTS = os.path.dirname(os.path.abspath(__file__))
 LAB = os.path.dirname(TESTS)
 G, R, S = ("provisioning/guest/rootfs/opt/metacomputer/bin/", "provisioning/remote/rootfs/opt/metacomputer/bin/",
@@ -86,7 +94,11 @@ PROGRAMS = {
     "lib/guest_import.py": P("py", [["dest"], ["dest", "--quiet", "--timeout", "5", "--", "ssh", "-T", "h"]], synth=True),
     "lib/guest_inspect.py": P("py", [["system"], ["browser"], ["--render"], ["--json-out"], ["all", "--minutes", "5", "--top", "3"]]),
     "lib/guest_profiles.py": P("py", [["new", "firefox", "p"], ["check", "chrome", "p"], ["delete", "firefox", "p"]]),
-    "lib/guest_put.py": P("py", [["--transport", "2", "ssh", "-T", "f"], ["--transport", "1", "ssh", "f", "g", "--to", "d", "--overwrite"]]),
+    # (bin/metacomputer's put passes the ops SSH command, which names the computer's SSH folder: its known-hosts file)
+    "lib/guest_put.py": P("py", [["--transport", "4", "ssh", "-o", "UserKnownHostsFile={BOX}/home/.ssh/metacomputer/known_hosts",
+                                  "-T", "f"],
+                                 ["--transport", "3", "ssh", "-o", "UserKnownHostsFile={BOX}/home/.ssh/metacomputer/known_hosts",
+                                  "f", "g", "--to", "d", "--overwrite"]]),
     "lib/handoff.py": P("py", [["status", "--json"], ["done", "--note", "n"], ["cancel"], ["wait"], ["guard", "--hold-fd", "6"],
                                ["guard"], ["_dialog", "h1"], ["--why", "login", "--say", "- sign in, then Hand back", "--json"],
                                ["done", "--note", "-- signed in"],
@@ -120,14 +132,28 @@ PROGRAMS = {
                                  ["save", "f.mkv", "--min-free-gb", "10", "--hold-fd", "6", "--", "ssh", "-T", "h"]],
                           synth=True),
     "lib/remote.py": P("py", [["missing", "--provider", "oci", "--feature", "x"], ["exec", "--vm", "demo", "--", "/usr/bin/true", "--help"],
-                              ["plan", "--vm", "v"]], synth=True),
+                              ["plan", "--vm", "v"],
+                              # the forms that change a computer, as bin/metacomputer and scripts/remote-build.sh pass
+                              # them (tests/test_acting.py runs each while a handoff is open)
+                              ["checkpoint", "--vm", "demo", "create", "keep", "--replace"],
+                              ["checkpoint", "--vm", "demo", "restore", "keep"], ["checkpoint", "--vm", "demo", "delete", "keep"],
+                              ["egress", "--vm", "demo", "--set", "off"], ["egress", "--vm", "demo", "--set", "internet", "--setup"],
+                              ["sleep", "--vm", "demo", "--force"], ["delete", "--vm", "demo", "--network-too"],
+                              ["abort", "--vm", "demo", "--op", "op1"], ["allow", "--vm", "demo", "--clear"],
+                              ["cloud", "teardown", "hetzner"], ["cloud", "teardown", "hetzner", "--forget", "0" * 32],
+                              ["cloud", "setup", "oci"]],
+                       synth=True),
     "lib/safedelete.py": P("py", [["rmtree", BOX + "/victim"], ["rmtree", "--quiet", "--", BOX + "/victim"],
                                   ["check-runner", "--", "d"], ["prune", "--older-than", "3600", "--", "d"],
                                   ["own", "--base", "b", "--rel", "a/n", "--target-vm", "n", "--check"]], synth=True),
     "lib/sessionvm.py": P("py", [["guard", "--vm", "v", "--ssh-port", "2222", "--chosen", "main", "--settings", "", "--", "status"],
                                  ["show", "--json"]], synth=True),
     "lib/shop.py": P("py", [["status", "--json"]], synth=True),
-    "lib/storage.py": P("py", [["volume", "list", "--json"], ["status"]], synth=True),
+    "lib/storage.py": P("py", [["volume", "list", "--json"], ["status"],
+                               # the forms that change a computer, as bin/metacomputer and scripts/lib.sh pass them
+                               ["volume", "sync", "v", "--force"], ["kill-vm", "--grace", "10"], ["release", "--quiet"],
+                               ["checkpoint", "save", "ck"], ["checkpoint", "restore", "ck"], ["checkpoint", "delete", "ck"],
+                               ["prepare", "--pid", "1", "--no-volumes"]], synth=True),
     "lib/termsafe.py": P("py", [[], ["--max", "65536"]], synth=True),
     "lib/traces.py": P("py", [["list"], ["show", "t", "--json"]], synth=True),
     "lib/tunnellog.py": P("py", [["--log", BOX + "/t.log", "--fork", "--", "ssh", "-f", "-N", "h"],

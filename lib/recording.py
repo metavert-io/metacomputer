@@ -345,9 +345,25 @@ def end_stream(proc, grace=5):
         proc.wait()
 
 
+def save_hold(a, cmd):
+    """The dispatch lock this save keeps until its stream is up (it starts a recording in the guest: lib/handoff_gate.py),
+    for the computer its command reaches (owners_dir_for: the SSH folder that command names, else MCOMP_RUN_DIR): the
+    descriptor --hold-fd N only when it really is a hold handed on (handoff_gate.inherited_hold: that very lock file, a
+    description that has taken it, held shared), never on the number alone; otherwise this program looks for itself
+    (take_hold: exit 4 while a handoff is open, but at the user's own terminal) before anything is launched or written."""
+    import handoff_gate
+    where = handoff_gate.owners_dir_for(name=os.environ.get("MCOMP_VM_NAME") or None,
+                                        run_dir=os.environ.get("MCOMP_RUN_DIR"), transport=cmd)
+    handoff_gate.use(where)
+    if 3 <= a.hold_fd <= 255 and handoff_gate.inherited_hold(only=(a.hold_fd,)) is not None:
+        return a.hold_fd
+    return handoff_gate.take_hold(where)
+
+
 def cmd_save(a):
     """--hold-fd N: a descriptor on the VM's dispatch lock that whoever started this held (bin/metacomputer's
-    record_stream_start: record start's handoff check), kept until the stream is up, so no handoff opens between that
+    record_stream_start: record start's handoff check), checked to be one (save_hold; else this looks for itself),
+    kept until the stream is up, so no handoff opens between that
     check and the stream: closed at the first bytes or the stream's end; at HOLD_MAX_S without either, the stream is
     ended first (it never starts: exit 6, nothing saved) and then the lock let go. Never passed to the stream's
     command, and not kept for the recording (a handoff may open while it records, as for any other)."""
@@ -355,7 +371,7 @@ def cmd_save(a):
     if not cmd:
         print("recording.py save: no command after --", file=sys.stderr)
         return 2
-    hold = [a.hold_fd] if 3 <= a.hold_fd <= 255 else []
+    hold = [save_hold(a, cmd)]
     hold_until = time.monotonic() + HOLD_MAX_S
 
     def let_go():
