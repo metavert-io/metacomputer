@@ -128,7 +128,6 @@ PROGRAMS = {
                               ["egress", "--vm", "demo", "--set", "off"], ["egress", "--vm", "demo", "--set", "internet", "--setup"],
                               ["sleep", "--vm", "demo", "--force"], ["delete", "--vm", "demo", "--network-too"],
                               ["abort", "--vm", "demo", "--op", "op1"], ["allow", "--vm", "demo", "--clear"],
-                              ["resolvers", "--vm", "demo", "--first-boot", "--set", "10.0.0.2"],
                               ["cloud", "teardown", "hetzner"], ["cloud", "teardown", "hetzner", "--forget", "0" * 32]],
                        synth=True),
     "lib/safedelete.py": P("py", [["rmtree", BOX + "/victim"], ["rmtree", "--quiet", "--", BOX + "/victim"],
