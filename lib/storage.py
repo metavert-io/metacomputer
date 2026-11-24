@@ -723,6 +723,34 @@ def holder_alive(rec):
     return bool(rec and rec.get("pstart") and proc_start(rec.get("pid")) == rec["pstart"])
 
 
+def holder_state(rec):
+    """Whether a holder record's process is "alive", "dead" or "unknown". Dead only when that's certain: its pid names
+    no process, or one that started at another time (the pid reused). Unknown: the record has no valid pid or start
+    time, or the process is there and ps can't say when it started. holder_alive's "" for a failed ps is never read
+    as gone here."""
+    pid, start = rec.get("pid"), rec.get("pstart")
+    if type(pid) is not int or pid <= 0 or not isinstance(start, str) or not start:
+        return "unknown"
+    for attempt in (0, 1):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return "dead"
+        except PermissionError:
+            pass                        # there, another account's
+        except OSError:
+            return "unknown"
+        if attempt:
+            return "unknown"            # there, and ps can't say when it started
+        try:
+            now_ = proc_start(pid)
+        except OSError:
+            now_ = ""
+        if now_:
+            return "alive" if now_ == start else "dead"
+    return "unknown"
+
+
 def same_holder(rec, vm, lab):
     return bool(rec) and rec.get("vm") == vm and rec.get("lab") == lab
 
@@ -853,9 +881,13 @@ def acquire(items, vm, lab, pid):
     if not items:
         return []
     pstart = proc_start(pid)
+    if not pstart:
+        # Every holder record names its process by pid and start time; one without could be read as nobody's.
+        raise StorageError(f"can't tell when process {pid} (the holder) started, so its storage can't be locked")
     host = hostname()
     with GlobalLock():
-        others = [r for r in all_locks() if not same_holder(r, vm, lab) and holder_alive(r)]
+        # A holder counts until its process is certainly gone (holder_state): one ps can't tell about still holds.
+        others = [r for r in all_locks() if not same_holder(r, vm, lab) and holder_state(r) != "dead"]
         conflicts = plan_conflicts(items)
         for it in items:
             conflicts += item_conflicts(it, others)
@@ -950,7 +982,7 @@ def reserved(recs, op, extra=()):
 def holder_of(path, kind):
     """The live lock on an item, or None."""
     rec = read_json(os.path.join(locks_dir(), lock_key(kind, path) + ".json"))
-    return rec if isinstance(rec, dict) and holder_alive(rec) else None
+    return rec if isinstance(rec, dict) and holder_state(rec) != "dead" else None
 
 
 # --- the plan for one start ------------------------------------------------------------
@@ -3770,6 +3802,7 @@ def holder_records():
             raise HoldersUnknown(f"the storage lock record {f} can't be read ({e})")
         if not isinstance(rec, dict):
             raise HoldersUnknown(f"the storage lock record {f} isn't one")
+        rec["_file"] = f
         out.append(rec)
     return out
 
@@ -3787,13 +3820,25 @@ def volume_users(name, path=None):
     """(VM, checkout) of every computer that has the volume, or what's inside or around its folder, attached now: the
     live records of its holders (an attached disk, a shared folder, an S3 copy kept in sync, a folder volume whose path
     is the copy, inside it or holding it), never a command's own operation record. Records that can't be read raise
-    HoldersUnknown (holder_records)."""
+    HoldersUnknown (holder_records), and so does one that may be the volume's whose holder can't be told: no VM, or a
+    process that may be alive (holder_state "unknown": no valid pid or start time, or ps can't say). Only a holder
+    whose process is certainly gone is left out."""
     out = set()
     for r in holder_records():
-        vm = str(r.get("vm") or "")
-        if not vm or vm.startswith(OPERATION) or not holder_alive(r):
+        vm = r.get("vm")
+        if isinstance(vm, str) and vm.startswith(OPERATION):
             continue
-        if r.get("name") == name or (path and r.get("path") and _related(str(r["path"]), path)):
+        rname, rpath = r.get("name"), r.get("path")
+        if not (rname == name or (path and isinstance(rpath, str) and rpath and _related(rpath, path))):
+            if isinstance(rname, str) and rname and (not path or isinstance(rpath, str)):
+                continue                # another volume's
+        if not isinstance(vm, str) or not vm:
+            raise HoldersUnknown(f"the storage lock record {r['_file']} names no VM")
+        state = holder_state(r)
+        if state == "unknown":
+            raise HoldersUnknown(f"whether the holder of the storage lock record {r['_file']} (VM '{vm}', process "
+                                 f"{r.get('pid')!r}) is still running can't be told")
+        if state == "alive":
             out.add((vm, str(r.get("lab") or "")))
     return out
 

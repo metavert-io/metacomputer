@@ -1,7 +1,8 @@
 """Read simple KEY=VALUE settings from config/defaults.env, then the one settings file scripts/lib.sh reads:
 $MCOMP_CONFIG, else config/vms/NAME.env for MCOMP_VM=NAME, else the default computer that config/default-vm names
-(unless MCOMP_NO_DEFAULT_VM is set), else this machine's config/local.env. Only plain values are understood (quotes
-stripped, no expansion), which is all the Python side needs (e.g. GUEST_USER). scripts/lib.sh refuses the unclear
+(unless MCOMP_NO_DEFAULT_VM is set), else this machine's config/local.env. Only plain values are understood (KEY=value,
+optionally after export; quotes stripped, no expansion), which is all the Python side needs (e.g. GUEST_USER); what
+the handoff gates tell computers by (computers()) is read more strictly, below. scripts/lib.sh refuses the unclear
 cases before anything runs, and bin/metacomputer passes the VM it chose on to what it starts (MCOMP_CONFIG, MCOMP_VM
 or MCOMP_NO_DEFAULT_VM), so this only has to pick the same file.
 
@@ -31,7 +32,7 @@ LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VMS_DIR = os.path.join(LAB, "config", "vms")
 MAIN_CONFIG = os.path.join(LAB, "config", "local.env")
 DEFAULT_VM_FILE = os.path.join(LAB, "config", "default-vm")
-_LINE = re.compile(r"^\s*([A-Z_][A-Z0-9_]*)=(\"[^\"]*\"|'[^']*'|[^\s#]*)")
+_LINE = re.compile(r"^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)=(\"[^\"]*\"|'[^']*'|[^\s#]*)")
 _NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 _KEY = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 # What makes a VM itself: a file in config/vms/ never takes these from the defaults (scripts/lib.sh).
@@ -377,64 +378,284 @@ def load(env=None):
 # that needs it falls back on this one (lib/storage.py vm_name, computers() below).
 DEFAULT_VM_NAME = "metacomputer"
 
+# --- the settings a handoff gate tells computers by (computers()), read strictly ----------------------------------
+# scripts/lib.sh sources a settings file as bash. This reads it without running anything, so it reads only what it can
+# read exactly as bash would and raises Unclear for the rest: a setting it can't read is never taken as missing (a
+# default: another computer's folder). Read line by line, a file may have:
+#   blank lines and comments;
+#   KEY=value lines, optionally after `export `, then optional spaces and a # comment. The value is one unquoted word
+#     (letters, digits, / . _ - : @ % + , =, a leading ~ or ~/, $NAME or ${NAME}), one "double-quoted" string (no
+#     backslash or backquote, $ only as $NAME or ${NAME}) or one 'single-quoted' string;
+#   any other line, as long as it doesn't name one of the settings computers() reads (WATCHED) anywhere, doesn't read
+#     another file or run text as commands (source, ., eval), turn on exporting everything (set -a, set -o allexport)
+#     or may set a variable by a name it builds (declare, typeset, local, readonly, printf, read, mapfile, readarray,
+#     let, getopts, unset: refused wherever they are).
+# From a line that may start something bash reads across lines (a quote or a line left open, a here-document) or a
+# part it may not run (if, case, a loop, braces, parentheses, a function, return or exit) on, a line that names one of
+# those settings raises, even as KEY=value. A value's $HOME, $LAB_ROOT (and ~ where bash expands it) are read; a
+# folder that uses any other variable, or isn't absolute, is None (it can't be told), a name or place that does raises.
+WATCHED = ("VM_NAME", "RUN_DIR", "SSH_DIR", "PROVIDER", "PLACE")
 
-def _expand(value, root, home):
-    """A folder setting as scripts/lib.sh would read it ($HOME, $LAB_ROOT and ~ only), or None when it says more."""
-    if value is None:
-        return None
-    for k, v in (("${HOME}", home), ("$HOME", home), ("${LAB_ROOT}", root), ("$LAB_ROOT", root)):
-        value = value.replace(k, v)
-    value = os.path.expanduser(value)
-    return None if "$" in value or "`" in value else value
+
+class Unclear(ValueError):
+    """A settings file this can't read as scripts/lib.sh would (computers()): which computer it is can't be told."""
+
+
+_REF = r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
+_ASSIGN = re.compile(r"[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)="
+                     r"(\"(?:[^\"\\`$\n]|" + _REF + r")*\"|'[^'\n]*'|(?:~(?=/|[ \t]|$))?(?:[A-Za-z0-9_./:@%+,=-]|"
+                     + _REF + r")*)(?:[ \t]+(?:#.*)?)?")
+_BLANK = re.compile(r"[ \t]*(?:#.*)?")
+_WATCHED = re.compile(r"(?<![A-Za-z0-9_])(?:" + "|".join(WATCHED) + r")(?![A-Za-z0-9_])")
+_SETTERS = frozenset(("source", ".", "eval", "declare", "typeset", "local", "readonly", "printf", "read", "mapfile",
+                      "readarray", "let", "getopts", "unset"))
+_RAW_SETTER = re.compile(r"(?<![A-Za-z0-9_.-])(?:" + "|".join(sorted(_SETTERS - {"."})) + r")(?![A-Za-z0-9_-])"
+                         r"|(?:^|[;&|({\s])\.(?=[ \t])|allexport|(?<![A-Za-z0-9_-])set[ \t]+[-+][A-Za-z]*a")
+_BLOCKS = frozenset(("if", "then", "elif", "else", "fi", "case", "esac", "for", "select", "while", "until", "do",
+                     "done", "function", "return", "exit", "{", "}"))
+
+
+def _lex(line):
+    """(the words of one line as bash splits them, quotes and backslashes removed, each of ; & | ( ) < > a word of its
+    own; a # that starts a word ends the line), and whether the line ends where it began (no quote, no line end
+    escaped)."""
+    words, cur, has, i, n = [], "", False, 0, len(line)
+    while i < n:
+        c = line[i]
+        if c in " \t;&|()<>":
+            if has:
+                words.append(cur)
+                cur, has = "", False
+            if c not in " \t":
+                words.append(c)
+            i += 1
+        elif c == "#" and not has:
+            break
+        elif c == "\\":
+            if i + 1 >= n:
+                return words, False
+            cur, has, i = cur + line[i + 1], True, i + 2
+        elif c == "'":
+            j = line.find("'", i + 1)
+            if j < 0:
+                return words, False
+            cur, has, i = cur + line[i + 1:j], True, j + 1
+        elif c == '"':
+            j, s = i + 1, ""
+            while j < n and line[j] != '"':
+                if line[j] == "\\" and j + 1 < n:
+                    s, j = s + line[j + 1], j + 2
+                else:
+                    s, j = s + line[j], j + 1
+            if j >= n:
+                return words, False
+            cur, has, i = cur + s, True, j + 1
+        else:
+            cur, has, i = cur + c, True, i + 1
+    if has:
+        words.append(cur)
+    return words, True
+
+
+def _label(path):
+    home = os.environ.get("HOME") or ""
+    return "~" + path[len(home):] if home and path.startswith(home + "/") else path
+
+
+def _setter(words):
+    """The word that makes a line able to set a variable by a name it builds, read another file or run text as commands
+    (or export everything), or None."""
+    for k, w in enumerate(words):
+        if w in _SETTERS:
+            return w
+        if w == "set" and any(x == "allexport" or (x[:1] in "-+" and "a" in x[1:]) for x in words[k + 1:]):
+            return "set -a"
+    return None
+
+
+def _opens(words):
+    """Whether a line's words may start something bash reads across lines (a here-document) or a part it may not run:
+    a block's word, braces, a parenthesis that isn't a $( or $((, return or exit."""
+    for k, w in enumerate(words):
+        if w in _BLOCKS:
+            return True
+        if w == "<" and k and words[k - 1] == "<":
+            return True
+        if w == "(" and not (k and (words[k - 1].endswith("$") or words[k - 1] == "(")):
+            return True
+    return False
 
 
 def _parse_strict(path, missing_ok=False):
-    """_parse, except that a file that is there but can't be read raises OSError (a missing one: {} when MISSING_OK)."""
+    """{KEY: its value as written} from the settings file at PATH, read as the notes above say. A missing file is {}
+    when MISSING_OK; one that is there but can't be read raises OSError; one that can't be read as bash would raises
+    Unclear (a ValueError)."""
     try:
-        with open(path) as f:
+        with open(path, newline="") as f:        # a carriage return is part of the line, as bash reads it
             text = f.read()
     except FileNotFoundError:
         if missing_ok:
             return {}
         raise
-    vals = {}
-    for line in text.splitlines():
-        m = _LINE.match(line)
-        if m:
-            vals[m.group(1)] = m.group(2).strip("\"'")
+    vals, block, loose = {}, False, False
+    for n, line in enumerate(text.split("\n"), 1):
+        where = f"{_label(path)} line {n}"
+        if loose:       # inside, or after, something bash reads across lines: only what can't matter
+            m = _WATCHED.search(line)
+            if m or _RAW_SETTER.search(line):
+                raise Unclear(f"{where} {'names ' + m.group(0) if m else 'may set variables'} after a line this reads "
+                              "only as bash would read the lines after it (a quote, a line or a here-document left "
+                              "open), so its settings can't be told here")
+            continue
+        if _BLANK.fullmatch(line):
+            continue
+        m = _ASSIGN.fullmatch(line)
+        if m and not block:
+            vals[m.group(1)] = m.group(2)
+            continue
+        hit = _WATCHED.search(line)
+        if hit:
+            raise Unclear(f"{where} sets or uses {hit.group(0)} in a way this doesn't read"
+                          + (" (after an if, a loop, a function, braces, parentheses, return or exit)" if m else "")
+                          + ": only KEY=value, KEY=\"value\" or KEY='value' lines, optionally after export, outside "
+                          "any block")
+        words, whole = _lex(line)
+        what = _setter(words)
+        if what:
+            raise Unclear(f"{where} uses {what}, so which settings it sets can't be told without running it")
+        if not whole or _opens(words):
+            loose = loose or not whole or any(w == "<" and k and words[k - 1] == "<" for k, w in enumerate(words))
+            block = True
     return vals
 
 
-def computers(root=None, home=None):
+def _value(token, root, home):
+    """A setting's value as bash would give it from its token (_ASSIGN's): a single-quoted one as written; otherwise
+    with $HOME and $LAB_ROOT (braced or not) put in, and an unquoted leading ~ as the home folder. None when it uses
+    any other variable."""
+    if token[:1] == "'":
+        return token[1:-1]
+    quoted = token[:1] == '"'
+    s = token[1:-1] if quoted else token
+    if not quoted and (s == "~" or s.startswith("~/")):
+        s = home + s[1:]
+    known = {"HOME": home, "LAB_ROOT": root}
+    if any(m.group(0).strip("${}") not in known for m in re.finditer(_REF, s)):
+        return None
+    return re.sub(_REF, lambda m: known[m.group(0).strip("${}")], s)
+
+
+def _folder(vals, key, default, root, home):
+    """A folder setting: DEFAULT when it's unset or empty (as scripts/lib.sh's ${KEY:-default}); None when its value
+    can't be told (another variable) or isn't an absolute path."""
+    if not vals.get(key) or vals[key] in ('""', "''"):
+        return default
+    v = _value(vals[key], root, home)
+    if v == "":
+        return default
+    return v if v and v.startswith("/") else None
+
+
+def _plain(vals, key, root, home, label):
+    """A setting that isn't a folder (a name, a provider, a place), "" when it's unset; Unclear when its value can't be
+    told."""
+    if key not in vals:
+        return ""
+    v = _value(vals[key], root, home)
+    if v is None:
+        raise Unclear(f"{label}: {key} uses a variable this doesn't read ({vals[key]})")
+    return v
+
+
+def _name(vals, root, home, label, default):
+    """The computer's name: DEFAULT when the settings don't set VM_NAME; Unclear when they set it to something that
+    isn't a VM name (scripts/lib.sh refuses it too), never the default."""
+    if "VM_NAME" not in vals:
+        return default
+    v = _plain(vals, "VM_NAME", root, home, label)
+    if not _NAME.fullmatch(v):
+        raise Unclear(f"{label}: VM_NAME isn't a VM name ({vals['VM_NAME']})")
+    return v
+
+
+def _selected_file(env, main, vms):
+    """The settings file MCOMP_CONFIG names (ENV's) as scripts/lib.sh chooses it, or None when it names none. With
+    MCOMP_VM set too, both must choose the same file (config/vms/NAME.env, else config/local.env when that's NAME's:
+    MAIN, the main computer); Unclear when they don't, or when the file isn't there (scripts/lib.sh then acts on no
+    computer)."""
+    cfg = env.get("MCOMP_CONFIG") or ""
+    if not cfg:
+        return None
+    if not os.path.isfile(cfg):
+        raise Unclear(f"MCOMP_CONFIG names {cfg}, which isn't a settings file (scripts/lib.sh then acts on none)")
+    name = env.get("MCOMP_VM") or ""
+    if name:
+        mine = os.path.join(vms, name + ".env") if _NAME.fullmatch(name) else ""
+        if mine and not os.path.isfile(mine):
+            mine = main["file"] if os.path.isfile(main["file"]) and main["name"] == name else ""
+        if not mine or os.path.realpath(mine) != os.path.realpath(cfg):
+            raise Unclear(f"MCOMP_CONFIG ({cfg}) and MCOMP_VM ({name}) choose different settings")
+    return cfg
+
+
+def computers(root=None, home=None, env=None):
     """The computers a checkout (ROOT, this one by default) has settings for, each {name, file, run_dir, ssh_dir,
-    provider, place}: its main one (config/local.env, else the defaults) and one per config/vms/NAME.env, whose folders
-    are fixed by its name (scripts/lib.sh mc_vm_default). A folder its settings spell in a way this can't read is None.
-    Plain values only, as everywhere here; nothing is run. Settings that are there but can't be read (a file, or the
-    config/vms folder) raise OSError: what uses this to choose a handoff to check refuses then, never reading them as
-    none. What's missing is missing: no config/vms folder is no computers there, no file no settings in it."""
+    provider, place}: its main one (config/local.env, else the defaults), one per config/vms/NAME.env, whose folders
+    are fixed by its name (scripts/lib.sh mc_vm_default), and the one MCOMP_CONFIG chooses when that's another file
+    (compared by real path; ENV's, this process's environment for this checkout and none for another), read as
+    scripts/lib.sh reads it: the defaults, then that file, with MCOMP_VM naming the same file when it's set too. That
+    one comes first: where two settings files give one name, it's the one this process acts on. Every file is read
+    strictly (_parse_strict): one that is there but can't be read raises OSError, one that can't be read as bash would
+    raises Unclear, and so does an MCOMP_CONFIG that isn't a file, that MCOMP_VM disagrees with, that names a
+    config/vms/ computer's name, or puts its computer elsewhere (only config/vms/ computers can be). What a gate uses
+    this for refuses then, never reading them as none. A folder its settings give in a way this can't tell is None.
+    What's missing is missing: no config/vms folder is no computers there, no file no settings in it."""
     root = os.path.abspath(root or LAB)
     home = home or os.environ.get("HOME") or os.path.expanduser("~")
+    if env is None:
+        env = os.environ if os.path.realpath(root) == os.path.realpath(LAB) else {}
     base = _parse_strict(os.path.join(root, "config", "defaults.env"), missing_ok=True)
     main_file = os.path.join(root, "config", "local.env")
-    main = dict(base)
-    main.update(_parse_strict(main_file, missing_ok=True))
-    out = [{"name": main.get("VM_NAME") or DEFAULT_VM_NAME, "file": main_file,
-            "run_dir": _expand(main.get("RUN_DIR") or os.path.join(root, ".run"), root, home),
-            "ssh_dir": _expand(main.get("SSH_DIR") or os.path.join(home, ".ssh", "metacomputer"), root, home),
-            "provider": main.get("PROVIDER") or "", "place": main.get("PLACE") or ""}]
     vms = os.path.join(root, "config", "vms")
+
+    def kept(file, missing_ok=False):
+        s = dict(base)
+        s.update(_parse_strict(file, missing_ok=missing_ok))
+        label = _label(file)
+        return {"name": _name(s, root, home, label, DEFAULT_VM_NAME), "file": file,
+                "run_dir": _folder(s, "RUN_DIR", os.path.join(root, ".run"), root, home),
+                "ssh_dir": _folder(s, "SSH_DIR", os.path.join(home, ".ssh", "metacomputer"), root, home),
+                "provider": _plain(s, "PROVIDER", root, home, label), "place": _plain(s, "PLACE", root, home, label)}
+
+    out = [kept(main_file, missing_ok=True)]
     try:
         names = sorted(f[:-4] for f in os.listdir(vms) if f.endswith(".env") and _NAME.fullmatch(f[:-4]))
     except FileNotFoundError:
         names = []
     for n in names:
-        s = dict(base)
-        for k in IDENTITY:
-            s.pop(k, None)
-        s.update(_parse_strict(os.path.join(vms, n + ".env")))
-        out.append({"name": n, "file": os.path.join(vms, n + ".env"), "run_dir": os.path.join(root, ".run-vms", n),
-                    "ssh_dir": os.path.join(home, ".ssh", "metacomputer-" + n), "provider": s.get("PROVIDER") or "",
-                    "place": s.get("PLACE") or ""})
+        f = os.path.join(vms, n + ".env")
+        s = {k: v for k, v in base.items() if k not in IDENTITY}
+        s.update(_parse_strict(f))
+        out.append({"name": n, "file": f, "run_dir": os.path.join(root, ".run-vms", n),
+                    "ssh_dir": os.path.join(home, ".ssh", "metacomputer-" + n),
+                    "provider": _plain(s, "PROVIDER", root, home, _label(f)),
+                    "place": _plain(s, "PLACE", root, home, _label(f))})
+    cfg = _selected_file(env, out[0], vms)
+    if cfg:
+        real = os.path.realpath(cfg)
+        vms_real = os.path.realpath(vms)
+        if real == os.path.realpath(main_file):
+            return out
+        if os.path.dirname(real) == vms_real and real.endswith(".env"):
+            if os.path.basename(real)[:-4] not in names:
+                raise Unclear(f"MCOMP_CONFIG ({cfg}) is in config/vms/ but isn't a VM's settings file")
+            return out
+        c = kept(os.path.abspath(cfg))
+        if c["name"] in names:
+            raise Unclear(f"MCOMP_CONFIG ({cfg}) names the VM {c['name']}, which config/vms/{c['name']}.env is")
+        if c["place"] not in ("", "mac"):
+            raise Unclear(f"MCOMP_CONFIG ({cfg}) says PLACE={c['place']}: only a config/vms/ computer can be elsewhere")
+        out.insert(0, c)
     return out
 
 

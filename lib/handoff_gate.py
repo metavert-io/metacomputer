@@ -170,9 +170,10 @@ def _transport_dirs(transport):
 def owners_dir_for(name=None, run_dir=None, transport=None, root=None):
     """The owners folder of the computer a program acts on, from what it acts with: NAME (its VM name), RUN_DIR (its
     run folder, as given) and TRANSPORT (the command that reaches it). A computer of this checkout's (its settings,
-    labconfig.computers) is told by its name or by the SSH folder its transport names, and its run folder must be its
-    own; otherwise the run folder given decides (a transport that names no computer of this checkout's: where it goes
-    can't be told here), and a name given must be its computer's. Anything else (a name and a folder of different
+    labconfig.computers: the main one, config/vms/ ones and the one an MCOMP_CONFIG file chooses, read strictly) is
+    told by its name or by the SSH folder its transport names, and its run folder must be its own; otherwise the run
+    folder given decides (a transport that names no computer of this checkout's: where it goes can't be told here),
+    and a name given must be its computer's. Anything else (a name and a folder of different
     computers, a transport to one and a name of another, nothing to tell it by, settings that can't be read) refuses
     with exit 4: its handoff can't be checked."""
     try:
@@ -181,7 +182,10 @@ def owners_dir_for(name=None, run_dir=None, transport=None, root=None):
     except Exception as e:      # noqa: BLE001  (settings that can't be read: the computer can't be told)
         _refuse(f"couldn't read this checkout's settings ({e}), so which computer's handoff to check can't be told; "
                 "nothing was done")
-    by_name = {c["name"]: c for c in comps if c["name"]}
+    by_name = {}
+    for c in comps:     # the computer MCOMP_CONFIG chooses comes first: where two files give one name, it's this
+        if c["name"]:
+            by_name.setdefault(c["name"], c)
     if transport is not None:
         dirs = _transport_dirs(transport)
         named = sorted({c["name"] for c in comps if c["ssh_dir"] and any(_same(d, c["ssh_dir"]) for d in dirs)})
