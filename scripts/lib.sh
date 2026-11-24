@@ -10,6 +10,9 @@ fi
 # lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported
 # again into remote_py's one child (scripts/lib.sh). The shell keeps them as unexported variables.
 for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY; do export -n "$mc_k"; done; unset mc_k
+# script_handoff_hold's own mark (this script already holds the dispatch lock on descriptor 5): never taken from the
+# environment, where it would skip the script's handoff check.
+unset MC_SCRIPT_HELD
 
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

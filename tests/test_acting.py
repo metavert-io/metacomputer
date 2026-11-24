@@ -203,6 +203,25 @@ def _parse(mod, row):
 
 
 # --- running a line by itself -------------------------------------------------------------------------------------
+def script_mark_checks(td):
+    """script_handoff_hold's mark (MC_SCRIPT_HELD) is the script's own, never the environment's."""
+    print("\nthe scripts' own hold mark isn't taken from the environment")
+    lab = make_lab(td, "mark")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    try:
+        run_dir = os.path.join(lab.box.co, ".run")
+        handoff_on(run_dir)
+        rc, out, err, called, _ = run_line(lab, ["/bin/bash", os.path.join(lab.box.co, "scripts", "build-vm.sh")],
+                                           {"MC_SCRIPT_HELD": "1"}, "plain", run_dir)
+        acted = acting_calls(called)
+        check("scripts/build-vm.sh with MC_SCRIPT_HELD=1 in its environment while the handoff is open: waits (exit 4), "
+              "nothing called", rc == 4 and not acted, (rc, acted[:3], err[-300:]))
+    finally:
+        lab.close()
+
+
 def handoff_on(run_dir):
     """An open handoff record in RUN_DIR (as lib/handoff.py writes one), and its dispatch lock file."""
     d = os.path.join(run_dir, "owners")
@@ -479,6 +498,7 @@ def main():
         rows = all_rows()
         table_checks(rows)
         session_guard_checks(td)
+        script_mark_checks(td)
         entry_checks(td, rows)
         bin_checks(td)
     finally:
