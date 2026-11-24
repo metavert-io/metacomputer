@@ -225,6 +225,110 @@ def test_locks():
     storage.release_locks("vm-c", "/lab")
 
 
+def refusal(fn, *a):
+    """fn's refusal (StorageError's words), "CRASH ..." for any other exception, None when it went ahead."""
+    try:
+        quiet(fn, *a)
+    except storage.StorageError as e:
+        return str(e)
+    except Exception as e:      # noqa: BLE001  (an older reader's PermissionError: not a refusal)
+        return f"CRASH {type(e).__name__}: {e}"
+    return None
+
+
+def test_held_strictly():
+    """Codex check r5, #2: every decision whether something is held reads the holder records strictly. A record, a
+    disk's lock file or the locks folder that's there and can't be read or parsed refuses, naming it and how to clear a
+    stale one, with nothing taken or changed: a start's acquire, a reservation's (volume resize), a folder volume's
+    delete. What's only shown (volume list) and a holder letting go of its own records stay lenient."""
+    rec = make_volume("sv")
+    img, size = rec["path"], os.path.getsize(rec["path"])
+    it = {"kind": "disk", "name": "sv", "path": img, "lock": storage.lock_key("disk", img)}
+    locks = storage.locks_dir()
+    own = os.path.join(locks, it["lock"] + ".json")      # a running VM's record of this volume
+    good = {"kind": "disk", "name": "sv", "path": img, "vm": "running-vm", "lab": "/lab", "pid": os.getpid(),
+            "pstart": storage.proc_start(os.getpid()), "since": "then", "state": "running", "lock": it["lock"]}
+    for how, text, mode in (("unreadable", json.dumps(good), 0), ("not JSON", "{", 0o600),
+                            ("JSON but not a holder record", "[1]", 0o600),
+                            ("a record whose vm isn't text", json.dumps(dict(good, vm=3)), 0o600)):
+        with open(own, "w") as f:
+            f.write(text)
+        os.chmod(own, mode)
+        ino = os.stat(own).st_ino
+        try:
+            e = refusal(storage.acquire, [it], "vm-s", "/lab", os.getpid())
+            taken = os.stat(own).st_ino != ino          # a record of its own written over the running VM's
+            check(f"the volume's holder record {how}: a start's storage refuses, naming the file and how to clear a "
+                  "stale one, nothing taken", e and not e.startswith("CRASH") and own in e and "stale" in e
+                  and not taken, (e, taken))
+            if e is None:
+                storage.release_locks("vm-s", "/lab")
+            e = refusal(storage.cmd_volume_resize, Args(name="sv", size="32M"))
+            check("...and volume resize refuses, the image not truncated", e and not e.startswith("CRASH") and own in e
+                  and os.path.getsize(img) == size, (e, os.path.getsize(img)))
+            st = refusal(lambda: print(storage.volume_state(storage.reg_load("volume", "sv"))))
+            check("...while volume list (shown only) still reads it, leniently", st is None, st)
+        finally:
+            if os.path.lexists(own):            # (an older reader took it over, then let go of it)
+                os.chmod(own, 0o600)
+                os.remove(own)
+    storage.acquire([it], "vm-own", "/lab", os.getpid())
+    bad = os.path.join(locks, "disk-0123456789abcdef01234567.json")
+    with open(bad, "w") as f:
+        f.write("{")
+    try:
+        n = storage.release_locks("vm-own", "/lab")
+        check("a holder lets go of its own records while another's can't be read (its own only: lenient)",
+              n == 1 and not os.path.exists(own) and os.path.exists(bad), n)
+    finally:
+        os.remove(bad)
+        storage.release_locks("vm-own", "/lab")
+    for mode in (0, 0o300):
+        os.chmod(locks, mode)
+        try:
+            e = refusal(storage.cmd_volume_resize, Args(name="sv", size="32M"))
+        finally:
+            os.chmod(locks, 0o700)
+        check(f"the locks folder unreadable (mode {mode:o}): volume resize refuses, naming it, the image not "
+              "truncated", e and not e.startswith("CRASH") and "locks folder" in e and locks in e
+              and os.path.getsize(img) == size, (e, os.path.getsize(img)))
+    for f in os.listdir(locks):     # (an older reader's reservation, left behind by a release that couldn't list them)
+        if f.endswith(".json") and json.load(open(os.path.join(locks, f))).get("pid") == os.getpid():
+            os.remove(os.path.join(locks, f))
+    with open(img + ".lock", "w") as f:
+        f.write("{")
+    try:
+        e = refusal(storage.cmd_volume_resize, Args(name="sv", size="32M"))
+        check("the disk's lock file (beside it) not JSON: volume resize refuses, naming it, the image not truncated",
+              e and not e.startswith("CRASH") and img + ".lock" in e and os.path.getsize(img) == size,
+              (e, os.path.getsize(img)))
+    finally:
+        if os.path.lexists(img + ".lock"):
+            os.remove(img + ".lock")
+    e = refusal(storage.cmd_volume_resize, Args(name="sv", size="32M"))
+    check("...and with every record readable, volume resize goes ahead",
+          e is None and os.path.getsize(img) == 32 << 20 and size < 32 << 20, (e, size))
+    fdir = os.path.join(TMP, "held", "hf.noindex")
+    os.makedirs(fdir)
+    quiet(storage.cmd_volume_create, Args(name="hf", folder=fdir, size=None, dir=None))
+    frec = storage.reg_load("volume", "hf")
+    fown = os.path.join(locks, storage.lock_key("folder", frec["path"]) + ".json")
+    with open(fown, "w") as f:
+        f.write("{")
+    try:
+        e = refusal(storage.cmd_volume_delete, Args(name="hf", yes=True, keep_image=False))
+        check("a folder volume whose read-write holder's record isn't JSON: volume delete refuses, naming it, the "
+              "volume kept", e and not e.startswith("CRASH") and fown in e and storage.reg_load("volume", "hf"),
+              (e, storage.reg_load("volume", "hf")))
+    finally:
+        if os.path.lexists(fown):
+            os.remove(fown)
+    e = refusal(storage.cmd_volume_delete, Args(name="hf", yes=True, keep_image=False))
+    check("...and with it readable (nobody's), the delete goes ahead", e is None and not storage.reg_load("volume", "hf"),
+          e)
+    refusal(storage.cmd_volume_delete, Args(name="sv", yes=True, keep_image=False))
+
+
 def test_network():
     check("smbfs, nfs, afpfs and webdav count as network filesystems",
           all(storage.is_network(t, True) for t in ("smbfs", "nfs", "afpfs", "webdav")))
@@ -2539,6 +2643,7 @@ def main():
         test_parsing()
         test_refusals()
         test_locks()
+        test_held_strictly()
         test_network()
         test_plan()
         test_sizes_names()

@@ -890,9 +890,10 @@ def unreadable_settings_checks(td):
 
 
 def strict_reader_checks(td):
-    """labconfig.computers reads settings exactly as scripts/lib.sh's bash would, or raises (codex re-check 4, #1): a
-    setting it can't read is never taken as missing (a default: another computer's folder)."""
-    print("\nthe settings a gate tells computers by: read as bash would, or refused")
+    """labconfig.computers reads settings files of plain assignments only, or raises (codex re-check 4, #1; check r5,
+    #1 and #3: a closed grammar, and HOME and LAB_ROOT never assigned): a setting it can't read is never taken as missing
+    (a default: another computer's folder)."""
+    print("\nthe settings a gate tells computers by: plain assignments only, anything else refused")
     sys.path.insert(0, os.path.join(LAB, "lib"))
     import labconfig
     home = os.path.join(td, "strict-home")
@@ -921,7 +922,8 @@ def strict_reader_checks(td):
                        ('#RUN_DIR="$HOME/elsewhere"', "{root}/.run"),
                        ('RUN_DIR="~/mc-run"', None),
                        ('RUN_DIR="$HOMEX/mc-run"', None),
-                       ('RUN_DIR="$OTHER/mc-run"', None)):
+                       ('RUN_DIR="$OTHER/mc-run"', None),
+                       ("RUN_DIR='/srv/Jon'\\''s run'", "/srv/Jon's run")):
         root, cs, e = comps(local="VM_NAME=mainvm\n" + line + "\n")
         exp = want and want.format(root=root, home=home)
         check(f"config/local.env {line!r}: the run folder is {want or 'not told (None: refused where it matters)'}, as "
@@ -937,14 +939,30 @@ def strict_reader_checks(td):
         root, cs, e = comps(local=line + "\n")
         check(f"config/local.env {line!r}: refused (raises), never read as unset", cs is None and e is not None,
               (cs and cs.get("metacomputer"), e))
+    # Codex check r5, #1 and #3: a line bash reads across lines or runs (true || / &&, then an assignment it skips; a
+    # $var command that reads another file), and an assignment to a variable the values are read with, all refuse: the
+    # file is plain assignments only, and anything else on any line refuses.
+    for text, what in (("true ||\nRUN_DIR=/unchecked-run\n", "'true ||', then an assignment bash skips"),
+                       ("true &&\nRUN_DIR=/unchecked-run\n", "'true &&', then an assignment"),
+                       ("loader=source\n$loader \"$LAB_ROOT/config/more.env\"\n", "'loader=source', then '$loader FILE'"),
+                       ('HOME=/different-home\nRUN_DIR="$HOME/run"\n', "HOME reassigned, then $HOME used"),
+                       ('export HOME=/different-home\nRUN_DIR=~/run\n', "HOME exported anew, then ~ used"),
+                       ('LAB_ROOT=/elsewhere\nRUN_DIR="$LAB_ROOT/.run"\n', "LAB_ROOT reassigned, then used"),
+                       ("X=1 |\nRUN_DIR=/unchecked-run\n", "a line ending in |"),
+                       ("X=1 ;\n", "a line ending in ;"), ("X=1 &\n", "a line ending in &"),
+                       ("X=1 \\\nRUN_DIR=/unchecked-run\n", "a line ending in a backslash"),
+                       ("f() { RUN_DIR=/x; }\n", "a function"), ("$cmd\n", "a $var command"),
+                       ("[ -x /nonexistent ] && PY=/nonexistent\n", "a test"), ("X=$(true)\n", "a command's output"),
+                       ("X=a~b\n", "a ~ past a value's start"), ("X=a(b)\n", "a parenthesis in a value"),
+                       ("X=a<b\n", "a redirection in a value")):
+        root, cs, e = comps(local="VM_NAME=mainvm\n" + text)
+        check(f"config/local.env with {what}: refused (raises), never read", cs is None and isinstance(e, ValueError),
+              (cs and cs.get("mainvm"), e))
     ex = open(os.path.join(LAB, "config", "local.env.example")).read()
     uncommented = "\n".join(l[1:] if l[:1] == "#" and l[1:2].isupper() and "=" in l else l for l in ex.split("\n"))
     root, cs, e = comps(local=uncommented)
     check("config/defaults.env with config/local.env.example's settings uncommented: read with no refusal",
           cs is not None and e is None, e)
-    root, cs, e = comps(local="VM_NAME=mainvm\n[ -x /nonexistent ] && PY=/nonexistent\nX=$(true)\n")
-    check("lines that set none of a computer's settings (a test, a command's output): read, nothing refused",
-          cs is not None and cs["mainvm"]["run_dir"] == os.path.join(root, ".run"), e)
     second = os.path.join(td, "strict-second.env")
     write(second, 'VM_NAME=second\nSSH_DIR="$HOME/.ssh/metacomputer-second"\nRUN_DIR="$HOME/.metacomputer-second/run"\n')
     root, cs, e = comps(local="VM_NAME=mainvm\n", env={"MCOMP_CONFIG": second})
@@ -1036,7 +1054,10 @@ def settings_syntax_checks(td):
         check("...with no handoff open there: it goes ahead", rc == 0 and WAITS not in err, (rc, err[-300:]))
         write(os.path.join(co, "config", "more.env"), 'RUN_DIR="$LAB_ROOT/.custom-run"\n')
         for line, what in (("RUN_DIR=$LAB_ROOT/.esc\\ run", "a value with a backslash"),
-                           ('source "$LAB_ROOT/config/more.env"', "a source line")):
+                           ('source "$LAB_ROOT/config/more.env"', "a source line"),
+                           ("true ||\nRUN_DIR=$LAB_ROOT/.custom-run", "'true ||' then an assignment bash skips"),
+                           ('loader=source\n$loader "$LAB_ROOT/config/more.env"', "'$loader FILE' (loader=source)"),
+                           ('HOME=/different-home\nRUN_DIR="$HOME/run"', "HOME reassigned, then used")):
             write(local, plain + line + "\n")
             rc, out, err, called, written = run_line(lab, kill, {}, "plain", custom)
             check(f"config/local.env with {what}: storage.py kill-vm refuses (exit 4, its settings can't be read), no "
@@ -1096,6 +1117,75 @@ def holder_liveness_checks(td):
         lab.close()
 
 
+def held_records_checks(td):
+    """`volume resize` changes no computer (the table's NONE) because a reservation keeps every computer off the volume
+    while it works, and that reservation reads the holder records strictly (codex check r5, #2): a running VM's record
+    that's there and can't be read or parsed, or a locks folder that can't be read, refuses, naming it; nothing is
+    truncated. The program itself, run as an agent runs it."""
+    print("\nvolume resize: holder records that can't be read refuse, never read as nobody")
+    lab = make_lab(td, "held")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    keeper = subprocess.Popen(["/bin/sleep", "600"])
+    try:
+        co, st = lab.box.co, storage_state(lab)
+        sp = [PY, "-B", os.path.join(co, "lib", "storage.py")]
+        r = subprocess.run(sp + ["volume", "create", "dv", "--size", "16M"], env=lab.env(os.devnull), cwd=co,
+                           capture_output=True, text=True, timeout=60)
+        reg = os.path.join(st, "registry", "volumes", "dv.json")
+        check("a disk volume made with the program (volume create dv --size 16M)", r.returncode == 0
+              and os.path.isfile(reg), r.stderr[-300:])
+        if r.returncode or not os.path.isfile(reg):
+            return
+        img = json.load(open(reg))["path"]
+        size = os.path.getsize(img)
+        locks = os.path.join(st, "locks")
+        os.makedirs(locks, mode=0o700, exist_ok=True)
+        sys.path.insert(0, os.path.join(LAB, "lib"))
+        import storage as storage_mod
+        rec_path = os.path.join(locks, storage_mod.lock_key("disk", img) + ".json")
+        held = {"kind": "disk", "name": "dv", "path": img, "vm": "other", "lab": os.path.realpath(co),
+                "pid": keeper.pid, "pstart": lstart(keeper.pid), "since": "now", "state": "running",
+                "rw": True, "exclusive": True, "lock": storage_mod.lock_key("disk", img)}
+        resize = sp + ["volume", "resize", "dv", "--size", "32M"]
+        main_run = os.path.join(co, ".run")
+        write(rec_path, json.dumps(held), 0o600)
+        rc, out, err, called, written = run_line(lab, resize, {"MCOMP_RUN_DIR": main_run}, "plain", main_run)
+        check("volume resize dv while VM other's readable record holds it: refused (in use), not truncated",
+              rc == 1 and "in use by" in err and os.path.getsize(img) == size, (rc, err[-300:]))
+        for how, text, mode in (("unreadable", json.dumps(held), 0), ("malformed (not JSON)", "{", 0o600)):
+            write(rec_path, text, 0o600)
+            os.chmod(rec_path, mode)
+            try:
+                rc, out, err, called, written = run_line(lab, resize, {"MCOMP_RUN_DIR": main_run}, "plain", main_run)
+            finally:
+                if os.path.lexists(rec_path):       # (an older reader took it over, then let go of it)
+                    os.chmod(rec_path, 0o600)
+            check(f"volume resize dv with VM other's holder record {how}: refused (exit 1), naming the record and how "
+                  "to clear a stale one; nothing truncated", rc == 1 and "can't be read" in err and "stale" in err
+                  and os.path.basename(rec_path) in err and os.path.getsize(img) == size and img not in written,
+                  (rc, os.path.getsize(img), err[-300:]))
+        if os.path.lexists(rec_path):
+            os.remove(rec_path)
+        for mode in (0, 0o300):
+            os.chmod(locks, mode)
+            try:
+                rc, out, err, called, written = run_line(lab, resize, {"MCOMP_RUN_DIR": main_run}, "plain", main_run)
+            finally:
+                os.chmod(locks, 0o700)
+            check(f"volume resize dv with the storage locks folder unreadable (mode {mode:o}): refused (exit 1), naming "
+                  "the folder; nothing truncated", rc == 1 and "storage locks folder" in err and "can't be read" in err
+                  and os.path.getsize(img) == size and img not in written, (rc, os.path.getsize(img), err[-300:]))
+        rc, out, err, called, written = run_line(lab, resize, {"MCOMP_RUN_DIR": main_run}, "plain", main_run)
+        check("...and with nothing held, volume resize grows it",
+              rc == 0 and "16.0 MiB -> 32.0 MiB" in out and os.path.getsize(img) == 32 << 20, (rc, out[-200:], err[-300:]))
+    finally:
+        keeper.kill()
+        keeper.wait()
+        lab.close()
+
+
 def main():
     td = tempfile.mkdtemp(prefix="mcact-", dir="/tmp")
     try:
@@ -1107,6 +1197,7 @@ def main():
         settings_syntax_checks(td)
         config_file_checks(td)
         holder_liveness_checks(td)
+        held_records_checks(td)
         binding_checks(td)
         volume_checks(td)
         look_once_checks(td)
