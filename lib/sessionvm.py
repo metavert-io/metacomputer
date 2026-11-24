@@ -116,8 +116,9 @@ def _claude(a):         # lib/vm_claude.py: the action is the first argument (st
     return "read" if _first(a) in ("read", "wait", "status") else "exempt" if _first(a) in HELP else "act"
 
 
-def _handoff(a):        # lib/handoff.py: status and wait, first, only look; anything else opens one or ends it
-    return "read" if _first(a) in ("status", "wait") else "exempt" if _first(a) in HELP else "act"
+def _handoff(a):        # lib/handoff.py: status, first, only looks; wait can make the input reset the open handoff left
+    # pending (it acts on that VM); anything else opens one or ends it
+    return "read" if _first(a) == "status" else "exempt" if _first(a) in HELP else "act"
 
 
 def _net(a):            # lib/netpolicy.py: the subcommand first, status when there's none: what the computer can

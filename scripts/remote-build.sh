@@ -32,6 +32,7 @@ for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_
 if ! sa_check remote-build.sh "metacomputer --vm NAME build [--keep-on-failure]" 0 0 "--keep-on-failure" "" "$@"; then
   sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0     # usage only
 fi
+MC_SCRIPT_SAID="${MCOMP_VM:-}${MCOMP_CONFIG:-}${MCOMP_EXPECT_VM:-}"   # the VM named, before lib.sh reads the settings
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
 [ "${MC_REMOTE:-0}" = 1 ] || die "$VM_NAME is a VM on this Mac: scripts/build-vm.sh builds it"
@@ -40,6 +41,10 @@ vm_notice
 BUILD_QUIET_EXIT=0
 KEEP_ON_FAILURE=0
 for a in "$@"; do case "$a" in --keep-on-failure) KEEP_ON_FAILURE=1 ;; *) die "usage: metacomputer --vm NAME build [--keep-on-failure]" ;; esac; done
+# Run on its own as well as by bin/metacomputer: the session guard, and the handoff check before anything reaches the
+# computer (it sets it up again: services restart), held for the rest of the build (scripts/lib.sh).
+script_session_guard "$MC_SCRIPT_SAID" build "$@" || exit 1
+script_handoff_hold || { BUILD_QUIET_EXIT=1; exit 4; }
 # This build's operation: its launch is tagged with it and journaled under it (lib/remote.py create --op), so a
 # failure deletes only what this operation made (lib/remote.py abort --op), never an instance it found.
 ABORT_OP=""

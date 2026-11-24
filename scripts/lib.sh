@@ -40,7 +40,9 @@ MC_SYS_HOME="$(mc_sys_home)"
 # (tests). The account's own vault folder, which the main VM and MCOMP_CONFIG VMs share unless they set VAULT_DIR:
 MC_VMS_APP_DIR="${MCOMP_VMS_APP_DIR:-$MC_SYS_HOME/Library/Application Support/metacomputer-vms}"
 MC_SHARED_VAULT="$MC_SYS_HOME/Library/Application Support/metacomputer"
-mc_valid_vm_name() { case "$1" in ''|[-.]*|*[!A-Za-z0-9._-]*) return 1 ;; esac; [ ${#1} -le 64 ]; }
+# A VM's name: up to 64 ASCII letters, digits, . _ -, not starting with - or . (the letters spelled out: a range like
+# A-Z also matches accented letters in a UTF-8 locale). lib/handoff.py VM_NAME_RE and the panel script are the same.
+mc_valid_vm_name() { case "$1" in ''|[-.]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*) return 1 ;; esac; [ ${#1} -le 64 ]; }
 # config/default-vm (the default computer's name), read by lib/defaultvm.py, the one reader lib/labconfig.py uses too:
 # opened once without following a link or waiting on a FIFO, checked through that descriptor to be a regular file,
 # and exactly the bytes read are checked (one VM name on one line, a newline at its end or not, nothing else).
@@ -569,6 +571,38 @@ vm_target_check() {
 }
 # The command to type for this VM, in hints: `metacomputer --vm NAME` for a VM in config/vms/.
 mc_cmd() { if [ "${MC_SETTINGS_KIND:-}" = vm ]; then printf 'metacomputer --vm %s' "$VM_NAME"; else printf 'metacomputer'; fi; }
+# Our own scripts that stop, delete or set up a computer again (scripts/build-vm.sh --replace, scripts/remote-build.sh)
+# check what bin/metacomputer checks before it runs them, themselves, before anything is stopped, deleted or written:
+# run on their own they're held the same way (run by bin/metacomputer, they pass again at once). An agent that runs the
+# runner or ssh itself isn't stopped by this (the same-account limit, SECURITY.md).
+# The session guard (bin/metacomputer's session_guard, lib/sessionvm.py): from an agent session that holds another
+# computer, a script that names none refuses (status 1, saying why). SAID: MCOMP_VM, MCOMP_CONFIG and MCOMP_EXPECT_VM
+# as they were before this file read the settings (it sets MCOMP_VM itself).
+script_session_guard() { # SAID CMD [ARGS...]
+  local said="$1" rc=0 chosen=main; shift
+  [ -z "$said" ] || return 0
+  [ "${MCOMP_GUARD_VM:-}" != "$VM_NAME:$SSH_PORT" ] || return 0
+  [ "${MC_FROM_DEFAULT:-0}" != 1 ] || chosen=default
+  "$PY" "$LAB_ROOT/lib/sessionvm.py" guard --vm "$VM_NAME" --ssh-port "$SSH_PORT" --chosen "$chosen" \
+    --settings "${MC_SETTINGS_LABEL:-}" -- "$@" || rc=$?
+  case "$rc" in
+    0|2) ;;
+    3) return 1 ;;
+    *) warn "couldn't check which computer this agent session holds (lib/sessionvm.py exit $rc); going on" ;;
+  esac
+  export MCOMP_GUARD_VM="$VM_NAME:$SSH_PORT"
+}
+# The handoff check (bin/metacomputer's handoff_hold_unless_user): lib/handoff.py guard --user-ok, with this VM's
+# dispatch lock taken shared on descriptor 5 for the rest of the script, so no handoff opens while it runs; while one
+# is open it stops (status 4, saying why), except at the user's own terminal.
+script_handoff_hold() {
+  local f="$RUN_DIR/owners/.dispatch"
+  { mkdir -p "$RUN_DIR/owners" && ( umask 077; : >> "$f" ) && [ -f "$f" ] && [ ! -L "$f" ]; } 2>/dev/null \
+    || { warn "couldn't open this VM's dispatch lock ($f)"; return 4; }
+  exec 5>>"$f" || { warn "couldn't open this VM's dispatch lock ($f)"; return 4; }
+  "$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 5 --user-ok || return 4
+}
+
 # One line on stderr, once per command, before a command acts on a VM: which VM and settings; "vault" adds the
 # vault folder. Scripts and commands it starts don't repeat it.
 vm_notice() { # [vault]
@@ -809,15 +843,67 @@ vm_change_lock() { # WHAT
 }
 
 # --- detached processes (own session, so they outlive the calling shell) ----
-daemonize() { # LOGFILE CMD ARGS...: in its own session, with no descriptors but 0-2 (so it never keeps a lock)
-  local log="$1"; shift
-  "$PY" -c 'import os,sys
+# A lock on descriptor FD kept for as long as this process lives, across an exec: `metacomputer ssh` execs ssh (so
+# signals, job control and the exit status are ssh's own), and OpenSSH closes the descriptors it inherits before it
+# connects. A helper started first keeps FD (the same open file, so the same lock) until this pid, ssh after the exec,
+# exits: it waits on it with kqueue (NOTE_EXIT, no polling; registered while this shell still waits for its answer, so
+# the pid can't have been reused; a pid already gone means it ends at once). It runs in a session of its own (not in
+# the terminal's foreground job: Ctrl-C and Ctrl-Z don't reach it) with every other descriptor closed, whatever its
+# number, and can't outlive this pid. It answers "held" only once all of that is done (the pipe it answers on kept
+# aside until then): any step that fails means no answer, and the command refuses. 0 once it holds FD; 1 when it
+# couldn't (nothing is left behind then). Killing the helper by hand lets the lock go: the same-account limit
+# (SECURITY.md).
+hold_fd_until_exit() { # FD
+  local ok
+  ok="$("$PY" -c 'import os, select, sys
+fd, pid = int(sys.argv[1]), int(sys.argv[2])
+os.fstat(fd)                                   # the descriptor to keep is open here, or this fails
 os.setsid()
-fd=os.open(sys.argv[1], os.O_WRONLY|os.O_CREAT|os.O_APPEND, 0o644)
+if os.fork():
+    os._exit(0)                                # the holder is the grandchild: not this shell'"'"'s child after the exec
+try:
+    kq = select.kqueue()
+    try:
+        kq.control([select.kevent(pid, filter=select.KQ_FILTER_PROC, flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                  fflags=select.KQ_NOTE_EXIT)], 0)
+    except ProcessLookupError:
+        os._exit(0)                            # that pid is gone already: nothing to hold for (and no answer)
+    answer = os.dup(1)                         # the pipe this shell reads, kept aside until the end
+    null = os.open(os.devnull, os.O_RDWR)
+    for n in (0, 1, 2):
+        os.dup2(null, n)
+    keep = {0, 1, 2, fd, kq.fileno(), answer}
+    for n in [int(x) for x in os.listdir("/dev/fd")]:     # every open descriptor, whatever its number
+        if n not in keep:
+            try:
+                os.close(n)
+            except OSError:
+                pass                           # (the listing'"'"'s own, closed already)
+    if os.write(answer, b"held\n") != 5:
+        os._exit(1)
+    os.close(answer)
+except BaseException:
+    os._exit(1)                                # no answer: the command refuses
+kq.control(None, 1)                            # until that pid exits
+os._exit(0)' "$1" "$$" 2>/dev/null)" || return 1
+  [ "$ok" = held ]
+}
+daemonize() { # [--keep-fd N] LOGFILE CMD ARGS...: in its own session, with no descriptors but 0-2 (so it never keeps
+  # a lock), or with N too: a lock it is meant to keep (record_stream_start: the dispatch lock, until its stream is up)
+  local keep=-1 log
+  if [ "${1:-}" = --keep-fd ]; then keep="$2"; shift 2; fi
+  log="$1"; shift
+  "$PY" -c 'import os,sys
+keep=int(sys.argv[1])
+os.setsid()
+fd=os.open(sys.argv[2], os.O_WRONLY|os.O_CREAT|os.O_APPEND, 0o644)
 os.dup2(fd,1); os.dup2(fd,2)
 n=os.open("/dev/null", os.O_RDONLY); os.dup2(n,0)
-os.closerange(3, 4096)
-os.execvp(sys.argv[2], sys.argv[2:])' "$log" "$@" &
+if 3 <= keep < 4096:
+    os.set_inheritable(keep, True); os.closerange(3, keep); os.closerange(keep + 1, 4096)
+else:
+    os.closerange(3, 4096)
+os.execvp(sys.argv[3], sys.argv[3:])' "$keep" "$log" "$@" &
 }
 
 # --- mcomp-netgw: cua-netgw patched (host-enforced egress policy, loopback-only forwards) -------
@@ -983,6 +1069,10 @@ export_options() {
          MCOMP_HOSTKEY_NAME="$(mc_hostkey_name)"     # this VM's spool and vault folder (empty: the defaults); its pinned host key's name
   # Dialogs on this Mac that wait for the user (a handoff's "Open live view"): off unless the user turned them on.
   export MCOMP_INTERACTIVE_PROMPTS="${INTERACTIVE_PROMPTS:-off}"
+  # The handoff's "Hand back" panel on this Mac's screen (lib/handoff.py run_panel): on unless the user turned it off
+  # (MCOMP_HANDBACK_PANEL=off in the environment wins: the tests' switch, which only ever turns it off).
+  [ "${MCOMP_HANDBACK_PANEL:-}" = off ] || export MCOMP_HANDBACK_PANEL="${HANDBACK_PANEL:-on}"
+  export MCOMP_PLACE="${PLACE:-mac}"   # where this VM is, in the panel's words (lib/placement.py on_place)
   # The hub (lib/mcp_hub.py), its coordinate guard, its hidden-text marks and its human pacing (lib/pacing.py).
   # MCOMP_MCP_HUB / MCOMP_COORD_GUARD / MCOMP_HIDDEN_TEXT / MCOMP_BROWSER_PACING already in the environment win
   # over the config (the benchmark's switches).

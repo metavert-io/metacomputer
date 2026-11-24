@@ -288,6 +288,7 @@ def free_bytes(path_or_fd):
 FINALIZE_GUARD = 512 << 20        # finalize stops ffmpeg this far above the reserve (what it can write between looks)
 FINALIZE_POLL = 0.2               # seconds between finalize's looks at the free space and the MP4's size
 STOP_GRACE = 10                   # seconds save waits for a stopped stream's last bytes
+HOLD_MAX_S = 20                   # seconds save keeps a --hold-fd lock at most, waiting for the stream's first bytes
 
 
 def chunk_claim(path, what):
@@ -320,11 +321,47 @@ def space_claim(path, nbytes, reserve, what):
                 os.unlink(f)
 
 
+def bytes_waiting(fd):
+    """How many bytes a pipe has waiting to be read (FIONREAD): 0 when none, at its end (EOF is no bytes), or when it
+    can't be told."""
+    import fcntl
+    import struct
+    import termios
+    try:
+        return struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, b"\0\0\0\0"))[0]
+    except (OSError, ValueError):
+        return 0
+
+
+def end_stream(proc, grace=5):
+    """The stream's command ended for good: asked (SIGTERM), then made to (SIGKILL), and waited for."""
+    with contextlib.suppress(OSError):
+        proc.terminate()
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            proc.kill()
+        proc.wait()
+
+
 def cmd_save(a):
+    """--hold-fd N: a descriptor on the VM's dispatch lock that whoever started this held (bin/metacomputer's
+    record_stream_start: record start's handoff check), kept until the stream is up, so no handoff opens between that
+    check and the stream: closed at the first bytes or the stream's end; at HOLD_MAX_S without either, the stream is
+    ended first (it never starts: exit 6, nothing saved) and then the lock let go. Never passed to the stream's
+    command, and not kept for the recording (a handoff may open while it records, as for any other)."""
     cmd = a.command
     if not cmd:
         print("recording.py save: no command after --", file=sys.stderr)
         return 2
+    hold = [a.hold_fd] if 3 <= a.hold_fd <= 255 else []
+    hold_until = time.monotonic() + HOLD_MAX_S
+
+    def let_go():
+        while hold:
+            with contextlib.suppress(OSError):
+                os.close(hold.pop())
     min_free = int(max(0.0, a.min_free_gb) * GIB)
     max_bytes = a.max_bytes if a.max_bytes and a.max_bytes > 0 else None
     idle = a.idle_timeout if a.idle_timeout and a.idle_timeout > 0 else None
@@ -333,16 +370,18 @@ def cmd_save(a):
         # A new file only: never an existing one, never through a link.
         fd = os.open(a.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o644)
     except OSError as e:
+        let_go()
         print(f"metacomputer: can't save the recording as {a.out}: {e.strerror}", file=sys.stderr)
         return 1
     try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, close_fds=True)
     except OSError as e:
+        let_go()
         os.close(fd)
         os.unlink(a.out)
         print(f"metacomputer: can't start the stream: {e.strerror}", file=sys.stderr)
         return 1
-    stopped = []
+    stopped, unstarted = [], False
 
     def stop(why):
         stopped.append(time.monotonic())
@@ -372,6 +411,18 @@ def cmd_save(a):
                     rc = 3
                     break
             now_ = time.monotonic()
+            if hold and now_ >= hold_until and bytes_waiting(src) > 0:
+                let_go()                   # bytes already waiting (this reader was late): the stream is up
+            elif hold and now_ >= hold_until:
+                # The stream isn't up after HOLD_MAX_S: it never starts. The stream's command (ssh, and the recorder
+                # it starts in the VM) is ended first, and only then the lock let go, so no recording begins once a
+                # handoff can open (record start may be gone by now).
+                print(f"metacomputer: the recording's stream didn't start within {HOLD_MAX_S:g} s; it was stopped "
+                      "before it began (nothing saved)", file=sys.stderr, flush=True)
+                end_stream(proc)
+                let_go()
+                rc, unstarted = 6, True
+                break
             if deadline is not None and now_ >= deadline or idle is not None and now_ - last >= idle:
                 print("metacomputer: stopped saving: the VM " + ("took too long" if deadline is not None
                       and now_ >= deadline else f"sent nothing for {idle:g} s") + "; what arrived before is kept",
@@ -386,6 +437,7 @@ def cmd_save(a):
             if not sel.select(timeout=max(0.0, min(waits + [1.0]))):
                 continue
             b = os.read(src, min(1 << 20, SAVE_CHECK_EVERY - since))
+            let_go()                       # the stream is up (its first bytes), or it ended
             if not b:
                 break
             last = time.monotonic()
@@ -403,9 +455,13 @@ def cmd_save(a):
                       "what arrived before is kept", file=sys.stderr, flush=True)
                 break
     finally:
+        let_go()
         claim.release()
         sel.close()
         os.close(fd)
+        if unstarted and total == 0:
+            with contextlib.suppress(OSError):
+                os.unlink(a.out)
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -641,6 +697,7 @@ def main():
     sv.add_argument("--max-bytes", type=int, default=0)
     sv.add_argument("--idle-timeout", type=float, default=0)
     sv.add_argument("--timeout", type=float, default=0)
+    sv.add_argument("--hold-fd", type=int, default=-1)
     fz = sub.add_parser("finalize")
     fz.add_argument("mkv")
     fz.add_argument("mp4")

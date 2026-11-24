@@ -15,6 +15,9 @@ hub that doesn't answer); and recorded before the guest is asked (owners.mark_in
 leave a hub sending through removed devices. Who makes one:
   - opening a handoff (lib/handoff.py, at_handoff), after its record is written, once acting calls already in the
     driver have ended (it waits up to INFLIGHT_WAIT_S; otherwise it leaves them and the handoff says it's pending);
+  - the command that waits for that handoff (`handoff` itself, or `handoff wait`), when it was left pending: as soon
+    as nothing of the agent's runs in the driver any more, while the handoff is still open (at_open_handoff). While
+    a pair is left, Chrome ignores the live view's keyboard for the whole handoff;
   - `metacomputer view --open` (bin/metacomputer view_open -> `input_reset.py view`, for_view), and, unless a person
     runs it at their own terminal, only when no other controller is active and no handoff is open;
   - `metacomputer input-reset` (for_cli; during a handoff only from the user's own terminal);
@@ -45,12 +48,17 @@ GUEST = "/opt/metacomputer/bin/input-reset"
 RESET_TIMEOUT_S = 20.0        # SSH (5 s to connect) and the guest's xinput calls
 OUT_MAX = 256                 # the guest prints one count
 INFLIGHT_WAIT_S = 10.0        # opening a handoff waits this long for acting calls already in the driver
+DISPATCH_TRY_S = 2.0          # a pending reset during a handoff waits this long for the dispatch lock, then tries later
 POLL_S = 0.25
 COUNT_RE = re.compile(rb"\s*([0-9]{1,4})\s*")
 ERR_WAIT_S = 2.0              # how long the end of the command's stderr is waited for, once it has ended
 REMOVED = ("Removed {n} leftover virtual input device pair(s) of the agent's driver, so the live view's mouse and "
            "keyboard reach every app.")
 TRY_LATER = ("If the live view ignores your mouse or keyboard, run `metacomputer input-reset` in your own terminal.")
+# Why opening a handoff left the devices (at_handoff's detail): the waiting command makes the reset later only for the
+# first (the second can't be known, so it's never made automatically).
+PENDING_RUNNING = "one of its actions was still running in the virtual computer"
+PENDING_UNKNOWN = "metacomputer couldn't tell whether one of its actions was still running"
 
 
 def parse_count(out):
@@ -224,14 +232,43 @@ def at_handoff(transport):
     try:
         busy = wait_in_flight(INFLIGHT_WAIT_S)
         if busy != 0:
-            return "pending", ("one of its actions was still running in the virtual computer" if busy else
-                               "metacomputer couldn't tell whether one of its actions was still running"), False
+            return "pending", (PENDING_RUNNING if busy else PENDING_UNKNOWN), False
         n, why = reset_now(transport)
     except Exception as e:  # the handoff opens whatever happens here
         return "failed", f"unexpected error: {type(e).__name__}", False
     if n is None:
         return "failed", why, False
     return ("removed" if n else "none"), n, False
+
+
+def at_open_handoff(transport, hid):
+    """The reset an open handoff left pending (an agent call was still running in the driver when it opened), made by
+    the command that waits for that handoff once nothing is running there any more. Made the way every reset is:
+    under the dispatch lock held exclusively (DISPATCH_TRY_S, then later), only while handoff hid is still open, never
+    while an agent call is in flight or when that can't be known, recorded first (reset_now). Returns (status,
+    detail): ("removed", n), ("none", 0), ("later", None) (a call still running, or the lock busy: try again),
+    ("unknown", why) (it can't be known whether one runs: never made), ("failed", why) or ("ended", None) (the
+    handoff isn't open any more). Never raises."""
+    if not transport:
+        return "failed", "no connection to the virtual computer was given"
+    try:
+        with owners.dispatch(shared=False, timeout=DISPATCH_TRY_S):
+            h = owners.open_handoff()
+            if not h or h.get("id") != hid:
+                return "ended", None
+            busy = in_flight()
+            if busy is None:
+                return "unknown", PENDING_UNKNOWN
+            if busy > 0:
+                return "later", None
+            n, why = reset_now(transport)
+    except (TimeoutError, OSError):
+        return "later", None
+    except Exception as e:  # the handoff goes on whatever happens here
+        return "failed", f"unexpected error: {type(e).__name__}"
+    if n is None:
+        return "failed", why
+    return ("removed" if n else "none"), n
 
 
 def for_view(transport, out=print):

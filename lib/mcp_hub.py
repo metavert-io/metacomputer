@@ -104,6 +104,11 @@ LEASE_TICK_S = 1.0                  # how often the lease keeper looks
 LEASE_REFRESH_S = 60.0              # a lease's claim is rewritten this often while its calls run (it stays active)
 LEASE_MAX_S = float(os.environ.get("MCOMP_ACTIVE_S") or 600)   # then the hub ends the driver runtime, and only then
                                                                # lets the computer go
+# Cua Driver ends a driver session after 5 minutes without a call in it (its session idle TTL), and a browser that
+# browser_prepare launched for it closes with it: during a handoff, that would be the page the user is working in. So
+# while one is open, such a session gets a read of the hub's own this often (list_windows in it: never input).
+BROWSER_KEEP_S = 60.0
+BROWSER_KEEP_TICK_S = 5.0
 TRANSPORT_GRACE_S = 3.0             # ending a driver connection: SIGTERM to its process group (the relay signs its log),
                                     # this long to exit, then SIGKILL to whatever of the group is left
 LAYOUT_WAIT_S = 5                   # the coordinate guard waits this long for a screenshot's window layout
@@ -873,6 +878,9 @@ class Hub:
         self.input_used = False     # a call that may use the driver's own input devices was sent on this connection
         self.reset_seen = 0.0       # owners.input_reset_at() when it began to (later resets make it stale)
         self.driver_browsers = {}   # driver session label -> when browser_prepare launched a browser this runtime owns
+        self.browser_kept = {}      # driver session label -> when the hub last read in it during a handoff (monotonic)
+        self._browser_keeper = None  # the thread that does that (_browser_keeper_run)
+        self.browser_keeper_lock = threading.Lock()
         self.send_gate = threading.RLock()   # every send to the driver, and a renewal's whole decision and teardown
         self.sid_lock = threading.Lock()
         self.sid_base = 0x10000000 + secrets.randbelow(0xc0000000)   # this hub's snapshot ids start here
@@ -1302,6 +1310,51 @@ class Hub:
             lease["written"] = False             # the keeper tries again; a claim it would replace stays
             self.note(f"could not write the lease: {e!r}", kind="lease write failed")
         return lease["written"]
+
+    def _start_browser_keeper(self):
+        with self.browser_keeper_lock:
+            if self._browser_keeper is not None and self._browser_keeper.is_alive():
+                return
+            self._browser_keeper = threading.Thread(target=self._browser_keeper_run, daemon=True,
+                                                    name="hub-browser-keeper")
+            self._browser_keeper.start()
+
+    def _browser_keeper_run(self):
+        """While a browser browser_prepare launched is open: whenever a handoff is open, a read of the hub's own in its
+        driver session every BROWSER_KEEP_S (list_windows, never input), so Cua Driver's session idle TTL doesn't end
+        the session, and close the browser, under the user. Outside a handoff it does nothing (the driver's own rule).
+        Ends when no such browser is left."""
+        while True:
+            time.sleep(BROWSER_KEEP_TICK_S)
+            with self.browser_keeper_lock:
+                try:
+                    labels = list(self.driver_browsers)
+                except RuntimeError:             # changed by another thread meanwhile: look again next tick
+                    continue
+                if not labels:
+                    self._browser_keeper = None
+                    return
+            try:
+                if owners.open_handoff() is None or not self.connected():
+                    continue
+            except Exception:
+                continue
+            now = time.monotonic()
+            for label in labels:
+                if now - self.browser_kept.get(label, 0.0) < BROWSER_KEEP_S:
+                    continue
+                self.browser_kept[label] = now
+                # Looked at again right before the send, under the owners lock, which every change of the handoff's
+                # record takes (lib/handoff.py end): it can't end between this look and the send.
+                try:
+                    with owners.lock():
+                        if owners.open_handoff() is None:
+                            break
+                        self.ask_up_async("tools/call", {"name": "list_windows",
+                                                         "arguments": {"session": label} if label else {}},
+                                          lambda m: None)
+                except (OSError, TimeoutError):
+                    break
 
     def _start_lease_keeper(self):
         with self.lease_lock:
@@ -3234,6 +3287,7 @@ class Hub:
             se = sc.get("side_effects") if isinstance(sc.get("side_effects"), dict) else None
             if se is None or se.get("launched_browser") is not False:
                 self.driver_browsers[sess or ""] = time.time()
+                self._start_browser_keeper()     # kept alive through a handoff (_browser_keeper_run)
         elif tool == "stop_recording":
             if res.get("isError"):
                 self.recordings.pop(sess or "", None)

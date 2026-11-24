@@ -14,21 +14,31 @@ and waits:
   handoff.py cancel [--note TEXT]   the user, or the session that asked: called off; Claude stops and asks
   handoff.py wait [--json]          wait again for the open handoff, or report how the last one ended
   handoff.py status [--json]        the open handoff, if any
-  handoff.py guard [--hold-fd N]    exit 4 (and say why) while a handoff is open; with --hold-fd, the dispatch
+  handoff.py guard [--hold-fd N] [--user-ok] [--hub-child]
+                                    exit 4 (and say why) while a handoff is open; with --hold-fd, the dispatch
                                     lock is taken shared on the caller's descriptor N and kept for the caller
-                                    (bin/metacomputer's fills and session loads)
+                                    (bin/metacomputer's fills and session loads); --user-ok lets the person at
+                                    their own terminal go ahead (put, ssh, rename...); --hub-child lets the VM's
+                                    hub's own child through (its input reset, under the lock it holds)
 
 Opening one also removes the driver's leftover virtual input devices (lib/input_reset.py), under the dispatch lock it
 holds exclusively, so the live view's mouse and keyboard work. When an agent action is still running in the VM (or
 that can't be known) it leaves them, since removing them could cut that action off, and the message says the reset is
-pending and how to make it; when it fails, the handoff opens anyway and its message says how to do it by hand.
-bin/metacomputer passes the SSH command for it first: --transport N WORD...
+pending; the command that waits for the handoff (this one, or `handoff wait`) then makes it as soon as nothing of the
+agent's runs in the driver any more, while the handoff is open (input_reset.at_open_handoff), since until then Chrome
+ignores the live view's keyboard. When it fails, the handoff opens anyway and its message says how to do it by hand.
+bin/metacomputer passes the SSH command for it first: --transport N WORD... (for `handoff wait` too).
 
 With INTERACTIVE_PROMPTS=on (off by default: dialogs that wait for the user), opening one for Claude also shows a
 dialog on the Mac's screen, "Claude needs you: <--say>", with Open live view (runs `metacomputer view --open`) and
 Later. A detached helper (handoff.py _dialog ID) shows it and takes it down when the handoff ends; the text reaches
 osascript as an argument of a fixed script, never as part of one. Not over SSH, not without the user's screen
 session, and not when the person at this terminal opened the handoff.
+
+With HANDBACK_PANEL=on (the default), a handoff also shows a small floating panel on the Mac's screen, "Hand back to
+Claude" (done) and "Call it off" (cancel), while it's open (handoff.py _panel ID, detached; `view --open` starts it too
+when one is open): the same rules as the dialog's screen session, and its answer comes only from a click in that
+macOS window (run_panel). Nothing in the VM can reach it, and no metacomputer command answers it.
 
 At a terminal, Enter where `handoff` waits is "done", and c then Enter (or Ctrl-C) is "cancel".
 
@@ -60,6 +70,7 @@ import termsafe  # noqa: E402
 DEFAULT_TIMEOUT_S = 900
 MIN_TIMEOUT_S = 30
 OPEN_WAIT_S = 40          # opening waits this long for actions on their way (the hub's input reset takes up to 30 s)
+RESET_RETRY_S = 2.0       # a pending input reset is tried this often while the handoff waits
 POLL_S = 0.25
 TEXT_MAX = 500
 EXIT_DONE, EXIT_ERROR, EXIT_USAGE, EXIT_REFUSED, EXIT_CANCELLED, EXIT_STOPPED, EXIT_TIME_LIMIT = 0, 1, 2, 3, 4, 5, 124
@@ -194,6 +205,37 @@ def write_record(rec):
         raise
 
 
+def mark_reset(hid, state):
+    """The input reset's state on the open handoff hid ("pending": opening it left the driver's devices because an
+    agent call was still running; "done": the command waiting for it made the reset since), under the owners lock.
+    Only on that handoff while it's open. True when written."""
+    try:
+        with owners.lock():
+            rec = owners.handoff_record()
+            if not rec or rec.get("unreadable") or rec.get("id") != hid or rec["status"] != "open":
+                return False
+            rec["input_reset"] = state
+            write_record(rec)
+            return True
+    except (OSError, TimeoutError):
+        return False
+
+
+def mark_panel(hid, state):
+    """The panel's state on the open handoff hid ("unavailable": it couldn't be shown, so the command waiting for the
+    handoff tells the user the terminal's way), under the owners lock. Only on that handoff while it's open."""
+    try:
+        with owners.lock():
+            rec = owners.handoff_record()
+            if not rec or rec.get("unreadable") or rec.get("id") != hid or rec["status"] != "open":
+                return False
+            rec["panel"] = state
+            write_record(rec)
+            return True
+    except (OSError, TimeoutError):
+        return False
+
+
 def remove_record():
     try:
         os.remove(owners.handoff_path())
@@ -293,6 +335,12 @@ def reset_line(reset, who):
     """What opening the handoff did about the driver's leftover virtual input devices (lib/input_reset.py), in one
     line for the user, or None when there's nothing to say."""
     status, detail, still = reset
+    if status == "pending" and detail == input_reset.PENDING_RUNNING:
+        return (f"{who}'s leftover virtual input devices weren't removed yet: {detail}, and removing them could cut it "
+                f"off. {who}'s actions are paused now, and they're removed as soon as that one has ended, while this "
+                "command waits (until then Chrome may ignore your keyboard in the live view). If the live view still "
+                "ignores your mouse or keyboard after that, run `metacomputer input-reset` in your own terminal (it runs "
+                "while the handoff is open).")
     if status == "pending":
         return (f"{who}'s leftover virtual input devices weren't removed: {detail}, and removing them could cut it off. "
                 f"{who}'s actions are paused now; once that one has ended, if the live view ignores your mouse or "
@@ -330,11 +378,37 @@ def instructions(rec, interactive, reset=("skipped", None, False)):
 
 
 # --- waiting --------------------------------------------------------------------------------------
+def pending_reset(hid, rec, state):
+    """The input reset opening handoff hid left pending (its record says so), made once nothing of the agent's runs
+    in the driver any more (lib/input_reset.py at_open_handoff: under the dispatch lock held exclusively, while the
+    handoff is open). state carries when to look next and whether to give up; one line for the user when it's made
+    or fails. Needs bin/metacomputer's transport (`handoff` and `handoff wait` get it)."""
+    if rec.get("input_reset") != "pending" or not TRANSPORT or TRANSPORT_PROBLEM or state.get("stop") \
+            or time.monotonic() < state.get("next", 0.0):
+        return
+    state["next"] = time.monotonic() + RESET_RETRY_S
+    status, detail = input_reset.at_open_handoff(TRANSPORT, hid)
+    who = agent_word(rec)
+    if status == "later":
+        return
+    state["stop"] = True
+    if status in ("removed", "none"):
+        mark_reset(hid, "done")
+        if status == "removed":
+            out(f"  {who}'s last action has ended, so its leftover virtual input devices were removed ({detail} pair(s)): "
+                "the live view's mouse and keyboard reach every app now.")
+    elif status in ("failed", "unknown"):
+        out(f"  Note: metacomputer couldn't remove {who}'s leftover virtual input devices after its last action ended "
+            f"({detail}). If the live view ignores your mouse or keyboard, run `metacomputer input-reset` in your own "
+            "terminal (it runs while the handoff is open).")
+
+
 def wait_for(hid, interactive, as_json):
     """Until the handoff hid ends: the user's `handoff done|cancel`, Enter at this terminal, or its time limit.
     A signal (the agent's tool stopped this command) stops only the waiting: the handoff stays open. The caller
-    holds stoppable()."""
+    holds stoppable(). Meanwhile an input reset its opening left pending is made once it can be (pending_reset)."""
     reading = interactive
+    reset_state, told_panel = {}, False
     try:
         while True:
             rec = owners.handoff_record()
@@ -342,6 +416,13 @@ def wait_for(hid, interactive, as_json):
                 return report(None, as_json, hid)
             if rec["status"] != "open":
                 return report(rec, as_json)
+            if not rec.get("unreadable"):
+                pending_reset(hid, rec, reset_state)
+            if rec.get("panel") == "unavailable" and not told_panel:
+                told_panel = True
+                out("  Note: the Hand back panel couldn't be shown on the Mac's screen (no place for it could be "
+                    "reserved). When you're done, run `metacomputer handoff done` in your own terminal (or "
+                    "`metacomputer handoff cancel`).")
             if time.time() >= rec["deadline"]:
                 try:
                     done, _ = end(hid, "timed_out", "time_limit")
@@ -497,6 +578,223 @@ def run_dialog(hid):
     return 0
 
 
+# --- the "Hand back" panel (HANDBACK_PANEL, on by default) -------------------------------------------------------------
+# A small floating panel on this Mac's screen while a handoff is open: "Hand back to Claude" ends it as done, "Call it
+# off" cancels it. Its answer comes only from a click in a macOS window (lib/handback_panel.js): nothing in the VM can
+# reach it, and an agent's commands (MCP calls, call, sh, put, ssh) act only in the VM. The helper runs Apple's
+# osascript by its absolute path and the panel script from this checkout, with fixed arguments: no variable, argument
+# or file the caller chooses decides what runs or what it answers (a PATH with a stand-in osascript changes nothing).
+OSASCRIPT = "/usr/bin/osascript"
+PANEL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "handback_panel.js")
+PANEL_LOCK = "handback-panel.lock"       # in the owners folder: one panel per handoff
+# What osascript prints for the panel's answers, exactly (the script's return value and a newline), and what each
+# does; anything else, or an osascript that didn't exit 0 (killed, failed), is no answer and the handoff stays open.
+PANEL_ANSWERS = {b"handback\n": "done", b"cancel\n": "cancelled"}
+PANEL_OUT_MAX = 64
+PANEL_SLOTS = 12                         # places for panels (one per VM with a handoff open): the script's SLOTS
+PANEL_SLOT_DIR = "metacomputer-panels"   # in this account's private runtime folder: whose slot is whose, by flock
+PANEL_SLOT_ROOT = None                   # that folder's parent: this account's runtime folder (the tests' own)
+PANEL_WAIT_S = 2                         # with every place on the screen taken, how often to look for a free one
+PANEL_DIR_TRIES = 5                      # looks at a slot folder that can't be used before giving the panel up
+# A VM's name, exactly scripts/lib.sh's rule (mc_valid_vm_name): up to 64 letters, digits, . _ -, not starting with
+# - or . (so _alpha is one); the panel script checks the same.
+VM_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
+
+
+def panel_identity():
+    """(the VM's name, where it is) for the panel's words, so two VMs' panels can't be taken for each other: the name
+    from the settings (MCOMP_VM_NAME, by the name rule) and the place's own words (lib/placement.py on_place, for
+    MCOMP_PLACE: "on this Mac", "on Oracle Cloud"...)."""
+    name = os.environ.get("MCOMP_VM_NAME") or "metacomputer"
+    if not VM_NAME_RE.fullmatch(name):
+        name = "this virtual computer"
+    try:
+        import placement
+        where = placement.on_place(os.environ.get("MCOMP_PLACE") or placement.MAC)
+    except Exception:
+        where = "on this Mac"
+    if not re.fullmatch(r"[A-Za-z0-9 .'()-]{1,40}", where):
+        where = "on this Mac"
+    return name, where
+
+
+def panel_capacity():
+    """How many panels fit on the Mac's screen side by side, none covering another: the panel script's own arithmetic
+    for the main screen's visible area (its `capacity` mode), at least 1 and at most PANEL_SLOTS; 1 when it can't be
+    told (no answer, or anything but a number)."""
+    try:
+        r = subprocess.run([OSASCRIPT, "-l", "JavaScript", PANEL_SCRIPT, "capacity"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return 1
+    if r.returncode != 0 or not re.fullmatch(rb"[0-9]{1,2}\n", r.stdout or b""):
+        return 1
+    return max(1, min(PANEL_SLOTS, int(r.stdout)))
+
+
+def panel_slot(capacity=PANEL_SLOTS):
+    """(slot number, its open lock) for a new panel: the first of the `capacity` places on the screen that no other
+    panel holds (an flock in this account's private runtime folder, kept while the panel is up), so panels for
+    different VMs stack instead of covering each other; (None, None) when every one is taken (an occupied place is
+    never used again: another panel holds its lock); (-1, None) when the folder or a slot's file can't be used (no
+    place can be reserved, so none is taken; run_panel gives that up after PANEL_DIR_TRIES looks)."""
+    import errno
+    import fcntl
+    try:
+        import mcp_hub
+        d = os.path.join(PANEL_SLOT_ROOT or mcp_hub.user_runtime_dir(), PANEL_SLOT_DIR)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        if not os.path.isdir(d) or os.path.islink(d):
+            return -1, None
+    except Exception:
+        return -1, None
+    for n in range(max(1, min(PANEL_SLOTS, capacity))):
+        try:
+            fd = os.open(os.path.join(d, f"slot-{n}.lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            return -1, None                      # a file that can't be opened (permissions, a link): nothing is reserved
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return n, fd
+        except OSError as e:
+            os.close(fd)
+            if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return -1, None                  # not a lock another panel holds: the folder can't be used
+    return None, None
+
+
+def panel_off_reason():
+    """None when the panel may be shown; else why not."""
+    if os.environ.get("MCOMP_HANDBACK_PANEL", "on") == "off":
+        return "off"
+    try:
+        import liveview
+        return liveview.gui_reason()
+    except Exception:
+        return "couldn't check for the Mac's screen session"
+
+
+def start_panel(hid):
+    """handoff.py _panel ID, detached (its own session, no inherited descriptors), as start_dialog does."""
+    try:
+        pid = os.fork()
+    except OSError:
+        return False
+    if pid:
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        return True
+    try:
+        os.setsid()
+        if os.fork():
+            os._exit(0)
+        null = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(null, fd)
+        os.closerange(3, 65536)
+        os.execv(sys.executable, [sys.executable, "-I", os.path.abspath(__file__), "_panel", hid])
+    except BaseException:
+        pass
+    os._exit(0)
+
+
+def run_panel(hid):
+    """The detached helper: the panel while handoff hid is open, taken down when it ends. A click on "Hand back"
+    ends it as done (ended_from "mac_panel"), "Call it off" cancels it; anything else (the panel closed some other
+    way, osascript failing, a signal) changes nothing. It applies the rules itself, whoever starts it: the open handoff
+    is hid, HANDBACK_PANEL isn't off, this Mac's screen session; one at a time per handoff. Exit 0 whether or not it
+    showed one."""
+    if not re.fullmatch(r"h-[0-9a-f]{12}", hid or ""):
+        return 0
+    rec = owners.open_handoff()
+    if not rec or rec.get("id") != hid or panel_off_reason() is not None:
+        return 0
+    import fcntl
+    try:
+        os.makedirs(owners.OWNERS_DIR, exist_ok=True)
+        lk = os.open(os.path.join(owners.OWNERS_DIR, PANEL_LOCK), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return 0
+    try:
+        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(lk)
+        return 0                         # a panel is up already
+    capacity, slot_fd = panel_capacity(), None
+    try:
+        slot, slot_fd = panel_slot(capacity)
+        tries = 0
+        while slot is None or slot < 0:
+            # Every place on the screen has a panel (other VMs' handoffs): this one waits for a place to come free
+            # rather than cover one; the handoff's other ways to end work meanwhile. A slot folder that can't be used
+            # reserves nothing, so no panel is shown unplaced: after a few looks it's given up, and the command waiting
+            # for the handoff tells the user the terminal's way (the panel is a convenience; that one always works).
+            if slot is not None:
+                tries += 1
+                if tries >= PANEL_DIR_TRIES:
+                    mark_panel(hid, "unavailable")
+                    return 0
+            time.sleep(PANEL_WAIT_S)
+            h = owners.open_handoff()
+            if not h or h.get("id") != hid:
+                return 0
+            slot, slot_fd = panel_slot(capacity)
+        vm, where = panel_identity()
+        try:
+            p = subprocess.Popen([OSASCRIPT, "-l", "JavaScript", PANEL_SCRIPT, "show", agent_word(rec), vm, where,
+                                  str(slot)],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        except OSError:
+            return 1
+        while True:
+            try:
+                out_b, _ = p.communicate(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                h = owners.open_handoff()
+                if not h or h.get("id") != hid:
+                    p.terminate()
+                    try:
+                        p.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                    return 0
+        to = panel_answer(p.returncode, out_b)
+        if to:
+            try:
+                end(hid, to, "mac_panel")
+            except (OSError, TimeoutError):
+                return 1
+        return 0
+    finally:
+        if slot_fd is not None:
+            os.close(slot_fd)
+        os.close(lk)
+
+
+def panel_answer(returncode, out_b):
+    """The handoff's new state from the panel's osascript ("done", "cancelled"), or None: only an exit status of 0
+    with exactly one of PANEL_ANSWERS on stdout counts. Killed, failed, more or other output: no answer."""
+    if returncode != 0 or not isinstance(out_b, bytes) or len(out_b) > PANEL_OUT_MAX:
+        return None
+    return PANEL_ANSWERS.get(out_b)
+
+
+def panel_for_open():
+    """`metacomputer view --open`: the panel for the open handoff, when the rules allow (run_panel checks them again).
+    One line when it starts one."""
+    h = owners.open_handoff()
+    if not h or h.get("unreadable") or panel_off_reason() is not None:
+        return 0
+    if start_panel(h["id"]):
+        out(f"A panel on this Mac's screen hands the virtual computer back to {agent_word(h)} when you're done "
+            "(HANDBACK_PANEL).")
+    return 0
+
+
 def cmd_open(a):
     say = clean_text(a.say)
     if not say:
@@ -615,6 +913,7 @@ def open_and_wait(a, say, timeout, interactive, opened):
             rec = {"v": 1, "id": "h-" + secrets.token_hex(6), "status": "open", "why": a.why, "say": say,
                    "opened": now, "deadline": now + timeout, "timeout_s": int(timeout), "opener_pid": os.getpid(),
                    "claude_pid": claude, "agent": owners.agent_of(claude, table) if claude else None,
+                   "claude_start": owners._session_start(claude) if claude else None,
                    "cwd": os.getcwd(), "sid": owners.my_sid(), "interactive": interactive,
                    "ended": None, "ended_from": None, "note": None}
             opened["id"] = rec["id"]             # before the write: a signal during it still finds the record
@@ -628,12 +927,19 @@ def open_and_wait(a, say, timeout, interactive, opened):
         return EXIT_ERROR
     finally:
         held.__exit__(None, None, None)
+    if reset[0] == "pending" and reset[1] == input_reset.PENDING_RUNNING:
+        # The command that waits for it (this one, or `handoff wait`) makes the reset once that call has ended.
+        mark_reset(rec["id"], "pending")
     told = announce(rec, interactive)
     off = dialog_off_reason(interactive)
     shown = off is None and start_dialog(rec["id"])
+    panel = panel_off_reason() is None and start_panel(rec["id"])
     instructions(rec, interactive, reset)
     if shown:
         out("  A dialog on the Mac's screen says the same, with an Open live view button (INTERACTIVE_PROMPTS=on).")
+    if panel:
+        out(f"  Or, on the Mac's screen: the small panel at the top right has Hand back to {agent_word(rec)} (the same as "
+            "`handoff done`) and Call it off (HANDBACK_PANEL).")
     if told:
         out("  " + told)
     if not interactive:
@@ -662,7 +968,14 @@ def cmd_end(a, to):
     except OSError:
         table, known = {}, False
     claude = owners.claude_of(os.getpid(), table) if table else None
-    own_session = bool(claude) and claude == rec.get("claude_pid")
+    # The session that opened it, positively: the process list read all the way up, the same agent session process
+    # by its pid, and its start time read now and equal to the one recorded when it opened (a pid reused by another
+    # process since doesn't count; a start time missing on either side never counts, so a record written before
+    # start times were kept is the user's to end).
+    start_now = owners._session_start(claude) if claude and known else None
+    own_session = (known and bool(claude) and claude == rec.get("claude_pid")
+                   and isinstance(rec.get("claude_start"), str) and isinstance(start_now, str)
+                   and start_now == rec["claude_start"])
     if to == "done" and not interactive and not known:
         err("couldn't tell whether this runs inside an agent session (the process list couldn't be read all the way "
             "up), so it can't say the user is done. The user runs `metacomputer handoff done` in their own terminal.")
@@ -676,6 +989,27 @@ def cmd_end(a, to):
         err(f"{who} can't say the user is done. The user runs "
             "`metacomputer handoff done` in their own terminal (or presses Enter where `metacomputer handoff` "
             "waits at a terminal). Ask them; if they've changed their mind, `metacomputer handoff cancel` calls it off.")
+        return EXIT_REFUSED
+    if to == "done" and not interactive:
+        # Only the user says they're done: at their own terminal (or the panel on the Mac's screen, whose click is the
+        # one answer that isn't a terminal, internal to its helper). A process with no terminal of the user's can't,
+        # whatever runs it: an agent host this check doesn't know by name included.
+        err("only the user says they're done: `metacomputer handoff done` in their own terminal (not through an agent "
+            "or a script), Enter where `metacomputer handoff` waits at a terminal, or Hand back to Claude in the panel "
+            "on the Mac's screen. Nothing was changed.")
+        return EXIT_REFUSED
+    if to == "cancel" and not interactive and not own_session:
+        # Only the session that opened it (matched by its agent session's process) or the user (at their own terminal,
+        # or with the panel) calls a handoff off. Anything else doesn't: another agent session, a process with no agent
+        # session this check knows above it and no terminal of the user's (an agent host it doesn't know by name, a
+        # detached worker), or one whose process list can't be read all the way up; nor, for a record that can't be
+        # read (it names no session), anything but the user's terminal.
+        why = ("couldn't tell whether this runs inside an agent session (the process list couldn't be read all the "
+               "way up), so it doesn't call off the handoff" if not known
+               else "this runs in an agent session that didn't open this handoff" if claude
+               else "this doesn't run at the user's own terminal or in the agent session that opened this handoff")
+        err(why + ": only the session that asked for it, or the user (in their own terminal, or with the panel on the "
+            "Mac's screen), can call it off. Nothing was changed.")
         return EXIT_REFUSED
     ended_from = "terminal" if interactive else ("claude_session" if own_session else "process")
     try:
@@ -742,19 +1076,47 @@ def cmd_status(a):
     return 0
 
 
+def hub_child():
+    """True when the command this guard runs for is the VM's running hub's own child (its Chrome guard's input reset
+    runs `metacomputer ssh ops input-reset` under the dispatch lock it holds exclusively, and only while no handoff is
+    open): MCOMP_HUB_PID names this VM's running hub (lib/mcp_hub.py hub_pid, from its own record) and that hub is the
+    parent of bin/metacomputer, this guard's parent. A process can't make itself the hub's child."""
+    try:
+        import mcp_hub
+        claimed = int(os.environ.get("MCOMP_HUB_PID") or 0)
+        hub = mcp_hub.hub_pid()
+        if not claimed or claimed != hub:
+            return False
+        table = owners.ps_table(strict=True)
+        return table.get(os.getppid(), (None,))[0] == hub
+    except Exception:
+        return False
+
+
 def cmd_guard(argv):
-    """guard [--hold-fd N]: exit 4, and say why, while a handoff is open. With --hold-fd, N is a descriptor the
-    caller (bin/metacomputer) opened on this VM's dispatch lock file: the lock is taken shared on it first, and
-    stays with the caller's descriptor after this exits (a flock belongs to the open file, which the caller
-    shares), so no handoff opens until the caller and what it runs are done."""
-    if argv:
-        if len(argv) != 2 or argv[0] != "--hold-fd" or not argv[1].isdigit() or not 3 <= int(argv[1]) <= 255:
-            err("usage: guard [--hold-fd N]")
-            return EXIT_USAGE
-    # (MCOMP_PARSE_ONLY, tests/test_help.py: taken; nothing checked or held)
-    strictargs.parsed("handoff.py guard", {"flags": [], "values": ["--hold-fd"], "words": 1, "max_words": 1})
-    if argv:
-        fd = int(argv[1])
+    """guard [--hold-fd N] [--user-ok] [--hub-child]: exit 4, and say why, while a handoff is open. With --hold-fd, N
+    is a descriptor the caller (bin/metacomputer) opened on this VM's dispatch lock file: the lock is taken shared on
+    it first, and stays with the caller's descriptor after this exits (a flock belongs to the open file, which the
+    caller shares), so no handoff opens until the caller and what it runs are done.
+    --user-ok: an open handoff doesn't stop the person at their own terminal (owners.at_user_terminal: a terminal on
+    stdin and no agent session above): `put`, `ssh` and the other commands that act in the guest are theirs to run
+    then, as `input-reset` is. --hub-child: the VM's running hub's own child goes ahead without taking the lock, which
+    that hub holds exclusively (hub_child); anything else is checked as usual."""
+    # Its command line (lib/strictargs.py; MCOMP_PARSE_ONLY: taken, then exit 99 with nothing checked or held).
+    a = guard_parser().parse_args(argv)
+    fd, user_ok, from_hub = a.hold_fd, a.user_ok, a.hub_child
+    if fd is not None and not 3 <= fd <= 255:
+        err("usage: guard [--hold-fd N] [--user-ok] [--hub-child] (N: a descriptor from 3 to 255)")
+        return EXIT_USAGE
+    if from_hub and hub_child():
+        # The hub holds the dispatch lock exclusively while it runs this, and resets only when no handoff is open;
+        # looked at once more all the same.
+        h = owners.open_handoff()
+        if h:
+            print("metacomputer: " + owners.handoff_refusal(h), file=sys.stderr, flush=True)
+            return EXIT_CANCELLED
+        return 0
+    if fd is not None:
         try:
             st, want = os.fstat(fd), os.lstat(owners.dispatch_path())
         except OSError as e:
@@ -770,9 +1132,22 @@ def cmd_guard(argv):
             return EXIT_CANCELLED
     h = owners.open_handoff()
     if h:
+        if user_ok and owners.at_user_terminal((0,)):
+            print("metacomputer: your handoff is open, and this runs at your own terminal: going ahead.",
+                  file=sys.stderr, flush=True)
+            return 0
         print("metacomputer: " + owners.handoff_refusal(h), file=sys.stderr, flush=True)
         return EXIT_CANCELLED
     return 0
+
+
+def guard_parser():
+    ap = strictargs.Parser(prog="handoff.py guard",
+                           description="exit 4 while a handoff is open (bin/metacomputer's handoff_hold, the build scripts)")
+    ap.add_argument("--hold-fd", type=int, metavar="N", help="a descriptor on this VM's dispatch lock: taken shared")
+    ap.add_argument("--user-ok", action="store_true", help="the person at their own terminal goes ahead")
+    ap.add_argument("--hub-child", action="store_true", help="the VM's running hub's own child (its input reset)")
+    return ap
 
 
 def sub_parser(sub):
@@ -851,6 +1226,12 @@ def main(argv):
     if len(argv) == 2 and argv[0] == "_dialog":
         strictargs.parsed("handoff.py _dialog", {"flags": [], "values": [], "words": 2, "max_words": 2})
         return run_dialog(argv[1])
+    if len(argv) == 2 and argv[0] == "_panel":
+        strictargs.parsed("handoff.py _panel", {"flags": [], "values": [], "words": 2, "max_words": 2})
+        return run_panel(argv[1])
+    if argv == ["_panel-open"]:
+        strictargs.parsed("handoff.py _panel-open", {"flags": [], "values": [], "words": 1, "max_words": 1})
+        return panel_for_open()
     if argv and argv[0] in SUBCOMMANDS:
         sub, rest = argv[0], argv[1:]
         if sub == "guard":

@@ -47,6 +47,8 @@ CLI (used by bin/metacomputer):
   owners.py check             exit 3 (and explain) if another controller is active; 4 while the user has it (a handoff)
   owners.py release           forget other sessions' claims (after the user agrees)
   owners.py at-terminal [--stderr]   exit 0 when stdin (and stderr) is the user's own terminal (at_user_terminal)
+  owners.py internal-caller [--user] [cli:SUB|script:NAME...]   exit 0 when bin/metacomputer was started by one of
+                              them (internal_caller), or, with --user, at the user's own terminal
 """
 import contextlib
 import json
@@ -894,7 +896,7 @@ def handoff_valid(rec):
             and rec.get("why") in HANDOFF_WHY and _finite(rec.get("opened")) and _finite(rec.get("deadline"))
             and 0 < rec["deadline"] - rec["opened"] <= HANDOFF_MAX_S + 1    # + 1: float rounding of a 2 h limit
             and opt("say", str) and opt("cwd", str) and opt("note", str) and opt("ended_from", str)
-            and opt("claude_pid", int) and rec.get("agent") in (None, *AGENTS)
+            and opt("claude_pid", int) and opt("claude_start", str) and rec.get("agent") in (None, *AGENTS)
             and (rec.get("ended") is None or _finite(rec.get("ended"))))
 
 
@@ -940,7 +942,7 @@ def handoff_record():
     that isn't a valid record fails closed, for a bounded time: it reads as an open handoff ("unreadable")
     for HANDOFF_MAX_S from when it last changed (its ctime, which the kernel sets: unlike its modification time,
     a program can't move it into the future), or, when even that can't be had, from when that was first
-    noticed (`metacomputer handoff cancel` removes it)."""
+    noticed (`metacomputer handoff cancel` at the user's own terminal removes it)."""
     p = handoff_path()
     now = time.time()
     try:
@@ -996,7 +998,7 @@ def handoff_describe(h, now=None):
     left = fmt_s(h["deadline"] - now)
     if h.get("unreadable"):
         return (f"a handoff record that can't be read ({short(handoff_path())}): it counts as an open handoff for "
-                f"{left} more; `metacomputer handoff cancel` removes it [ACTIVE]")
+                f"{left} more; `metacomputer handoff cancel` in your own terminal removes it [ACTIVE]")
     where = f" from {short(h['cwd'])}" if h.get("cwd") else ""
     return (f"the user has the computer: a handoff ({h['why']}) opened {fmt_s(now - h['opened'])} ago{where}, until "
             f"they run `metacomputer handoff done` (or `cancel`), {left} at most [ACTIVE]")
@@ -1193,12 +1195,52 @@ def describe(o):
     return f"direct connection (ssh pid {o['ssh_pid']}) from {o['via']} in {short(o.get('cwd'))} [ACTIVE]"
 
 
+CLI_OPTION_ARGS = ("--vm", "--on")     # bin/metacomputer's options before the command that take a value
+
+
+def internal_caller(allowed, table=None):
+    """Whether the bin/metacomputer process this runs under (this process's parent) was started by metacomputer itself
+    for one of `allowed`: "cli:SUB" is this checkout's bin/metacomputer running the command SUB (after its --vm/--on
+    options), "script:NAME" is this checkout's scripts/NAME. Read from the caller's own arguments (proc_argv) and
+    compared by real path, so a copy elsewhere or another program doesn't count. Like every check against your own
+    account, it stops an agent's ordinary command, not a program that sets out to imitate metacomputer."""
+    lab = os.path.realpath(LAB)
+    try:
+        table = ps_table(strict=True) if table is None else table
+        me = os.getppid()                                  # bin/metacomputer
+        caller = table.get(me, (None,))[0]
+        argv = proc_argv(caller) if caller and caller > 1 else None
+    except Exception:
+        return False
+    if not argv or len(argv) < 2:
+        return False
+    if os.path.basename(argv[0]).lstrip("-") not in ("bash", "sh"):
+        return False
+    if os.path.isabs(argv[1]):
+        script = os.path.realpath(argv[1])
+    elif os.sep in argv[1] and proc_cwd(caller):               # relative to where the caller ran it
+        script = os.path.realpath(os.path.join(proc_cwd(caller), argv[1]))
+    else:
+        return False
+    for want in allowed:
+        kind, _, name = want.partition(":")
+        if kind == "script" and script == os.path.join(lab, "scripts", name):
+            return True
+        if kind == "cli" and script == os.path.join(lab, "bin", "metacomputer"):
+            rest = argv[2:]
+            while rest and (rest[0] in CLI_OPTION_ARGS or rest[0].split("=", 1)[0] in CLI_OPTION_ARGS):
+                rest = rest[2:] if rest[0] in CLI_OPTION_ARGS else rest[1:]
+            if rest and rest[0] == name:
+                return True
+    return False
+
+
 def main(argv):
     # Its command line (lib/strictargs.py): anything else (`release --help`, an option it doesn't have, a word) is
     # refused, or the usage shown, before any claim is read or released.
     import strictargs
-    strictargs.expect(argv[1:], ["[who] [--json]", "check", "release", "at-terminal [--stderr]"], prog="owners.py",
-                      usage=__doc__)
+    strictargs.expect(argv[1:], ["[who] [--json]", "check", "release", "at-terminal [--stderr]",
+                                 "internal-caller [--user] [CALLER...]"], prog="owners.py", usage=__doc__)
     cmd = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else "who"
     if cmd == "who":
         table = ps_table()
@@ -1274,6 +1316,16 @@ def main(argv):
             except Exception:
                 pass
         return 0
+    if cmd == "internal-caller":
+        # exit 0 when bin/metacomputer was started by metacomputer itself for one of the given callers (its internal
+        # commands: _vnc-install from a build), or, with --user, at the user's own terminal
+        rest = argv[2:]
+        user = "--user" in rest
+        allowed = [a for a in rest if a != "--user"]
+        if any(not re.fullmatch(r"(cli|script):[A-Za-z0-9._-]{1,64}", a) for a in allowed):
+            print("usage: owners.py internal-caller [--user] cli:SUB|script:NAME...", file=sys.stderr)
+            return 2
+        return 0 if internal_caller(allowed) or (user and at_user_terminal((0,))) else 1
     if cmd == "at-terminal":
         # exit 0 when standard input (and with --stderr, standard error) is the user's own terminal: a terminal
         # with no agent session above it (bin/metacomputer's user-only commands)
