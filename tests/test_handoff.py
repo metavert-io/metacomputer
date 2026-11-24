@@ -77,6 +77,7 @@ PRELUDE = ("import os, sys; sys.path.insert(0, os.path.join(%r, 'lib')); import 
            "_real_ps = owners.ps_table; "
            "owners.ps_table = ((lambda strict=False: (_ for _ in ()).throw(OSError('ps failed')) if strict else {}) "
            "if os.environ.get('FAKE_PS_FAIL') else _real_ps); "
+           "_ag = os.environ.get('FAKE_AGENT'); owners.agent_of = (lambda *a, **k: _ag) if _ag else owners.agent_of; "
            "import handoff; handoff.MIN_TIMEOUT_S = 1; "
            "handoff.OPEN_WAIT_S = float(os.environ.get('TEST_OPEN_WAIT', '40')); "
            "sys.exit(handoff.main(sys.argv[1:]))") % LAB
@@ -612,12 +613,13 @@ def older_hub_checks():
     os.makedirs(os.path.dirname(p), exist_ok=True)
 
     @contextlib.contextmanager
-    def stand_in_hub(code):
+    def stand_in_hub(code, body=None):
         fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             os.ftruncate(fd, 0)
-            os.write(fd, json.dumps({"pid": os.getpid(), **({"code": code} if code is not None else {})}).encode())
+            os.write(fd, body if body is not None else
+                     json.dumps({"pid": os.getpid(), **({"code": code} if code is not None else {})}).encode())
             yield
         finally:
             os.close(fd)
@@ -626,10 +628,10 @@ def older_hub_checks():
             except OSError:
                 pass
 
-    def open_with(code, why):
+    def open_with(code, why, body=None):
         clear()
-        with stand_in_hub(code):
-            proc = start("--why", why, "--say", SAY)
+        with stand_in_hub(code, body):
+            proc = start("--why", why, "--say", SAY, FAKE_AGENT="Codex")    # an agent session that has a name
             h = wait_open()
             raw = json.load(open(owners.handoff_path())) if h else None
             user_end("cancel")
@@ -638,14 +640,36 @@ def older_hub_checks():
         return raw, o or ""
 
     raw, o = open_with("0" * 64, "payment")
-    check("a hub on older code: a payment handoff is recorded as 'other', with no agent name, and the output says why",
-          raw and raw["why"] == "other" and raw.get("agent") is None and "older code" in o, (raw, o[-400:]))
+    check("a hub on older code: a payment handoff is recorded as 'other', without the agent's name, and the output says "
+          "why", raw and raw["why"] == "other" and raw.get("agent") is None and "older code" in o, (raw, o[-400:]))
     raw, o = open_with(None, "captcha")
     check("...a hub whose record names no code counts as older; a reason every version reads is kept",
           raw and raw["why"] == "captcha" and raw.get("agent") is None and "older code" in o, (raw, o[-400:]))
+    raw, o = open_with(None, "payment", body=b"{not json")
+    check("...and so does a hub whose record can't be read (it can't be told which code it runs)",
+          raw and raw["why"] == "other" and raw.get("agent") is None and "older code" in o, (raw, o[-400:]))
     raw, o = open_with(mcp_hub.code_digest(), "payment")
-    check("a hub on this checkout's code: the reason is written as given, and nothing is said about it",
-          raw and raw["why"] == "payment" and "older code" not in o, (raw, o[-400:]))
+    check("a hub on this checkout's code: the reason and the agent's name are written as given, and nothing is said",
+          raw and raw["why"] == "payment" and raw.get("agent") == "Codex" and "older code" not in o, (raw, o[-400:]))
+    real_digest = mcp_hub.code_digest
+    try:
+        mcp_hub.code_digest = lambda: None          # this checkout's digest can't be had
+        with stand_in_hub(None):
+            both_none = mcp_hub.runs_other_code()
+        with stand_in_hub(real_digest()):
+            now_none = mcp_hub.runs_other_code()
+    finally:
+        mcp_hub.code_digest = real_digest
+    open(p, "w").write("{}")
+    os.chmod(p, 0)
+    try:
+        unreadable = mcp_hub.runs_other_code()     # the record can't even be opened: whether a hub holds it can't be told
+    finally:
+        os.chmod(p, 0o600)
+        os.remove(p)
+    check("this checkout's digest that can't be had, or a hub record that can't be opened, counts as other code (two "
+          "missing digests never match); no record at all is no hub", both_none is True and now_none is True
+          and unreadable is True and mcp_hub.runs_other_code() is False, (both_none, now_none, unreadable))
     who = [sys.executable, os.path.join(LAB, "lib", "owners.py"), "who"]
     with stand_in_hub("0" * 64):
         r = subprocess.run(who + ["--json"], env=env(), capture_output=True, text=True, timeout=60)

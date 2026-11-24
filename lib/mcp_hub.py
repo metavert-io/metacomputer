@@ -4233,15 +4233,45 @@ def hub_pid(env=None):
         return None
 
 
+def _hub_lock_state(env=None):
+    """(held, record) for this VM's hub lock: held is False when no hub holds it (no file, or nobody has it locked),
+    True when one does, None when that can't be told; record is what that hub wrote, or None when it can't be read."""
+    p = paths(env)
+    try:
+        fd = os.open(p["pid"], os.O_RDONLY)
+    except FileNotFoundError:
+        return False, None
+    except OSError:
+        return None, None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False, None
+        except BlockingIOError:
+            pass
+        except OSError:
+            return None, None
+        try:
+            rec = json.loads(os.read(fd, 4096) or b"{}")
+        except (ValueError, OSError):
+            return True, None
+        return True, (rec if isinstance(rec, dict) else None)
+    finally:
+        os.close(fd)
+
+
 def runs_other_code(env=None):
-    """Whether this VM's running hub loaded other code than this checkout's lib/ holds now: it was started before an
-    update or a pull (the code_digest its hub.pid records differs), or its record names none (a hub from before it was
-    recorded). Its checks may then not read everything this version writes (a handoff record's new words:
-    lib/handoff.py writes the form every version reads). False when no hub runs."""
-    rec = _hub_record(env)
-    if rec is None:
+    """Whether this VM's running hub may have loaded other code than this checkout's lib/ holds now: it was started
+    before an update or a pull (the code_digest its hub.pid records differs), its record names none (a hub from before
+    it was recorded) or can't be read, or this checkout's digest can't be had. Its checks may then not read everything
+    this version writes (a handoff record's new words: lib/handoff.py writes the form every version reads). False only
+    when no hub runs, or it recorded this very code."""
+    held, rec = _hub_lock_state(env)
+    if held is False:
         return False
-    return rec.get("code") != code_digest()
+    code, now = (rec or {}).get("code"), code_digest()
+    return not code or not now or code != now
 
 
 def hub_sockets(env=None):

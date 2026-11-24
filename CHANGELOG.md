@@ -135,7 +135,7 @@ All notable changes to metacomputer are recorded here. The format follows
   handoff record with a reason it didn't know (`--why payment`, added in 0.5.0) or a newer agent's name as a record
   that can't be read, which counts as open for up to 2 hours, so Claude's actions stayed refused after `handoff done`
   until `metacomputer hub stop`. Now a handoff opened while this VM's hub runs other code than the checkout (its
-  `hub.pid` records which) is written in the form every version reads (the reason `captcha`, `login`, `2fa` or
+  `hub.pid` records which), or when that can't be told, is written in the form every version reads (the reason `captcha`, `login`, `2fa` or
   `other`, no agent name) and says so, with `metacomputer hub stop --if-idle` to restart the hub on the current code;
   a reason or agent name this version doesn't know (a newer version's) reads as `other` and none, with the record's
   own state, so this doesn't happen again; and `metacomputer who` says when the hub runs older code

@@ -1272,7 +1272,7 @@ def main(argv):
             import mcp_hub
             older = mcp_hub.runs_other_code()      # started before the code changed (an update, a pull)
         except Exception:
-            pass
+            older = None                           # can't be told: said as such
         handoff = open_handoff()
         if "--json" in argv:
             print(json.dumps({"self_claude_pid": me, "sessions": all_claims, "direct": direct,
@@ -1281,7 +1281,9 @@ def main(argv):
             return 0
         if hub:
             print("  hub: " + mcp_hub.describe_status(hub).replace("\n", "\n  "))
-        if older:
+        if older is None:
+            print("  hub: whether it runs this checkout's code couldn't be told")
+        elif older:
             print("  hub: runs older code than this checkout (it started before the code changed); `metacomputer hub "
                   "stop --if-idle` restarts it on the current code once nothing uses it (`metacomputer update` does too)")
         if handoff:
