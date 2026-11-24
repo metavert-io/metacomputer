@@ -558,21 +558,32 @@ scanned there too.
 
 ## What waits during a handoff, whoever runs it: `tests/test_acting.py`
 
-`python3 tests/test_acting.py` (about 340 checks, two minutes) needs no VM. `tests/acting.py` sorts every program
+`python3 tests/test_acting.py` (about 435 checks, two minutes) needs no VM. `tests/acting.py` sorts every program
 tests/entrypoints.py finds, each of its subcommands (its callers' lines and one for each subcommand or form its parser
 declares) and every command of bin/metacomputer's dispatch by what it does to a computer: it changes one itself (and
-must wait), it's a lifecycle command or a fill (waits even at your terminal, `--override` goes ahead), an input reset,
-yours only, judged per call (the hub, the relay, the shell channel), only through other entries, part of a start that
-waited (the folder watcher, an allowlist's own end), the guest's, or nothing of a computer's. A program or subcommand
-that isn't sorted fails, and `lib/remote.py`'s and `lib/storage.py`'s own `changes_computer()` must say what the table
-says on every line. Then, on copies of the checkout (tests/test_help.py's Lab, with a runner whose computers run and an
-ssh that answers only probes), with an open handoff record in the right computer's RUN_DIR, each line of each entry
-that changes a computer is run by itself: plainly (exit 4, the refusal's words, nothing called but the runner's
-lookups, nothing written), at your own terminal (tests/userterm.py: past the gate, saying so) and under a hold handed on
-as an inherited descriptor on that computer's dispatch lock (past the gate). The input resets and the commands that are
-yours only are run by their own rules, and every acting form of bin/metacomputer in tests/test_help.py's FORMS the same
-way (a line that isn't whole there, a word missing or a question with no terminal, only has to call nothing). Last,
-with a `lib/sessionvm.py` that crashes, `metacomputer` and `scripts/build-vm.sh` refuse instead of going on.
+must wait), it changes what several computers use (a volume, a provider's shared network), it's a lifecycle command or
+a fill (waits even at your terminal, a lifecycle command's `--override` goes ahead), an input reset, yours only, judged
+per call (the hub, the relay, the shell channel), only through other entries, part of a start that waited (the folder
+watcher, an allowlist's own end), the guest's, or nothing of a computer's. A program or subcommand that isn't sorted
+fails, and `lib/remote.py`'s and `lib/storage.py`'s own `changes_computer()` must say what the table says on every line.
+What's sorted as per call, through others, the guest's or none isn't run here: those rest on how they're sorted (the
+per-call ones have their own handoff checks in test_hub, test_handoff and test_vm_shell).
+
+Then, on copies of the checkout (tests/test_help.py's Lab, with a runner whose computers run and an ssh that answers
+only probes), with an open handoff record in the right computer's RUN_DIR, each line of each entry that changes a
+computer itself is run by itself: plainly (exit 4, the refusal's words, nothing called but the runner's lookups,
+nothing written), at your own terminal (tests/userterm.py: past the gate, saying so), under a hold handed on as
+descriptor 6 (5 for the scripts) on that computer's dispatch lock, as bin/metacomputer and the scripts hand it on (past
+the gate), and with a descriptor 6 (or 5) on that lock file that never took it while the test holds the lock on another
+(no hold: exit 4). The input resets and the commands that are yours only are run by their own rules, and every acting
+form of bin/metacomputer in tests/test_help.py's FORMS the same way (a line that isn't whole there, a word missing or a
+question with no terminal, only has to call nothing). Fixtures cover the rest: a storage command and `put` for another
+VM (by its name, by `MCOMP_VM`, with the main VM's run folder, by a transport to it) look at that VM's handoff; a volume
+attached to another VM, or kept by its checkpoint, waits for that VM's handoff on `volume sync` and `volume delete`; an
+Oracle Cloud computer's handoff stops `cloud setup oci` and another's create there (Hetzner's setup doesn't wait);
+`metacomputer mcp` with no hub and a bounded driver waits before writing a missing manifest. Last, with a
+`lib/sessionvm.py` that crashes, `metacomputer` and `scripts/build-vm.sh` refuse instead of going on, and
+`MC_SCRIPT_HELD=1` in a script's environment doesn't skip its handoff check.
 
 ## The Claude Code plugin: `tests/test_plugin.py`
 

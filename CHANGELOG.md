@@ -71,21 +71,31 @@ All notable changes to metacomputer are recorded here. The format follows
   `sh --read-only - <<'SCRIPT'`), and reads that can't act stay (`inspect`, `get`, `shot`, the desktop tools' reads). A
   `HANDOFF_HELD=1` in the environment no longer skips every handoff check. What's left is in SECURITY.md: an agent's
   own VNC client to the live view, and programs already running in the VM.
-- **Every program that changes a computer waits while you have it, however it's run.** Run by themselves (by an
-  agent, a script or a person), `lib/remote.py` (`exec`, `create`, `wake`, `sleep`, `delete`, `abort`, `checkpoint
-  create|restore|delete`, `allow`, `egress --set`, `resolvers`), `lib/storage.py` (`kill-vm`, `volume sync`, `attach`,
-  `prepare`, `started`, `release`, `checkpoint save|restore|delete`), `lib/netpolicy.py` (`allow`, `remove`, `clear`,
-  `render`) and `lib/guest_put.py` went ahead during a handoff; so did `metacomputer start`, `checkpoint NAME` and
-  `checkpoint --delete` on this Mac, `net allow|remove|clear` and `vm delete --force`. Each now stops with exit 4 (the
-  same words as the other commands) right after its command line, before anything is called or written, and holds the
-  dispatch lock to the end (`lib/handoff_gate.py`); at your own terminal, or under the hold of the command that runs it
-  (a descriptor on that very lock file, checked; never an environment variable), it goes ahead. `lib/remote.py cloud
-  teardown` and `--forget` run by themselves need your own terminal, as `metacomputer cloud` does. `stop` of your own
-  server (it ends this Mac's hub, which keeps your browser alive during a handoff) waits too, and the lifecycle commands
-  that refused during a handoff with exit 1 now exit 4; with `--override` they hold the lock to the end, so what they
-  run goes ahead under it. `tests/acting.py` sorts every program and subcommand by what it does to a computer, and
-  `tests/test_acting.py` (no VM) runs each one that acts while a handoff is open, at your terminal and under a caller's
-  hold: a new program or subcommand fails it until it's sorted. On Fly Sprites, `metacomputer logs` shows no service
+- **The programs that change a computer by themselves wait while you have it, however they're run.** Run by
+  themselves (by an agent, a script or a person), `lib/remote.py` (`exec`, `create`, `wake`, `sleep`, `delete`, `abort`,
+  `checkpoint create|restore|delete`, `allow`, `egress --set`, `resolvers`), `lib/storage.py` (`kill-vm`, `volume
+  sync`, `attach`, `prepare`, `started`, `release`, `checkpoint save|restore|delete`), `lib/netpolicy.py` (`allow`,
+  `remove`, `clear`, `render`) and `lib/guest_put.py` went ahead during a handoff; so did `metacomputer start`,
+  `checkpoint NAME` and `checkpoint --delete` on this Mac, `net allow|remove|clear` and `vm delete --force`. Each now
+  stops with exit 4 (the same words as the other commands) right after its command line, before anything is called or
+  written, and holds the dispatch lock to the end (`lib/handoff_gate.py`). It looks at the computer it acts on: its
+  name and its run folder must be one computer's (a storage command for another VM looked at the main VM's handoff
+  when no run folder was given), or the computer whose SSH folder its transport names; what can't be told refuses. What
+  changes several computers waits for each: `volume sync` for every computer that has the volume attached, `volume
+  delete` for every computer whose checkpoints keep it, and Oracle Cloud's `cloud setup` and creates (they rewrite the
+  network its computers share) for every computer of this checkout's there. At your own terminal, or under the hold of
+  the command that runs it, it goes ahead: a descriptor on that very lock file (6 from `metacomputer`, 5 from our
+  scripts; a command run under one keeps it) that has taken the lock (checked with the kernel's own record of it,
+  never an environment variable). With `MCP_HUB=off` and `DRIVER_MODE=bounded`, `metacomputer mcp` writes the driver's
+  manifest to the guest only when it isn't there yet, and that write waits during a handoff too (so such a first
+  connection does). `lib/remote.py cloud teardown` and `--forget` run by themselves need your own terminal, as
+  `metacomputer cloud` does. `stop` of your own server (it ends this Mac's hub, which keeps your browser alive during a
+  handoff) waits too, and the lifecycle commands that refused during a handoff with exit 1 now exit 4; with
+  `--override` they hold the lock to the end, so what they run goes ahead under it. `tests/acting.py` sorts every
+  program and subcommand by what it does to a computer, and `tests/test_acting.py` (no VM) runs each line of what's
+  sorted as acting while a handoff is open, at your terminal, under a hold on descriptor 6 or 5 and with an unlocked
+  descriptor; what's sorted as acting only through others, per call (hub, relay, shell channel) or not at all isn't run
+  there. A new program or subcommand fails it until it's sorted. On Fly Sprites, `metacomputer logs` shows no service
   logs while a handoff is open (they're read through `lib/remote.py exec`, which now waits).
 - **The Hand back panel counts only an exact answer** from an osascript that exits 0: one that's killed or fails, or
   prints anything else around or instead of its answer, leaves the handoff open.

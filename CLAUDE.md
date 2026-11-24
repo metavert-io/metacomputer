@@ -150,11 +150,18 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   `script_handoff_hold`, held to the end); so does every Python program that changes a computer by itself
   (`lib/remote.py`, `lib/storage.py`, `lib/netpolicy.py`, `lib/guest_put.py`: `lib/handoff_gate.py` `wait_or_hold`,
   shared code with no provider names, right after its command line: exit 4 with `owners.handoff_refusal`, your
-  terminal goes ahead, and a caller's hold goes ahead only once its descriptor is checked to be that very lock, never by
-  an environment variable; never under MCOMP_PARSE_ONLY, which ends at 99 first), and `start`, `checkpoint`, `net` and
-  `vm delete` (`--force` too) in bin/metacomputer. `--override` on a lifecycle command still holds the lock
-  (`dispatch_hold`) for what it runs. Every program and subcommand is sorted by what it does to a computer in
-  `tests/acting.py`; `tests/test_acting.py` runs each acting one during a handoff and fails on one that isn't sorted.
+  terminal goes ahead; never under MCOMP_PARSE_ONLY, which ends at 99 first). It gates the computer it acts on, told
+  from the same settings it acts with (`owners_dir_for`: name and run folder one computer's, or the SSH folder its
+  transport names; what can't be told refuses); what changes several computers gates each in path order
+  (`wait_or_hold_all`: a volume's users and checkpoint owners, a provider's computers when its adapter says
+  `SHARED_NETWORK_CHANGES`). A caller's hold (bin/metacomputer's fd 6, a script's fd 5, kept by a command run under it:
+  scripts/lib.sh `inherited_dispatch_hold`) goes ahead only once its descriptor is that very lock file, a description
+  that has taken a flock (FHASLOCK, `proc_pidfdinfo`) and holding it shared; never an environment variable. FHASLOCK
+  survives LOCK_UN: never unlock a dispatch descriptor and keep it open (close it). bin/metacomputer gates `start`,
+  `checkpoint`, `net` and `vm delete` (`--force` too), and the bounded driver manifest's write before `mcp`.
+  `--override` on a lifecycle command still holds the lock (`dispatch_hold`) for what it runs. Every program and
+  subcommand is sorted by what it does to a computer in `tests/acting.py`; `tests/test_acting.py` runs each line of the
+  acting ones during a handoff (not the per-call, through-others or none ones) and fails on one that isn't sorted.
   The session guards fail closed (a check that crashes refuses). Every value that
   reaches a shell in the guest is checked first (`record_args_ok`), and file names go after `--`; a recording's
   stream is started by `record start` itself (`record_stream_start`: no internal command for it), keeping its

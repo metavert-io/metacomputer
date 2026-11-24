@@ -3158,26 +3158,52 @@ CLAIMS = [
      and 'tlog="$LOG_DIR/tunnel/view-tunnel.log"' in raw("bin/metacomputer")
      and ">>\"$tlog\"" not in raw("bin/metacomputer")),
     # Every program that changes a computer waits during a handoff, however it's run (lib/handoff_gate.py).
-    ("SECURITY.md", r"every other program of the repository that changes a computer waits the same way, however it's run "
-                    r"\(by\s+`metacomputer`, by another program, or by itself\)",
+    ("SECURITY.md", r"the programs of the repository that change a computer by themselves wait the same way, however "
+                    r"they're run \(by\s+`metacomputer`, by another program, or by themselves\)",
      lambda m: programs_gated()),
-    ("SECURITY.md", r"so do `start`, a checkpoint on this Mac\s+\(`checkpoint NAME`, `checkpoint --delete`\), `net "
+    ("SECURITY.md", r"so do `start`, a checkpoint on this\s+Mac \(`checkpoint NAME`, `checkpoint --delete`\), `net "
                     r"allow\|remove\|clear` and `vm delete` \(`--force` or not\)",
      lambda m: bin_commands_held()),
-    ("SECURITY.md", r"a descriptor on that very\s+lock file, checked \(the file's device and inode, and a shared lock held, "
-                    r"never one being taken exclusively\),\s+never an\s+environment variable",
+    ("SECURITY.md", r"at the computer it acts on: the one its name and run folder say \(they must be one computer's,\s+by "
+                    r"this checkout's settings\), or the one whose SSH folder its transport names; one that can't be told, "
+                    r"or names that\s+disagree, refuse",
+     lambda m: computer_bound()),
+    ("SECURITY.md", r"What changes several computers waits for each of them, in one order: a volume sync for every computer "
+                    r"that has\s+the volume attached, a volume delete for every computer whose checkpoints keep it",
+     lambda m: shared_gated()),
+    ("SECURITY.md", r"a provider whose setup and creates rewrite a network its computers share \(Oracle Cloud's\s+VCN\) "
+                    r"for every computer of this checkout's there",
+     lambda m: "SHARED_NETWORK_CHANGES = True" in raw("lib/cloud/oci.py")
+     and "SHARED_NETWORK_CHANGES = False" in raw("lib/cloud/adapter.py")
+     and "SHARED_NETWORK_CHANGES" not in raw("lib/cloud/vps.py") + raw("lib/cloud/sprites.py") + raw("lib/cloud/ubuntu_vm.py")
+     and (lambda r: r.index("shared_network_computers(a)") < r.index('if a.cmd == "target":'))(py_top_fn("lib/remote.py", "run"))
+     and 'getattr(cls, "SHARED_NETWORK_CHANGES", False)' in py_top_fn("lib/remote.py", "shared_network_computers")),
+    ("SECURITY.md", r"a descriptor on that very lock file\s+\(bin/metacomputer hands it on as 6, our scripts as 5, and a "
+                    r"command run under one keeps it rather than opening its\s+own\), checked: the file's device and "
+                    r"inode, a description that has taken a flock \(the kernel's FHASLOCK on it, read\s+with "
+                    r"`proc_pidfdinfo`",
      lambda m: inherited_hold_checked()),
-    ("SECURITY.md", r"`lib/remote.py cloud teardown` and `--forget` are yours only, at your own terminal",
+    ("SECURITY.md", r"With `MCP_HUB=off` and `DRIVER_MODE=bounded`,\s+`metacomputer mcp` first looks whether the guest has "
+                    r"its driver manifest \(a read\): writing one waits the same way",
+     lambda m: (lambda d: d.index('gssh ops "test -f ~/.config/metacomputer/manifests/$sha.yaml"')
+                < d.index("\n    handoff_hold_unless_user\n") < d.index("cat > \\$f.tmp"))(fn_src("scripts/lib.sh", "driver_request"))
+     and 'req="$(driver_request)" || exit $?' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"`lib/remote.py cloud teardown` and `--forget` are yours only, at your own\s+terminal",
      lambda m: (lambda r: r.index("owners.at_user_terminal((0,))") < r.index("handoff_gate.wait_or_hold(")
                 < r.index('if a.cmd == "target":') and 'a.action == "teardown" or a.forget is not None' in r)(
          py_top_fn("lib/remote.py", "run"))),
-    ("SECURITY.md", r"`tests/acting.py` sorts every program and subcommand by what it does to a computer,\s+and "
-                    r"`tests/test_acting.py` runs each one that acts while a handoff is open",
+    ("SECURITY.md", r"The test runs each line of every entry\s+sorted as acting by itself while a handoff is open, at your "
+                    r"terminal, under a hold on descriptor 6 or 5, and with a\s+descriptor on the lock file that never "
+                    r"took it \(no hold\)",
      lambda m: os.path.exists(os.path.join(LAB, "tests", "acting.py"))
      and "test_acting" in re.search(r"NO_VM_SUITES=\((.*?)\)", raw("scripts/release.sh"), re.S).group(1)
-     and "def classify(" in raw("tests/acting.py") and 'not in acting.LABELS' in raw("tests/test_acting.py")),
-    ("SECURITY.md", r"A command whose check of which computer the agent session holds can't be made \(it\s+crashed\) "
-                    r"refuses instead of going on",
+     and "def classify(" in raw("tests/acting.py") and 'not in acting.LABELS' in raw("tests/test_acting.py")
+     and "HELD_FD_BIN, HELD_FD_SCRIPT = 6, 5" in raw("tests/test_acting.py")
+     and '"unlocked", run_dir, fd=n' in raw("tests/test_acting.py")),
+    ("SECURITY.md", r"It doesn't run what's sorted as\s+reaching a computer only through other entries, as judged per call",
+     lambda m: "lab in (acting.ACTS, acting.RESET, acting.USER)" in raw("tests/test_acting.py")),
+    ("SECURITY.md", r"A command whose check of which computer the agent session holds can't be made \(it\s+crashed\)"
+                    r"\s+refuses instead of going on",
      lambda m: session_guards_fail_closed()),
     ("SECURITY.md", r"`baseline`, `test` and `desktop-restart` refuse \(exit 4\) unless you add `--override`",
      lambda m: "printf '%s\\n' \"${c_red}metacomputer: the user has the computer (metacomputer handoff)" in
@@ -3205,7 +3231,7 @@ def programs_gated():
             and st.index("a = ap.parse_args(argv)") < st.index("handoff_gate.wait_or_hold(") < st.index("return a.fn(a)")
             and npol.index("p = paths()") < npol.index("handoff_gate.wait_or_hold(") < npol.index('return {"status":')
             and '("allow", "remove", "clear", "render")' in npol
-            and gp.index('strictargs.expect(rest') < gp.index("handoff_gate.wait_or_hold()") < gp.index("put(ssh, files")
+            and gp.index('strictargs.expect(rest') < gp.index("handoff_gate.wait_or_hold(handoff_gate.owners_dir_for(") < gp.index("put(ssh, files")
             and 'return a.cmd in ("prepare", "started", "attach", "release", "kill-vm")' in
             py_top_fn("lib/storage.py", "changes_computer")
             and "EXIT_WAIT = 4" in g and "_refuse(owners.handoff_refusal(h))" in g
@@ -3213,6 +3239,28 @@ def programs_gated():
             and "strictargs.PARSE_ONLY" in g
             and not re.search(r"\b(oci|sprites?|hetzner|digitalocean|vultr|lume|claude|codex|ubuntu|firefox|chrome)\b",
                               g, re.I))
+
+
+def computer_bound():
+    """lib/storage.py and lib/guest_put.py gate the computer they act on (handoff_gate.owners_dir_for: its name and run
+    folder one computer's by labconfig.computers, or the SSH folder its transport names), and storage.py acts with the
+    same run folder."""
+    g = py_top_fn("lib/handoff_gate.py", "owners_dir_for")
+    st, gp = py_top_fn("lib/storage.py", "main"), py_top_fn("lib/guest_put.py", "main")
+    return ("labconfig.computers(root)" in g and "_transport_dirs(transport)" in g
+            and "handoff_gate.owners_dir_for(name=vm_name(), run_dir=os.environ.get(\"MCOMP_RUN_DIR\"))" in st
+            and "transport=ssh))" in gp and 'c["name"] == vm_name()' in py_top_fn("lib/storage.py", "run_dir")
+            and "UserKnownHostsFile=" in py_top_fn("lib/handoff_gate.py", "_transport_dirs"))
+
+
+def shared_gated():
+    """volume sync gates every computer with the volume attached, volume delete every computer whose checkpoints keep it,
+    each in path order (handoff_gate.wait_or_hold_all)."""
+    sy, de = py_top_fn("lib/storage.py", "cmd_volume_sync"), py_top_fn("lib/storage.py", "cmd_volume_delete")
+    return (sy.index("gate_computers(") < sy.index("s3_sync(rec") and "volume_users(" in sy
+            and de.index("gate_computers(") < de.index('with reserved([rec], "delete")') and "checkpoint_vms(" in de
+            and "handoff_gate.wait_or_hold_all(dirs)" in py_top_fn("lib/storage.py", "gate_computers")
+            and "for real in sorted(seen):" in py_top_fn("lib/handoff_gate.py", "wait_or_hold_all"))
 
 
 def bin_commands_held():
@@ -3233,7 +3281,12 @@ def inherited_hold_checked():
     guard (handoff.py) accepts the same, and neither reads the environment for it."""
     g = py_top_fn("lib/handoff_gate.py", "inherited_hold")
     guard = py_top_fn("lib/handoff.py", "cmd_guard")
-    return ("(st.st_dev, st.st_ino) == (want.st_dev, want.st_ino)" in g and "stat.S_ISREG(want.st_mode)" in g
+    return ("(st.st_dev, st.st_ino) == (want.st_dev, want.st_ino) and has_flocked(fd)" in g
+            and "FHASLOCK = 0x4000" in raw("lib/handoff_gate.py") and "PROC_PIDFDVNODEINFO = 1" in raw("lib/handoff_gate.py")
+            and "inherited_dispatch_hold 6; then HANDOFF_HELD=1; return 0; fi" in fn_src("bin/metacomputer", "handoff_hold")
+            and "inherited_dispatch_hold 5; then MC_SCRIPT_HELD=1; return 0; fi" in fn_src("scripts/lib.sh",
+                                                                                           "script_handoff_hold")
+            and "stat.S_ISREG(want.st_mode)" in g
             and g.index("fcntl.LOCK_EX | fcntl.LOCK_NB") < g.index("fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)")
             < g.index("fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)") and "os.environ" not in raw("lib/handoff_gate.py") and "getenv" not in raw("lib/handoff_gate.py")
             and guard.index("handoff_gate.inherited_hold(exclude=") < guard.index("flockwait.take(fd")
