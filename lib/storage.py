@@ -686,11 +686,72 @@ def locks_dir():
     return d
 
 
+class HoldersUnknown(StorageError):
+    """Whether something is held can't be told: the locks folder, a holder record or a disk's lock file that's there but
+    can't be read or parsed (the strict reads: all_locks(strict=True), holder_of(strict=True), acquire), or the users
+    of a volume changed during a manual sync. A refusal like any other (exit 1); where a handoff gate decides from it (a
+    manual volume sync: which computers to check), exit 4."""
+
+
+def locks_folder_unknown(d, why):
+    return HoldersUnknown(f"the storage locks folder {d} can't be read ({why}), so whether anything is held can't be "
+                          f"told; nothing was changed. Make it readable again (it should be yours: chmod 700 {d}), "
+                          "never by deleting it, and run this again")
+
+
+def record_unknown(path, why):
+    return HoldersUnknown(f"the storage lock record {path} can't be read ({why}), so whether what it holds is in "
+                          "use can't be told; nothing was changed. If it's stale (no VM on this Mac is running with "
+                          "volumes or reference disks, and no volume, refdisk or checkpoint command is still working: "
+                          "metacomputer list), delete that one file (or, if it's yours and only unreadable, chmod 600 "
+                          "it) and run this again")
+
+
+def read_json_strictly(path, follow=False):
+    """The JSON a file holds (at most 1 MiB of it); None when there's no file. One that's there and isn't a plain
+    file, can't be read or isn't JSON raises OSError or ValueError. Never through a link unless FOLLOW, and never
+    waiting on a FIFO."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | (0 if follow else os.O_NOFOLLOW))
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise ValueError("it isn't a file")
+        return json.loads(fh.read(1 << 20))
+
+
+def read_record(path, strict=True):
+    """One holder record: the object it holds; None when it isn't there (let go of meanwhile); never through a link.
+    One that's there and can't be read, isn't JSON, or isn't a holder record (an object whose vm and path are text)
+    raises HoldersUnknown when STRICT, never read as none; not strict (shown only, or a holder's own), it's None."""
+    if not strict:
+        try:
+            return read_record(path)
+        except HoldersUnknown:
+            return None
+    try:
+        rec = read_json_strictly(path)
+    except OSError as e:
+        raise record_unknown(path, e.strerror or e) from None
+    except ValueError as e:
+        raise record_unknown(path, e) from None
+    if rec is None:
+        return None
+    if not isinstance(rec, dict) or not isinstance(rec.get("vm"), str) or not isinstance(rec.get("path"), str):
+        raise record_unknown(path, "it isn't a holder record")
+    return rec
+
+
 class GlobalLock:
-    """One process at a time changes the locks (an flock on locks/.lock)."""
+    """One process at a time changes the locks (an flock on locks/.lock). A locks folder that can't be used refuses
+    (HoldersUnknown)."""
 
     def __enter__(self):
-        self.f = open(os.path.join(locks_dir(), ".lock"), "a")
+        try:
+            self.f = open(os.path.join(locks_dir(), ".lock"), "a")
+        except OSError as e:
+            raise locks_folder_unknown(os.path.join(state_home(), "locks"), e.strerror or e) from None
         fcntl.flock(self.f, fcntl.LOCK_EX)
         return self
 
@@ -755,18 +816,30 @@ def same_holder(rec, vm, lab):
     return bool(rec) and rec.get("vm") == vm and rec.get("lab") == lab
 
 
-def all_locks():
-    out = []
+def all_locks(strict=True):
+    """Every holder record in the locks folder, each with its file name (_file). strict (the default), for every
+    decision whether something is held (acquire's conflict check, which every start, reservation and sync takes;
+    volume_users): a missing folder is none and a record let go of meanwhile is gone, but a folder or a record that's
+    there and can't be read or parsed raises HoldersUnknown, never read as none. Not strict, where a holder acts only
+    on its own records (update_holder, release_locks): those are left out, untouched, and still refuse every strict
+    read."""
+    d = os.path.join(state_home(), "locks")
     try:
-        names = os.listdir(locks_dir())
-    except OSError:
-        return out
+        names = sorted(os.listdir(d))
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        if not strict:
+            return []
+        raise locks_folder_unknown(d, e.strerror or e) from None
+    out = []
     for f in names:
-        if f.endswith(".json"):
-            rec = read_json(os.path.join(locks_dir(), f))
-            if isinstance(rec, dict):
-                rec["_file"] = f
-                out.append(rec)
+        if not f.endswith(".json"):
+            continue
+        rec = read_record(os.path.join(d, f), strict)
+        if rec is not None:
+            rec["_file"] = f
+            out.append(rec)
     return out
 
 
@@ -887,13 +960,15 @@ def acquire(items, vm, lab, pid):
     host = hostname()
     with GlobalLock():
         # A holder counts until its process is certainly gone (holder_state): one ps can't tell about still holds.
-        others = [r for r in all_locks() if not same_holder(r, vm, lab) and holder_state(r) != "dead"]
+        # Records are read strictly: one that's there and can't be read or parsed refuses (HoldersUnknown), as does a
+        # disk's lock file that can't be.
+        others = [r for r in all_locks(strict=True) if not same_holder(r, vm, lab) and holder_state(r) != "dead"]
         conflicts = plan_conflicts(items)
         for it in items:
             conflicts += item_conflicts(it, others)
             if it["kind"] == "disk" and it.get("lock"):
-                side = read_json(sidecar_path(it))
-                if isinstance(side, dict) and side.get("host") and side.get("host") != host:
+                side = read_sidecar(sidecar_path(it))
+                if side.get("host") and side.get("host") != host:
                     conflicts.append(f"disk '{it['name']}': its lock file says computer '{side['host']}' has it "
                                      f"(VM '{side.get('vm', '?')}', since {side.get('since', '?')}). If that computer "
                                      f"isn't using it, delete {sidecar_path(it)}")
@@ -923,7 +998,7 @@ def update_holder(vm, lab, pid):
         return 0
     n = 0
     with GlobalLock():
-        for rec in all_locks():
+        for rec in all_locks(strict=False):         # its own records only
             if same_holder(rec, vm, lab) and LOCK_NAME.fullmatch(rec["_file"]):
                 f = rec.pop("_file")
                 rec.update(pid=int(pid), pstart=pstart, state="running")
@@ -941,7 +1016,8 @@ def release_locks(vm, lab):
     disk sidecars they name, when those say this computer and VM."""
     host = hostname()
     with GlobalLock():
-        mine = [rec for rec in all_locks() if same_holder(rec, vm, lab) and LOCK_NAME.fullmatch(rec["_file"])]
+        mine = [rec for rec in all_locks(strict=False)          # its own records only
+                if same_holder(rec, vm, lab) and LOCK_NAME.fullmatch(rec["_file"])]
         try:
             n = safedelete.remove_records(locks_dir(), [rec["_file"] for rec in mine], LOCK_NAME)
         except (safedelete.Refused, OSError) as e:
@@ -951,6 +1027,25 @@ def release_locks(vm, lab):
             if rec.get("kind") == "disk":
                 drop_sidecar(rec["path"] + ".lock", host, vm)
     return n
+
+
+def read_sidecar(path):
+    """A disk's lock file (beside the disk: which computer has it), read strictly: {} when there's none; one that's
+    there and can't be read or isn't one raises HoldersUnknown."""
+    try:
+        side = read_json_strictly(path, follow=True)
+    except (OSError, ValueError) as e:
+        why = e.strerror if isinstance(e, OSError) and e.strerror else e
+        side = None
+    else:
+        if side is None:
+            return {}
+        why = "it isn't a disk's lock file"
+    if not isinstance(side, dict) or not isinstance(side.get("host", ""), str):
+        raise HoldersUnknown(f"the disk's lock file {path} can't be read ({why}), so whether another computer has the "
+                             "disk can't be told; nothing was changed. If no computer is using that disk, delete that "
+                             "file and run this again")
+    return side
 
 
 def drop_sidecar(path, host, vm):
@@ -979,10 +1074,12 @@ def reserved(recs, op, extra=()):
         release_locks(holder, lab_root())
 
 
-def holder_of(path, kind):
-    """The live lock on an item, or None."""
-    rec = read_json(os.path.join(locks_dir(), lock_key(kind, path) + ".json"))
-    return rec if isinstance(rec, dict) and holder_state(rec) != "dead" else None
+def holder_of(path, kind, strict=True):
+    """The live lock on an item (its holder counts until its process is certainly gone), or None. strict (the
+    default), where it decides (a delete): a record that's there and can't be read or parsed raises HoldersUnknown.
+    Not strict (volume list's state, shown only): it reads as none."""
+    rec = read_record(os.path.join(state_home(), "locks", lock_key(kind, path) + ".json"), strict)
+    return rec if rec is not None and holder_state(rec) != "dead" else None
 
 
 # --- the plan for one start ------------------------------------------------------------
@@ -1856,12 +1953,12 @@ def volume_state(rec):
     if rec.get("kind") == "disk":
         if not os.path.isfile(path):
             return "missing (is its drive connected?)"
-        h = holder_of(path, "disk")
+        h = holder_of(path, "disk", strict=False)
         return f"in use by {describe_holder(h)}" if h else "free"
     if rec.get("kind") in FOLDER_KINDS:
         if not os.path.isdir(path):
             return "missing (is its drive connected?)"
-        h = holder_of(path, "folder")
+        h = holder_of(path, "folder", strict=False)
         return (f"read-write in {describe_holder(h)}" if h else "free") + ("" if has_noindex(_real(path))
                                                                            else "; read-only only (no .noindex)")
     return "?"
@@ -1949,11 +2046,11 @@ def cmd_volume_delete(a):
                 reg_delete("volume", a.name)
     else:
         if rec.get("kind") in FOLDER_KINDS:
-            h = holder_of(rec.get("path", ""), "folder")
+            h = holder_of(rec.get("path", ""), "folder", strict=True)
             if h:
                 raise StorageError(f"volume '{a.name}' is shared read-write with {describe_holder(h)}; stop that VM first")
         if rec.get("kind") == "s3":
-            h = holder_of(rec.get("path", ""), "s3sync")
+            h = holder_of(rec.get("path", ""), "s3sync", strict=True)
             if h:
                 raise StorageError(f"volume '{a.name}' is kept in sync by {describe_holder(h)}; stop that VM first")
             d = s3_dir(a.name)
@@ -3769,44 +3866,6 @@ def cmd_volume_test(a):
     return 0
 
 
-class HoldersUnknown(StorageError):
-    """Who has a volume attached can't be told (a holder record, or their folder, that's there but can't be read), or
-    changed during a manual sync: its handoff gate refuses (exit 4)."""
-
-
-def holder_records():
-    """Every holder record, read strictly (volume_users, for the handoff gate): a missing locks folder is none, a record
-    removed meanwhile is gone, but a folder or a record that's there and can't be read or parsed raises HoldersUnknown,
-    never read as none."""
-    d = os.path.join(state_home(), "locks")
-    try:
-        names = os.listdir(d)
-    except FileNotFoundError:
-        return []
-    except OSError as e:
-        raise HoldersUnknown(f"the storage locks folder can't be read ({e.strerror or e})")
-    out = []
-    for f in sorted(names):
-        if not f.endswith(".json"):
-            continue
-        try:
-            fd = os.open(os.path.join(d, f), os.O_RDONLY | os.O_NOFOLLOW)
-        except FileNotFoundError:
-            continue                    # let go of meanwhile
-        except OSError as e:
-            raise HoldersUnknown(f"the storage lock record {f} can't be read ({e.strerror or e})")
-        try:
-            with os.fdopen(fd) as fh:
-                rec = json.loads(fh.read(1 << 20))
-        except (OSError, ValueError, UnicodeDecodeError) as e:
-            raise HoldersUnknown(f"the storage lock record {f} can't be read ({e})")
-        if not isinstance(rec, dict):
-            raise HoldersUnknown(f"the storage lock record {f} isn't one")
-        rec["_file"] = f
-        out.append(rec)
-    return out
-
-
 def _related(a, b):
     """Two paths of which one is the other or inside it, compared as the filesystem compares names, links resolved."""
     try:
@@ -3820,11 +3879,11 @@ def volume_users(name, path=None):
     """(VM, checkout) of every computer that has the volume, or what's inside or around its folder, attached now: the
     live records of its holders (an attached disk, a shared folder, an S3 copy kept in sync, a folder volume whose path
     is the copy, inside it or holding it), never a command's own operation record. Records that can't be read raise
-    HoldersUnknown (holder_records), and so does one that may be the volume's whose holder can't be told: no VM, or a
-    process that may be alive (holder_state "unknown": no valid pid or start time, or ps can't say). Only a holder
+    HoldersUnknown (all_locks(strict=True)), and so does one that may be the volume's whose holder can't be told: no VM,
+    or a process that may be alive (holder_state "unknown": no valid pid or start time, or ps can't say). Only a holder
     whose process is certainly gone is left out."""
     out = set()
-    for r in holder_records():
+    for r in all_locks(strict=True):
         vm = r.get("vm")
         if isinstance(vm, str) and vm.startswith(OPERATION):
             continue
@@ -3833,7 +3892,7 @@ def volume_users(name, path=None):
             if isinstance(rname, str) and rname and (not path or isinstance(rpath, str)):
                 continue                # another volume's
         if not isinstance(vm, str) or not vm:
-            raise HoldersUnknown(f"the storage lock record {r['_file']} names no VM")
+            raise record_unknown(os.path.join(state_home(), "locks", r["_file"]), "it names no VM")
         state = holder_state(r)
         if state == "unknown":
             raise HoldersUnknown(f"whether the holder of the storage lock record {r['_file']} (VM '{vm}', process "
@@ -3883,8 +3942,8 @@ def cmd_volume_sync(a):
     try:
         gated = _who({(vm_name(), "")} | volume_users(rec["name"], rec.get("path")))
     except HoldersUnknown as e:
-        handoff_gate.refuse(f"{e}, so which computers' handoffs to check for volume '{rec['name']}' can't be told; "
-                            "nothing was done")
+        handoff_gate.refuse(f"which computers' handoffs to check for volume '{rec['name']}' can't be told, so nothing "
+                            f"was done: {e}")
     gate_computers(gated)
 
     def same_users():

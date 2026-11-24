@@ -379,82 +379,30 @@ def load(env=None):
 DEFAULT_VM_NAME = "metacomputer"
 
 # --- the settings a handoff gate tells computers by (computers()), read strictly ----------------------------------
-# scripts/lib.sh sources a settings file as bash. This reads it without running anything, so it reads only what it can
-# read exactly as bash would and raises Unclear for the rest: a setting it can't read is never taken as missing (a
-# default: another computer's folder). Read line by line, a file may have:
-#   blank lines and comments;
-#   KEY=value lines, optionally after `export `, then optional spaces and a # comment. The value is one unquoted word
-#     (letters, digits, / . _ - : @ % + , =, a leading ~ or ~/, $NAME or ${NAME}), one "double-quoted" string (no
-#     backslash or backquote, $ only as $NAME or ${NAME}) or one 'single-quoted' string;
-#   any other line, as long as it doesn't name one of the settings computers() reads (WATCHED) anywhere, doesn't read
-#     another file or run text as commands (source, ., eval), turn on exporting everything (set -a, set -o allexport)
-#     or may set a variable by a name it builds (declare, typeset, local, readonly, printf, read, mapfile, readarray,
-#     let, getopts, unset: refused wherever they are).
-# From a line that may start something bash reads across lines (a quote or a line left open, a here-document) or a
-# part it may not run (if, case, a loop, braces, parentheses, a function, return or exit) on, a line that names one of
-# those settings raises, even as KEY=value. A value's $HOME, $LAB_ROOT (and ~ where bash expands it) are read; a
-# folder that uses any other variable, or isn't absolute, is None (it can't be told), a name or place that does raises.
-WATCHED = ("VM_NAME", "RUN_DIR", "SSH_DIR", "PROVIDER", "PLACE")
+# scripts/lib.sh sources a settings file as bash. This reads it without running anything, and only when the whole file
+# is plain assignments: every line is blank, a comment, or exactly one
+#   [export ]NAME=VALUE, then optional spaces or tabs and an optional # comment,
+# whose VALUE is one unquoted word (letters, digits, / . _ - : @ % + , =, a leading ~ or ~/, $NAME or ${NAME}), one
+# "double-quoted" string (no backslash or backquote, $ only as $NAME or ${NAME}) or one 'single-quoted' string (or
+# several joined by \', as `vm create` writes a quote in a value). Any other line, anywhere in the file, raises Unclear:
+# a command, a $var command, control flow, a function, a here-document, a line continued or chained (\, &&, ||, |, ;,
+# &), a value with anything else in it (;&|<>() or a backquote, $(, a space, a ~ past the start, a backslash). So does
+# an assignment to a variable this reader puts into values (EXPANDED: HOME, LAB_ROOT), since bash would use the new
+# value from there on. A setting it can't read is never taken as missing (a default: another computer's folder). A
+# value's $HOME, $LAB_ROOT (and ~ where bash expands it) are read; a folder that uses any other variable, or isn't
+# absolute, is None (it can't be told), a name or place that does raises.
+EXPANDED = ("HOME", "LAB_ROOT")
 
 
 class Unclear(ValueError):
-    """A settings file this can't read as scripts/lib.sh would (computers()): which computer it is can't be told."""
+    """A settings file that isn't plain assignments only (computers()): which computer it is can't be told."""
 
 
 _REF = r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
 _ASSIGN = re.compile(r"[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)="
-                     r"(\"(?:[^\"\\`$\n]|" + _REF + r")*\"|'[^'\n]*'|(?:~(?=/|[ \t]|$))?(?:[A-Za-z0-9_./:@%+,=-]|"
-                     + _REF + r")*)(?:[ \t]+(?:#.*)?)?")
+                     r"(\"(?:[^\"\\`$\n]|" + _REF + r")*\"|'[^'\n]*'(?:\\''[^'\n]*')*"
+                     r"|(?:~(?=/|[ \t]|$))?(?:[A-Za-z0-9_./:@%+,=-]|" + _REF + r")*)(?:[ \t]+(?:#.*)?)?")
 _BLANK = re.compile(r"[ \t]*(?:#.*)?")
-_WATCHED = re.compile(r"(?<![A-Za-z0-9_])(?:" + "|".join(WATCHED) + r")(?![A-Za-z0-9_])")
-_SETTERS = frozenset(("source", ".", "eval", "declare", "typeset", "local", "readonly", "printf", "read", "mapfile",
-                      "readarray", "let", "getopts", "unset"))
-_RAW_SETTER = re.compile(r"(?<![A-Za-z0-9_.-])(?:" + "|".join(sorted(_SETTERS - {"."})) + r")(?![A-Za-z0-9_-])"
-                         r"|(?:^|[;&|({\s])\.(?=[ \t])|allexport|(?<![A-Za-z0-9_-])set[ \t]+[-+][A-Za-z]*a")
-_BLOCKS = frozenset(("if", "then", "elif", "else", "fi", "case", "esac", "for", "select", "while", "until", "do",
-                     "done", "function", "return", "exit", "{", "}"))
-
-
-def _lex(line):
-    """(the words of one line as bash splits them, quotes and backslashes removed, each of ; & | ( ) < > a word of its
-    own; a # that starts a word ends the line), and whether the line ends where it began (no quote, no line end
-    escaped)."""
-    words, cur, has, i, n = [], "", False, 0, len(line)
-    while i < n:
-        c = line[i]
-        if c in " \t;&|()<>":
-            if has:
-                words.append(cur)
-                cur, has = "", False
-            if c not in " \t":
-                words.append(c)
-            i += 1
-        elif c == "#" and not has:
-            break
-        elif c == "\\":
-            if i + 1 >= n:
-                return words, False
-            cur, has, i = cur + line[i + 1], True, i + 2
-        elif c == "'":
-            j = line.find("'", i + 1)
-            if j < 0:
-                return words, False
-            cur, has, i = cur + line[i + 1:j], True, j + 1
-        elif c == '"':
-            j, s = i + 1, ""
-            while j < n and line[j] != '"':
-                if line[j] == "\\" and j + 1 < n:
-                    s, j = s + line[j + 1], j + 2
-                else:
-                    s, j = s + line[j], j + 1
-            if j >= n:
-                return words, False
-            cur, has, i = cur + s, True, j + 1
-        else:
-            cur, has, i = cur + c, True, i + 1
-    if has:
-        words.append(cur)
-    return words, True
 
 
 def _label(path):
@@ -462,79 +410,44 @@ def _label(path):
     return "~" + path[len(home):] if home and path.startswith(home + "/") else path
 
 
-def _setter(words):
-    """The word that makes a line able to set a variable by a name it builds, read another file or run text as commands
-    (or export everything), or None."""
-    for k, w in enumerate(words):
-        if w in _SETTERS:
-            return w
-        if w == "set" and any(x == "allexport" or (x[:1] in "-+" and "a" in x[1:]) for x in words[k + 1:]):
-            return "set -a"
-    return None
-
-
-def _opens(words):
-    """Whether a line's words may start something bash reads across lines (a here-document) or a part it may not run:
-    a block's word, braces, a parenthesis that isn't a $( or $((, return or exit."""
-    for k, w in enumerate(words):
-        if w in _BLOCKS:
-            return True
-        if w == "<" and k and words[k - 1] == "<":
-            return True
-        if w == "(" and not (k and (words[k - 1].endswith("$") or words[k - 1] == "(")):
-            return True
-    return False
-
-
 def _parse_strict(path, missing_ok=False):
-    """{KEY: its value as written} from the settings file at PATH, read as the notes above say. A missing file is {}
-    when MISSING_OK; one that is there but can't be read raises OSError; one that can't be read as bash would raises
-    Unclear (a ValueError)."""
+    """{NAME: its value as written} from the settings file at PATH, read as the notes above say: a file of plain
+    assignments only. A missing file is {} when MISSING_OK; one that is there but can't be read raises OSError; any
+    line that isn't blank, a comment or one plain assignment, an assignment to HOME or LAB_ROOT, and text that isn't
+    UTF-8 raise Unclear (a ValueError)."""
     try:
-        with open(path, newline="") as f:        # a carriage return is part of the line, as bash reads it
-            text = f.read()
+        with open(path, "rb") as f:
+            raw = f.read()
     except FileNotFoundError:
         if missing_ok:
             return {}
         raise
-    vals, block, loose = {}, False, False
-    for n, line in enumerate(text.split("\n"), 1):
-        where = f"{_label(path)} line {n}"
-        if loose:       # inside, or after, something bash reads across lines: only what can't matter
-            m = _WATCHED.search(line)
-            if m or _RAW_SETTER.search(line):
-                raise Unclear(f"{where} {'names ' + m.group(0) if m else 'may set variables'} after a line this reads "
-                              "only as bash would read the lines after it (a quote, a line or a here-document left "
-                              "open), so its settings can't be told here")
-            continue
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Unclear(f"{_label(path)} isn't UTF-8 text, so its settings can't be told") from None
+    vals = {}
+    for n, line in enumerate(text.split("\n"), 1):     # a carriage return is part of the line, as bash reads it
         if _BLANK.fullmatch(line):
             continue
         m = _ASSIGN.fullmatch(line)
-        if m and not block:
-            vals[m.group(1)] = m.group(2)
-            continue
-        hit = _WATCHED.search(line)
-        if hit:
-            raise Unclear(f"{where} sets or uses {hit.group(0)} in a way this doesn't read"
-                          + (" (after an if, a loop, a function, braces, parentheses, return or exit)" if m else "")
-                          + ": only KEY=value, KEY=\"value\" or KEY='value' lines, optionally after export, outside "
-                          "any block")
-        words, whole = _lex(line)
-        what = _setter(words)
-        if what:
-            raise Unclear(f"{where} uses {what}, so which settings it sets can't be told without running it")
-        if not whole or _opens(words):
-            loose = loose or not whole or any(w == "<" and k and words[k - 1] == "<" for k, w in enumerate(words))
-            block = True
+        if not m:
+            raise Unclear(f"{_label(path)} line {n} isn't a plain assignment (only NAME=value, NAME=\"value\" or "
+                          "NAME='value' lines, optionally after export and with a # comment after; anything else "
+                          "refuses), so its settings can't be told without running it")
+        if m.group(1) in EXPANDED:
+            raise Unclear(f"{_label(path)} line {n} sets {m.group(1)}, which the settings' values are read with, so "
+                          "they can't be told without running it")
+        vals[m.group(1)] = m.group(2)
     return vals
 
 
 def _value(token, root, home):
-    """A setting's value as bash would give it from its token (_ASSIGN's): a single-quoted one as written; otherwise
-    with $HOME and $LAB_ROOT (braced or not) put in, and an unquoted leading ~ as the home folder. None when it uses
-    any other variable."""
+    """A setting's value as bash would give it from its token (_ASSIGN's): a single-quoted one as written (pieces
+    joined by \\' with a quote); otherwise with $HOME and $LAB_ROOT (braced or not) put in, and an unquoted leading ~
+    as the home folder. None when it uses any other variable."""
     if token[:1] == "'":
-        return token[1:-1]
+        return token[1:-1].replace("'\\''", "'")
     quoted = token[:1] == '"'
     s = token[1:-1] if quoted else token
     if not quoted and (s == "~" or s.startswith("~/")):
@@ -605,7 +518,7 @@ def computers(root=None, home=None, env=None):
     (compared by real path; ENV's, this process's environment for this checkout and none for another), read as
     scripts/lib.sh reads it: the defaults, then that file, with MCOMP_VM naming the same file when it's set too. That
     one comes first: where two settings files give one name, it's the one this process acts on. Every file is read
-    strictly (_parse_strict): one that is there but can't be read raises OSError, one that can't be read as bash would
+    strictly (_parse_strict): one that is there but can't be read raises OSError, one that isn't plain assignments only
     raises Unclear, and so does an MCOMP_CONFIG that isn't a file, that MCOMP_VM disagrees with, that names a
     config/vms/ computer's name, or puts its computer elsewhere (only config/vms/ computers can be). What a gate uses
     this for refuses then, never reading them as none. A folder its settings give in a way this can't tell is None.

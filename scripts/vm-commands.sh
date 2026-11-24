@@ -436,7 +436,7 @@ print(" ".join(out))') "
   {
     printf '%s\n' "# metacomputer settings for the VM $name, made by \`metacomputer vm create\` on $(date '+%Y-%m-%d')." \
       "# Used by: metacomputer --vm $name COMMAND (or MCOMP_VM=$name). Read after config/defaults.env, on its own:" \
-      "# config/local.env isn't read for this VM. Bash syntax. Its own names and ports:" \
+      "# config/local.env isn't read for this VM. Plain NAME=value lines only; anything else refuses. Its own names and ports:" \
       "VM_NAME=$name" "BASELINE_NAME=$name-baseline" "SSH_PORT=$ssh" "VNC_PORT=$vnc" \
       ${rprov:+"# Where it is: a computer reached over SSH (docs/remote.md, docs/sprites.md). SSH_PORT is kept only so no two"} \
       ${rprov:+"# computers here share a port; VNC_PORT is where its live view's SSH tunnel listens on this Mac."} \
