@@ -28,8 +28,9 @@ The labels:
             channel: tests/test_hub.py, tests/test_handoff.py): acting ones wait, reads go on.
   THROUGH   changes a computer only through other entries, named in its note, each of which waits on its own (or runs
             only the command its caller hands it, after `--`).
-  ONGOING   runs on as part of a start that waited (the folder watcher; an allowlist's own end at its time): never a
-            change anyone makes now, and never holding the lock for hours.
+  ONGOING   an allowlist's own end at its time (netpolicy _expire, started by the allow that waited): never a change
+            anyone makes now, and never holding the lock for hours. (The folder watcher is ACTS: it looks once when it
+            starts, the hold of the start that starts it handed on, and holds nothing while it runs.)
   GUEST     runs inside the computer; reached only through an entry on the Mac that waits.
   NONE      changes no computer: reads one, or works only on this Mac (its settings, records, the vault, files, the
             repository) or at a provider's account level.
@@ -125,8 +126,9 @@ PROGRAMS = {
     "lib/page_guest.py": GUEST,
     "lib/placement.py": NONE,
     "lib/proxywrap.py": THROUGH,                            # the caller's command (a provider's tunnel)
+    # save starts the guest's recorder stream: it checks a --hold-fd it's handed is a hold, else looks for itself
     "lib/recording.py": {"sidecar": NONE, "finalize": NONE, "moments": NONE, "probe": NONE, "unsynced": NONE,
-                         "save": THROUGH, "capture": THROUGH},   # the caller's command (record start's, under its hold)
+                         "save": ACTS, "capture": THROUGH},      # capture: the caller's command, a read of the guest
     "lib/remote.py": {
         "target": NONE, "tunnel": NONE, "probe": NONE, "missing": NONE, "status": NONE, "state": NONE, "rates": NONE,
         "user-data": NONE, "plan": NONE, "key-lists": NONE, "setup-done": NONE, "identity": NONE,   # this Mac's records
@@ -146,7 +148,7 @@ PROGRAMS = {
         "attached": NONE, "status": NONE,
         "volume sync": ACTS, "prepare": ACTS, "started": ACTS, "attach": ACTS, "release": ACTS, "kill-vm": ACTS,
         "checkpoint": when(has("save", "restore", "delete"), ACTS, NONE),
-        "watch": ONGOING},
+        "watch": ACTS},                 # long-running: it looks once when it starts and holds nothing (look_once)
     "lib/termsafe.py": NONE,
     "lib/traces.py": NONE,                                  # the hub records; the traces are files on the Mac
     "lib/tunnellog.py": THROUGH,                            # the caller's command (a tunnel)

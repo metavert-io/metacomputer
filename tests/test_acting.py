@@ -340,6 +340,11 @@ def entry_checks(td, rows):
         plain, user, held = res
         rc, out, err, called, written = plain
         acted = acting_calls(called)
+        if rc == 2 and not acted and not written:
+            # A line made from the declaration that isn't whole (`save x`, with no command after --): refused as a
+            # usage error, before anything, which is all it does.
+            check(f"{words}: not a whole line (a usage error): refused before anything is called or written", True)
+            continue
         if label == acting.ACTS:
             check(f"{words}: while the user has the computer, by itself: exit 4, saying so; nothing called, connected or "
                   "written", rc == 4 and WAITS in err and not acted and not written, (rc, acted[:3], written[:3], err[-300:]))
@@ -551,11 +556,28 @@ def binding_checks(td):
             rc, out, err, called, written = run_line(lab, put, extra, "plain", other_run)
             check(f"guest_put.py with a transport to VM other ({how}), while other has a handoff open: exit 4, nothing "
                   "called", rc == 4 and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+        # A transport that names none of this checkout's computers is checked at the run folder it's given (where such
+        # a command goes can't be told here: the same-account limit, SECURITY.md).
         bare = [PY, "-B", os.path.join(co, "lib", "guest_put.py"), "--transport", "2", "ssh", "-T", os.path.join(co, "install.sh")]
-        rc, out, err, called, written = run_line(lab, bare, {"MCOMP_RUN_DIR": main_run}, "plain", other_run)
-        check("guest_put.py with a transport that names no computer and the main VM's run folder: refused (exit 4: "
-              "which computer can't be told), nothing called", rc == 4 and not acting_calls(called),
+        handoff_on(main_run)
+        rc, out, err, called, written = run_line(lab, bare, {"MCOMP_RUN_DIR": main_run}, "plain", main_run)
+        check("guest_put.py with a transport that names no computer is checked at the run folder it's given: with a "
+              "handoff open there, exit 4, nothing called", rc == 4 and WAITS in err and not acting_calls(called),
               (rc, acting_calls(called)[:3], err[-300:]))
+        # storage.py attach reaches the guest through the transport it's given: a transport to other is checked at
+        # other (codex re-check 2, #1), whichever VM it was run for.
+        os.remove(os.path.join(main_run, "owners", "handoff.state"))
+        write(os.path.join(main_run, "storage-plan.json"), json.dumps({"items": []}))
+        att = [PY, "-B", os.path.join(co, "lib", "storage.py"), "attach", "--transport", "4", "ssh", "-o",
+               f"UserKnownHostsFile={kh}", "-T"]
+        rc, out, err, called, written = run_line(lab, att, {"MCOMP_RUN_DIR": main_run}, "plain", other_run)
+        check("storage.py attach run for the main VM with a transport to VM other, while other has a handoff open: "
+              "refused (exit 4), nothing called", rc == 4 and not acting_calls(called),
+              (rc, acting_calls(called)[:3], err[-300:]))
+        rc, out, err, called, written = run_line(lab, att, {"MCOMP_RUN_DIR": other_run, "MCOMP_VM_NAME": "other"},
+                                                 "plain", other_run)
+        check("...and run for other itself, its handoff open: exit 4, saying the user has it, nothing called",
+              rc == 4 and WAITS in err and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
     finally:
         lab.close()
 
@@ -689,7 +711,66 @@ def session_guard_checks(td):
         check("scripts/build-vm.sh run by itself with a session check that crashes: refused before its handoff check, "
               "saying the check wasn't made; nothing called", rc == 1 and "couldn't check which computer" in err
               and "going on" not in err and not acted, (rc, acted[:3], err[-300:]))
+        # One that's missing, or can't be read: Python says so with exit 2, the check's own "couldn't tell" (codex
+        # re-check 2, #9). The program is looked at first: refused.
+        sv = os.path.join(lab.box.co, "lib", "sessionvm.py")
+        for how in ("missing", "unreadable"):
+            if how == "missing":
+                os.remove(sv)
+            else:
+                write(sv, "import sys\nsys.exit(0)\n")
+                os.chmod(sv, 0)
+            rc, out, err, called, _ = run_line(lab, [lab.box.mc, "inspect", "windows"], {}, "plain",
+                                               os.path.join(lab.box.co, ".run"))
+            acted = acting_calls(called)
+            check(f"metacomputer inspect with the session check {how}: refused (exit 1), nothing called",
+                  rc == 1 and "session check" in err and not acted, (rc, acted[:3], err[-300:]))
+            rc, out, err, called, _ = run_line(lab, ["/bin/bash", os.path.join(lab.box.co, "scripts", "build-vm.sh")],
+                                               {}, "plain", os.path.join(lab.box.co, ".run"))
+            acted = acting_calls(called)
+            check(f"scripts/build-vm.sh with the session check {how}: refused (exit 1) before its handoff check, nothing "
+                  "called", rc == 1 and "session check" in err and not acted, (rc, acted[:3], err[-300:]))
+        os.chmod(sv, 0o644)
     finally:
+        lab.close()
+
+
+def unreadable_settings_checks(td):
+    """Settings that are there but can't be read are never read as none (codex re-check 2, #8): what chooses a handoff to
+    check from them refuses (exit 4)."""
+    print("\nsettings that can't be read: the gates refuse")
+    lab = make_lab(td, "unread")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    vms = os.path.join(lab.box.co, "config", "vms")
+    try:
+        co = lab.box.co
+        lab.box.settings("config/vms/oc.env", "SSH_PORT=2405\nVNC_PORT=6105\nPLACE=oci\nPROVIDER=oci\nTRANSPORT=ssh\n"
+                                              "EGRESS=internet\n")
+        oc_run = os.path.join(co, ".run-vms", "oc")
+        handoff_on(oc_run)
+        rp = [PY, "-B", os.path.join(co, "lib", "remote.py"), "cloud", "setup", "oci"]
+        kh = os.path.join(lab.box.home, ".ssh", "metacomputer-other", "known_hosts")
+        put = [PY, "-B", os.path.join(co, "lib", "guest_put.py"), "--transport", "4", "ssh", "-o", f"UserKnownHostsFile={kh}",
+               "-T", os.path.join(co, "install.sh")]
+        kill = [PY, "-B", os.path.join(co, "lib", "storage.py"), "kill-vm"]
+        for what, target in (("the config/vms folder", vms), ("a config/vms file", os.path.join(vms, "oc.env"))):
+            os.chmod(target, 0)
+            try:
+                rc, out, err, called, written = run_line(lab, rp, {}, "plain", oc_run)
+                check(f"cloud setup oci with {what} unreadable: refused (exit 4) before the provider is asked anything",
+                      rc == 4 and "can't be" in err and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+                rc, out, err, called, written = run_line(lab, put, {}, "plain", oc_run)
+                check(f"guest_put.py with a transport to VM other, {what} unreadable: refused (exit 4), nothing called",
+                      rc == 4 and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+                rc, out, err, called, written = run_line(lab, kill, {"MCOMP_VM_NAME": "other"}, "plain", oc_run)
+                check(f"storage.py kill-vm for VM other, no run folder given, {what} unreadable: refused (exit 4)",
+                      rc == 4 and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+            finally:
+                os.chmod(target, 0o755 if os.path.isdir(target) else 0o644)
+    finally:
+        os.chmod(vms, 0o755)
         lab.close()
 
 
@@ -699,6 +780,7 @@ def main():
         rows = all_rows()
         table_checks(rows)
         session_guard_checks(td)
+        unreadable_settings_checks(td)
         binding_checks(td)
         volume_checks(td)
         cloud_setup_checks(td)

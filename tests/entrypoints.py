@@ -22,6 +22,14 @@ import os
 import re
 import subprocess
 
+# Programs this scan doesn't find, and why they're outside tests/test_acting.py's sweep. The vault is compiled Swift
+# (scripts/build-vault.sh), run from an installed copy, and walked form by form by tests/test_vault_ops.py; its own CLI
+# run directly (`mcomp-vault fill ...`) isn't handoff-gated: `metacomputer secrets fill|login|session load` and the hub's
+# fills are (bin/metacomputer handoff_hold). A program running as you can call the vault's CLI as it can ssh: the
+# same-account limit (SECURITY.md).
+OUTSIDE = {"vault/ (mcomp-vault)": "compiled Swift, run from an installed copy; its own CLI isn't handoff-gated, "
+                                   "metacomputer's secrets commands and the hub's fills are (the same-account limit)"}
+
 TESTS = os.path.dirname(os.path.abspath(__file__))
 LAB = os.path.dirname(TESTS)
 G, R, S = ("provisioning/guest/rootfs/opt/metacomputer/bin/", "provisioning/remote/rootfs/opt/metacomputer/bin/",
