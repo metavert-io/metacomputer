@@ -56,6 +56,10 @@ class Adapter:
     name = "adapter"
     manifest = {}
     test_only = False
+    # Whether making a computer here, or the provider's setup, rewrites something its other computers use too (a shared
+    # network's rules): lib/remote.py then holds the handoff check of every computer of this provider's, not only the
+    # one being made (lib/handoff_gate.py wait_or_hold_all).
+    SHARED_NETWORK_CHANGES = False
 
     def _no(self, what, reason=None):
         raise NotSupported(self.name, what, reason)

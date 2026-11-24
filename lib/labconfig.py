@@ -373,6 +373,48 @@ def load(env=None):
     return vals
 
 
+def _expand(value, root, home):
+    """A folder setting as scripts/lib.sh would read it ($HOME, $LAB_ROOT and ~ only), or None when it says more."""
+    if value is None:
+        return None
+    for k, v in (("${HOME}", home), ("$HOME", home), ("${LAB_ROOT}", root), ("$LAB_ROOT", root)):
+        value = value.replace(k, v)
+    value = os.path.expanduser(value)
+    return None if "$" in value or "`" in value else value
+
+
+def computers(root=None, home=None):
+    """The computers a checkout (ROOT, this one by default) has settings for, each {name, file, run_dir, ssh_dir,
+    provider, place}: its main one (config/local.env, else the defaults) and one per config/vms/NAME.env, whose folders
+    are fixed by its name (scripts/lib.sh mc_vm_default). A folder its settings spell in a way this can't read is None.
+    Plain values only, as everywhere here; nothing is run."""
+    root = os.path.abspath(root or LAB)
+    home = home or os.environ.get("HOME") or os.path.expanduser("~")
+    base = _parse(os.path.join(root, "config", "defaults.env"))
+    main_file = os.path.join(root, "config", "local.env")
+    main = dict(base)
+    if os.path.isfile(main_file):
+        main.update(_parse(main_file))
+    out = [{"name": main.get("VM_NAME") or "", "file": main_file,
+            "run_dir": _expand(main.get("RUN_DIR") or os.path.join(root, ".run"), root, home),
+            "ssh_dir": _expand(main.get("SSH_DIR") or os.path.join(home, ".ssh", "metacomputer"), root, home),
+            "provider": main.get("PROVIDER") or "", "place": main.get("PLACE") or ""}]
+    vms = os.path.join(root, "config", "vms")
+    try:
+        names = sorted(f[:-4] for f in os.listdir(vms) if f.endswith(".env") and _NAME.fullmatch(f[:-4]))
+    except OSError:
+        names = []
+    for n in names:
+        s = dict(base)
+        for k in IDENTITY:
+            s.pop(k, None)
+        s.update(_parse(os.path.join(vms, n + ".env")))
+        out.append({"name": n, "file": os.path.join(vms, n + ".env"), "run_dir": os.path.join(root, ".run-vms", n),
+                    "ssh_dir": os.path.join(home, ".ssh", "metacomputer-" + n), "provider": s.get("PROVIDER") or "",
+                    "place": s.get("PLACE") or ""})
+    return out
+
+
 CONFIG = load()
 GUEST_USER = CONFIG.get("GUEST_USER", "cua")
 GUEST_HOME = os.path.join("/home", GUEST_USER)

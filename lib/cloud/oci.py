@@ -564,6 +564,9 @@ class OCI(RemoteVM):
     # Its security groups are acted on only as the computer's record names them: by the ids recorded from their create
     # answers, and by the marks of the operations recorded for it, each read by its id and checked (lib/remote.py)
     groups_by_record = True
+    # `cloud setup` and every create (make_network) rewrite the shared VCN's route table and security list, which every
+    # computer of it here uses: every one of them waits during a handoff (lib/remote.py, lib/handoff_gate.py).
+    SHARED_NETWORK_CHANGES = True
     thing = "instance"
     size_of = staticmethod(size_of)
 

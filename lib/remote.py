@@ -1555,6 +1555,23 @@ def changes_computer(a):
     return False
 
 
+def shared_network_computers(a):
+    """For `cloud setup PROVIDER` and `create --vm NAME`: this checkout's computers at that provider (config/vms/, by
+    their PROVIDER) when its adapter's setup and creates rewrite a network they share; [] otherwise."""
+    import labconfig
+    comps = [c for c in labconfig.computers(LAB) if c["file"].startswith(os.path.join(LAB, "config", "vms") + os.sep)]
+    if a.cmd == "cloud" and a.action == "setup":
+        prov = a.provider
+    elif a.cmd == "create":
+        prov = next((c["provider"] for c in comps if c["name"] == a.vm), "")
+    else:
+        return []
+    cls = cloud.ADAPTERS.get(prov)
+    if not cls or not getattr(cls, "SHARED_NETWORK_CHANGES", False):
+        return []
+    return [c for c in comps if c["provider"] == prov]
+
+
 def main(argv=None):
     """The command line. Everything it prints, on standard output and error, passes no_creds (NoCreds)."""
     real = sys.stdout, sys.stderr
@@ -1668,6 +1685,12 @@ def run(argv=None):
             return 2
         import handoff_gate
         handoff_gate.wait_or_hold(os.path.join(LAB, ".run-vms", a.vm, "owners"))
+    # A provider whose setup and every create rewrite a network its other computers share too (its adapter says so:
+    # SHARED_NETWORK_CHANGES): each of this checkout's computers there waits as well, taken in order.
+    shared = shared_network_computers(a)
+    if shared:
+        import handoff_gate
+        handoff_gate.wait_or_hold_all([os.path.join(c["run_dir"], "owners") for c in shared])
     try:
         if a.cmd == "target":
             return cmd_target(a)

@@ -106,7 +106,14 @@ def vm_name():
 
 
 def run_dir():
-    return os.environ.get("MCOMP_RUN_DIR") or os.path.join(LAB, ".run")
+    """This VM's run folder: MCOMP_RUN_DIR (bin/metacomputer passes it), else the one its settings give the VM this
+    works on (vm_name(): a config/vms/ computer's is fixed by its name), so the folder and the name are one computer's
+    (main()'s handoff gate refuses when they aren't)."""
+    given = os.environ.get("MCOMP_RUN_DIR")
+    if given:
+        return given
+    mine = next((c["run_dir"] for c in labconfig.computers() if c["name"] == vm_name() and c["run_dir"]), None)
+    return mine or os.path.join(LAB, ".run")
 
 
 def guest_home():
@@ -1876,15 +1883,29 @@ def snapshots_of(name):
     return out
 
 
+def checkpoint_vms(snaps):
+    """The VMs whose checkpoints hold a volume's snapshots (snapshots_of): a manifest's folder is its VM's name."""
+    return {os.path.basename(os.path.dirname(m)) for m, _ in snaps}
+
+
 def cmd_volume_delete(a):
     rec = reg_load("volume", check_name(a.name))
     if not rec:
         raise StorageError(f"no volume named {a.name} (metacomputer volume list)")
+    # A disk volume's delete deletes the snapshots of it that computers' checkpoints keep, and rewrites those
+    # checkpoints: each such computer waits during its handoff, before anything (one that has it attached refuses the
+    # delete anyway: reserved(), the holder checks below).
+    gated = checkpoint_vms(snapshots_of(a.name))
+    if gated:
+        gate_computers({(vm, "") for vm in gated})
     if rec.get("kind") == "disk":
         with reserved([rec], "delete"):          # held until the registry entry is gone too
             # While the volume is held, no checkpoint can gain it (a save needs it too); the checkpoints that
             # have it are held as well, so their manifests are rewritten one operation at a time.
             snaps = snapshots_of(a.name)
+            if checkpoint_vms(snaps) - gated:
+                raise StorageError(f"volume '{a.name}' gained a checkpoint while this was checking; nothing was "
+                                   "deleted. Run this again")
             with reserved([], "delete-checkpoints", [ckpt_item_at(m) for m in sorted({m for m, _ in snaps})]):
                 delete_disk(a, rec, snaps)
                 reg_delete("volume", a.name)
@@ -3703,10 +3724,49 @@ def cmd_volume_test(a):
     return 0
 
 
+def volume_users(name, path=None):
+    """(VM, checkout) of every computer that has the volume attached now: the live records of its holders (an attached
+    disk, a shared folder, an S3 copy kept in sync), never a command's own operation record."""
+    out = set()
+    for r in all_locks():
+        vm = str(r.get("vm") or "")
+        if not vm or vm.startswith(OPERATION) or not holder_alive(r):
+            continue
+        if r.get("name") == name or (path and r.get("path") == path):
+            out.add((vm, str(r.get("lab") or "")))
+    return out
+
+
+def gate_computers(pairs):
+    """The handoff gate (lib/handoff_gate.py) of every computer in PAIRS ((VM, checkout); a checkout "" is this one):
+    each told from its checkout's settings (labconfig.computers), this command's own VM as main() told it, all taken in
+    one order (wait_or_hold_all). One that can't be told refuses (exit 4): its handoff can't be checked."""
+    import handoff_gate
+    dirs = []
+    for vm, lab in sorted(pairs):
+        root = os.path.realpath(lab) if lab else lab_root()
+        if vm == vm_name() and root == lab_root():
+            dirs.append(handoff_gate.owners_dir_for(name=vm, run_dir=os.environ.get("MCOMP_RUN_DIR")))
+            continue
+        try:
+            comp = next((c for c in labconfig.computers(root) if c["name"] == vm and c["run_dir"]), None)
+        except Exception:       # noqa: BLE001  (its checkout's settings can't be read)
+            comp = None
+        if comp is None:
+            handoff_gate.refuse(f"VM '{vm}'{'' if root == lab_root() else f' (from {lab})'} uses this volume, but its "
+                                "settings aren't in a checkout this can read, so its handoff can't be checked; nothing "
+                                "was done")
+        dirs.append(os.path.join(comp["run_dir"], "owners"))
+    handoff_gate.wait_or_hold_all(dirs)
+
+
 def cmd_volume_sync(a):
     rec = reg_load("volume", check_name(a.name))
     if not rec or rec.get("kind") != "s3":
         raise StorageError(f"no S3 volume named {a.name} (metacomputer volume list)")
+    # What it syncs is what every computer that has it attached sees: each of them waits during its handoff, not only
+    # the one this command was run for (held by main() already).
+    gate_computers({(vm_name(), "")} | volume_users(rec["name"], rec.get("path")))
     r = s3_sync(rec, reason="manual", force=a.force, resync=a.resync)
     print(("  ✓ " if r["ok"] else "  ! ") + esc(r["summary"]))
     for c in r["conflicts"][:20]:
@@ -4635,9 +4695,11 @@ def main(argv):
     # While the user has the computer (a handoff), what changes it waits (lib/handoff_gate.py): exit 4 before anything
     # is read or written, except at the user's own terminal or under the hold of the command that runs this
     # (bin/metacomputer's start, stop, restore, checkpoint and volume sync; scripts/build-vm.sh).
+    # The computer is the one it acts on: its name (vm_name()) and its run folder (run_dir()) must be one computer's,
+    # told from this checkout's settings (handoff_gate.owners_dir_for); otherwise it refuses.
     if changes_computer(a):
         import handoff_gate
-        handoff_gate.wait_or_hold(os.path.join(run_dir(), "owners"))
+        handoff_gate.wait_or_hold(handoff_gate.owners_dir_for(name=vm_name(), run_dir=os.environ.get("MCOMP_RUN_DIR")))
     try:
         return a.fn(a)
     except StorageError as e:

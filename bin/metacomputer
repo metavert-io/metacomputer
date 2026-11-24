@@ -671,6 +671,9 @@ owners_check() {
 # end (they inherit descriptor 6), so no handoff opens meanwhile: opening one takes the lock exclusively.
 handoff_hold() { # [--user-ok] [--hub-child]: lib/handoff.py guard's
   [ "${HANDOFF_HELD:-}" = 1 ] && return 0   # once per command: opening it again would let go of it meanwhile
+  # A hold the command that runs this one handed on as descriptor 6 itself is kept (scripts/lib.sh
+  # inherited_dispatch_hold), never replaced before it's looked at.
+  if inherited_dispatch_hold 6; then HANDOFF_HELD=1; return 0; fi
   local f="$RUN_DIR/owners/.dispatch"
   { mkdir -p "$RUN_DIR/owners" && ( umask 077; : >> "$f" ) && [ -f "$f" ] && [ ! -L "$f" ]; } 2>/dev/null \
     || die "couldn't open this VM's dispatch lock ($f)"
@@ -690,6 +693,7 @@ handoff_hold_unless_override() { if [ "$OVERRIDE" = 1 ]; then dispatch_hold; els
 # This VM's dispatch lock, shared, on descriptor 6, without looking at the handoff: --override's only.
 dispatch_hold() {
   [ "${HANDOFF_HELD:-}" = 1 ] && return 0
+  if inherited_dispatch_hold 6; then HANDOFF_HELD=1; return 0; fi
   local f="$RUN_DIR/owners/.dispatch"
   { mkdir -p "$RUN_DIR/owners" && ( umask 077; : >> "$f" ) && [ -f "$f" ] && [ ! -L "$f" ]; } 2>/dev/null \
     || die "couldn't open this VM's dispatch lock ($f)"
@@ -3310,7 +3314,7 @@ case "$cmd" in
                 export_options; exec "$PY" "$LAB_ROOT/lib/mcp_lazy.py"
               fi
               vm_running "$VM_NAME" || { echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1; }
-              req="$(driver_request)" || exit 1
+              req="$(driver_request)" || exit $?     # 4: its manifest isn't in the guest yet, and the user has it
               ssh_base mcp
               if [ "$ACTION_LOG" = on ]; then
                 export_options; exec "$PY" "$LAB_ROOT/lib/mcp_relay.py" ssh -T "${SSH_ARGS[@]}" ${req:+"$req"}
