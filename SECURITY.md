@@ -786,13 +786,15 @@ notice (`--say` cleaned like every event) and writes a record,
   (one computer's, by this checkout's settings: the main one, each config/vms/ one, and the one an `MCOMP_CONFIG` file
   chooses, as scripts/lib.sh chooses it), or the one whose SSH folder its transport names (`put`, `attach`, the
   recorder's stream); a transport that names none of this checkout's computers is checked at the run folder it's
-  given. Those settings are read without running them, and only as bash reads them: `KEY=value`, `KEY="value"` and
-  `KEY='value'` lines, optionally after `export` and with a comment after, with `$HOME`, `$LAB_ROOT` and a leading `~`
-  read. A line that sets a computer's name, run or SSH folder, provider or place any other way (a backslash, `+=`,
-  `declare`, text after the value, inside or after an `if`, a loop, braces or a function), and any `source`, `.`,
-  `eval` or `set -a` line, refuse, never read as unset; a folder given with another variable can't be told and refuses
-  where it's needed. So do names that disagree, and settings that can't be read. It stops with exit 4 and the same
-  words, and
+  given. Those settings are read without running them, from plain assignments only; anything else refuses: every line
+  of a settings file must be blank, a comment, or one `NAME=value`, `NAME="value"` or `NAME='value'`, optionally after
+  `export` and with a comment after, with `$HOME`, `$LAB_ROOT` and a leading `~` read. Any other line, anywhere in the
+  file, refuses the whole file, never read as unset: a command, control flow, a function, a here-document, a line
+  continued or chained (`\`, `&&`, `||`, `|`, `;`, `&`), an unquoted value with a space, a backslash, a backquote,
+  `$(`, one of `;&|<>()` or a `~` past its start, a double-quoted one with a backslash, a backquote or a `$` that isn't
+  `$NAME` or `${NAME}`, and an assignment to `HOME` or `LAB_ROOT` (the values are read with them); a folder given with
+  another variable can't be told and refuses where it's needed. So do names that disagree, and settings that can't be
+  read. It stops with exit 4 and the same words, and
   otherwise holds the dispatch lock to the end of its run (the recorder's stream until it's up; the watcher, which
   runs for as long as its VM does, looks once when it starts, then closes every descriptor it has on that lock file,
   so neither it nor what it forks keeps one). Some changes reach several computers, and wait for each that can be told,
@@ -1610,7 +1612,9 @@ Common to every kind:
   folder any VM has read-write, and after the VM starts every attached path must still lead,
   through the same walk, to the file or folder that was checked. Operations on a volume (checkpoint, restore, checkpoint delete,
   resize, delete, an S3 sync) hold it until every change is made, so no VM can attach it, or
-  a read-write folder around it, halfway through.
+  a read-write folder around it, halfway through. Whether something is held is read strictly: a lock record, the
+  locks folder or an image's lock file that's there but can't be read or parsed refuses a start, an operation or a
+  delete, naming it and saying how to clear a stale one, never read as nobody's (`volume list` only shows).
 - **Failing closed means from the Mac.** A storage problem after the VM started (a path
   that changed, the watcher not starting, mounts failing) powers the VM off by ending its
   process on the Mac; the guest is never asked to shut down, so a guest that stalls can't

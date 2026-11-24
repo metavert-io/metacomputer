@@ -85,10 +85,11 @@ All notable changes to metacomputer are recorded here. The format follows
   handoff when no run folder was given), or the computer whose SSH folder its transport names (`put`, `attach`, the
   recorder); a transport that names none of this checkout's computers is checked at the run folder it's given. The
   computers are this checkout's main one, its config/vms/ ones and the one an `MCOMP_CONFIG` file chooses (as
-  scripts/lib.sh chooses it), their settings read without running them and only as bash reads them: `KEY=value`,
-  `KEY="value"` and `KEY='value'` lines, optionally after `export`; a line that sets a computer's name, folders,
-  provider or place any other way, and any `source`, `.`, `eval` or `set -a` line, refuse, as do names that disagree
-  and settings that can't be read. Some changes reach several computers and wait for each that can be told: `volume
+  scripts/lib.sh chooses it), their settings read without running them, from plain assignments only: `NAME=value`,
+  `NAME="value"` and `NAME='value'` lines, optionally after `export` and with a comment after. Anything else refuses:
+  any other line anywhere in a settings file (a command, control flow, a line continued or chained), a value with
+  anything else in it, and an assignment to `HOME` or `LAB_ROOT`; so do names that disagree and settings that can't
+  be read. Some changes reach several computers and wait for each that can be told: `volume
   sync` for every computer the holder records show with the volume, or a folder inside or around its copy, attached
   (records that can't be read, or whose process can't be told alive or gone, refuse; read again under the sync's own
   lock before each exchange, and one that attached meanwhile stops it, though not one that attaches during the last
@@ -157,6 +158,12 @@ All notable changes to metacomputer are recorded here. The format follows
   keeps `record start`'s dispatch lock until it's up, so no handoff opens in between, even if `record start` is
   stopped on the way; a stream that isn't up within 20 s (no bytes from it waiting either: one that ended with nothing
   never started) is ended before the lock goes, so it never starts.
+- **Storage lock records that couldn't be read counted as nobody's.** A VM's `start`, `volume resize`, `volume
+  delete`, a checkpoint and a sync's reservation read them leniently: a locks folder that couldn't be read counted as
+  empty, and a record that couldn't be read or parsed was skipped, so a running VM's disk could be resized under it.
+  Every decision whether something is held now reads them strictly: a lock record, the locks folder or an image's lock
+  file that's there but can't be read or parsed refuses, naming it and how to clear a stale one, with nothing changed
+  (exit 4 where it decides which computers' handoffs a `volume sync` waits for). `volume list` only shows, as before.
 - **`metacomputer get` passed a file name that looks like an option to the VM's `tar` as one** (`get /tmp/--version`
   printed tar's version instead of copying the file). The name goes after `--` now.
 - **A VM's name with an accented letter passed the name check in a UTF-8 locale** (bash's `A-Z` range matches

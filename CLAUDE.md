@@ -159,12 +159,14 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   transport naming none is checked at the run folder given; disagreement or unreadable settings refuse:
   `labconfig.computers` raises on them. It lists the main computer, config/vms/ ones and the MCOMP_CONFIG one (as
   scripts/lib.sh resolves it, first where names collide), reading each file strictly without running it
-  (`_parse_strict`: KEY=value lines, optionally after `export`; a line touching `labconfig.WATCHED` any other way, or
-  after a block, and any source/./eval/set -a line raise `Unclear`; never a default for what it can't read)); what
-  reaches several computers gates each that can be told, in path order (`wait_or_hold_all`: a volume sync's users by
-  the holder records, read strictly (`holder_records`; a holder counts until `holder_state` says "dead", "unknown"
-  refuses) and matched by name or a path inside or around the copy, then read again under the sync lock before each
-  exchange (`users_check`: a
+  (`_parse_strict`: plain assignments only, anything else refuses: every line blank, a comment or one
+  `[export ]NAME=value` (`_ASSIGN`) with an optional comment; any other line anywhere, and an assignment to a variable
+  the values are read with (`labconfig.EXPANDED`: HOME, LAB_ROOT), raise `Unclear`; never a default for what it can't
+  read, and no tracking of bash constructs)); what reaches several computers gates each that can be told, in path
+  order (`wait_or_hold_all`: a volume sync's users by the holder records, read strictly (`all_locks(strict=True)`, as
+  every held decision reads them: acquire, a delete's `holder_of`; lenient only for `volume list` and a holder's own
+  records; a holder counts until `holder_state` says "dead", "unknown" refuses) and matched by name or a path inside
+  or around the copy, then read again under the sync lock before each exchange (`users_check`: a
   newcomer refuses; one that attaches during the last exchange isn't seen); a volume delete's checkpoint owners in
   this checkout; a provider's computers in this checkout when its adapter says `SHARED_NETWORK_CHANGES`). Never take a
   dispatch lock after the sync lock. A caller's hold (bin/metacomputer's fd 6, a script's fd 5, kept by a command run

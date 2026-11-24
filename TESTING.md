@@ -590,12 +590,17 @@ read refuses, and one that attaches after the gate (injected right after it) sto
 exchange; `look_once` with a hold handed on as two descriptors keeps neither (real flocks: an exclusive lock is had
 while it still runs); with no settings files at all the main computer keeps its default name; an Oracle Cloud computer's
 handoff stops `cloud setup oci` and another's create there (Hetzner's setup doesn't wait); settings that can't be read
-(the config/vms folder, a file in it) make `cloud setup`, `put` and `kill-vm` refuse. Settings are read as bash reads
-them or refused: `export RUN_DIR=...` is that folder (`put` and `kill-vm` wait for the handoff there), `export
-PROVIDER=oci` puts a computer in Oracle's gate, a folder with a `~` inside quotes (bash leaves it as written) or a
-variable other than `$HOME` and `$LAB_ROOT` can't be told, and a backslash, `+=`, `declare`, `readonly`, `local`, text
-after the value, a block, a here-document, `source`, `.`, `eval` or `set -a` refuse (`kill-vm` and `put` exit 4 with no
-handoff open), while config/local.env.example's settings, uncommented, read cleanly. A computer chosen by `MCOMP_CONFIG`
+(the config/vms folder, a file in it) make `cloud setup`, `put` and `kill-vm` refuse. Settings files are read as plain
+assignments only; anything else refuses: `export RUN_DIR=...` is that folder (`put` and `kill-vm` wait for the handoff
+there), `export PROVIDER=oci` puts a computer in Oracle's gate, a `'...'\''...'` value (as `vm create` writes a quote)
+reads as one string, a folder with a `~` inside quotes or a variable other than `$HOME` and `$LAB_ROOT` can't be told;
+a backslash, `+=`, `declare`, `readonly`, `local`, text after the value, a block, a function, a here-document,
+`source`, `.`, `eval`, `set -a`, a test, a command's output, a `$var` command (`loader=source`, then `$loader FILE`),
+`true ||` or `true &&` then an assignment, a line ending in `|`, `;`, `&` or `\`, a value with `~` past its start or
+with `()<>`, and `HOME=` or `LAB_ROOT=` (then used) refuse (`kill-vm` and `put` exit 4 with no handoff open for `true
+||`, `$loader` and `HOME=` too), while config/local.env.example's settings, uncommented, read cleanly. `volume resize`
+(sorted as changing no computer: its reservation keeps them off the volume) refuses with a running VM's holder record
+unreadable or not JSON, and with the locks folder unreadable (mode 000 or 300), naming it, the image not truncated. A computer chosen by `MCOMP_CONFIG`
 (the example's second VM, outside the checkout) is its own: a storage command for it goes ahead with only the main
 computer's handoff open and waits with its own, `put` with a transport to it waits, `MCOMP_VM` naming another computer
 refuses, and `MCOMP_CONFIG` naming config/local.env is the main computer. A volume sync refuses when a holder's process
@@ -1662,7 +1667,12 @@ helper agrees on every mount point; the folders that may never go into the VM (p
 folders and their parents, Library and iCloud Drive, dot-folders, `SSH_DIR`, the checkout,
 system folders, the gateway's socket folders), with links resolved; locks (a live holder
 refuses and is named, a dead or reused pid doesn't count, the same VM may take its own
-again, a lock file from another computer refuses, release); the statfs network-filesystem
+again, a lock file from another computer refuses, release); holder records read strictly (a
+running VM's record unreadable, not JSON, not a record or with a `vm` that isn't text: a
+start's storage and `volume resize` refuse, naming it, nothing taken or truncated, while
+`volume list` still shows the volume; the locks folder unreadable and an image's lock file
+not JSON refuse the same; a folder volume's delete refuses with its holder's record not JSON;
+a holder lets go of its own records while another's can't be read); the statfs network-filesystem
 classifier and the warning, and a real network filesystem as a local stand-in (WebDAV served by
 the pinned rclone on 127.0.0.1, mounted with macOS's `mount_webdav`, no root): detected, warned
 about at create and start, and refused once unmounted (skipped until rclone is fetched); the plan for a start (missing images, read-only disk volumes,

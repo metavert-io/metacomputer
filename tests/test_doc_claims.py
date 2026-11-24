@@ -3173,13 +3173,30 @@ CLAIMS = [
                     r"transport names \(`put`, `attach`, the\s+recorder's stream\); a transport that names none of this "
                     r"checkout's computers is checked at the run folder it's\s+given",
      lambda m: computer_bound() and config_computer()),
-    ("SECURITY.md", r"Those settings are read without running them, and only as bash reads them: `KEY=value`, "
-                    r"`KEY=\"value\"` and\s+`KEY='value'` lines, optionally after `export` and with a comment after, "
-                    r"with `\$HOME`, `\$LAB_ROOT` and a leading `~`\s+read. A line that sets a computer's name, run or "
-                    r"SSH folder, provider or place any other way \(a backslash, `\+=`,\s+`declare`, text after the "
-                    r"value, inside or after an `if`, a loop, braces or a function\), and any `source`, `.`,\s+`eval` or "
-                    r"`set -a` line, refuse, never read as unset",
+    ("SECURITY.md", r"Those settings are read without running them, from plain assignments only; anything else refuses: "
+                    r"every line\s+of a settings file must be blank, a comment, or one `NAME=value`, `NAME=\"value\"` or "
+                    r"`NAME='value'`, optionally after\s+`export` and with a comment after, with `\$HOME`, `\$LAB_ROOT` "
+                    r"and a leading `~` read. Any other line, anywhere in the\s+file, refuses the whole file, never read as "
+                    r"unset: a command, control flow, a function, a here-document, a line\s+continued or chained \(`\\`, "
+                    r"`&&`, `\|\|`, `\|`, `;`, `&`\), an unquoted value with a space, a backslash, a backquote,\s+"
+                    r"`\$\(`, one of `;&\|<>\(\)` or a `~` past its start, a double-quoted one with a backslash, a "
+                    r"backquote or a `\$` that isn't\s+`\$NAME` or `\$\{NAME\}`, and an assignment to `HOME` or "
+                    r"`LAB_ROOT` \(the values are read with them\)",
      lambda m: settings_read_strictly()),
+    ("CHANGELOG.md", r"their settings read without running them, from plain assignments only: `NAME=value`,\s+"
+                     r"`NAME=\"value\"` and `NAME='value'` lines, optionally after `export` and with a comment after. "
+                     r"Anything else refuses",
+     lambda m: settings_read_strictly()),
+    ("config/local.env.example", r"as plain assignments only; anything\s+# else refuses",
+     lambda m: settings_read_strictly()),
+    ("SECURITY.md", r"Whether something is held is read strictly: a lock record, the\s+locks folder or an image's lock "
+                    r"file that's there but can't be read or parsed refuses a start, an operation or a\s+delete, naming "
+                    r"it and saying how to clear a stale one, never read as nobody's \(`volume list` only shows\)",
+     lambda m: held_read_strictly()),
+    ("docs/storage.md", r"They're read strictly wherever something is decided from them \(a start, a reservation, a "
+                        r"delete\): a record, the\s+folder or an image's `NAME.img.lock` that's there but can't be read "
+                        r"or parsed refuses, naming it",
+     lambda m: held_read_strictly()),
     ("SECURITY.md", r"Some changes reach several computers, and wait for each that can be told,\s+in one order: `volume "
                     r"sync` for every computer that the holder records show with the volume, or a folder inside or\s+"
                     r"around its copy, attached \(records that are there and can't be read refuse, and so does a holder "
@@ -3301,13 +3318,14 @@ def watcher_and_recorder_gated():
 
 
 def volume_users_strict():
-    """volume_users reads holder records strictly (holder_records: an unreadable folder or record raises), matches a path
-    inside or around the copy (_related), and cmd_volume_sync checks them again under the sync lock (users_check,
-    called before each exchange in s3_sync) and refuses with exit 4 when a newcomer shows."""
-    hr, vu = py_top_fn("lib/storage.py", "holder_records"), py_top_fn("lib/storage.py", "volume_users")
+    """volume_users reads holder records strictly (all_locks(strict=True): an unreadable folder or record raises),
+    matches a path inside or around the copy (_related), and cmd_volume_sync checks them again under the sync lock
+    (users_check, called before each exchange in s3_sync) and refuses with exit 4 when a newcomer shows."""
+    hr, vu = py_top_fn("lib/storage.py", "all_locks"), py_top_fn("lib/storage.py", "volume_users")
     sy, s3 = py_top_fn("lib/storage.py", "cmd_volume_sync"), py_top_fn("lib/storage.py", "s3_sync")
-    return ("except FileNotFoundError:\n        return []" in hr and "raise HoldersUnknown" in hr
-            and "holder_records()" in vu and "_related(" in vu and "inside(a, b) or inside(b, a)" in
+    return ("except FileNotFoundError:\n        return []" in hr and "raise locks_folder_unknown(" in hr
+            and "read_record(os.path.join(d, f), strict)" in hr
+            and "all_locks(strict=True)" in vu and "_related(" in vu and "inside(a, b) or inside(b, a)" in
             py_top_fn("lib/storage.py", "_related")
             and "users_check=same_users" in sy and 'handoff_gate.refuse(f"volume' in sy
             and s3.index("if users_check:\n                    users_check()") < s3.index("root1 = open_copy_root(rec)")
@@ -3326,16 +3344,40 @@ def config_computer():
 
 
 def settings_read_strictly():
-    """labconfig's strict reader: KEY=value lines (optionally after export) fully matched; a line that names a watched
-    setting otherwise, or after a block, raises; so do source, ., eval and set -a; values only with HOME and LAB_ROOT."""
+    """labconfig's strict reader is a closed grammar: every line blank, a comment or one plain assignment (_ASSIGN,
+    fully matched), anything else raises Unclear, and so does an assignment to a variable the values are read with
+    (EXPANDED, the same names _value puts in); no bash construct is tracked. The forms the docs name refuse."""
     import labconfig
     ps = py_top_fn("lib/labconfig.py", "_parse_strict")
-    return (set(labconfig.WATCHED) == {"VM_NAME", "RUN_DIR", "SSH_DIR", "PROVIDER", "PLACE"}
-            and {"source", ".", "eval"} <= labconfig._SETTERS and "m = _ASSIGN.fullmatch(line)" in ps
-            and "if m and not block:" in ps and "hit = _WATCHED.search(line)" in ps and "raise Unclear(" in ps
-            and labconfig._ASSIGN.fullmatch('export RUN_DIR="$LAB_ROOT/x"  # c') is not None
-            and labconfig._ASSIGN.fullmatch("RUN_DIR=/x\\ y") is None
-            and 'known = {"HOME": home, "LAB_ROOT": root}' in py_top_fn("lib/labconfig.py", "_value"))
+    va = py_top_fn("lib/labconfig.py", "_value")
+    full = labconfig._ASSIGN.fullmatch
+    return ("if _BLANK.fullmatch(line):\n            continue" in ps and "m = _ASSIGN.fullmatch(line)" in ps
+            and "if not m:\n            raise Unclear(" in ps and "if m.group(1) in EXPANDED:\n            raise Unclear(" in ps
+            and set(labconfig.EXPANDED) == {"HOME", "LAB_ROOT"} and 'known = {"HOME": home, "LAB_ROOT": root}' in va
+            and not any(hasattr(labconfig, n) for n in ("WATCHED", "_SETTERS", "_BLOCKS", "_lex", "_opens", "_setter"))
+            and "block" not in ps and "loose" not in ps
+            and full('export RUN_DIR="$LAB_ROOT/x"  # c') is not None and full("X='it'\\''s'") is not None
+            and not any(full(x) for x in ("RUN_DIR=/x\\ y", "true ||", "X=1 &&", "$loader f", "X=1 |", "X=1;", "X=1 &",
+                                          "X=a \\", "X=a~b", "X=a(b)", "X=a<b", "X=$(true)", "X=`true`", "X=a b",
+                                          "f() { X=1; }", "X+=1", "declare X=1")))
+
+
+def held_read_strictly():
+    """Every decision whether something is held reads the lock records strictly: acquire (every start, reservation
+    and sync) through all_locks(strict=True), GlobalLock and read_sidecar; a delete's holder_of strict; only volume
+    list's state (volume_state) and a holder's own records (update_holder, release_locks) read leniently. The
+    messages name the file and how to clear a stale one."""
+    acq = py_top_fn("lib/storage.py", "acquire")
+    de, vs = py_top_fn("lib/storage.py", "cmd_volume_delete"), py_top_fn("lib/storage.py", "volume_state")
+    uh, rl = py_top_fn("lib/storage.py", "update_holder"), py_top_fn("lib/storage.py", "release_locks")
+    rr, ru = py_top_fn("lib/storage.py", "read_record"), py_top_fn("lib/storage.py", "record_unknown")
+    src = raw("lib/storage.py")
+    return ("all_locks(strict=True)" in acq and "read_sidecar(sidecar_path(it))" in acq
+            and "raise HoldersUnknown(" in py_top_fn("lib/storage.py", "read_sidecar")
+            and "raise locks_folder_unknown(" in src.split("class GlobalLock:", 1)[1].split("\ndef ", 1)[0]
+            and de.count("strict=True)") == 2 and vs.count("strict=False)") == 2
+            and "all_locks(strict=False)" in uh and "all_locks(strict=False)" in rl
+            and "raise record_unknown(path" in rr and "stale" in ru and "delete that one file" in ru)
 
 
 def holder_liveness_strict():
