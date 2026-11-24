@@ -889,6 +889,213 @@ def unreadable_settings_checks(td):
         lab.close()
 
 
+def strict_reader_checks(td):
+    """labconfig.computers reads settings exactly as scripts/lib.sh's bash would, or raises (codex re-check 4, #1): a
+    setting it can't read is never taken as missing (a default: another computer's folder)."""
+    print("\nthe settings a gate tells computers by: read as bash would, or refused")
+    sys.path.insert(0, os.path.join(LAB, "lib"))
+    import labconfig
+    home = os.path.join(td, "strict-home")
+    n = [0]
+
+    def comps(local=None, vm=None, env=None):
+        n[0] += 1
+        root = os.path.join(td, f"strict-{n[0]}")
+        os.makedirs(os.path.join(root, "config", "vms"))
+        shutil.copy(os.path.join(LAB, "config", "defaults.env"), os.path.join(root, "config", "defaults.env"))
+        if local is not None:
+            write(os.path.join(root, "config", "local.env"), local)
+        if vm is not None:
+            write(os.path.join(root, "config", "vms", "oc.env"), vm)
+        try:
+            kw = {} if env is None else {"env": env}
+            return root, {c["name"]: c for c in reversed(labconfig.computers(root, home, **kw))}, None
+        except Exception as e:      # noqa: BLE001  (a raise is the answer here; an older reader's TypeError too)
+            return root, None, e
+
+    for line, want in (('export RUN_DIR="$LAB_ROOT/.custom-run"', "{root}/.custom-run"),
+                       ("RUN_DIR=\"$HOME/.mc/run\"   # a comment", "{home}/.mc/run"),
+                       ("RUN_DIR='/srv/mc run'", "/srv/mc run"),
+                       ("RUN_DIR=~/mc-run", "{home}/mc-run"),
+                       ('RUN_DIR=""', "{root}/.run"),
+                       ('#RUN_DIR="$HOME/elsewhere"', "{root}/.run"),
+                       ('RUN_DIR="~/mc-run"', None),
+                       ('RUN_DIR="$HOMEX/mc-run"', None),
+                       ('RUN_DIR="$OTHER/mc-run"', None)):
+        root, cs, e = comps(local="VM_NAME=mainvm\n" + line + "\n")
+        exp = want and want.format(root=root, home=home)
+        check(f"config/local.env {line!r}: the run folder is {want or 'not told (None: refused where it matters)'}, as "
+              "bash reads it", cs is not None and cs["mainvm"]["run_dir"] == exp, (e, cs and cs["mainvm"]["run_dir"]))
+    root, cs, e = comps(vm="SSH_PORT=2405\nVNC_PORT=6105\nPLACE=oci\nexport PROVIDER=oci\n")
+    check("config/vms/oc.env 'export PROVIDER=oci': oc's provider is oci (it's in the shared-network gate)",
+          cs is not None and cs["oc"]["provider"] == "oci", (e, cs and cs["oc"]))
+    for line in ("RUN_DIR=$LAB_ROOT/.esc\\ run", 'RUN_DIR="$LAB_ROOT/.esc\\run"', "RUN_DIR+=/x", "declare RUN_DIR=/x",
+                 "readonly RUN_DIR=/x", "local RUN_DIR=/x", "RUN_DIR=/x trailing", "RUN_DIR=/x#y", "RUN_DIR=/x; X=1",
+                 'source "$LAB_ROOT/config/more.env"', '. "$LAB_ROOT/config/more.env"', "eval \"X=1\"", "set -a",
+                 "if true; then\nRUN_DIR=/x\nfi", "cat >/dev/null <<EOF\nRUN_DIR=/x\nEOF", 'X="a\nRUN_DIR=/x\n"',
+                 "RUN_DIR=/x\r", 'VM_NAME="$USER"'):
+        root, cs, e = comps(local=line + "\n")
+        check(f"config/local.env {line!r}: refused (raises), never read as unset", cs is None and e is not None,
+              (cs and cs.get("metacomputer"), e))
+    ex = open(os.path.join(LAB, "config", "local.env.example")).read()
+    uncommented = "\n".join(l[1:] if l[:1] == "#" and l[1:2].isupper() and "=" in l else l for l in ex.split("\n"))
+    root, cs, e = comps(local=uncommented)
+    check("config/defaults.env with config/local.env.example's settings uncommented: read with no refusal",
+          cs is not None and e is None, e)
+    root, cs, e = comps(local="VM_NAME=mainvm\n[ -x /nonexistent ] && PY=/nonexistent\nX=$(true)\n")
+    check("lines that set none of a computer's settings (a test, a command's output): read, nothing refused",
+          cs is not None and cs["mainvm"]["run_dir"] == os.path.join(root, ".run"), e)
+    second = os.path.join(td, "strict-second.env")
+    write(second, 'VM_NAME=second\nSSH_DIR="$HOME/.ssh/metacomputer-second"\nRUN_DIR="$HOME/.metacomputer-second/run"\n')
+    root, cs, e = comps(local="VM_NAME=mainvm\n", env={"MCOMP_CONFIG": second})
+    check("MCOMP_CONFIG=second.env (another file): its computer, read as scripts/lib.sh reads it",
+          cs is not None and cs.get("second", {}).get("run_dir") == os.path.join(home, ".metacomputer-second", "run")
+          and "mainvm" in cs, (e, cs and sorted(cs)))
+    for env, how in (({"MCOMP_CONFIG": second, "MCOMP_VM": "mainvm"}, "with MCOMP_VM naming another computer"),
+                     ({"MCOMP_CONFIG": os.path.join(td, "strict-missing.env")}, "naming no file")):
+        root, cs, e = comps(local="VM_NAME=mainvm\n", env=env)
+        check(f"MCOMP_CONFIG {how}: refused (raises)", cs is None and e is not None and "TypeError" not in repr(e),
+              (cs and sorted(cs), e))
+
+
+def config_file_checks(td):
+    """A computer chosen by MCOMP_CONFIG is told from that file (codex re-check 4, #3): config/local.env.example's
+    second VM, run directly with MCOMP_CONFIG and nothing else."""
+    print("\na computer chosen by MCOMP_CONFIG: its own handoff")
+    lab = make_lab(td, "mcfg")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    try:
+        co, st, home = lab.box.co, storage_state(lab), lab.box.home
+        second = os.path.join(lab.box.root, "second.env")
+        write(second, 'VM_NAME=second\nSSH_DIR="$HOME/.ssh/metacomputer-second"\n'
+                      'RUN_DIR="$HOME/.metacomputer-second/run"\nSSH_PORT=2231\nVNC_PORT=5931\n')
+        run2 = os.path.join(home, ".metacomputer-second", "run")
+        man = os.path.join(st, "checkpoints", "second", "saved.json")
+        sp = [PY, "-B", os.path.join(co, "lib", "storage.py"), "checkpoint", "delete", "saved"]
+        write(man, json.dumps({"volumes": []}), 0o600)
+        handoff_on(os.path.join(co, ".run"))         # the main computer's handoff, open: not second's
+        rc, out, err, called, written = run_line(lab, sp, {"MCOMP_CONFIG": second}, "plain", run2)
+        check("MCOMP_CONFIG=second.env storage.py checkpoint delete saved, no handoff open for second (the main "
+              "computer's is): it goes ahead, second's checkpoint deleted", rc == 0 and not os.path.exists(man),
+              (rc, os.path.exists(man), err[-300:]))
+        write(man, json.dumps({"volumes": []}), 0o600)
+        handoff_on(run2)
+        rc, out, err, called, written = run_line(lab, sp, {"MCOMP_CONFIG": second}, "plain", run2)
+        check("...and with second's handoff open: exit 4, saying the user has it, its checkpoint kept",
+              rc == 4 and WAITS in err and os.path.exists(man), (rc, os.path.exists(man), err[-300:]))
+        kh = os.path.join(home, ".ssh", "metacomputer-second", "known_hosts")
+        put = [PY, "-B", os.path.join(co, "lib", "guest_put.py"), "--transport", "4", "ssh", "-o",
+               f"UserKnownHostsFile={kh}", "-T", os.path.join(co, "install.sh")]
+        rc, out, err, called, written = run_line(lab, put, {"MCOMP_CONFIG": second}, "plain", run2)
+        check("MCOMP_CONFIG=second.env guest_put.py with a transport to second, no run folder given, second's handoff "
+              "open: exit 4, saying the user has it, nothing called", rc == 4 and WAITS in err
+              and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+        rc, out, err, called, written = run_line(lab, sp, {"MCOMP_CONFIG": second, "MCOMP_VM": "other"}, "plain", run2)
+        check("MCOMP_CONFIG=second.env with MCOMP_VM=other (different settings, as scripts/lib.sh refuses): refused "
+              "(exit 4), its checkpoint kept", rc == 4 and os.path.exists(man) and "choose different settings" in err,
+              (rc, err[-300:]))
+        rc, out, err, called, written = run_line(lab, [PY, "-B", os.path.join(co, "lib", "storage.py"), "kill-vm"],
+                                                 {"MCOMP_CONFIG": os.path.join(co, "config", "local.env")}, "plain",
+                                                 os.path.join(co, ".run"))
+        check("MCOMP_CONFIG naming config/local.env itself: the main computer (one, not two): with its handoff open, "
+              "exit 4 saying the user has it", rc == 4 and WAITS in err, (rc, err[-300:]))
+    finally:
+        lab.close()
+
+
+def settings_syntax_checks(td):
+    """The programs themselves, with settings bash reads that the old reader didn't (codex re-check 4, #1): `export
+    RUN_DIR=...` is that folder, a value with a backslash and a `source` line refuse."""
+    print("\nsettings written as bash reads them: the right handoff, or a refusal")
+    lab = make_lab(td, "syntax")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    try:
+        co = lab.box.co
+        local = os.path.join(co, "config", "local.env")
+        plain = open(local).read()
+        custom = os.path.join(co, ".custom-run")
+        kill = [PY, "-B", os.path.join(co, "lib", "storage.py"), "kill-vm"]
+        kh = os.path.join(lab.box.home, ".ssh", "metacomputer", "known_hosts")
+        put = [PY, "-B", os.path.join(co, "lib", "guest_put.py"), "--transport", "4", "ssh", "-o",
+               f"UserKnownHostsFile={kh}", "-T", os.path.join(co, "install.sh")]
+        write(local, plain + 'export RUN_DIR="$LAB_ROOT/.custom-run"\n')
+        handoff_on(custom)
+        rc, out, err, called, written = run_line(lab, put, {}, "plain", custom)
+        check("config/local.env 'export RUN_DIR=\"$LAB_ROOT/.custom-run\"', its handoff open there: guest_put.py with "
+              "the main computer's transport, no run folder given, exits 4 saying the user has it; nothing called",
+              rc == 4 and WAITS in err and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+        rc, out, err, called, written = run_line(lab, kill, {}, "plain", custom)
+        check("...and storage.py kill-vm, no run folder given: exit 4, saying the user has it",
+              rc == 4 and WAITS in err, (rc, err[-300:]))
+        os.remove(os.path.join(custom, "owners", "handoff.state"))
+        rc, out, err, called, written = run_line(lab, kill, {}, "plain", custom)
+        check("...with no handoff open there: it goes ahead", rc == 0 and WAITS not in err, (rc, err[-300:]))
+        write(os.path.join(co, "config", "more.env"), 'RUN_DIR="$LAB_ROOT/.custom-run"\n')
+        for line, what in (("RUN_DIR=$LAB_ROOT/.esc\\ run", "a value with a backslash"),
+                           ('source "$LAB_ROOT/config/more.env"', "a source line")):
+            write(local, plain + line + "\n")
+            rc, out, err, called, written = run_line(lab, kill, {}, "plain", custom)
+            check(f"config/local.env with {what}: storage.py kill-vm refuses (exit 4, its settings can't be read), no "
+                  "handoff open anywhere", rc == 4 and "settings" in err and WAITS not in err, (rc, err[-300:]))
+            rc, out, err, called, written = run_line(lab, put, {}, "plain", custom)
+            check(f"...and guest_put.py with the main computer's transport: refused (exit 4), nothing called",
+                  rc == 4 and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+        write(local, plain)
+    finally:
+        lab.close()
+
+
+def holder_liveness_checks(td):
+    """A holder of a volume is left out of a manual sync's gate only when its process is certainly gone (codex re-check
+    4, #2): a live pid that ps can't read, or a record without a start time, refuses (exit 4)."""
+    print("\nvolume sync: a holder whose process can't be told alive or gone")
+    lab = make_lab(td, "live")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    keeper = subprocess.Popen(["/bin/sleep", "600"])
+    try:
+        co, st = lab.box.co, storage_state(lab)
+        other_run, main_run = os.path.join(co, ".run-vms", "other"), os.path.join(co, ".run")
+        copy = os.path.join(lab.box.root, "s3copy")
+        os.makedirs(copy, exist_ok=True)
+        write(os.path.join(st, "registry", "volumes", "shared.json"),
+              json.dumps({"name": "shared", "kind": "s3", "path": copy, "bucket": "b", "endpoint": "https://example.com"}))
+        rec_path = os.path.join(st, "locks", "s3-test-shared.json")
+        base = {"kind": "s3", "name": "shared", "path": copy, "vm": "other", "lab": os.path.realpath(co),
+                "pid": keeper.pid, "pstart": lstart(keeper.pid), "since": "now", "state": "running"}
+        sync = [PY, "-B", os.path.join(co, "lib", "storage.py"), "volume", "sync", "shared"]
+        noisy = os.path.join(lab.box.root, "ps-fails")
+        write(os.path.join(noisy, "ps"), "#!/bin/sh\nexit 1\n", 0o755)
+        env = lab.env(os.devnull)
+        for rec, extra, how in ((base, {"PATH": noisy + ":" + env["PATH"]}, "ps can't read its live process"),
+                                ({k: v for k, v in base.items() if k != "pstart"}, {}, "a record with no start time"),
+                                (dict(base, pid="12"), {}, "a record whose pid isn't a number")):
+            write(rec_path, json.dumps(rec), 0o600)
+            rc, out, err, called, written = run_line(lab, sync, dict(extra, MCOMP_RUN_DIR=main_run), "plain", other_run)
+            check(f"volume sync shared, VM other holding it ({how}), no handoff open anywhere: refused (exit 4) before "
+                  "anything is called", rc == 4 and "can't be told" in err and not acting_calls(called),
+                  (rc, acting_calls(called)[:3], err[-300:]))
+        dead = subprocess.Popen(["/usr/bin/true"])
+        dead.wait()
+        handoff_on(other_run)
+        for rec, how in ((dict(base, pid=dead.pid), "its process gone"),
+                         (dict(base, pstart="Mon Jan  1 00:00:00 2001"), "its pid now another process's")):
+            write(rec_path, json.dumps(rec), 0o600)
+            rc, out, err, called, written = run_line(lab, sync, {"MCOMP_RUN_DIR": main_run}, "plain", other_run)
+            check(f"volume sync shared, the record of VM other ({how}; other's handoff open): other isn't waited for",
+                  WAITS not in err and "can't be told" not in err, (rc, err[-300:]))
+        os.remove(rec_path)
+    finally:
+        keeper.kill()
+        keeper.wait()
+        lab.close()
+
+
 def main():
     td = tempfile.mkdtemp(prefix="mcact-", dir="/tmp")
     try:
@@ -896,6 +1103,10 @@ def main():
         table_checks(rows)
         session_guard_checks(td)
         unreadable_settings_checks(td)
+        strict_reader_checks(td)
+        settings_syntax_checks(td)
+        config_file_checks(td)
+        holder_liveness_checks(td)
         binding_checks(td)
         volume_checks(td)
         look_once_checks(td)
