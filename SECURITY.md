@@ -957,7 +957,11 @@ The 2 hours run from the file's change time, which the kernel sets (a modificati
 time moved into the future doesn't stretch them), or, when not even that can be
 read, from when that was first noticed (kept in `RUN_DIR/handoff-unreadable`); if
 that can't be recorded either, nothing would bound it, so such a record doesn't
-count, and Claude's actions aren't paused by it.
+count, and Claude's actions aren't paused by it. A record that is valid but names
+a reason or an agent this version doesn't know (a newer version wrote it) reads
+as the reason `other` and no agent, with its own state: those only name things in
+messages. While this VM's hub runs other code than the checkout (it started
+before an update), a handoff is written with only what every version reads.
 
 **What it is and isn't.** It's a cooperative pause of Claude's actions, so it
 doesn't fight you for the mouse, and an honest handoff: metacomputer doesn't
