@@ -97,7 +97,8 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   JSON and drain stderr with `lib/wirelimits.py`, and escape the VM's text on a
   terminal (`lib/termsafe.py`).
   `metacomputer call --session NAME` keeps element tokens and driver state
-  between calls. Tests: `python3 tests/test_hub.py` (no VM) and
+  between calls; `call TOOL -` takes the arguments on stdin (text with a `'` in a single-quoted argument loses it to
+  the shell). Tests: `python3 tests/test_hub.py` (no VM) and
   `tests/test_options.py G` (VM).
 - Hidden page text (`HIDDEN_TEXT=on`, `lib/hidden_text.py`, SECURITY.md "Hidden page text"): the hub marks
   page text a person likely can't see, or that addresses AI agents, in the results that carry it; it labels,
@@ -139,8 +140,19 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   user does or a 2FA prompt the vault can't fill, run `metacomputer handoff --why …
   --say "…"` and wait (lib/handoff.py; the record is owners.py's, written under the
   owners lock). While it's open every acting call waits, in the hub for every client
-  and in `sh` (so `metacomputer claude`'s steps), fills and the lifecycle checks, and the
-  inner Claude's keeper renews nothing. Anything new that acts on the VM or holds it for
+  and in `sh` (so `metacomputer claude`'s steps; an agent's `sh --read-only` too, checked again by the dispatch gate),
+  fills, the lifecycle checks and the commands that reach the guest outside the hub (`put`, `ssh`, `rename`, `task
+  start`, `browser profiles`, `security apply`, `record start|stop`, `volume sync`: `handoff_hold_unless_user`, which
+  lets the person at their own terminal through; only the hub's own reset is `--hub-child`), and the inner Claude's
+  keeper renews nothing. Our own scripts that stop, delete or set up a computer (`scripts/build-vm.sh`, every build;
+  `scripts/remote-build.sh`) run the same checks themselves, after their command-line check and before anything
+  changes, whether bin/metacomputer runs them or something else does (scripts/lib.sh `script_session_guard`,
+  `script_handoff_hold`, held to the end). Every value that
+  reaches a shell in the guest is checked first (`record_args_ok`), and file names go after `--`; a recording's
+  stream is started by `record start` itself (`record_stream_start`: no internal command for it), keeping its
+  dispatch lock until the stream is up (`daemonize --keep-fd 6`, `recording.py save --hold-fd 6`); the internal
+  underscore commands that write to the guest check their caller (`owners.py internal-caller`: `_vnc-install` from a
+  build or the user's terminal, `_vnc-push` from the user's terminal). Anything new that acts on the VM or holds it for
   Claude (a hub cleanup or teardown, a raw SSH mutation, a CLI command, a claim renewal) looks again right before it leaves the Mac
   under `owners.acting()` (bash: `handoff_hold`), the dispatch lock that opening a handoff
   takes exclusively; never act between a check and a dispatch. Every input reset (`lib/input_reset.py` reset_now:
@@ -149,7 +161,18 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   (`MCP_HUB=off`); the hub decides a reconnect after one in the same critical section as the send (`before_send`),
   never cuts a running call off; element tokens and snapshot ids are the hub's own per driver runtime (`tag_ids` /
   `untag_ids`; another runtime's are refused before any guard); `input-reset` runs during a handoff only at the user's
-  own terminal (`for_cli`). Never try to pass a check, switch
+  own terminal (`for_cli`); a reset opening left pending (an agent call still running) is made by the command that
+  waits for that handoff once nothing runs (`at_open_handoff`), the same way. While a handoff is open the hub keeps a
+  browser `browser_prepare` launched alive with a read in its driver session (Cua Driver ends idle sessions after 5
+  minutes; it looks at the handoff again under the owners lock right before each read). The Hand back panel
+  (`HANDBACK_PANEL`; lib/handoff.py `run_panel`, `lib/handback_panel.js`) answers only to a click in its macOS window:
+  `/usr/bin/osascript` by absolute path, a fixed script, arguments checked on both sides (agent, VM name by the VM
+  naming rule, where, a place: inside the visible area, never one another panel holds); never add a command, variable
+  or file that answers it, nor a control inside the VM that ends a handoff (the live view's input reaches the VM as
+  XTest, like any program's: design notes in SECURITY.md). `handoff done` without the user's own terminal is refused
+  whoever runs it; `handoff cancel` without it only from the agent session that opened the handoff (its pid and start
+  time, both read and equal, and the process list complete: never a match on a missing start time). The panel
+  without a usable slot folder isn't shown (`mark_panel` "unavailable": the waiting command says to use the terminal). Never try to pass a check, switch
   browsers or profiles to get around one, or run `handoff done` for the user. Live
   view for the user: `metacomputer view --open` (Screen Sharing's remembered password in the
   login keychain, written by osascript, or the clipboard; never in argv, output, logs or events;
@@ -159,7 +182,8 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   need `INTERACTIVE_PROMPTS=on` (off by default): the handoff's dialog takes `--say` as osascript
   argv data, never script text.
   Tests: `python3 tests/test_handoff.py` (no VM), test_hub.py's handoff checks, and
-  `tests/test_handoff_vm.py` (test VM only: `MCOMP_CONFIG`).
+  `tests/test_handoff_vm.py` and `tests/test_input_vm.py` (test VM only: `MCOMP_CONFIG`; the latter types exactly and
+  sends the user's clicks and keys through the live view, `tests/vncuser.py`).
 - Optional event stream (docs/events.md): `metacomputer notify` when blocked
   on the user; `metacomputer events sink …` only when the user asks (it
   decides what leaves the Mac). Off by default and best effort: an emitter
@@ -194,7 +218,7 @@ metacomputer sh -c 'cmd' | --file SCRIPT | -   # bash in the VM as the desktop u
 metacomputer ssh ops 'cmd'      # raw SSH shell (the host's plumbing; prefer sh)
 metacomputer secrets list | fill NAME --field password | token NAME | status   # logins and API keys without seeing values
 metacomputer claude --token NAME [--show] | send "PROMPT" --wait | read | keys KEY | status | stop --revoke   # Claude Code in the VM
-metacomputer call [--session NAME] [--json|--raw] TOOL '{json}'   # through the hub; or: python3 lib/mcp_client.py --tools | --describe TOOL
+metacomputer call [--session NAME] [--json|--raw] TOOL '{json}' | TOOL - <<'JSON'   # through the hub (text with ' or ": stdin); or: python3 lib/mcp_client.py --tools | --describe TOOL
 metacomputer hub [status [--json] | stop]   # the hub: pid, clients, idle time
 metacomputer learn report | review | approve ID | list   # lessons from your own sessions (docs/learn.md)
 ```

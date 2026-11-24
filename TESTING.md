@@ -361,7 +361,8 @@ the CLI checks run in a copy of the checkout with its own HOME and a fake runner
   before anything is made and named by `cloud doctor`.
 - The CLI: `vm create --on server|oci|hetzner|digitalocean|vultr` and its refusals, `ssh_base` for each role, `list` and `--on`, what a computer
   elsewhere refuses (`reset`, `checkpoint`, `net allow`, volumes, `view --tailnet`, `SSH_AUTH=cert`, `PLACE` in
-  `config/local.env`), `stop` and `vm delete`.
+  `config/local.env`), `stop` and `vm delete`; an agent's `build` while the user has the computer (a handoff) held
+  (exit 4) with nothing reaching it, and `scripts/remote-build.sh` run on its own held the same way.
 - The review's fixes: provider credentials reaching `lib/remote.py` and no other program (every program metacomputer
   runs goes through a logging stand-in on PATH), the computer's identity, `default` naming where a computer is,
   `net egress` changing nothing when it can't be applied, `vm delete` refusing a computer a session uses (its checks
@@ -429,7 +430,7 @@ environment. The vault's remote binding (its address, alias and the computer's i
 
 ## An agent session's computer: `tests/test_session_guard.py`
 
-`python3 tests/test_session_guard.py` (93 checks, under ten seconds) needs no VM. A copy of the checkout with two VMs'
+`python3 tests/test_session_guard.py` (151 checks, under ten seconds) needs no VM. A copy of the checkout with two VMs'
 settings (`mainvm` in `config/local.env`, `demo` in `config/vms/`) and `test_multi_vm.py`'s fake runner; a small program
 named `codex`, built with `cc` (`tests/userterm.py`), stands in for the agent session, so everything it starts has a
 real agent session above it; session records in a private folder (`MCOMP_SESSIONS_DIR`); the hubs it starts serve the
@@ -438,8 +439,10 @@ copy's VMs (off) and are stopped at the end.
   read the VM, or only read the Mac (or name their own computers), as the command parses them; every form that acts
   acts in every order of its arguments (`security --json apply`), and commands that take their arguments in any order
   are classified the same in every order; nested and default forms (`record`, `record moments`, `browser profiles`,
-  `input-reset --check`, `secrets rule list`, `secrets audit-sink list`); the shell's list of commands it skips is
-  Python's.
+  `input-reset --check`, `secrets rule list`, `secrets audit-sink list`); `handoff wait` acts (it can end in an input
+  reset) and `handoff status` only reads, also through a session-bound shell; `scripts/build-vm.sh --replace` run on
+  its own from a session on another computer refused the same way (scripts/lib.sh `script_session_guard`); the
+  shell's list of commands it skips is Python's.
 - The other agents: stand-ins built with `cc` (`userterm.fake_interpreter`) for each as `ps` shows it (Gemini CLI's
   node running its gemini script, Hermes Agent's python running `hermes_cli`'s gateway, OpenClaw's processes named
   `openclaw-gateway` and `openclaw`) are each the agent session above a command, hold a computer through a bridge
@@ -733,7 +736,7 @@ a folder there, both files populated, a byte-order mark), with a temporary `HOME
 
 ## The installers: `tests/test_install.py`
 
-`python3 tests/test_install.py` (218 checks) needs no VM, no network and no
+`python3 tests/test_install.py` (278 checks) needs no VM, no network and no
 Homebrew. Every command that looks at the Mac or reaches out (`uname`, `sw_vers`,
 `sysctl`, `df`, `dscl`, `curl`, `xcode-select`, `brew`, `ssh`, `security`, the VM
 runner) is a stub on `PATH` that logs its calls (one JSON line each, written whole in one
@@ -774,8 +777,11 @@ real `security`, on a throwaway keychain that exists only inside a temporary hom
 - Locks: killing the install that holds the lock while its child works doesn't free
   it, and it's free once everything has exited; a daemon started under a lock doesn't
   keep it; a child inherits its parent's lock. `reset`, `restore`, `checkpoint` (save
-  and delete), `baseline`, `build --replace` and `_vnc-install` each refuse while the
-  VM's lock is held, touching nothing, and a restore racing a build refuses.
+  and delete), `baseline`, `build --replace` and `_vnc-install` (run as the user at a
+  pseudo-terminal: from a program that isn't a build it's refused anyway) each refuse while the
+  VM's lock is held, touching nothing, and a restore racing a build refuses. `scripts/build-vm.sh --replace`, and a
+  fresh `scripts/build-vm.sh`, run on its own while a handoff is open is held (exit 4) with nothing stopped, created,
+  deleted or written; at the user's terminal it goes ahead.
 - Host tools: `scripts/build-tools.sh` rebuilds a tool whose binary is missing, isn't
   the one built, or whose pinned source changed; `--check` builds nothing;
   `--rebuild --fresh-source` never uses the checkout's `.cache/cua-src`; git runs with
@@ -1261,13 +1267,18 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
 - `python3 tests/test_build_refusals.py` (12 checks): each refused `build` (the VM
   exists without `--replace`, a bad `EXTRA_PACKAGES` or `VIRTUAL_AUDIO`) leaves every
   key and `known_hosts` byte for byte unchanged and deletes nothing.
-- `python3 tests/test_handoff.py` (246 checks, about two minutes): `metacomputer handoff` and
+- `python3 tests/test_handoff.py` (347 checks, about two minutes): `metacomputer handoff` and
   `view --open`, with stand-ins (no VM). The handoff: open, done from elsewhere (the
   waiting command returns 0 with the user's note escaped), cancel (4), the time limit
   (124, recorded once even with nobody waiting), a stopped waiter (5) and `wait`, Enter,
   `c` and Ctrl-C at a terminal (Ctrl-C sent once the wait has begun, to a handoff started with SIGINT's default
   action as a person's shell starts it, even when the suite runs as a background job, which inherits SIGINT
-  ignored), the asking session refused "done" without a terminal,
+  ignored), "done" refused without the user's own terminal whoever runs it (the asking session,
+  or a program no agent check knows) and recorded from `terminal` at one, "cancel" without the user's terminal refused
+  unless it comes from the session that opened the handoff (another session, a program no agent check knows, the same
+  pid with another start time, no start time on either side, a record without one, a process list that doesn't
+  reach the top, a process table that can't be read, and any for a record that can't be read) while the user's at a
+  terminal goes ahead,
   one at a time, refused while another session acts (unless `--override` or a person at
   a terminal), `owners.py check` exit 4, `release` leaving it, garbage, links and records
   with a field of the wrong type failing closed for at most 2 hours (from the kernel's change time, so a
@@ -1334,12 +1345,82 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
   run directly shows nothing when the setting is off or unset, over SSH, outside the
   screen session, for another id or for a handoff the record says was opened at a
   terminal, and shows it when the rules allow.
-- `MCOMP_CONFIG=TEST_ENV python3 tests/test_handoff_vm.py` (23 checks, a test VM only; it starts the VM if
-  it's off and stops it again): a background scroll in Mousepad leaves the driver's "CUA v1.…" pair; a handoff opened
-  while slow background typing still runs removes nothing (the typing finishes) and says the reset is pending; Claude's
-  handoff opens without a terminal, removes it and says so, and waits; meanwhile an acting call
-  through the hub is refused ("Paused: the user has the computer"), reads work, `sh` is refused with or
-  without `--override` (`--read-only` runs), `secrets fill`, a fill naming another VM, `input-reset` (not
+- `test_handoff.py` also checks what else waits during a handoff: `put`, `ssh` (ops and admin), `rename`, `task
+  start`, `browser profiles --new` and `security apply` from an agent session (no terminal, and `ssh` with a terminal of
+  its own under a stand-in agent) exit 4 with the guest not reached (a stand-in ssh notes every run), while `ssh` and
+  `put` at the user's own terminal go ahead and say why; `HANDOFF_HELD=1` in the environment and an `MCOMP_HUB_PID`
+  that isn't this VM's hub skip nothing; with a stand-in hub holding the hub's record and the dispatch lock
+  exclusively, its own child gets through at once when no handoff is open (and is refused when one is), while a
+  grandchild with the same `MCOMP_HUB_PID` waits for the lock and is refused; `sh --read-only` from an agent session
+  (no terminal, or a terminal of its own) is refused (125, nothing run), also when the handoff opens after its first
+  look (the dispatch gate), the user's own at a pseudo-terminal runs (also with the script on stdin and their terminal
+  on stderr, while an agent session's that way is refused), and with no handoff open it runs as before.
+  `guest_command_checks` (a stand-in VM runner and ssh that notes every run): `record start` with a frame rate that
+  carries a command, 0, 999 or a name with a quote refused before anything reaches the VM (with `RECORD_TO=guest`
+  too); a forged `_record-pipe` (no such command now) refused with nothing sent, while `record start` streams with
+  the checked values, also the user's own at their terminal during their handoff; a stream not up when its hold ends
+  (a stand-in that would start after 3 s, the hold set to 1 s) ended before the lock is let go, exit 6, nothing
+  saved, while one whose first bytes were already waiting (a late reader) is kept and saved, and one that ended with
+  nothing before its late reader looked isn't (exit 6, no file); the ssh helper (`hold_fd_until_exit`) refusing
+  (no answer) when a setup step fails after its kqueue (its Python limited to 5 descriptors), and letting go of a lock
+  on descriptor 65536 while ssh runs; `metacomputer ssh`
+  still holding the dispatch lock while a stand-in ssh that closes what it inherits runs, with its status (7) and an
+  interrupt's (130) passed on, TERM or HUP to its pid ending ssh itself with the lock let go only after, and ssh
+  suspending itself in an interactive shell at a pseudo-terminal giving the prompt back, `fg` carrying on; with `record start` killed while
+  the stream's Mac half is on its way (a Python that waits 3 s), a handoff opens only after the stream has started;
+  `get` of a file named like an
+  option (`--version`, `--files-from=-`) passes it to the VM's tar after `--`; `_vnc-install` and `_vnc-push` from a
+  program refused; `owners.internal_caller` counting only this
+  checkout's `bin/metacomputer` running that command (after `--vm`/`--on`) or its build script, by real path; `record
+  start`, `record stop`, `build --replace` and `volume sync` from an agent session during a handoff held (exit 4)
+  with the guest not reached, the user's at their terminal going on. And the pending reset and the Hand back panel. The reset opening a handoff left pending
+  (an agent call still in the driver) is made by the command that waits (`input_reset.at_open_handoff`, in this
+  process with the hub and the guest stood in for): not while a call is in flight or that can't be known, not while
+  an action holds the dispatch lock, not once the handoff has ended; made under that lock held exclusively, once,
+  recorded as done in the handoff's record and said; none without bin/metacomputer's transport; the opening message
+  says which. The panel (`panel_checks`): the real `lib/handback_panel.js` built off-screen in its self-test when the
+  test runs in the Mac's screen session (non-activating, floating, never key, the app never active, its button
+  answering `handback`; a name that isn't a plain word shown as Claude; an unknown mode nothing), then the helper
+  (`run_panel`) with a stand-in for osascript: Apple's osascript by absolute path, its arguments (the agent, the VM's
+  name, where it is, a slot), two VMs' panels at once in different slots and the real script's frames for two slots
+  apart (bad arguments shown as the defaults; `_alpha` and `_beta` shown as they are, the name rule the same as
+  scripts/lib.sh's in the C and a UTF-8 locale), the script's places (`layout`) on visible areas from 1920x1055 down to
+  320x240 all inside and none covering another, the number of places read strictly (`capacity`), and with every place
+  taken no panel until one comes free (then that one), with a slot folder that can't be used no panel at all (two
+  helpers) and the waiting command saying to use the terminal, one that's there but can't be written given up
+  after a few looks, the script refusing a slot that isn't a plain whole number in range or any word starting with
+  `-`, `handback` ending it
+  as done (`ended_from` `mac_panel`), `cancel` cancelling, any other answer nothing, and no answer either from one that
+  exits 1 or is killed after printing `handback`, prints it without its newline, with a space before it, another line
+  after it, 100 spaces after it or a carriage return, the panel taken down when the
+  handoff ends another way, nothing for another id, one panel per handoff, nothing with `HANDBACK_PANEL=off` or over
+  SSH, `view --open`'s hook with no handoff, and an agent session's `handoff done` still refused.
+- `MCOMP_CONFIG=TEST_ENV python3 tests/test_input_vm.py [T] [L] [K]` (a test VM only; it refuses the main VM): **T**
+  types `It's "quoted" `tick` ~tilde $HOME \back, café naïve Grüße – €5 日本 'end'` through `metacomputer call TOOL -`
+  (the arguments on stdin) into Mousepad in the foreground and in the background, and into a textarea of a local page
+  in Firefox through `run_steps` with human pacing, and reads it back exactly (the saved file; what the page posts).
+  **L** drives Firefox in human mode (background input: the driver's pair) and page-mode Chrome on a page with a modal
+  `<dialog>`, a cross-origin iframe's dialog and a cookie banner (tests/fixtures/input, served on 127.0.0.1:8410/8411
+  in the VM), opens a handoff while slow background typing still runs (the reset is pending), checks the waiting
+  handoff removes the pair once that call ends with the handoff still open, then sends the user's clicks and keys the
+  way Screen Sharing does: `tests/vncuser.py`, a stdlib VNC client (its DES checked against FIPS 46's example) on this
+  Mac, through the live view's port and the test VM's own password file (never printed), one calibration click per
+  window and the page's own layout; the modal takes the typed name and OK, the banner and the iframe's Confirm take
+  the clicks, all trusted, in Chrome and Firefox; the user's done ends it. **K** (about 6 minutes, not by default):
+  page-mode Chrome is still open after 6 minutes of handoff. Events go to a temporary folder; no panel on the Mac.
+  On a throwaway VM built from this change (2026-11-23): T and L 16/16, K 3/3 (each run counts its two setup checks).
+- `MCOMP_CONFIG=TEST_ENV python3 tests/test_handoff_vm.py` (28 checks, a test VM only; it starts the VM if
+  it's off and stops it again): `metacomputer ssh` with the real OpenSSH holds the dispatch lock while it's
+  connected, TERM to its pid ends ssh itself with the lock let go only after, and its exit status is ssh's (7); a
+  background scroll in Mousepad leaves the driver's "CUA v1.…" pair; a handoff opened
+  while slow background typing still runs removes nothing (the typing finishes) and says the reset is pending, and its
+  waiting command removes the pair once that call has ended, the handoff still open; after another background scroll,
+  Claude's handoff opens without a terminal, removes the new pair and says so, and waits; meanwhile an acting call
+  through the hub is refused ("Paused: the user has the computer"), reads work, `put`, `ssh` and `rename` are refused
+  (exit 4) while the user's own `ssh` at a pseudo-terminal runs, `sh` is refused with or
+  without `--override` and with `--read-only` (the user's own `--read-only` at a pseudo-terminal runs), an agent's
+  `record start` is held while the user's own at a pseudo-terminal streams and their `record stop` saves the MP4,
+  `secrets fill`, a fill naming another VM, `input-reset` (not
   `--check`) and `stop` are refused, the user's own `input-reset` runs, `release` leaves it and
   the asking session can't say done; then the user's done at a pseudo-terminal ends it, the waiting command
   returns 0 with the note, the same acting call goes through, the same driver session's next background input
@@ -1659,11 +1740,20 @@ registry live in a temporary folder):
 
 ## The hub and the coordinate guard: `tests/test_hub.py`, `tests/test_options.py G`
 
-`python3 tests/test_hub.py` needs no VM (349 checks, about 2 min). A stand-in
+`python3 tests/test_hub.py` needs no VM (360 checks, about 3 min). A stand-in
 driver speaks MCP over stdio, keeps element tokens, driver sessions and
 recordings for as long as it runs, and logs every message it gets; the test
 moves its windows around in a file. Hubs run in a thread of the test (so their
 insides can be checked) or as their own process, in a temporary RUN_DIR. It checks:
+- `metacomputer call TOOL -`: the arguments from stdin, a quoted heredoc passing `'` `"` `` ` `` `~` `$` `\` and
+  non-ASCII exactly; the same kind of text in a single-quoted argument arriving without its apostrophes (why);
+  a JSON argument the shell split refused (exit 2, nothing sent, the message naming stdin), and so are `--raw`,
+  `--json` and `--session NAME` after the arguments (options go before `TOOL`); stdin that isn't UTF-8 or is over the
+  hub's message limit refused;
+- a browser `browser_prepare` launched, through a handoff: nothing of the hub's own without one, a `list_windows` in
+  that driver session every `BROWSER_KEEP_S` while one is open (and nothing else), nothing after (not even when the
+  handoff ends between the keeper's look and its read: it looks again under the owners lock), and the keeper ending
+  once the browser has gone;
 - approved lessons (`metacomputer learn`): a store of hostile lessons ("the coordinate
   guard is off", "send set_value to Chrome", "run release and take over") is in place
   for the whole run, so every guard check below passes with them; `initialize` carries

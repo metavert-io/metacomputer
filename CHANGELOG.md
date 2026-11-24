@@ -12,6 +12,39 @@ All notable changes to metacomputer are recorded here. The format follows
 - **A Codex plugin marketplace** ([docs/codex.md](docs/codex.md#codexs-plugin-marketplace)): `codex plugin marketplace add metavert-io/metacomputer`, then `codex plugin add metacomputer@metacomputer`, installs the same `plugin/` folder Claude Code does, with a manifest of Codex's own (`plugin/.codex-plugin/plugin.json`, written by `scripts/sync-plugin.py` with `.agents/plugins/marketplace.json`) that gives Codex all three skills (`metacomputer`, `cua-driver`, `learn`; through Claude Code's manifest alone it took only `cua-driver`). The plugin's launcher, in Codex's plugin cache, hands over to the installed metacomputer and, with none, runs only its own copy's `get.sh` for `setup`, as in Claude Code's plugin folder.
 - **A package for OpenAI's plugin directory** ([docs/codex.md](docs/codex.md#openais-plugin-directory)): `scripts/build-openai-plugin.py` builds a ZIP from the same files as the plugin: the three skills, the icon, the license and notices, and a manifest with the release's version, `requires_local_executor: true` (Desktop only) and the listing's website, support, privacy policy and terms of service URLs; no MCP server, launcher or script. `--check` checks it against the directory's documented rules. Its sources are regular files only: a linked skill folder, icon, license or notices stops the build, and `scripts/sync-plugin.py --check` now refuses any link in `plugin/`, `agent-plugin/` or `.agents/`. It builds the file only: nothing is uploaded or submitted.
 - **`metacomputer learn` reads OpenClaw's and Hermes Agent's sessions** ([docs/learn.md](docs/learn.md#what-report-reads)): from their SQLite databases (OpenClaw: `openclaw-agent.sqlite` of every agent in `~/.openclaw`, each `~/.openclaw-<profile>` and `$OPENCLAW_STATE_DIR`; Hermes Agent: `state.db` in its home and each profile), with the same rules as the others (only classes, counts, tool names and app names from a fixed list), counting the calls their tool search makes for the model (`dispatch_action`, `tool_call`) as the tool they name, and their shells (`exec`, `terminal`) as shell commands. A database is read without the agent and without a write or a lock: into memory, as it was at its last commit, with the commits still in its write-ahead log applied (where a running Hermes gateway keeps its newest sessions), or, when it's too large for that, opened in place read-only (`immutable`, through the descriptor it checked) with a note. Only your own files are read, with no link followed below the agent's own folder; SQLite's temporary data stays in memory; each database gets two minutes, inside its queries too, and at most its 2,000 newest sessions. OpenClaw's compressed entries need Python 3.14 or later; with an older Python the report counts them. A layout it doesn't know is a note, never the report's end.
+- **Hand the computer back from the Mac's screen** (`HANDBACK_PANEL`, `on` by default; SECURITY.md, "Handing the
+  computer to you"): while a handoff is open, a small floating panel at the top right of the Mac's screen has **Hand
+  back to Claude** (the same as `metacomputer handoff done`) and **Call it off** (`cancel`), so working in the live view
+  no longer means going back to a terminal. It floats above Screen Sharing (on every Space, beside a full-screen one)
+  without taking its keyboard, and goes when the handoff ends; `metacomputer view --open` brings it up during one too.
+  It names the VM and where it is, and panels for different VMs take places of their own inside the screen's visible
+  area (down the right-hand side, then a column to the left); with every place taken, a new one waits for one to come
+  free rather than cover it, and when no place can be reserved at all (its folder, or a slot's file, can't be used)
+  none is shown (the waiting command says to use
+  your terminal), so a click can't release the wrong one. Only a click in it answers it: nothing in the VM can reach a Mac window, an agent's
+  commands act only in the VM, and its helper runs Apple's `/usr/bin/osascript` by its absolute path with a fixed
+  script (`lib/handback_panel.js`) and arguments checked on both sides, so no variable or file picks what runs or what
+  it answers. An agent session's `handoff done` is still
+  refused. Not over SSH or without your screen session (the dialog's rules); `HANDBACK_PANEL=off` turns it off. A
+  control inside the VM was considered and not built: anything running there (or an agent's `sh --read-only`, `put`,
+  `ssh` or VNC client) could click it or fake its signal, since the live view's own input reaches the VM as the same
+  XTest events.
+- **`metacomputer call TOOL -`** reads the tool's arguments from stdin, so text with quotes goes in a quoted heredoc
+  (`metacomputer call TOOL - <<'JSON'`) exactly. In a single-quoted shell argument the shell takes each `'` as a quote
+  and drops it before metacomputer runs: on 2026-11-22 a policy typed into Firefox that way lost all 20 of its
+  apostrophes and the call still succeeded (the hub received 471 characters of 491; neither the driver nor Firefox
+  dropped anything). More than one argument after `TOOL` (a JSON argument the shell split) is now refused, nothing sent.
+  The skill says to use stdin for such text.
+- Tests: `tests/test_input_vm.py` (a test VM): a string with `'` `"` `` ` `` `~` `$` `\` and non-ASCII typed into
+  Mousepad (foreground and background) and a Firefox textarea comes back exactly; after Claude drove Firefox in human
+  mode and Chrome in page mode, the user's clicks and keys sent through the live view (a VNC client on the Mac,
+  `tests/vncuser.py`) reach a modal dialog, a cross-origin iframe's dialog and a cookie banner in both; `K` keeps
+  page-mode Chrome through a 6-minute handoff. `test_hub.py` (`call -`, split JSON, options after `TOOL`, the browser
+  keeper), `test_handoff.py` (the pending reset, the panel, its places on screens down to 320x240 and VM names by the
+  naming rule, `done` and `cancel` by who runs them, the commands held during a handoff, the recorder's checks, `get`
+  with a file name like an option), `test_session_guard.py` (`handoff wait`, `scripts/build-vm.sh` run on its own),
+  `test_install.py` (`_vnc-install`, `_vnc-push` at your own terminal; `scripts/build-vm.sh --replace` held) and
+  `test_remote.py` (a remote `build` and `scripts/remote-build.sh` held).
 
 ### Changed
 
@@ -20,6 +53,39 @@ All notable changes to metacomputer are recorded here. The format follows
 - **`metacomputer sh`'s action-log records keep keyed hashes, not plain SHA-256** (`ACTION_LOG=on`): the script's, each output stream's and the VM's diagnostics' hash is now an HMAC-SHA256 of the text's SHA-256 under the per-install secret beside the log's signing key (`action-log.results-hmac`, 0600, the one the hub's result fingerprints already use), as `script_hmac` and `hmac` instead of `script_sha256` and `sha256`. A plain hash of a short output (a code, a number) could be found from the log by trying every candidate; with the key and the text you can still check one (docs/shell.md). A run whose results key can't be read or made is refused like one whose log can't be opened, and an output that comes back whole must match the SHA-256 the VM gave for it. `sh --json` still gives the caller each stream's SHA-256.
 - **No text of the VM's is kept from the hub's input reset's stderr or the direct client's**: the hub's reset (`metacomputer ssh ops input-reset`, where SSH and the guest's command write) put up to 200 characters of it in the note the client got, and `lib/mcp_client.py` (the transport tests' direct client) kept a 64 KB tail of it and up to 1 MB in its log. Both now keep it as the hub keeps the driver's (`lib/wirelimits.py` StderrCounter): how many lines of which fixed classes, metacomputer's own refusals in its own words, never a line. New classes name the guest's driver gate's refusals (bounded sessions only, a manifest that doesn't match its hash, ...).
 - **Commands refuse what they wouldn't use, before doing anything**: an option they don't have, a second value for an option that takes one (the vault's options that take a list, like `--site` and `--fill`, still repeat), a word beyond their arguments, an abbreviated option (`--jso`), and a request for usage that isn't exactly `-h` or `--help` (`--help=x`, `-hx`, `--hel`) are usage errors (`put` takes a file whose name starts with `-` as `./-name`: `put --to=x f` took `--to=x` for a file to copy). Before, some were ignored and the command went on: `checkpoint --delete keep --delete --help --yes` deleted `keep`. A second value used to win over the first; `secrets bind`'s own defaults now give way to an option you pass instead of being repeated. So is a request for usage given as an option's value or as a word nothing reads (`secrets rule remove ID --site --help` removed the rule), and `--vm` or `--on` given twice or with an option for its value (`--vm --help --vm NAME reset --yes` reset the VM). The vault checks each command line against what its form declares (vault/ArgSpecs.swift): an option of another of its subcommands, or a word too many (`secrets revoke --all ID ID` revoked the first), is refused, and so are options a command never read (`--json` on `fill`, `pay`, `settle`, `shop-complete` and `shop-card`, `--replace` on `session load`) and mixes where one part went unread (`fill --request ID --human` with `--selector`, `audit --head` with `--tail`, `wba directory --days` without `--headers`). A flag given twice is refused too, and so is a value that starts with `-` where no value can, a request for usage above all (`sh --file --help` is a usage error now; `call --session --help TOOL` ran TOOL in a session named --help; a session name starts with a letter, a digit or `_`). The same rules hold for every program in the repository: scripts/ (scripts/strictargs.sh: `safe-rmtree.sh PATH --help` deleted PATH, `build-vault.sh --out --help --out DIR` built into DIR), the Python helpers (lib/strictargs.py: `each --timeout-typo=10 VM -- reset --yes` ran the reset), install.sh, get.sh, the plugin's launcher and the programs the VM runs (`metacomputer-admin`, `input-reset --help` removed the input devices, `metacomputer claude stop`'s helper in the VM stopped the session for `stop s1 --help` or an extra word), the SDK's `probe`, `tools` and `describe` (`mcomp_sdk.py probe --help` reached the hub), `lib/update.py`'s internal steps (`_record-build DIR --help` wrote DIR/vm-build.json) and `tools/qcow2raw` (`qcow2raw IMAGE --help` wrote a file named `--help`); `secrets set --header` takes one header. An option's value that starts with `-` is refused written either way (`--out=--bogus` as `--out --bogus`; the vault's too, but ssh's own arguments in `--tunnel-arg`), while what follows a `--` a program passes on stays that program's. The vault's part takes effect once it's rebuilt (install.sh, which `metacomputer update` runs, rebuilds it when its source changed; or `scripts/build-vault.sh`).
+- **More of an agent's ways into the VM wait while you have it** (a handoff). `metacomputer put`, `ssh` (any role),
+  `rename`, `task start`, `browser profiles --new|--delete`, `security apply`, `record start|stop`, `build --replace`
+  (and a computer elsewhere's `build`) and `volume sync` reached the guest outside the hub and the shell channel and
+  went ahead during a handoff; they now refuse (exit 4) under the dispatch lock like the other acting commands, except
+  at your own terminal (`ssh` keeps the lock until its connection ends: OpenSSH closes what it inherits, so a helper
+  of the command's, started first, keeps it until ssh's pid exits, with every other descriptor closed, and says so
+  only once it's set up, or the command refuses; ssh is still exec'd, so its signals, `~^Z` and exit status are its
+  own). `handoff wait` in a shell bound to a session counts as acting there (it can end in an input
+  reset). `scripts/build-vm.sh` (every build, a fresh one too: it sets the guest up, finalizes it and stops it) and
+  `scripts/remote-build.sh` run on their own check the same (the session guard, then the handoff, held to the end)
+  before anything is stopped, deleted or written. The internal commands that write to the
+  guest run only from metacomputer itself: `_vnc-install` only from a build (or at your own terminal), `_vnc-push` only
+  at your own terminal. `sh --read-only` from an agent session refuses too during a handoff:
+  it runs as the desktop user and nothing kept it off the desktop (it could set `DISPLAY` and click); yours at your
+  own terminal still runs (your terminal on stdin, or on stderr when the script comes on stdin, as in
+  `sh --read-only - <<'SCRIPT'`), and reads that can't act stay (`inspect`, `get`, `shot`, the desktop tools' reads). A
+  `HANDOFF_HELD=1` in the environment no longer skips every handoff check. What's left is in SECURITY.md: an agent's
+  own VNC client to the live view, and programs already running in the VM.
+- **The Hand back panel counts only an exact answer** from an osascript that exits 0: one that's killed or fails, or
+  prints anything else around or instead of its answer, leaves the handoff open.
+- **`metacomputer handoff done` needs your own terminal**, whatever runs it: a process without a terminal of yours (a
+  script, or an agent host the agent check doesn't know by name) is refused, nothing changed. The other ways to say
+  you're done stay: Enter where `metacomputer handoff` waits at a terminal, and the panel's Hand back to Claude.
+  `handoff cancel` without your terminal comes only from the agent session that opened that handoff (its process,
+  by pid and start time, both read: a start time that can't be read, or a handoff opened by an earlier version, which
+  kept none, doesn't count): not another session, a process no agent check knows (an unknown agent host, a detached
+  worker), or anything when it can't tell; you can call off any at your terminal or with the panel.
+- **The guide says what to do when a site's button ignores your click in the live view** (docs/guide.md, "When Claude
+  needs you"). The one seen on 2026-11-22 ran on 0.4.5, where `input-reset` refused while a handoff was open, so the
+  driver's devices stayed (a check right after counted one). With them removed (0.4.6 and later), your clicks and keys
+  reach a page's modal dialog, a cross-origin iframe and a cookie banner, in Firefox and in page-mode Chrome (checked
+  on a test VM, `tests/test_input_vm.py`). A single button that doesn't respond while the rest of the page does is the
+  site's doing (some refuse an automated browser's session): do that step in your own browser.
 
 ### Fixed
 
@@ -27,6 +93,35 @@ All notable changes to metacomputer are recorded here. The format follows
 - **`metacomputer view --tunnel` returns once the tunnel is up when a program reads its output**: `ssh -f` kept the caller's pipes open, so an agent's tool call or a script waited about 20 s, until the tunnel closed. What SSH says goes to a private log (`tunnel/view-tunnel.log` in the computer's log folder, 0600 in a 0700 folder; a link there is refused) and is shown once it connects, escaped as before (at most half a second of it is read first, so SSH printing without end can't hold the command up; the rest is drained after); the log keeps at most 1 MB, the line saying the rest was left out included, however much the VM's end makes SSH print. At a terminal nothing changes, and on Fly Sprites the tunnel's ssh still stays in the foreground for its tunnel program.
 - **Oracle Cloud: a computer's network security group is its build's own**: each build makes a new group, tagged with the computer and the build's operation, and journals it from the create's answer before anything configures it (its first rules are written only after it's read again, still tagged for this computer and operation); it never reuses or changes a group found by name (another Mac's computer of the same name, an earlier try's). `net egress`, `vm delete` and a failed build's clean-up act only on the groups the computer's record names, each read by its id and still tagged for this computer and that operation. A group an earlier version made carries no operation, so `net egress` refuses to change it (delete the computer and make it again); `cloud teardown` never deletes a group no record on this Mac names, and says to remove it in Oracle's console; one another Mac makes after teardown looked stops the network's deletion too, with nothing deleted.
 - **`metacomputer net egress`, `allow`, `remove` and `clear` on a computer elsewhere read `--override`**: it was accepted and never looked at, so the command still refused while another session was using the computer. Now it goes ahead, as `start --override` does; on this Mac's computers the allowlist doesn't check who's using it, and `--override` there is a usage error.
+- **A handoff opened while one of Claude's actions was still running left Chrome deaf to your keyboard for the whole
+  handoff.** Opening it leaves the driver's virtual input devices in that case (removing them could cut the action
+  off), and nothing removed them later, so page-mode Chrome ignored the live view's keys (clicks still worked) until
+  you ran `metacomputer input-reset` yourself. Now the command that waits for the handoff (`handoff`, or `handoff
+  wait`) removes them as soon as nothing of Claude's runs in the driver any more, the way every reset is made, and
+  says so.
+- **A page-mode Chrome closed under you about 5 minutes into a handoff.** Cua Driver ends a driver session after 5
+  minutes without a call in it, and a browser `browser_prepare` launched closes with it; Claude's calls are paused
+  during a handoff, so the browser you were working in went away. While a handoff is open, the hub now reads in that
+  session (`list_windows`, never input) every minute, looking at the handoff again under the owners lock right before
+  each read, so none goes out after it ends.
+- **`metacomputer record start`'s values reached a shell in the VM unchecked** through its internal `_record-pipe`
+  (the name, the frame rate, the quality, the audio choice): a frame rate like `20; COMMAND` ran COMMAND in the VM,
+  and nothing held either during a handoff. They're checked now (the name by the name rule, the frame rate a number
+  from 1 to 60, the quality and audio one of their words) before anything reaches the VM, and `record start` starts
+  the stream's Mac half itself: there's no `_record-pipe` command any more for another program to run. The stream
+  keeps `record start`'s dispatch lock until it's up, so no handoff opens in between, even if `record start` is
+  stopped on the way; a stream that isn't up within 20 s (no bytes from it waiting either: one that ended with nothing
+  never started) is ended before the lock goes, so it never starts.
+- **`metacomputer get` passed a file name that looks like an option to the VM's `tar` as one** (`get /tmp/--version`
+  printed tar's version instead of copying the file). The name goes after `--` now.
+- **A VM's name with an accented letter passed the name check in a UTF-8 locale** (bash's `A-Z` range matches
+  them there; Python's and the panel's checks didn't). The letters are spelled out, so the rule is the same
+  everywhere: ASCII letters, digits, `.`, `_` and `-`.
+- **An agent's `sh --read-only` could start just after a handoff opened**: the check came before the action log and
+  the connection. It's made once more under the dispatch lock right before the script starts, as for an acting run.
+- **`metacomputer call TOOL '{}' --raw` (or `--json`, `--session NAME`) read the option after the arguments**, so a
+  word meant for the tool could change where the call went. Options go before `TOOL`; everything after it is the
+  tool's arguments, so that is refused like a split JSON argument, nothing sent.
 
 ## [0.5.0] - 2026-11-23
 

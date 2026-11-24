@@ -202,7 +202,10 @@ like a click:
   `owners.lock()` is there for it.
 
 `--read-only` is for a second session that only needs to look: read a saved
-file, list a folder, check a process. It isn't refused and claims nothing.
+file, list a folder, check a process. It isn't refused for another session and
+claims nothing. While a handoff is open it waits like any run when an agent
+session runs it (yours at your own terminal still runs): it runs as the desktop
+user, so nothing keeps it off the desktop.
 It runs without the desktop's environment (no `DISPLAY`, no session-bus
 address), so a program can't open on the desktop by accident. It's a promise,
 not a sandbox: the script can still change files or signal processes, like

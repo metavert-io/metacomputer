@@ -822,15 +822,21 @@ past them. It hands the computer to you and waits:
    step in the live view. With `INTERACTIVE_PROMPTS=on` in your settings, a dialog
    on the Mac's screen also says what Claude needs, and its **Open live view**
    button does the same (it's off by default, so nothing pops up while you're away).
-3. You run `metacomputer handoff done` in your terminal (add
-   `--note "use the second account"` for anything Claude should know), or
-   `metacomputer handoff cancel` to call it off.
+3. You click **Hand back to Claude** in the small panel at the top right of the Mac's
+   screen (it floats above Screen Sharing while the handoff is open), or run
+   `metacomputer handoff done` in your terminal (add `--note "use the second account"`
+   for anything Claude should know); **Call it off** there, or `metacomputer handoff
+   cancel`, calls it off. Only a click on the Mac's screen answers the panel: nothing in
+   the VM, and none of Claude's commands, can (`HANDBACK_PANEL=off` hides it).
 4. Claude reads the screen again and carries on, or, after a cancel, stops and
    asks you how to go on.
 
 While a handoff is open, Claude's actions on the desktop wait: the hub refuses
 every acting call, from every session and script, with "Paused: the user has
-the computer", and so do `metacomputer sh` (but `--read-only`), `metacomputer
+the computer", and so do `metacomputer sh` (`--read-only` too, unless you run it at
+your own terminal: a script can still reach the desktop), `put`, `ssh`, `rename`,
+`task start`, `browser profiles --new|--delete` and `security apply` (they go ahead
+at your own terminal), `metacomputer
 claude`'s `start`, `send`, `keys`, `show` and `stop` (an inner Claude that's
 working carries on with what it was given; its keeper stops renewing its hold on
 the computer), fills and
@@ -838,8 +844,9 @@ session loads from the vault, `input-reset` (but at your own terminal), and `sto
 commands that check for other controllers (`--override` still goes ahead on
 those, as it does for another session). The hub's own cleanup waits too, and it
 keeps its connection to the VM (no idle exit, no restart), so the browser you're
-working in stays; `metacomputer web` leaves its Firefox windows open, and the GUI
-tests stop. Claude can still read the screen. `metacomputer who` and
+working in stays (a Chrome Claude opened in page mode too: the hub keeps its driver
+session from ending after 5 idle minutes); `metacomputer web` leaves its Firefox
+windows open, and the GUI tests stop. Claude can still read the screen. `metacomputer who` and
 `metacomputer handoff status` show it. It's a cooperative pause with stated
 limits: something that had already left your Mac when it opened (a call, a shell
 run) finishes ([SECURITY.md](../SECURITY.md#handing-the-computer-to-you-metacomputer-handoff)).
@@ -853,7 +860,8 @@ clicks and typing go through virtual input devices of the driver's own, which it
 keeps, and while they exist Chrome ignores your keyboard (and Firefox has been seen
 ignoring your mouse and keyboard). The handoff removes them and says so. If one
 of Claude's actions is still running in the VM, it leaves them (removing them could
-cut that action off) and says the reset is pending; if it can't remove them, it
+cut that action off), says the reset is pending, and removes them as soon as that
+action ends, while the handoff waits for you; if it can't remove them, it
 says to end the handoff and run `metacomputer input-reset`. Either way, that
 command also runs in your own terminal while the handoff is open, once nothing of
 Claude's is still running. `metacomputer view --open` removes them too when no
@@ -867,8 +875,9 @@ It ends when you run `handoff done` or `handoff cancel`, or at its time limit
 (15 minutes unless Claude chose another, at most 2 hours); then the computer is
 Claude's again, and it asks you before trying anything else. If you ran
 `metacomputer handoff` yourself at a terminal, Enter there is "done", and `c`
-then Enter, or Ctrl-C, is "cancel". The Claude Code session that asked can't
-say "done" for you from its own shell; it can only call its handoff off.
+then Enter, or Ctrl-C, is "cancel". Only you say "done": in your own terminal (a
+process without your terminal can't, whatever runs it) or with the panel. Only the
+agent session that opened a handoff can call it off besides you; you can call off any.
 
 ```bash
 metacomputer handoff status            # the open handoff, what to do, how long it has left
@@ -876,6 +885,14 @@ metacomputer handoff done [--note T]   # you: finished, Claude carries on
 metacomputer handoff cancel            # you: called off, Claude stops and asks
 metacomputer view --open               # Screen Sharing: the password it remembers, or on the clipboard
 ```
+
+**A button that ignores your click.** With the driver's devices gone, your clicks and
+keys in the live view reach a page's dialogs, a cross-origin iframe and a cookie
+banner, in Firefox and in page-mode Chrome (`tests/test_input_vm.py` checks it on a
+test VM). So if the rest of the page responds and one button doesn't (a "Send code"
+that never sends), it's the site, which may be refusing an automated browser's
+session: do that step in your own browser. If nothing responds, or typing doesn't
+reach Chrome, run `metacomputer input-reset` in your own terminal.
 
 **Sites with bot checks.** Some sites refuse the VM's browser even when you tick
 the box yourself. Page-mode and hybrid Chrome are driven through Chrome's

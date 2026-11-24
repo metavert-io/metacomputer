@@ -869,7 +869,7 @@ that turns hostile mid-run can erase it (SECURITY.md, "Recordings"):
    `desktop-record` (ffmpeg x11grab, visible pointer, 20 fps, H.264) and
    saves to `recordings/manual/` (or `RECORD_DIR`). With `RECORD_TO=host`, the
    default, `desktop-record stream` writes Matroska to stdout over SSH, and the
-   Mac's half (`_record-pipe`, detached) is `lib/recording.py save`: it runs that
+   Mac's half (started detached by `record start` itself) is `lib/recording.py save`: it runs that
    ssh, writes what arrives to a new `.mkv` (exclusive, no-follow), and stops the
    stream before the Mac's free space falls below `IMPORT_MIN_FREE_GB`. `record
    stop` asks the VM's recorder to stop (its answer through `vm_answer`: at most 4 KB
