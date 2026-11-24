@@ -97,6 +97,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
 
 
+def hub_on_other_code():
+    """Whether this VM's running hub loaded other code than this checkout's (lib/mcp_hub.py runs_other_code); True when
+    that can't be told while a hub may run (the record then says only what every version reads)."""
+    try:
+        import mcp_hub
+        return mcp_hub.runs_other_code()
+    except Exception:       # noqa: BLE001
+        return True
+
+
 def agent_word(rec):
     """Who asked, for the user's messages: the short name of the agent whose session opened the handoff ("Codex",
     "OpenClaw", "Hermes", "Gemini"), else "Claude"."""
@@ -894,6 +904,7 @@ def open_and_wait(a, say, timeout, interactive, opened):
             return EXIT_REFUSED
         drop_marks(marks)
         reset = ("skipped", None, False)
+        older = False
         with owners.lock():
             cur = owners.open_handoff()
             if cur:
@@ -911,9 +922,14 @@ def open_and_wait(a, say, timeout, interactive, opened):
                         "\nAsk the user; if they agree, run the handoff again with --override.")
                     return EXIT_REFUSED
             now = time.time()
-            rec = {"v": 1, "id": "h-" + secrets.token_hex(6), "status": "open", "why": a.why, "say": say,
+            # A hub on other code (started before an update or a pull) may not know this version's words: then the
+            # record says only what every version reads (owners.HANDOFF_WHY_EVERY_VERSION, no agent name), so its
+            # check reads it as it is, rather than as a record that can't be read (open for 2 h, even once it ends).
+            older = hub_on_other_code()
+            why = a.why if not older or a.why in owners.HANDOFF_WHY_EVERY_VERSION else "other"
+            rec = {"v": 1, "id": "h-" + secrets.token_hex(6), "status": "open", "why": why, "say": say,
                    "opened": now, "deadline": now + timeout, "timeout_s": int(timeout), "opener_pid": os.getpid(),
-                   "claude_pid": claude, "agent": owners.agent_of(claude, table) if claude else None,
+                   "claude_pid": claude, "agent": owners.agent_of(claude, table) if claude and not older else None,
                    "claude_start": owners._session_start(claude) if claude else None,
                    "cwd": os.getcwd(), "sid": owners.my_sid(), "interactive": interactive,
                    "ended": None, "ended_from": None, "note": None}
@@ -936,6 +952,10 @@ def open_and_wait(a, say, timeout, interactive, opened):
     shown = off is None and start_dialog(rec["id"])
     panel = panel_off_reason() is None and start_panel(rec["id"])
     instructions(rec, interactive, reset)
+    if older:
+        out("  This VM's hub runs older code than this checkout (it started before the code changed), so the handoff "
+            "is recorded in the form every version reads. `metacomputer hub stop --if-idle` restarts it on the current "
+            "code once nothing uses it (`metacomputer update` does the same).")
     if shown:
         out("  A dialog on the Mac's screen says the same, with an Open live view button (INTERACTIVE_PROMPTS=on).")
     if panel:

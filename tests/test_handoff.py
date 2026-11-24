@@ -15,6 +15,7 @@ password reaches the clipboard and never an argument, the output, the logs or th
 cleared after the delay only while it still holds that password; SSH sessions get instructions instead;
 --tailnet prints the commands and runs none of them.
 """
+import contextlib
 import fcntl
 import json
 import os
@@ -76,6 +77,7 @@ PRELUDE = ("import os, sys; sys.path.insert(0, os.path.join(%r, 'lib')); import 
            "_real_ps = owners.ps_table; "
            "owners.ps_table = ((lambda strict=False: (_ for _ in ()).throw(OSError('ps failed')) if strict else {}) "
            "if os.environ.get('FAKE_PS_FAIL') else _real_ps); "
+           "_ag = os.environ.get('FAKE_AGENT'); owners.agent_of = (lambda *a, **k: _ag) if _ag else owners.agent_of; "
            "import handoff; handoff.MIN_TIMEOUT_S = 1; "
            "handoff.OPEN_WAIT_S = float(os.environ.get('TEST_OPEN_WAIT', '40')); "
            "sys.exit(handoff.main(sys.argv[1:]))") % LAB
@@ -575,7 +577,107 @@ def unreadable_checks():
         h = owners.open_handoff()
         check(f"a record with {what} reads as unreadable: open, for at most 2 h",
               h and h.get("unreadable") and h["deadline"] - time.time() <= owners.HANDOFF_MAX_S + 1, h)
+    for what, bad in (("a reason that isn't a word", {"v": 1, "id": "h-aaaaaaaaaaaa", "status": "done",
+                                                       "why": "Pay ment", "opened": now, "deadline": now + 60}),
+                      ("a reason that isn't text", {"v": 1, "id": "h-aaaaaaaaaaaa", "status": "done", "why": 7,
+                                                     "opened": now, "deadline": now + 60}),
+                      ("an agent name with a line break", {"v": 1, "id": "h-aaaaaaaaaaaa", "status": "done",
+                                                            "why": "other", "opened": now, "deadline": now + 60,
+                                                            "agent": "Codex\nX"})):
+        json.dump(bad, open(owners.handoff_path(), "w"))
+        h = owners.open_handoff()
+        check(f"a record with {what} reads as unreadable: open, for at most 2 h",
+              h and h.get("unreadable") and h["deadline"] - time.time() <= owners.HANDOFF_MAX_S + 1, h)
+    # What a newer version writes: a reason or an agent this one doesn't know. They only name things in messages, so it
+    # reads as "other" and no agent, with its own state: one that ended is over, not an unreadable one open for 2 h.
+    json.dump({"v": 1, "id": "h-aaaaaaaaaaaa", "status": "done", "why": "refund", "opened": now, "deadline": now + 60,
+               "ended": now, "agent": "Future Agent"}, open(owners.handoff_path(), "w"))
+    h = owners.handoff_record()
+    check("a newer version's reason and agent read as 'other' and none, and one that ended is over (not unreadable)",
+          h and not h.get("unreadable") and h["why"] == "other" and h.get("agent") is None and h["status"] == "done"
+          and owners.open_handoff() is None, h)
+    json.dump({"v": 1, "id": "h-aaaaaaaaaaaa", "status": "open", "why": "refund", "opened": now, "deadline": now + 60},
+              open(owners.handoff_path(), "w"))
+    h = owners.open_handoff()
+    check("...and one that's open is open, until its own deadline", h and not h.get("unreadable") and h["why"] == "other"
+          and h["deadline"] == now + 60, h)
     clear()
+
+
+def older_hub_checks():
+    """A hub started before the code changed (an update, a pull) may not know this version's words: opening a handoff
+    then writes only what every version reads, and `who` says so."""
+    print("a hub on older code: the record says only what every version reads")
+    import mcp_hub
+    p = mcp_hub.paths()["pid"]
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+
+    @contextlib.contextmanager
+    def stand_in_hub(code, body=None):
+        fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.ftruncate(fd, 0)
+            os.write(fd, body if body is not None else
+                     json.dumps({"pid": os.getpid(), **({"code": code} if code is not None else {})}).encode())
+            yield
+        finally:
+            os.close(fd)
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    def open_with(code, why, body=None):
+        clear()
+        with stand_in_hub(code, body):
+            proc = start("--why", why, "--say", SAY, FAKE_AGENT="Codex")    # an agent session that has a name
+            h = wait_open()
+            raw = json.load(open(owners.handoff_path())) if h else None
+            user_end("cancel")
+            _, o, _ = finish(proc)
+        clear()
+        return raw, o or ""
+
+    raw, o = open_with("0" * 64, "payment")
+    check("a hub on older code: a payment handoff is recorded as 'other', without the agent's name, and the output says "
+          "why", raw and raw["why"] == "other" and raw.get("agent") is None and "older code" in o, (raw, o[-400:]))
+    raw, o = open_with(None, "captcha")
+    check("...a hub whose record names no code counts as older; a reason every version reads is kept",
+          raw and raw["why"] == "captcha" and raw.get("agent") is None and "older code" in o, (raw, o[-400:]))
+    raw, o = open_with(None, "payment", body=b"{not json")
+    check("...and so does a hub whose record can't be read (it can't be told which code it runs)",
+          raw and raw["why"] == "other" and raw.get("agent") is None and "older code" in o, (raw, o[-400:]))
+    raw, o = open_with(mcp_hub.code_digest(), "payment")
+    check("a hub on this checkout's code: the reason and the agent's name are written as given, and nothing is said",
+          raw and raw["why"] == "payment" and raw.get("agent") == "Codex" and "older code" not in o, (raw, o[-400:]))
+    real_digest = mcp_hub.code_digest
+    try:
+        mcp_hub.code_digest = lambda: None          # this checkout's digest can't be had
+        with stand_in_hub(None):
+            both_none = mcp_hub.runs_other_code()
+        with stand_in_hub(real_digest()):
+            now_none = mcp_hub.runs_other_code()
+    finally:
+        mcp_hub.code_digest = real_digest
+    open(p, "w").write("{}")
+    os.chmod(p, 0)
+    try:
+        unreadable = mcp_hub.runs_other_code()     # the record can't even be opened: whether a hub holds it can't be told
+    finally:
+        os.chmod(p, 0o600)
+        os.remove(p)
+    check("this checkout's digest that can't be had, or a hub record that can't be opened, counts as other code (two "
+          "missing digests never match); no record at all is no hub", both_none is True and now_none is True
+          and unreadable is True and mcp_hub.runs_other_code() is False, (both_none, now_none, unreadable))
+    who = [sys.executable, os.path.join(LAB, "lib", "owners.py"), "who"]
+    with stand_in_hub("0" * 64):
+        r = subprocess.run(who + ["--json"], env=env(), capture_output=True, text=True, timeout=60)
+        r2 = subprocess.run(who, env=env(), capture_output=True, text=True, timeout=60)
+    r3 = subprocess.run(who + ["--json"], env=env(), capture_output=True, text=True, timeout=60)
+    check("who says when the hub runs older code (and --json has hub_older_code), and not when no hub runs",
+          json.loads(r.stdout or "{}").get("hub_older_code") is True and "runs older code" in r2.stdout
+          and json.loads(r3.stdout or "{}").get("hub_older_code") is False, (r.stdout[-300:], r2.stdout[-300:], r3.stdout[-200:]))
 
 
 def event_checks():
@@ -3284,6 +3386,7 @@ def main():
         terminal_checks()
         controller_checks()
         unreadable_checks()
+        older_hub_checks()
         event_checks()
         shell_checks()
         shell_write_checks()
