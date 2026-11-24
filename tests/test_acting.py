@@ -609,6 +609,57 @@ def volume_checks(td):
         check("volume sync shared run for the main VM, while VM other has it attached and a handoff open: exit 4, nothing "
               "called (no keys read, no sync)", rc == 4 and WAITS in err and not acting_calls(called),
               (rc, acting_calls(called)[:3], err[-300:]))
+        rec_shared = os.path.join(st, "locks", "s3-test-shared.json")
+        os.remove(rec_shared)
+        # (codex re-check 3, #1) other mounts only a folder inside the S3 copy (another volume): it sees what the sync
+        # changes too.
+        os.makedirs(os.path.join(copy, "docs"), exist_ok=True)
+        sub = os.path.join(st, "locks", "folder-test-docs.json")
+        write(sub, json.dumps({"kind": "folder", "name": "docs", "path": os.path.join(copy, "docs"), "vm": "other",
+                               "lab": os.path.realpath(co), "pid": keeper.pid, "pstart": lstart(keeper.pid),
+                               "since": "now", "state": "running", "rw": False, "exclusive": False}), 0o600)
+        rc, out, err, called, written = run_line(lab, sync, {"MCOMP_RUN_DIR": main_run}, "plain", other_run)
+        check("volume sync shared while VM other has a folder inside its copy attached (another volume) and a handoff "
+              "open: exit 4, nothing called", rc == 4 and WAITS in err and not acting_calls(called),
+              (rc, acting_calls(called)[:3], err[-300:]))
+        os.remove(sub)
+        # (#2) a holder record that's there but can't be read, or a locks folder that can't be read: refused, never
+        # read as nobody.
+        bad = os.path.join(st, "locks", "s3-test-unreadable.json")
+        for how in ("unreadable", "not JSON"):
+            write(bad, "{" if how == "not JSON" else json.dumps({"vm": "other"}), 0o600)
+            if how == "unreadable":
+                os.chmod(bad, 0)
+            rc, out, err, called, written = run_line(lab, sync, {"MCOMP_RUN_DIR": main_run}, "plain", other_run)
+            check(f"volume sync shared with a holder record that's {how}: refused (exit 4), nothing called",
+                  rc == 4 and "can't be" in err and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+            os.chmod(bad, 0o600)
+            os.remove(bad)
+        os.chmod(os.path.join(st, "locks"), 0)
+        try:
+            rc, out, err, called, written = run_line(lab, sync, {"MCOMP_RUN_DIR": main_run}, "plain", other_run)
+        finally:
+            os.chmod(os.path.join(st, "locks"), 0o700)
+        check("volume sync shared with the storage locks folder unreadable: refused (exit 4), nothing called",
+              rc == 4 and "can't be read" in err and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
+        # (#3) a computer that attaches it after the gate, while this sync waits for its lock or transfers: read again
+        # under the sync's own lock, before the exchange with the copy; refused (exit 4) before anything is written.
+        drv = os.path.join(lab.box.root, "late_holder.py")
+        write(drv, "import json, os, sys\nsys.path.insert(0, os.path.join(%r, 'lib'))\nimport storage\n"
+                   "real = storage.gate_computers\n"
+                   "def late(pairs):\n"
+                   "    real(pairs)\n"
+                   "    rec = dict(kind='s3', name='shared', path=%r, vm='other', lab=os.path.realpath(%r), pid=%d,\n"
+                   "               pstart=%r, since='now', state='running')\n"
+                   "    open(%r, 'w').write(json.dumps(rec))\n"
+                   "storage.gate_computers = late\n"
+                   "sys.exit(storage.main(['volume', 'sync', 'shared']))\n"
+              % (co, copy, co, keeper.pid, lstart(keeper.pid), rec_shared))
+        rc, out, err, called, written = run_line(lab, [PY, "-B", drv], {"MCOMP_RUN_DIR": main_run}, "plain", other_run)
+        os.remove(rec_shared)
+        check("volume sync shared, VM other attaching it after the gate (its handoff open): exit 4 under the sync's lock, "
+              "before the exchange; nothing called (no keys, no sync)", rc == 4 and "attached it meanwhile" in err
+              and not acting_calls(called), (rc, acting_calls(called)[:3], err[-300:]))
         img, snap = os.path.join(lab.box.root, "dv.img"), os.path.join(lab.box.root, ".dv.img.ckpt-other-ck")
         write(img, "x" * 4096)
         write(snap, "y" * 4096)
@@ -626,6 +677,70 @@ def volume_checks(td):
     finally:
         keeper.kill()
         keeper.wait()
+        lab.close()
+
+
+def look_once_checks(td):
+    """look_once closes every descriptor it has on the dispatch lock file (codex re-check 3, #4), with real flocks: a
+    held description handed on twice (two numbers), the long-running program looks once, the caller lets go of its own
+    copies, and an exclusive lock from another description must then be had (nothing kept it)."""
+    print("\nlook_once: a long-running program keeps no copy of a hold handed on")
+    import fcntl
+    run = os.path.join(td, "lookonce-run")
+    os.makedirs(os.path.join(run, "owners"))
+    path = os.path.join(run, "owners", ".dispatch")
+    write(path, "", 0o600)
+    a = os.open(path, os.O_RDWR)
+    fcntl.flock(a, fcntl.LOCK_SH)
+    b = os.dup(a)
+    code = ("import os, sys, time; sys.path.insert(0, %r); import handoff_gate\n"
+            "print(handoff_gate.look_once(%r), flush=True)\ntime.sleep(10)\n" % (os.path.join(LAB, "lib"),
+                                                                                    os.path.join(run, "owners")))
+    p = subprocess.Popen([PY, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, pass_fds=(a, b),
+                         env=dict(os.environ, MCOMP_RUN_DIR=run))
+    try:
+        os.close(a)
+        os.close(b)
+        how = p.stdout.readline().strip()
+        probe = os.open(path, os.O_RDONLY)
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            free = True
+        except BlockingIOError:
+            free = False
+        finally:
+            os.close(probe)
+        check("a hold handed on as two descriptors: look_once goes ahead on it (inherited) and keeps neither: once the "
+              "caller lets go, an exclusive lock is had while the program still runs", how == "inherited" and free
+              and p.poll() is None, (how, free, p.poll()))
+    finally:
+        p.kill()
+        p.wait()
+
+
+def default_name_checks(td):
+    """With no config/defaults.env and no config/local.env, the main computer's name is the one every helper falls back
+    on (labconfig.DEFAULT_VM_NAME), so a storage command for it with no run folder given goes ahead when no handoff is
+    open (codex re-check 3, #5)."""
+    print("\nno settings files: the main computer's default name")
+    lab = make_lab(td, "noset")
+    check("the copy runs a plain command first", lab is not None)
+    if lab is None:
+        return
+    try:
+        co = lab.box.co
+        for f in ("defaults.env", "local.env"):
+            os.remove(os.path.join(co, "config", f))
+        rc, out, err, called, written = run_line(lab, [PY, "-B", os.path.join(co, "lib", "storage.py"), "kill-vm"], {},
+                                                 "plain", os.path.join(co, ".run"))
+        check("storage.py kill-vm with no settings files and no run folder given, no handoff open: it goes ahead "
+              "(the main computer's default name, its .run)", rc == 0 and WAITS not in err and "can't be told" not in err,
+              (rc, err[-300:]))
+        handoff_on(os.path.join(co, ".run"))
+        rc, out, err, called, written = run_line(lab, [PY, "-B", os.path.join(co, "lib", "storage.py"), "kill-vm"], {},
+                                                 "plain", os.path.join(co, ".run"))
+        check("...and with the main computer's handoff open: exit 4", rc == 4 and WAITS in err, (rc, err[-300:]))
+    finally:
         lab.close()
 
 
@@ -783,6 +898,8 @@ def main():
         unreadable_settings_checks(td)
         binding_checks(td)
         volume_checks(td)
+        look_once_checks(td)
+        default_name_checks(td)
         cloud_setup_checks(td)
         mcp_manifest_checks(td)
         script_mark_checks(td)
