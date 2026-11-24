@@ -360,7 +360,9 @@ def entry_checks(td, rows):
                   "silent nothing); nothing called or written", rc in (0, 4) and not acted and not written
                   and (rc == 0 or WAITS in err), (rc, acted[:3], written[:3], err[-300:]))
             rc, out, err, called, _ = user
-            past = GOES in err or "couldn't tell whether an agent call is running" in (out + err)
+            # (reset says it goes ahead; view, which does nothing and says nothing for an agent during a handoff, goes
+            # on to its in-flight check or the reset itself, and says what came of it either way)
+            past = GOES in err or "virtual input devices" in (out + err)
             check(f"{words}: ...at the user's own terminal it goes past the handoff check", past and rc != 4,
                   (rc, out[-200:], err[-300:]))
         else:   # USER
