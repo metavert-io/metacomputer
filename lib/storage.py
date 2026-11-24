@@ -4541,6 +4541,19 @@ def cmd_status(a):
 
 
 # --- the command line ------------------------------------------------------------------------
+# What changes the computer: its start's storage (prepare, started, attach), what it sees of an S3 volume (sync), its
+# volumes' snapshots for a checkpoint, letting its storage go (release: the folder watcher stops, the locks go), and
+# powering it off (kill-vm). Volumes and reference disks themselves are images and records on this Mac, attached at a
+# start (refused while a running computer holds one); the folder watcher runs on as part of the start that waited.
+# tests/acting.py's table names the same.
+def changes_computer(a):
+    if a.cmd == "volume":
+        return a.op == "sync"
+    if a.cmd == "checkpoint":
+        return a.op != "list"
+    return a.cmd in ("prepare", "started", "attach", "release", "kill-vm")
+
+
 def main(argv):
     ap = strictargs.Parser(prog="metacomputer", add_help=True)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -4619,6 +4632,12 @@ def main(argv):
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_status)
     a = ap.parse_args(argv)
+    # While the user has the computer (a handoff), what changes it waits (lib/handoff_gate.py): exit 4 before anything
+    # is read or written, except at the user's own terminal or under the hold of the command that runs this
+    # (bin/metacomputer's start, stop, restore, checkpoint and volume sync; scripts/build-vm.sh).
+    if changes_computer(a):
+        import handoff_gate
+        handoff_gate.wait_or_hold(os.path.join(run_dir(), "owners"))
     try:
         return a.fn(a)
     except StorageError as e:

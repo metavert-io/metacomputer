@@ -613,7 +613,9 @@ session_guard() {
     0|2) ;;                     # 2: it couldn't tell, and said so
     3) exit 1 ;;                # refused: it said why
     99) die "the session check didn't run (MCOMP_PARSE_ONLY, the tests' switch: parse only); nothing was done" ;;
-    *) warn "couldn't check which computer this agent session holds (lib/sessionvm.py exit $rc); going on" ;;
+    # Anything else (a crash, a signal, a Python that won't start) is a check that wasn't made: refused, never taken
+    # for a pass.
+    *) die "couldn't check which computer this agent session holds (lib/sessionvm.py ended with exit $rc), so this doesn't go ahead; nothing was done. Name the computer to be sure (metacomputer --vm NAME ...), or try again" ;;
   esac
   export MCOMP_GUARD_VM="$VM_NAME:$SSH_PORT"
 }
@@ -658,7 +660,8 @@ parse_flags() {
 owners_check() {
   [ "$OVERRIDE" = 1 ] && return 0
   local rc=0; "$PY" "$LAB_ROOT/lib/owners.py" check || rc=$?
-  [ $rc = 4 ] && die "the user has the computer (metacomputer handoff): wait until they run 'metacomputer handoff done' or 'cancel'"
+  # While the user has the computer it waits with exit 4, as every acting command does (handoff_hold).
+  [ $rc = 4 ] && { printf '%s\n' "${c_red}metacomputer: the user has the computer (metacomputer handoff): wait until they run 'metacomputer handoff done' or 'cancel'${c_off}" >&2; exit 4; }
   [ $rc = 0 ] || die "another session is using the virtual computer (metacomputer who). Ask before taking over; then re-run with --override, or run 'metacomputer release' first"
 }
 
@@ -679,9 +682,22 @@ handoff_hold() { # [--user-ok] [--hub-child]: lib/handoff.py guard's
 # profiles --new/--delete, security apply): held the same way while the user has the computer, except at the user's
 # own terminal (their own hands, as `input-reset` there).
 handoff_hold_unless_user() { handoff_hold --user-ok "$@"; }
-# The lifecycle commands (stop, reset, restore, baseline, desktop-restart): after any question, right before they
-# change anything, and held until they're done; --override (you agreed) goes ahead as it does for another session.
-handoff_hold_unless_override() { [ "$OVERRIDE" = 1 ] || handoff_hold; }
+# The lifecycle commands (stop, reset, restore, baseline, checkpoint, desktop-restart): after any question, right
+# before they change anything, and held until they're done; --override (you agreed) goes ahead as it does for another
+# session, still holding the lock (dispatch_hold), so what it runs (lib/storage.py, lib/remote.py: lib/handoff_gate.py)
+# goes ahead under that hold, and no handoff opens until it's done.
+handoff_hold_unless_override() { if [ "$OVERRIDE" = 1 ]; then dispatch_hold; else handoff_hold; fi; }
+# This VM's dispatch lock, shared, on descriptor 6, without looking at the handoff: --override's only.
+dispatch_hold() {
+  [ "${HANDOFF_HELD:-}" = 1 ] && return 0
+  local f="$RUN_DIR/owners/.dispatch"
+  { mkdir -p "$RUN_DIR/owners" && ( umask 077; : >> "$f" ) && [ -f "$f" ] && [ ! -L "$f" ]; } 2>/dev/null \
+    || die "couldn't open this VM's dispatch lock ($f)"
+  exec 6>>"$f" || die "couldn't open this VM's dispatch lock ($f)"
+  "$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import flockwait; flockwait.take(6, 10.0, 0.02, shared=True)' \
+    "$LAB_ROOT/lib" 2>/dev/null || die "a handoff is being opened; nothing was changed (metacomputer handoff status)"
+  HANDOFF_HELD=1
+}
 
 guest_path() { # PATH -> absolute guest path; refuses shell metacharacters
   local p="$1"
@@ -768,13 +784,15 @@ do_stop_remote() {
   parse_flags "$@"
   local force=""; for a in ${REST[@]+"${REST[@]}"}; do case "$a" in --force) force=--force ;; *) die "usage: metacomputer stop [--force] [--override]" ;; esac; done
   expect_guard
+  # Not while a session or the user (a handoff) has it: on your own server too, where only the hub is stopped (it keeps
+  # the user's browser alive during a handoff).
+  owners_check
+  handoff_hold_unless_override
   if ! remote_made; then
     hub_stop
     ok "metacomputer doesn't power your own server off; this Mac's connection to it (the hub) is closed"
     return 0
   fi
-  owners_check
-  handoff_hold_unless_override
   if [ "${PROVIDER:-}" != sprites ]; then
     # How it's stopped (and what it bills stopped) is the plan's, and stopping it needs its provider's credentials:
     # both are checked before anything is touched (the hub, a recording): a plan that can't be read stops nothing.
@@ -1046,6 +1064,10 @@ do_start() { # [--no-volumes]
   # (`vm delete` holds it through its prompt) or another change of it.
   vm_lock_or_die "metacomputer start"
   expect_guard   # a caller that confirmed which VM (metacomputer update) named it: never another
+  # It starts the computer, or, running, may stop it again (no gateway), set the guest's options and mount its storage:
+  # not while the user has it (but at their own terminal), held until it's done. Within reset, restore or baseline it
+  # holds already.
+  handoff_hold_unless_user
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: metacomputer build"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then
@@ -1668,6 +1690,7 @@ do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
     ckpt_name "${2:-}"; vm_exists "$CKPT_PREFIX$2" || die "no checkpoint '$2' (metacomputer checkpoints)"
     local vols; vols="$(storage_py checkpoint list "$2" 2>/dev/null)"
     confirm "Delete checkpoint '$2'${vols:+ (and its snapshot of volumes: $vols)}?"
+    handoff_hold_unless_override     # a checkpoint of the computer the user has: not meanwhile, held until it's gone
     runner_delete "$CKPT_PREFIX$2" >/dev/null || die "checkpoint '$2' wasn't deleted (above)"
     storage_py checkpoint delete "$2" || warn "could not delete the volume snapshots of checkpoint '$2'"
     emit_event lifecycle checkpoint info "Checkpoint '$2' of $VM_NAME deleted" "" "name=$2" "change=deleted"
@@ -1679,6 +1702,8 @@ do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
   done
   ckpt_name "$name"
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
+  # Its checkpoints change (one replaced, one made): not while the user has the computer, held until it's saved.
+  handoff_hold_unless_override
   vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'metacomputer stop' first"
   if vm_exists "$CKPT_PREFIX$name"; then
     [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"

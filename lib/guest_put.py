@@ -283,6 +283,11 @@ def main(argv):
     if not files:
         print("usage: metacomputer put HOST_PATH... [--to GUEST_DIR] [--overwrite]", file=sys.stderr)
         return 2
+    # It writes in the guest: while the user has the computer (a handoff) it waits (lib/handoff_gate.py, this VM's
+    # RUN_DIR): exit 4 before anything is read or sent, except at the user's own terminal or under the hold of the
+    # command that runs this (bin/metacomputer put).
+    import handoff_gate
+    handoff_gate.wait_or_hold()
     user = os.environ.get("MCOMP_GUEST_USER") or "cua"
     try:
         items, nfiles = put(ssh, files, to, overwrite, user)

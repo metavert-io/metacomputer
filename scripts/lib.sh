@@ -588,19 +588,25 @@ script_session_guard() { # SAID CMD [ARGS...]
   case "$rc" in
     0|2) ;;
     3) return 1 ;;
-    *) warn "couldn't check which computer this agent session holds (lib/sessionvm.py exit $rc); going on" ;;
+    # Anything else (a crash, a signal, parse-only's 99) is a check that wasn't made: refused, never taken for a pass.
+    *) warn "couldn't check which computer this agent session holds (lib/sessionvm.py ended with exit $rc), so this doesn't go ahead; nothing was done"
+       return 1 ;;
   esac
   export MCOMP_GUARD_VM="$VM_NAME:$SSH_PORT"
 }
 # The handoff check (bin/metacomputer's handoff_hold_unless_user): lib/handoff.py guard --user-ok, with this VM's
 # dispatch lock taken shared on descriptor 5 for the rest of the script, so no handoff opens while it runs; while one
-# is open it stops (status 4, saying why), except at the user's own terminal.
+# is open it stops (status 4, saying why), except at the user's own terminal or under a hold its caller handed on.
+# What it runs (lib/remote.py, lib/storage.py, metacomputer's own commands) goes ahead under that hold
+# (lib/handoff_gate.py). vm delete takes it too, before its owners lock (the order: dispatch, then owners).
 script_handoff_hold() {
+  [ "${MC_SCRIPT_HELD:-}" = 1 ] && return 0
   local f="$RUN_DIR/owners/.dispatch"
   { mkdir -p "$RUN_DIR/owners" && ( umask 077; : >> "$f" ) && [ -f "$f" ] && [ ! -L "$f" ]; } 2>/dev/null \
     || { warn "couldn't open this VM's dispatch lock ($f)"; return 4; }
   exec 5>>"$f" || { warn "couldn't open this VM's dispatch lock ($f)"; return 4; }
   "$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 5 --user-ok || return 4
+  MC_SCRIPT_HELD=1
 }
 
 # One line on stderr, once per command, before a command acts on a VM: which VM and settings; "vault" adds the

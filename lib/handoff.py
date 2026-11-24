@@ -19,7 +19,8 @@ and waits:
                                     lock is taken shared on the caller's descriptor N and kept for the caller
                                     (bin/metacomputer's fills and session loads); --user-ok lets the person at
                                     their own terminal go ahead (put, ssh, rename...); --hub-child lets the VM's
-                                    hub's own child through (its input reset, under the lock it holds)
+                                    hub's own child through (its input reset, under the lock it holds); a hold
+                                    its caller handed on (lib/handoff_gate.py) goes ahead too
 
 Opening one also removes the driver's leftover virtual input devices (lib/input_reset.py), under the dispatch lock it
 holds exclusively, so the live view's mouse and keyboard work. When an agent action is still running in the VM (or
@@ -1101,7 +1102,8 @@ def cmd_guard(argv):
     --user-ok: an open handoff doesn't stop the person at their own terminal (owners.at_user_terminal: a terminal on
     stdin and no agent session above): `put`, `ssh` and the other commands that act in the guest are theirs to run
     then, as `input-reset` is. --hub-child: the VM's running hub's own child goes ahead without taking the lock, which
-    that hub holds exclusively (hub_child); anything else is checked as usual."""
+    that hub holds exclusively (hub_child); anything else is checked as usual. A caller's hold handed on to this one
+    (a build's descriptor 5 to the commands it runs: lib/handoff_gate.py inherited_hold, checked) goes ahead too."""
     # Its command line (lib/strictargs.py; MCOMP_PARSE_ONLY: taken, then exit 99 with nothing checked or held).
     a = guard_parser().parse_args(argv)
     fd, user_ok, from_hub = a.hold_fd, a.user_ok, a.hub_child
@@ -1116,6 +1118,11 @@ def cmd_guard(argv):
             print("metacomputer: " + owners.handoff_refusal(h), file=sys.stderr, flush=True)
             return EXIT_CANCELLED
         return 0
+    # A caller that looked already and holds the lock passes it on (a build's fd 5 to the commands it runs): checked
+    # as lib/handoff_gate.py checks it for the programs that act by themselves, before this guard's own descriptor
+    # takes the lock (it's never counted as the caller's).
+    import handoff_gate
+    inherited = handoff_gate.inherited_hold(exclude=(fd,) if fd is not None else ())
     if fd is not None:
         try:
             st, want = os.fstat(fd), os.lstat(owners.dispatch_path())
@@ -1132,6 +1139,8 @@ def cmd_guard(argv):
             return EXIT_CANCELLED
     h = owners.open_handoff()
     if h:
+        if inherited is not None:
+            return 0                    # under its caller's hold: that caller looked, and no handoff opened since
         if user_ok and owners.at_user_terminal((0,)):
             print("metacomputer: your handoff is open, and this runs at your own terminal: going ahead.",
                   file=sys.stderr, flush=True)

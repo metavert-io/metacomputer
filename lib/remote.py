@@ -1537,6 +1537,24 @@ def cmd_missing(args):
     return 0
 
 
+VM_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")     # a computer's name (scripts/lib.sh mc_valid_vm_name)
+# The subcommands that change a computer (its power, disks, checkpoints, network rules, what runs in it, or whether it
+# exists), and the forms of the others that do: tests/acting.py's table names the same.
+CHANGES = ("exec", "create", "wake", "sleep", "delete", "abort", "resolvers")
+
+
+def changes_computer(a):
+    if a.cmd in CHANGES:
+        return True
+    if a.cmd == "checkpoint":
+        return a.action != "list"
+    if a.cmd == "allow":
+        return not a.show
+    if a.cmd == "egress":
+        return bool(a.set)
+    return False
+
+
 def main(argv=None):
     """The command line. Everything it prints, on standard output and error, passes no_creds (NoCreds)."""
     real = sys.stdout, sys.stderr
@@ -1630,6 +1648,26 @@ def run(argv=None):
     p.add_argument("--forget", default=None, help="teardown: an unresolved launch's operation you've dealt with")
     a = ap.parse_args(argv)
     take_credentials()
+    # What deletes at a provider whatever computer it was (teardown), or forgets a launch that may have made one, is
+    # the user's own call at their own terminal, run this way as through `metacomputer cloud` (Fly Sprites has nothing
+    # to tear down: cmd_cloud says so).
+    if a.cmd == "cloud" and (a.action == "teardown" or a.forget is not None) and a.provider != "sprites":
+        import owners
+        if not owners.at_user_terminal((0,)):
+            print(f"metacomputer: cloud {a.action} {a.provider}{' --forget' if a.forget is not None else ''} deletes "
+                  "what metacomputer left at the provider (servers included) or forgets a launch that may have made "
+                  "one, so it's yours to run: in your own terminal (not through an agent). Nothing was changed",
+                  file=sys.stderr)
+            return 3
+    # While the user has the computer (a handoff), what changes it waits (lib/handoff_gate.py): exit 4 before any
+    # provider is asked anything or any record is written, except at the user's own terminal or under the hold of the
+    # command that runs this (bin/metacomputer, scripts/remote-build.sh). Its RUN_DIR is fixed by its name.
+    if changes_computer(a):
+        if not VM_NAME_RE.fullmatch(a.vm):
+            print(f"metacomputer: '{a.vm[:64]}' isn't a computer's name; nothing was done", file=sys.stderr)
+            return 2
+        import handoff_gate
+        handoff_gate.wait_or_hold(os.path.join(LAB, ".run-vms", a.vm, "owners"))
     try:
         if a.cmd == "target":
             return cmd_target(a)
