@@ -4233,6 +4233,17 @@ def hub_pid(env=None):
         return None
 
 
+def runs_other_code(env=None):
+    """Whether this VM's running hub loaded other code than this checkout's lib/ holds now: it was started before an
+    update or a pull (the code_digest its hub.pid records differs), or its record names none (a hub from before it was
+    recorded). Its checks may then not read everything this version writes (a handoff record's new words:
+    lib/handoff.py writes the form every version reads). False when no hub runs."""
+    rec = _hub_record(env)
+    if rec is None:
+        return False
+    return rec.get("code") != code_digest()
+
+
 def hub_sockets(env=None):
     """Where to find this VM's hub: where the running hub says it listens (a hub started by another version of
     this code may use another folder), then where this version puts it. Each is checked like any other."""

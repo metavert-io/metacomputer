@@ -875,6 +875,14 @@ def claims():
 HANDOFF_FILE = "handoff.state"
 HANDOFF_MAX_S = 7200          # the longest time limit; a record that can't be read counts as open this long
 HANDOFF_WHY = ("captcha", "login", "2fa", "payment", "other")
+# The words every version has read since handoffs began: lib/handoff.py writes only these, and no agent name, while
+# this VM's hub runs other code (lib/mcp_hub.py runs_other_code), so an older hub reads the record as it is rather than
+# as one that can't be read (an open handoff for HANDOFF_MAX_S, even after it ends).
+HANDOFF_WHY_EVERY_VERSION = ("captcha", "login", "2fa", "other")
+# A word or agent name this version doesn't know (a newer version wrote it) reads as "other" or no agent: they only
+# name things in messages, so the record's state (open or ended, and when) still counts.
+HANDOFF_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+HANDOFF_AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
 HANDOFF_STATUS = ("open", "done", "cancelled", "timed_out")
 HANDOFF_ID_RE = re.compile(r"h-[0-9a-f]{12}")
 
@@ -893,10 +901,13 @@ def handoff_valid(rec):
         return rec.get(k) is None or (isinstance(rec.get(k), t) and not isinstance(rec.get(k), bool))
     return (isinstance(rec, dict) and rec.get("v") == 1 and isinstance(rec.get("id"), str)
             and HANDOFF_ID_RE.fullmatch(rec["id"]) is not None and rec.get("status") in HANDOFF_STATUS
-            and rec.get("why") in HANDOFF_WHY and _finite(rec.get("opened")) and _finite(rec.get("deadline"))
+            and isinstance(rec.get("why"), str) and HANDOFF_WORD_RE.fullmatch(rec["why"]) is not None
+            and _finite(rec.get("opened")) and _finite(rec.get("deadline"))
             and 0 < rec["deadline"] - rec["opened"] <= HANDOFF_MAX_S + 1    # + 1: float rounding of a 2 h limit
             and opt("say", str) and opt("cwd", str) and opt("note", str) and opt("ended_from", str)
-            and opt("claude_pid", int) and opt("claude_start", str) and rec.get("agent") in (None, *AGENTS)
+            and opt("claude_pid", int) and opt("claude_start", str)
+            and (rec.get("agent") is None or (isinstance(rec.get("agent"), str)
+                                              and HANDOFF_AGENT_RE.fullmatch(rec["agent"]) is not None))
             and (rec.get("ended") is None or _finite(rec.get("ended"))))
 
 
@@ -973,6 +984,10 @@ def handoff_record():
     except (UnicodeDecodeError, ValueError):
         rec = None
     if handoff_valid(rec):
+        if rec["why"] not in HANDOFF_WHY:
+            rec["why"] = "other"            # a newer version's word (HANDOFF_WORD_RE)
+        if rec.get("agent") is not None and rec["agent"] not in AGENTS:
+            rec["agent"] = None             # a newer version's agent: messages then name none
         return rec
     t = min(t, now) if _finite(t) else _first_failure(now)
     return {"v": 1, "id": None, "status": "open", "unreadable": True, "why": "other", "opened": t,
@@ -1247,19 +1262,28 @@ def main(argv):
         me = claude_of(os.getpid(), table)
         all_claims = claims()
         direct = direct_connections(table)
-        hub = None
+        hub, older = None, False
         try:   # the hub's own view: its clients (they act through it), idle time
             import mcp_hub
             hub = mcp_hub.query_status()
         except Exception:
             pass
+        try:
+            import mcp_hub
+            older = mcp_hub.runs_other_code()      # started before the code changed (an update, a pull)
+        except Exception:
+            pass
         handoff = open_handoff()
         if "--json" in argv:
             print(json.dumps({"self_claude_pid": me, "sessions": all_claims, "direct": direct,
-                              "active_s": ACTIVE_S, "hub": hub, "handoff": handoff}, indent=2, default=str))
+                              "active_s": ACTIVE_S, "hub": hub, "hub_older_code": older, "handoff": handoff},
+                             indent=2, default=str))
             return 0
         if hub:
             print("  hub: " + mcp_hub.describe_status(hub).replace("\n", "\n  "))
+        if older:
+            print("  hub: runs older code than this checkout (it started before the code changed); `metacomputer hub "
+                  "stop --if-idle` restarts it on the current code once nothing uses it (`metacomputer update` does too)")
         if handoff:
             print("  " + handoff_describe(handoff))
         if not all_claims and not direct:
