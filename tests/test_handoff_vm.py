@@ -5,7 +5,8 @@
 
 Claude's side opens a handoff (no terminal, as an agent's shell runs it) and waits. While it's open, an acting
 call through the hub (`metacomputer call`) is refused with "Paused: the user has the computer" and reaches nothing,
-reads still work, `metacomputer sh` is refused (with or without --override; --read-only runs), `secrets fill`,
+reads still work, `metacomputer sh` is refused (with or without --override, and --read-only too: the user's own
+--read-only at a pseudo-terminal runs), `put`, `ssh` and `rename` are refused (the user's own ssh runs), `secrets fill`,
 a fill naming another VM, `input-reset` (but `--check`) and `stop` are refused, `release` leaves it, and the
 session that asked can't say "done" for the user. Then the
 user's "done" (scripted at a pseudo-terminal, standing in for the user's own terminal) ends it: the waiting
@@ -13,7 +14,8 @@ command returns 0 with the user's note, and the same acting call goes through.
 
 The driver's leftover input devices (lib/input_reset.py): a background scroll in Mousepad leaves a "CUA v1.…" pair;
 a handoff opened while slow background typing still runs removes nothing (the typing finishes) and says the reset is
-pending; opening the main handoff removes it and says so; the user's own `input-reset` runs during the handoff (an agent's is
+pending, and its waiting command removes the pair once that call has ended, the handoff still open; opening the main
+handoff (after another background scroll) removes the new pair and says so; the user's own `input-reset` runs during the handoff (an agent's is
 refused); after "done" the same driver session's next background input works at once (the hub has a fresh driver
 connection; without one, Cua Driver 0.53.0 ends at its next pointer action through the removed pair) and leaves a
 new pair, which `input-reset` removes again at the end.
@@ -22,10 +24,13 @@ It starts the VM if it's off (and stops it again afterwards), uses the VM's own 
 events to a temporary folder, so no event sink of yours hears it. A test VM only: it acts on the desktop (the
 driver's agent-cursor setting).
 """
+import fcntl
 import json
 import os
 import pty
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -98,17 +103,51 @@ def scroll(env, target):
     return r, time.time() - t0
 
 
+def run_dir_of(vm):
+    """The test VM's RUN_DIR: its settings file's, else a config/vms/ VM's own folder, else the checkout's .run."""
+    cfg = os.environ["MCOMP_CONFIG"]
+    for line in open(cfg):
+        if line.startswith("RUN_DIR="):
+            return os.path.expanduser(line.split("=", 1)[1].strip().strip('"').strip("'"))
+    if os.path.basename(os.path.dirname(os.path.abspath(cfg))) == "vms":
+        return os.path.join(LAB, ".run-vms", vm)
+    return os.path.join(LAB, ".run")
+
+
+def lock_held(path):
+    """Whether something holds the dispatch lock (an exclusive try fails)."""
+    try:
+        f = os.open(path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(f)
+
+
+def ssh_connected(pid):
+    """Whether PID is ssh by now (metacomputer ssh exec'd it) with a connection of its own."""
+    r = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    return r.stdout.strip().endswith("ssh")
+
+
 def main():
     if not os.environ.get("MCOMP_CONFIG"):
         print("set MCOMP_CONFIG to a test VM's settings file (this test acts on that VM's desktop)")
         return 2
     td = tempfile.mkdtemp(prefix="mchandoff-")
-    env = dict(os.environ, MCOMP_EVENTS_DIR=os.path.join(td, "events"))
+    env = dict(os.environ, MCOMP_EVENTS_DIR=os.path.join(td, "events"), MCOMP_HANDBACK_PANEL="off")   # no panel on the Mac
     try:
         names_spool = any(line.startswith("EVENTS_SPOOL=") for line in open(os.environ["MCOMP_CONFIG"]))
     except OSError:
         names_spool = False
-    if not names_spool:                  # a VM's own settings file that names its spool keeps it (two would refuse)
+    if not names_spool and os.path.basename(os.path.dirname(os.path.abspath(os.environ["MCOMP_CONFIG"]))) != "vms":
+        # a VM's own settings file that names its spool keeps it (two would refuse); a config/vms/ VM's is fixed
         env["MCOMP_EVENTS_SPOOL"] = os.path.join(td, "spool")
     r = mc(env, "where")
     vm = next((line.split()[1] for line in r.stdout.splitlines() if line.startswith("vm ")), "")
@@ -126,6 +165,41 @@ def main():
         mc(env, "release")
         r = mc(env, "call", *ACT)
         check("before the handoff, an acting call goes through", r.returncode == 0, (r.stdout[-300:], r.stderr[-300:]))
+        # `metacomputer ssh` with the real OpenSSH (it closes the descriptors it inherits): the dispatch lock is held
+        # while it runs (a helper keeps it until ssh's pid exits), its exit status is ssh's, and TERM to its pid ends
+        # ssh itself (it's exec'd), the lock going only after.
+        dispatch = os.path.join(run_dir_of(vm), "owners", ".dispatch")
+        sp = subprocess.Popen([MC, "ssh", "ops", "sleep 30"], env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        held = False
+        end = time.time() + 20
+        while time.time() < end and not held and sp.poll() is None:
+            time.sleep(0.5)
+            held = lock_held(dispatch) and ssh_connected(sp.pid)
+        seen = {}
+
+        def watch():
+            end_w = time.time() + 20
+            while time.time() < end_w:
+                if not lock_held(dispatch):
+                    sp.poll()
+                    seen["ssh_alive_at_release"] = sp.returncode is None
+                    return
+                time.sleep(0.01)
+        wt = threading.Thread(target=watch, daemon=True)
+        wt.start()
+        os.kill(sp.pid, signal.SIGTERM)
+        wt.join(25)
+        try:
+            sp.wait(10)
+        except subprocess.TimeoutExpired:
+            sp.kill()
+        r7 = mc(env, "ssh", "ops", "exit 7")
+        check("metacomputer ssh (real OpenSSH): the dispatch lock is held while ssh is connected, TERM to its pid ends ssh "
+              "(the lock let go only after), and ssh's exit status is the command's (7)", held
+              and seen.get("ssh_alive_at_release") is False and sp.returncode in (-signal.SIGTERM, 255)   # (OpenSSH
+              and r7.returncode == 7,                                          # catches TERM and exits 255 itself)
+              (held, seen, sp.returncode, r7.returncode, r7.stderr[-200:]))
         target = mousepad(env)
         check("Mousepad runs (the window the background input goes to)", target is not None)
         if target:
@@ -152,7 +226,13 @@ def main():
                 time.sleep(0.25)
             still_pairs = pairs(env)
             typing.join(120)
-            mc(env, "handoff", "cancel")
+            # Once that call has ended, the handoff's waiting command makes the pending reset, the handoff still open
+            # (with a pair left, Chrome would ignore the live view's keyboard for the whole handoff).
+            end = time.time() + 20
+            while time.time() < end and pairs(env) != 0:
+                time.sleep(0.5)
+            after_pairs, still_open = pairs(env), popen.poll() is None
+            as_user(env, "handoff", "cancel")
             popen.wait(30)
             plog.seek(0)
             said = plog.read()
@@ -160,6 +240,10 @@ def main():
                   "finishes), and it says the reset is pending and how to make it", (still_pairs or 0) >= 1
                   and "weren't removed" in said and "metacomputer input-reset" in said and box.get("r") is not None
                   and box["r"].returncode == 0, (still_pairs, said[:600], box.get("r") and box["r"].stderr[-200:]))
+            check("...and once that call has ended, the waiting handoff removes them, the handoff still open, and says so",
+                  after_pairs == 0 and still_open and "leftover virtual input devices were removed" in said,
+                  (after_pairs, still_open, said[-400:]))
+            r, took = scroll(env, target)            # a pair again, for the main handoff to remove
 
         log = open(os.path.join(td, "opener.out"), "w+")
         opener = subprocess.Popen([MC, "handoff", "--why", "captcha", "--say",
@@ -193,9 +277,35 @@ def main():
         r = mc(env, "sh", "-c", "echo acting")
         r2 = mc(env, "sh", "--override", "-c", "echo acting")
         r3 = mc(env, "sh", "--read-only", "-c", "echo reading")
-        check("sh is refused (125) with or without --override; --read-only runs",
-              r.returncode == 125 and r2.returncode == 125 and "the user has the computer" in r.stderr + r.stdout
-              and r3.returncode == 0 and "reading" in r3.stdout, (r.returncode, r2.returncode, r3.returncode, r.stderr[-200:]))
+        check("sh is refused (125) with or without --override, and --read-only too (an agent session's script could "
+              "still reach the desktop)", r.returncode == 125 and r2.returncode == 125 and r3.returncode == 125
+              and "the user has the computer" in r.stderr + r.stdout and "reading" not in r3.stdout,
+              (r.returncode, r2.returncode, r3.returncode, r.stderr[-200:]))
+        rc, o, e = as_user(env, "sh", "--read-only", "-c", "echo reading")
+        check("...but the user's own --read-only run at their terminal goes ahead", rc == 0 and "reading" in o, (rc, o, e[-200:]))
+        upf = os.path.join(td, "held.txt")
+        open(upf, "w").write("x")
+        r = mc(env, "put", upf)
+        r2 = mc(env, "ssh", "ops", "touch /tmp/held-by-handoff")
+        r3 = mc(env, "rename", "~/nothing-here.txt", "x.txt")
+        rc, o, e = as_user(env, "ssh", "ops", "echo mine; test -e /tmp/held-by-handoff && echo reached || echo held")
+        check("put, ssh and rename are refused for the agent (exit 4, the guest isn't reached); the user's own ssh at "
+              "their terminal goes ahead", r.returncode == 4 and r2.returncode == 4 and r3.returncode == 4
+              and rc == 0 and "mine" in o and "held" in o, (r.returncode, r2.returncode, r3.returncode, rc, o[-200:]))
+        # Recording: an agent's record start is held; the user's own at their terminal streams through their handoff,
+        # and their record stop saves it (the stream's Mac half is record start's own: nothing asks again).
+        r = mc(env, "record", "start", "held-rec", "10")
+        rc, o, e = as_user(env, "record", "start", "mine-rec", "10")
+        time.sleep(4)
+        rc2, o2, e2 = as_user(env, "record", "stop")
+        m_dir = re.search(r"streaming to (/\S+)/ ", o + e)
+        rec_dir = m_dir.group(1) if m_dir else ""
+        saved = sorted(f for f in os.listdir(rec_dir) if f.startswith(("mine-rec.", "held-rec."))) if rec_dir else []
+        check("an agent's record start is held (exit 4); the user's own at their terminal streams, and their stop "
+              "saves it", r.returncode == 4 and rc == 0 and rc2 == 0 and "mine-rec.mp4" in saved
+              and not any(f.startswith("held-rec") for f in saved), (r.returncode, rc, e[-300:], rc2, e2[-300:], saved))
+        for f in saved:
+            os.remove(os.path.join(rec_dir, f))
         r = mc(env, "secrets", "fill", "nothing-here", "--field", "password")
         check("secrets fill is refused before the vault is asked (exit 4)", r.returncode == 4
               and "the user has the computer" in r.stderr, (r.returncode, r.stderr[-300:]))
@@ -256,7 +366,7 @@ def main():
     finally:
         if opener and opener.poll() is None:
             opener.terminate()
-            subprocess.run([MC, "handoff", "cancel"], env=env, capture_output=True, timeout=60)
+            as_user(env, "handoff", "cancel")        # the user calls it off (their terminal)
         mc(env, "call", "end_session", json.dumps({"session": SESSION}))
         mc(env, "input-reset")                       # leave no pair behind
         mc(env, "release")

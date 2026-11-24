@@ -11,10 +11,13 @@
 # Nothing but --replace: anything else (an option it doesn't have, a word) is a usage error, before anything runs.
 if ! sa_check build-vm.sh "metacomputer build [--replace]" 0 0 "--replace" "" "$@"; then sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0; fi   # usage only
 set -Eeuo pipefail
+MC_SCRIPT_SAID="${MCOMP_VM:-}${MCOMP_CONFIG:-}${MCOMP_EXPECT_VM:-}"   # the VM named, before lib.sh reads the settings
 . "$(dirname "$0")/lib.sh"
 trap 'die "failed at ${BASH_SOURCE[0]##*/} line $LINENO: $BASH_COMMAND"' ERR
 vm_target_check   # which VM: never the defaults' VM on a guess (scripts/lib.sh)
 vm_notice
+# Run on its own as well as by bin/metacomputer: the session guard, and (below) the handoff check.
+script_session_guard "$MC_SCRIPT_SAID" build "$@" || exit 1
 # The optional event stream (docs/events.md): build_done or build_failed, however the build ends.
 # Refusing to overwrite an existing VM sends nothing; an interrupted build (Ctrl-C) is info.
 BUILD_QUIET_EXIT=0
@@ -22,6 +25,10 @@ trap 'rc=$?; if [ $rc = 0 ]; then emit_event lifecycle build_done info "The virt
       elif [ $rc = 130 ] || [ $rc = 143 ]; then emit_event lifecycle build_failed info "Building the virtual computer $VM_NAME was interrupted" "metacomputer build --replace to start again" "exit=$rc";
       elif [ "$BUILD_QUIET_EXIT" = 0 ]; then emit_event lifecycle build_failed error "Building the virtual computer $VM_NAME failed (exit $rc)" "see ${BUILD_LOG:-the newest logs/build-*.log}" "exit=$rc"; fi' EXIT
 REPLACE=0; [ "${1:-}" = "--replace" ] && REPLACE=1
+# The handoff check, held for the whole build (scripts/lib.sh script_handoff_hold): --replace stops and deletes the VM
+# the user may have, and every build sets the guest up, finalizes it, clears its run files and stops it, so no
+# handoff opens meanwhile; while one is open, nothing of the VM's is looked at, stopped, deleted or written.
+script_handoff_hold || { BUILD_QUIET_EXIT=1; exit 4; }
 TS="$(date +%Y%m%d-%H%M%S)"
 BUILD_LOG="$LOG_DIR/build-$TS.log"
 exec > >(tee -a "$BUILD_LOG") 2>&1

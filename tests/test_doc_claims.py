@@ -362,13 +362,14 @@ def record_to_host():
     streamed path writing on the Mac."""
     rec = function_text("do_record")
     return (D["RECORD_TO"] == "host" and 'local mode="${RECORD_TO:-host}"' in rec
-            and '"$SELF" _record-pipe' in rec and "recording.py\" save" in function_text("do_record_pipe")), D["RECORD_TO"]
+            and 'record_stream_start "$name"' in rec and "recording.py\" save" in function_text("record_stream_start")), D["RECORD_TO"]
 
 
 def stream_keeps_reserve():
     """The Mac's half of a stream gets the free-space reserve, and stops on it."""
     import recording
-    return ('--min-free-gb "${IMPORT_MIN_FREE_GB:-' + D["IMPORT_MIN_FREE_GB"] + '}"' in function_text("do_record_pipe")
+    return ('"${IMPORT_MIN_FREE_GB:-' + D["IMPORT_MIN_FREE_GB"] + '}"' in function_text("record_stream_start")
+            and 'save "$out" --min-free-gb "$free"' in function_text("record_stream_start")
             and "IMPORT_MIN_FREE_GB" in raw("lib/recording.py") and callable(recording.cmd_save))
 
 
@@ -432,7 +433,7 @@ def recording_deadlines():
             and "vm_tar_copy \"$dest\" 'if cd ~/metacomputer-runs" in function_text("do_recordings")
             and '--idle-timeout "${MCOMP_SYNC_IDLE:-120}" -- ssh' in function_text("vm_tar_copy")
             and "timeout = 600.0 if idle is None or \"--timeout\" in args else None" in raw("lib/guest_import.py")
-            and "--timeout" not in function_text("do_record_pipe"))
+            and "--timeout" not in function_text("record_stream_start"))
 
 
 def task_finish_keeps_turns():
@@ -1083,7 +1084,7 @@ CLAIMS = [
      lambda m: fill_types_match()),
     ("docs/guide.md", r"Passwords filled by `metacomputer secrets` show as dots, but usernames and codes are visible",
      lambda m: fill_types_match()),
-    # Where recordings are while they record (bin/metacomputer do_record, do_record_pipe, the task copier, task
+    # Where recordings are while they record (bin/metacomputer do_record, record_stream_start, the task copier, task
     # finish; lib/recording.py save). A VM that turns hostile can erase only what's still inside it.
     ("SECURITY.md", r"\| \*\*Desktop, `RECORD_TO=host`\*\* \(the default\) \| On the Mac: the VM encodes its screen and streams it",
      lambda m: record_to_host()),
@@ -1544,8 +1545,56 @@ CLAIMS = [
      lambda m: f'"code": "{m[1]}"' in raw("lib/mcp_hub.py")
      and owners.handoff_refusal({"why": "captcha", "opened": 0, "deadline": 1e12}).startswith(
          "Paused: the user has the computer")),
-    ("SECURITY.md", r"`metacomputer sh` refuses every run that isn't `--read-only`, with or without `--override`",
-     lambda m: handoff_before_override()),
+    ("SECURITY.md", r"`metacomputer sh` refuses every run that isn't `--read-only`, with or without\s+`--override`, and a "
+                    r"`--read-only` one too when an agent session runs it",
+     lambda m: handoff_before_override() and read_only_held()),
+    ("SECURITY.md", r"`put`, `ssh` \(any role\), `rename`, `task start`, `browser profiles --new\|--delete`, `security apply`, "
+                    r"`record\s+start\|stop`, `build --replace` \(and a computer elsewhere's `build`\) and `volume sync`, which "
+                    r"reach the guest outside\s+the hub and the shell channel, refuse the same way",
+     lambda m: guest_commands_held()),
+    ("SECURITY.md", r"A recording's stream is started by `record start` itself, after its checks \(there's no command\s+of "
+                    r"its own to run\), and keeps `record start`'s dispatch lock until the stream is up, so no handoff "
+                    r"opens in between\s+even if `record start` is stopped on the way \(a stream not up within 20 s, no "
+                    r"bytes from it waiting either, is ended\s+before the lock goes: it never starts\); the internal commands that write to the guest are metacomputer's own: `_vnc-install` "
+                    r"only from\s+a build or at your own terminal, `_vnc-push` only at your terminal; and every value that "
+                    r"reaches the recorder's\s+shell in the VM is checked first \(the name by the name rule, the frame rate a "
+                    r"number from 1 to 60",
+     lambda m: internal_commands_rules()),
+    ("SECURITY.md", r"or kill the helper that keeps\s+`metacomputer ssh`'s dispatch lock \(the lock goes while that ssh "
+                    r"goes on\)",
+     lambda m: "Killing the helper by hand lets the lock go: the same-account limit" in raw("scripts/lib.sh")),
+    ("SECURITY.md", r"`ssh` keeps it until its connection ends, since OpenSSH closes what it inherits: a helper of the\s+"
+                    r"command's keeps it until ssh's pid exits, with every other descriptor closed, and says so only once "
+                    r"it's set up, or\s+the command refuses; ssh itself is exec'd",
+     lambda m: ssh_hold_rules()),
+    ("SECURITY.md", r"Yours at your own terminal still runs \(your terminal\s+on stdin, or on stderr when the script comes on "
+                    r"stdin, with no agent session above it either way\)",
+     lambda m: "owners.at_user_terminal((0,)) or owners.at_user_terminal((2,))" in raw("lib/vm_shell.py")),
+    ("SECURITY.md", r"So do\s+`scripts/build-vm.sh` \(every build: `--replace` deletes the VM, and any build sets the guest up "
+                    r"and stops it\) and\s+`scripts/remote-build.sh` run on their own: they check for themselves \(the "
+                    r"session guard, then the handoff, before\s+anything is stopped, deleted or written, held to the end\)",
+     lambda m: build_scripts_held()),
+    ("SECURITY.md", r"`done` needs your own terminal \(or the panel's click\): no process without a terminal of yours says it, "
+                    r"an agent host\s+this check doesn't know by name included. A handoff is called off only by the agent "
+                    r"session that opened it \(its\s+process, by pid and start time, both read: a start time that can't be "
+                    r"read now, or a record from before they were\s+kept, doesn't count, nor does a process list that "
+                    r"doesn't reach the top\) or by you \(your terminal, the panel\)",
+     lambda m: end_rules()),
+    ("SECURITY.md", r"with every\s+place taken, a new one waits for a place to come free rather than cover one, and when no "
+                    r"place can be reserved at\s+all \(its folder, or a slot's file, can't be used\), none is shown and the command waiting "
+                    r"for the handoff tells you to use your terminal",
+     lambda m: panel_places_rules()),
+    ("SECURITY.md", r"It names the VM and\s+where it is \(in its title and its text\), and panels for different VMs take "
+                    r"places of their own inside the screen's\s+visible area, none covering another",
+     lambda m: panel_identity_rules()),
+    ("SECURITY.md", r"looking at the handoff again under the owners lock right\s+before each read",
+     lambda m: "with owners.lock():\n                        if owners.open_handoff() is None:" in hub_fn("_browser_keeper_run")),
+    ("SECURITY.md", r"an inherited `HANDOFF_HELD` doesn't skip that check",
+     lambda m: "\nunset HANDOFF_HELD\n" in raw("bin/metacomputer")
+     and raw("bin/metacomputer").index("\nunset HANDOFF_HELD\n") < raw("bin/metacomputer").index("\nhandoff_hold() {")),
+    ("SECURITY.md", r"that child alone goes ahead without the lock \(it must be the VM's running hub's direct child\), and "
+                    r"still refuses\s+while one is open",
+     lambda m: hub_child_rules()),
     ("SECURITY.md", r"`secrets fill`, `login` and `session load` refuse, and so does `input-reset`, except at your own "
                     r"terminal \(it gives\s+your mouse and keyboard back; an agent session's run still refuses, terminal "
                     r"or not\)",
@@ -1563,6 +1612,34 @@ CLAIMS = [
     ("SECURITY.md", r"Opening a handoff waits up to (\d+) s for calls\s+already in the driver; if one is still running "
                     r"then, it leaves the devices and its message says the reset is pending\s+and how to make it",
      lambda m: int(m[1]) == input_reset.INFLIGHT_WAIT_S and reset_pending_says()),
+    ("SECURITY.md", r"the command\s+that waits for it \(`handoff` itself, or `handoff wait`\) makes that reset as soon as nothing of "
+                    r"the agent's runs in the\s+driver any more, while the handoff is still open, the same way "
+                    r"\(`input_reset.at_open_handoff`\), and says so; when\s+whether something runs can't be known, it "
+                    r"never does",
+     lambda m: pending_reset_rules()),
+    ("SECURITY.md", r"so while a handoff is open the hub reads\s+in that session \(`list_windows`, never input\) every (\d+) s",
+     lambda m: int(m[1]) == mcp_hub.BROWSER_KEEP_S and browser_keeper_rules()),
+    ("SECURITY.md", r"\*\*A panel on the Mac \(`HANDBACK_PANEL`, `(\w+)` by default\)\.\*\*",
+     lambda m: m[1] == D["HANDBACK_PANEL"] == "on" and panel_default_on()),
+    ("SECURITY.md", r"A\s+detached\s+helper\s+\(`handoff.py _panel ID`\)\s+shows\s+it\s+with\s+Apple's\s+`/usr/bin/osascript`,"
+                    r"\s+by\s+that\s+absolute\s+path,\s+running\s+this\s+checkout's\s+`lib/handback_panel.js`\s+with\s+arguments"
+                    r"\s+both\s+sides\s+check\s+\(the\s+agent's\s+name,\s+the\s+VM's\s+name,\s+where\s+it\s+is,\s+a\s+slot\s+number\),"
+                    r"\s+and\s+takes\s+only\s+its\s+exact\s+answer\s+\(\"handback\":\s+done,\s+\"cancel\":\s+cancelled\)\s+from\s+an"
+                    r"\s+osascript\s+that\s+exits\s+0:\s+one\s+that's\s+killed\s+or\s+fails,\s+or\s+prints\s+anything\s+else,\s+is\s+no"
+                    r"\s+answer,\s+and\s+the\s+handoff\s+stays\s+open;\s+no\s+variable,\s+argument\s+or\s+file\s+picks\s+the\s+program"
+                    r"\s+or\s+the\s+answer,\s+and\s+there\s+is\s+no\s+command\s+that\s+answers\s+it",
+     lambda m: panel_rules()),
+    ("SECURITY.md", r"it never takes the keyboard from Screen\s+Sharing \(a non-activating panel",
+     lambda m: "$.NSWindowStyleMaskNonactivatingPanel" in raw("lib/handback_panel.js")
+     and "panel.becomesKeyOnlyIfNeeded = true;" in raw("lib/handback_panel.js")
+     and "app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);" in raw("lib/handback_panel.js")),
+    ("CHANGELOG.md", r"\*\*Hand the computer back from the Mac's screen\*\* \(`HANDBACK_PANEL`, `(\w+)` by default",
+     lambda m: m[1] == D["HANDBACK_PANEL"] == "on"),
+    ("CHANGELOG.md", r"More than one argument after `TOOL` \(a JSON argument the shell split\) is now refused, nothing sent",
+     lambda m: "if len(words) > 1:" in py_top_fn("lib/mcomp_sdk.py", "call_main")
+     and py_top_fn("lib/mcomp_sdk.py", "call_main").index("after = _after_tool(argv)")
+     < py_top_fn("lib/mcomp_sdk.py", "call_main").index("if len(words) > 1:")
+     < py_top_fn("lib/mcomp_sdk.py", "call_main").index("Hub(session=session")),
     ("SECURITY.md", r"If the reset fails, the handoff opens anyway and its message tells you to end it and run\s+"
                     r"`metacomputer input-reset`",
      lambda m: reset_failure_says()),
@@ -3248,6 +3325,191 @@ def every_reset_rules():
             < raw("lib/handoff.py").find("input_reset.at_handoff(TRANSPORT)"))
 
 
+def read_only_held():
+    """An agent's `sh --read-only` (its own script: user_script) waits during a handoff, checked again under the
+    dispatch lock right before it starts (gate); the person at their terminal and metacomputer's own fixed read
+    scripts (vm_claude's) don't."""
+    rg = raw("lib/vm_shell.py")
+    i = rg.index('    agent_read = (o["read_only"] and user_script\n'
+                 '                  and not (owners.at_user_terminal((0,)) or owners.at_user_terminal((2,))))')
+    return ("res, code = run_guarded(o, transport, script, user_script=True)" in rg
+            and "    if agent_read:\n        handoff = owners.open_handoff()\n        if handoff:" in rg[i:i + 500]
+            and 'gate if (not o["read_only"] or agent_read) else None)' in rg
+            and "            with owners.acting():\n                yield" in rg
+            and "user_script=True" not in raw("lib/vm_claude.py"))
+
+
+def guest_commands_held():
+    """put, ssh, rename, task start, browser profiles --new|--delete and security apply hold the dispatch lock and check
+    for a handoff (handoff_hold_unless_user: the guard's --user-ok) before they reach the guest."""
+    b = raw("bin/metacomputer")
+    put, ren = fn_src("bin/metacomputer", "do_put"), fn_src("bin/metacomputer", "do_rename")
+    task, sec = fn_src("bin/metacomputer", "do_task"), fn_src("bin/metacomputer", "do_security")
+    rec = fn_src("bin/metacomputer", "do_record")
+    brow = fn_src("bin/metacomputer", "do_browser")
+    ssh = b[b.index("\n  ssh)"):b.index("\n  mcp)")]
+    return ('handoff_hold_unless_user() { handoff_hold --user-ok "$@"; }' in b
+            and '"$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 "$@" || exit 4' in b
+            and put.index("handoff_hold_unless_user") < put.index('"$LAB_ROOT/lib/guest_put.py"')
+            and ren.index("handoff_hold_unless_user") < ren.index("mv --")
+            and task.index("handoff_hold_unless_user") < task.index("mkdir -p '$guest/recording'")
+            and sec.index("handoff_hold_unless_user") < sec.index("sync_guest_options all")
+            and brow.index("handoff_hold_unless_user") < brow.index("new firefox")
+            and ssh.index("handoff_hold_unless_user --hub-child") < ssh.index("hold_fd_until_exit 6")
+            < ssh.index('exec ssh "${SSH_ARGS[@]}" "$@" ;;')
+            and rec.index("handoff_hold_unless_user") < rec.index('record_stream_start "$name"')
+            and rec.index("    stop)\n      handoff_hold_unless_user") > 0
+            and "\nscript_handoff_hold || { BUILD_QUIET_EXIT=1; exit 4; }" in raw("scripts/build-vm.sh")
+            and "\nscript_handoff_hold || { BUILD_QUIET_EXIT=1; exit 4; }" in raw("scripts/remote-build.sh")
+            and '[ "$cmd" = volume ] && [ "${1:-}" = sync ] && handoff_hold_unless_user' in b)
+
+
+def internal_commands_rules():
+    """The internal commands that write to the guest check who runs them before anything else, and the recorder's values
+    are checked (record_args_ok) wherever they reach a shell in the VM."""
+    rp, vi, vp = fn_src("bin/metacomputer", "record_stream_start"), fn_src("bin/metacomputer", "do_vnc_install"), \
+        fn_src("bin/metacomputer", "do_vnc_push")
+    rec, ok = fn_src("bin/metacomputer", "do_record"), fn_src("bin/metacomputer", "record_args_ok")
+    b = raw("bin/metacomputer")
+    save = py_top_fn("lib/recording.py", "cmd_save")
+    return ("_record-pipe" not in b and "do_record_pipe" not in b
+            and rp.index('record_args_ok "$1" "$2" "$3" "$4" || return 1') < rp.index("desktop-record stream")
+            and 'daemonize --keep-fd 6 "$6"' in rp and "--hold-fd 6 --" in rp and "2> >(exec 6>&-;" in rp
+            and '[ "${HANDOFF_HELD:-}" = 1 ] || die' in rp
+            and save.index("let_go()                       # the stream is up") > save.index("subprocess.Popen(cmd")
+            and save.index("end_stream(proc)\n                let_go()") > 0 and recording_hold_s() == 20
+            and "if hold and now_ >= hold_until and bytes_waiting(src) > 0:\n                let_go()" in save
+            and rec.index("handoff_hold_unless_user") < rec.index('record_stream_start "$name"')
+            and 'owners.py" internal-caller --user script:build-vm.sh script:remote-build.sh' in vi
+            and vi.index("internal-caller") < vi.index("vnc_file")
+            and 'owners.py" internal-caller --user \\' in vp and vp.index("internal-caller") < vp.index("vnc_push \"$pw\"")
+            and '[[ "$2" =~ ^[0-9]{1,2}$ ]] && [ "$2" -ge 1 ] && [ "$2" -le 60 ]' in ok
+            and '[[ "$1" =~ ^[A-Za-z0-9._-]{1,128}$ ]]' in ok
+            and rec.index('record_args_ok "$name" "$fps" "$quality" "$audio"') < rec.index("desktop-record start"))
+
+
+def ssh_hold_rules():
+    """bin/metacomputer's ssh arm: the helper (scripts/lib.sh hold_fd_until_exit, kqueue NOTE_EXIT on $$, its own
+    session, every other descriptor closed) before ssh is exec'd."""
+    b, lib = raw("bin/metacomputer"), raw("scripts/lib.sh")
+    ssh = b[b.index("\n  ssh)"):b.index("\n  mcp)")]
+    h = fn_src("scripts/lib.sh", "hold_fd_until_exit")
+    return (ssh.index("hold_fd_until_exit 6 || die") < ssh.index('exec ssh "${SSH_ARGS[@]}" "$@" ;;')
+            and "fflags=select.KQ_NOTE_EXIT" in h and "os.setsid()" in h and "except ProcessLookupError:" in h
+            and h.index('os.write(answer, b"held\\n")') > h.index("kq.control([select.kevent(pid")
+            and "except BaseException:\n    os._exit(1)" in h
+            and 'for n in [int(x) for x in os.listdir("/dev/fd")]:' in h and '"$1" "$$"' in h
+            and h.index("answer = os.dup(1)") < h.index('os.listdir("/dev/fd")') < h.index('os.write(answer, b"held\\n")')
+            and "hold_fd_until_exit() { # FD" in lib)
+
+
+def recording_hold_s():
+    import recording
+    return recording.HOLD_MAX_S
+
+
+def build_scripts_held():
+    """scripts/build-vm.sh (on --replace, before the first stop or delete) and scripts/remote-build.sh (before anything
+    reaches the computer) run scripts/lib.sh's session guard and handoff check themselves."""
+    bv, rb, lib = raw("scripts/build-vm.sh"), raw("scripts/remote-build.sh"), raw("scripts/lib.sh")
+    hold = fn_src("scripts/lib.sh", "script_handoff_hold")
+    return ('"$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 5 --user-ok || return 4' in hold
+            and '"$PY" "$LAB_ROOT/lib/sessionvm.py" guard' in fn_src("scripts/lib.sh", "script_session_guard")
+            and bv.index('script_session_guard "$MC_SCRIPT_SAID" build "$@" || exit 1') < bv.index("lock_hold")
+            and bv.index("\nscript_handoff_hold || { BUILD_QUIET_EXIT=1; exit 4; }") < bv.index('printf \'started=%s')
+            < bv.index('vm_stop "$vm" --force')
+            and rb.index('script_session_guard "$MC_SCRIPT_SAID" build "$@" || exit 1') < rb.index("script_handoff_hold")
+            < rb.index('PLAN="$(remote_py plan')
+            and bv.index('MC_SCRIPT_SAID="${MCOMP_VM:-}') < bv.index('. "$(dirname "$0")/lib.sh"')
+            and rb.index('MC_SCRIPT_SAID="${MCOMP_VM:-}') < rb.index('. "$(dirname "$0")/lib.sh"') and "script_handoff_hold()" in lib)
+
+
+def panel_places_rules():
+    """Places for panels: the script's layout keeps each inside the visible area; the helper uses at most the script's
+    capacity and never a place another panel holds (it waits)."""
+    js, rp, ps = raw("lib/handback_panel.js"), py_top_fn("lib/handoff.py", "run_panel"), py_top_fn("lib/handoff.py", "panel_slot")
+    return ("x = Math.max(vx, Math.min(x, vx + vw - W));" in js and "y = Math.max(vy, Math.min(y, vy + vh - TB - H));" in js
+            and "capacity, slot_fd = panel_capacity(), None" in rp and "while slot is None or slot < 0:" in rp
+            and 'mark_panel(hid, "unavailable")' in rp and "return 0, None" not in ps
+            and "return None, None" in ps and "for n in range(max(1, min(PANEL_SLOTS, capacity))):" in ps
+            and 'if rec.get("panel") == "unavailable" and not told_panel:' in py_top_fn("lib/handoff.py", "wait_for")
+            and "var W = 380, H = 104, M = 20, TB = 28, STEP = H + 44, GAP = 20, SLOTS = %d;" % handoff.PANEL_SLOTS in js)
+
+
+def end_rules():
+    """handoff done: refused without the user's own terminal whatever runs it; cancel without that terminal only from
+    the session that opened it (its pid and start time), nothing else."""
+    ce = py_top_fn("lib/handoff.py", "cmd_end")
+    return ('if to == "done" and not interactive:' in ce and ce.index('if to == "done" and not interactive:')
+            < ce.index("new, changed = end(")
+            and 'if to == "cancel" and not interactive and not own_session:' in ce
+            and "own_session = (known and bool(claude) and claude == rec.get(\"claude_pid\")" in ce
+            and 'and isinstance(rec.get("claude_start"), str) and isinstance(start_now, str)' in ce)
+
+
+def panel_identity_rules():
+    """The panel gets the VM's name, where it is and a slot of its own; the script shows the name and stacks by slot."""
+    rp, js = py_top_fn("lib/handoff.py", "run_panel"), raw("lib/handback_panel.js")
+    return ('"show", agent_word(rec), vm, where,' in rp and "slot, slot_fd = panel_slot(capacity)" in rp
+            and "panel.title = 'metacomputer: ' + vm;" in js and "- row * STEP;" in js
+            and "/^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/.test(vm)" in js
+            and handoff.VM_NAME_RE.pattern == "[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
+
+
+def hub_child_rules():
+    """guard --hub-child: only the VM's running hub's direct child (MCOMP_HUB_PID is that hub, and it's the parent of
+    bin/metacomputer), and an open handoff still refuses it."""
+    hc, cg = py_top_fn("lib/handoff.py", "hub_child"), py_top_fn("lib/handoff.py", "cmd_guard")
+    return ("if not claimed or claimed != hub:" in hc and "return table.get(os.getppid(), (None,))[0] == hub" in hc
+            and cg.index("if from_hub and hub_child():") < cg.index("flockwait.take(fd")
+            and "h = owners.open_handoff()\n        if h:" in cg[cg.index("if from_hub and hub_child():"):])
+
+
+def pending_reset_rules():
+    """A pending reset is made by the waiting command (lib/handoff.py wait_for -> pending_reset -> at_open_handoff):
+    under the dispatch lock held exclusively, only while that handoff is open, after an in-flight check that fails
+    closed (None: never), before reset_now; `handoff wait` gets bin/metacomputer's transport too."""
+    ao, h = ir_fn("at_open_handoff"), raw("lib/handoff.py")
+    b = raw("bin/metacomputer")
+    return (ao.index("owners.dispatch(shared=False") < ao.index("owners.open_handoff()") < ao.index("in_flight()")
+            < ao.index("reset_now(transport)") and 'if busy is None:\n                return "unknown"' in ao
+            and "pending_reset(hid, rec, reset_state)" in h and 'mark_reset(rec["id"], "pending")' in h
+            and 'case "${1:-}" in done|cancel|status|guard|-h|--help) exec "$PY" "$LAB_ROOT/lib/handoff.py" "$@" ;; esac' in b)
+
+
+def browser_keeper_rules():
+    """The hub's browser keeper reads (list_windows) only while a handoff is open, only in the sessions of browsers
+    browser_prepare launched, and is started when one is."""
+    k = hub_fn("_browser_keeper_run")
+    return ("if owners.open_handoff() is None or not self.connected():" in k and '"name": "list_windows"' in k
+            and "labels = list(self.driver_browsers)" in k and "self._start_browser_keeper()" in raw("lib/mcp_hub.py"))
+
+
+def panel_default_on():
+    """HANDBACK_PANEL: on unless set (only an environment's `off` overrides the settings), and the helper's fallback."""
+    return ('[ "${MCOMP_HANDBACK_PANEL:-}" = off ] || export MCOMP_HANDBACK_PANEL="${HANDBACK_PANEL:-on}"' in raw("scripts/lib.sh")
+            and 'if os.environ.get("MCOMP_HANDBACK_PANEL", "on") == "off":' in raw("lib/handoff.py"))
+
+
+def panel_rules():
+    """The panel's helper: osascript by absolute path, the script beside handoff.py, arguments checked on both sides
+    (panel_identity in handoff.py, the patterns in handback_panel.js), exact answers."""
+    rp = py_top_fn("lib/handoff.py", "run_panel")
+    pa = py_top_fn("lib/handoff.py", "panel_answer")
+    pi, js = py_top_fn("lib/handoff.py", "panel_identity"), raw("lib/handback_panel.js")
+    return (handoff.OSASCRIPT == "/usr/bin/osascript"
+            and handoff.PANEL_ANSWERS == {b"handback\n": "done", b"cancel\n": "cancelled"}
+            and '[OSASCRIPT, "-l", "JavaScript", PANEL_SCRIPT, "show", agent_word(rec), vm, where,\n' in rp
+            and "VM_NAME_RE" in pi
+            and "if (!/^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/.test(vm)) vm = 'the virtual computer';" in js
+            and "if (!/^[A-Za-z0-9 .'()-]{1,40}$/.test(where)) where = '';" in js
+            and 'end(hid, to, "mac_panel")' in rp and "to = panel_answer(p.returncode, out_b)" in rp
+            and "if returncode != 0 or not isinstance(out_b, bytes) or len(out_b) > PANEL_OUT_MAX:" in pa
+            and "return PANEL_ANSWERS.get(out_b)" in pa
+            and '"_panel"' in raw("lib/handoff.py") and "def cmd_end(" in raw("lib/handoff.py")
+            and "mac_panel" not in py_top_fn("lib/handoff.py", "cmd_end"))
+
+
 def reset_pending_says():
     line = handoff.reset_line(("pending", "x", False), "Claude")
     return "weren't removed" in line and "metacomputer input-reset" in line and "own terminal" in line
@@ -3404,13 +3666,13 @@ def fills_guarded():
     """bin/metacomputer checks --vm and takes the dispatch lock with the handoff guard (handoff_hold) before secrets
     fill, login and session load reach the vault."""
     b = raw("bin/metacomputer")
-    hold = re.search(r"^handoff_hold\(\) \{\n(.*?)^\}", b, re.S | re.M)
+    hold = re.search(r"^handoff_hold\(\) \{[^\n]*\n(.*?)^\}", b, re.S | re.M)
     return (re.search(r'\[ "\$sub" = fill \] \|\| \[ "\$sub" = login \] \|\| \[ "\$sub" = code \] \|\| \[ "\$sub" = relay \] '
                       r'\|\| \[ "\$sub" = give \] \\\n\s+\|\| \{ \[ "\$sub" = session \] && '
                       r'\[ "\$\{1:-\}" = load \]; \}; then\n\s+secrets_vm_is_this "\$@" \|\| die [^\n]*\n\s+handoff_hold\n',
                       b) is not None and hold is not None
             and 'exec 6>>"$f"' in hold.group(1)
-            and '"$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 || exit 4' in hold.group(1))
+            and '"$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 "$@" || exit 4' in hold.group(1))
 
 
 def fn_src(path, name):

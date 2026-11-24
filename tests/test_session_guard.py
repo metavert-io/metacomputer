@@ -116,7 +116,7 @@ FORMS = [
     ("notify", ["x", "--why", "login"], "exempt"), ("learn", ["report"], "exempt"), ("actions", ["list"], "exempt"),
     ("agents", ["check"], "exempt"), ("volume", ["list"], "exempt"), ("refdisk", ["list"], "exempt"),
     ("contact-sheet", ["a.mp4"], "exempt"), ("checkpoints", [], "exempt"), ("_health", [], "exempt"),
-    ("_runinfo", [], "exempt"), ("_record-pipe", ["n"], "exempt"), ("_task-sync", ["n"], "exempt"),
+    ("_runinfo", [], "exempt"), ("_task-sync", ["n"], "exempt"),
     ("_vnc-install", [], "exempt"), ("_vnc-push", [], "exempt"), ("frobnicate", ["stop"], "exempt"),
     # security: every argument is --json or apply, in any order; apply anywhere applies (F1)
     ("security", [], "read"), ("security", ["--json"], "read"), ("security", ["apply"], "act"),
@@ -143,7 +143,7 @@ FORMS = [
     ("claude", ["--help"], "exempt"), ("claude", [], "act"), ("claude", ["--token", "k"], "act"),
     ("claude", ["send", "hi", "--wait"], "act"), ("claude", ["stop", "--revoke"], "act"), ("claude", ["--session", "s", "read"], "act*"),
     # handoff
-    ("handoff", ["status", "--json"], "read"), ("handoff", ["wait"], "read"), ("handoff", ["--help"], "exempt"),
+    ("handoff", ["status", "--json"], "read"), ("handoff", ["wait"], "act"), ("handoff", ["--help"], "exempt"),
     ("handoff", ["--why", "login", "--say", "x"], "act"), ("handoff", ["done"], "act"), ("handoff", ["cancel"], "act"),
     ("handoff", ["--json", "status"], "act*"),
     # net: status reads what the computer can reach (a computer elsewhere: from it, over SSH); the rest changes it
@@ -1190,6 +1190,20 @@ def end_to_end(fake):
         r = zl(s, "stop")
         check("...and a command that names no computer refuses again, saying the session selected demo",
               r.get("rc") == 1 and "selected demo for its MCP tools (select_computer)" in r.get("err", ""), r)
+        # `handoff wait` can make the input reset a handoff left pending, which acts on that VM: with the session on
+        # demo, one that names no computer (mainvm) refuses like any acting command; `handoff status` only looks.
+        r = zl(s, "handoff", "wait")
+        r2 = zl(s, "handoff", "status")
+        check("two computers: `handoff wait` naming none acts on the other one, so it refuses; `handoff status` reads",
+              r.get("rc") == 1 and "selected demo for its MCP tools (select_computer)" in r.get("err", "")
+              and REFUSED_WORDS not in r2.get("err", ""), (r, r2))
+        # Our own build scripts run on their own check the same (scripts/lib.sh script_session_guard): from this session,
+        # a build naming no computer refuses before it looks at a VM (a runner that can't list VMs stands in for the
+        # rest: without the check, the build would stop there instead).
+        r = s.run([os.path.join(co, "scripts", "build-vm.sh"), "--replace"], FAKE_LS_FAIL="1")
+        check("scripts/build-vm.sh run on its own, naming no computer, from a session on demo: refused, as `build` is",
+              r.get("rc") == 1 and "selected demo for its MCP tools (select_computer)" in r.get("err", "")
+              and "couldn't list the VMs" not in r.get("err", ""), r)
         res = s.tool("b", "select_computer", {"name": "nosuch"})
         check("select_computer of a computer with no settings: refused, the session's tools stay where they were",
               res["result"].get("isError") and "nosuch can't be selected" in text_of(res)

@@ -33,7 +33,7 @@
 #   start [--no-volumes] | stop [--force] | restart | status [--json] | reset [--yes] [--discard-unsynced]
 #   who | release                  who is using the virtual computer / hand it over
 #   where                          project, config, skill and results folders
-#   call [--session NAME] TOOL ['JSON']
+#   call [--session NAME] TOOL ['JSON' | -]   (-: the JSON on stdin, e.g. a quoted heredoc for text with quotes)
 #                                  one Cua Driver tool call through the hub; with --session, element
 #                                  tokens and driver state carry over to the next call with that name
 #   hub [status [--json] | start | stop]   the hub: one connection per VM shared by every client
@@ -147,6 +147,9 @@ set -uo pipefail
 # lib/remote.py only: taken off the environment here, before any other program runs (bash builtins only), and exported
 # again into remote_py's one child (scripts/lib.sh). The shell keeps them as unexported variables.
 for mc_k in OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY; do export -n "$mc_k"; done; unset mc_k
+# handoff_hold's own mark (this command already holds the dispatch lock): never taken from the environment, where it
+# would skip every handoff check.
+unset HANDOFF_HELD
 SELF="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 LIB="$(dirname "$SELF")/../scripts/lib.sh"
 # The command-line rules of every metacomputer bash program (sa_check, sa_is_help_shaped): functions only.
@@ -498,7 +501,6 @@ mc_strict() { # CMD ARGS...
                        --only-antigravity --lume=mcomp-vm \
                        --lume=standard --lume=secure" "" "$@" ;;
     _task-sync)      mc_take "_task-sync NAME" 1 1 "" "" "$@" ;;
-    _record-pipe)    mc_take "_record-pipe NAME FPS QUALITY OUT [AUDIO]" 4 5 "" "" "$@" ;;
   esac
   return 0
 }
@@ -664,15 +666,19 @@ owners_check() {
 # dispatch()) taken shared on descriptor 6, then one last look for a handoff. While the user has the computer
 # (metacomputer handoff) it stops with exit 4; otherwise the lock stays held until this command and what it runs
 # end (they inherit descriptor 6), so no handoff opens meanwhile: opening one takes the lock exclusively.
-handoff_hold() {
+handoff_hold() { # [--user-ok] [--hub-child]: lib/handoff.py guard's
   [ "${HANDOFF_HELD:-}" = 1 ] && return 0   # once per command: opening it again would let go of it meanwhile
   local f="$RUN_DIR/owners/.dispatch"
   { mkdir -p "$RUN_DIR/owners" && ( umask 077; : >> "$f" ) && [ -f "$f" ] && [ ! -L "$f" ]; } 2>/dev/null \
     || die "couldn't open this VM's dispatch lock ($f)"
   exec 6>>"$f" || die "couldn't open this VM's dispatch lock ($f)"
-  "$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 || exit 4
+  "$PY" "$LAB_ROOT/lib/handoff.py" guard --hold-fd 6 "$@" || exit 4
   HANDOFF_HELD=1
 }
+# The commands that act in the guest outside the hub and the shell channel (put, ssh, rename, task start, browser
+# profiles --new/--delete, security apply): held the same way while the user has the computer, except at the user's
+# own terminal (their own hands, as `input-reset` there).
+handoff_hold_unless_user() { handoff_hold --user-ok "$@"; }
 # The lifecycle commands (stop, reset, restore, baseline, desktop-restart): after any question, right before they
 # change anything, and held until they're done; --override (you agreed) goes ahead as it does for another session.
 handoff_hold_unless_override() { [ "$OVERRIDE" = 1 ] || handoff_hold; }
@@ -1265,7 +1271,7 @@ do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as conf
   local json=0 apply=0 a; for a in "$@"; do case "$a" in --json) json=1 ;; apply) apply=1 ;; *) die "usage: metacomputer security [apply] [--json]" ;; esac; done
   local vm_ssh="" vm_drv=""
   if vm_running "$VM_NAME" && gssh admin true >/dev/null 2>&1; then
-    [ "$apply" = 1 ] && sync_guest_options all
+    [ "$apply" = 1 ] && { handoff_hold_unless_user; sync_guest_options all; }   # it changes the guest's settings
     vm_ssh="$(guest_option ssh-auth)"; vm_drv="$(guest_option driver-policy)"
   elif [ "$apply" = 1 ]; then
     die "the virtual computer is off; start it (start applies these settings too)"
@@ -1821,6 +1827,15 @@ record_sidecar() { # MP4 NAME STARTED ENDED FPS QUALITY MODE [--ended-early]
     || warn "could not write the description file for $1"
 }
 
+# What reaches the recorder's command line in the VM (a shell there): each value checked here, so none can carry more
+# than itself (a name by the name rule, a frame rate as a number, the rest from fixed sets).
+record_args_ok() { # NAME FPS QUALITY AUDIO
+  [[ "$1" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || { warn "recording names use letters, digits, . _ - only (at most 128)"; return 1; }
+  { [[ "$2" =~ ^[0-9]{1,2}$ ]] && [ "$2" -ge 1 ] && [ "$2" -le 60 ]; } || { warn "the frame rate is a whole number from 1 to 60 (RECORD_FPS, or record start NAME FPS)"; return 1; }
+  case "$3" in standard|high) ;; *) warn "RECORD_QUALITY must be standard or high"; return 1 ;; esac
+  case "$4" in auto|off) ;; *) warn "RECORD_AUDIO must be auto or off"; return 1 ;; esac
+}
+
 do_record() {
   local sub="${1:-status}"; shift || true
   local state="$RUN_DIR/manual-recording"
@@ -1829,10 +1844,10 @@ do_record() {
       need_running
       local name="${1:-manual-$(date +%Y%m%d-%H%M%S)}" fps="${2:-${RECORD_FPS:-20}}" quality="${RECORD_QUALITY:-standard}"
       local mode="${RECORD_TO:-host}" audio="${RECORD_AUDIO:-auto}" dir started
-      [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "recording names use letters, digits, . _ - only"
-      case "$quality" in standard|high) ;; *) die "RECORD_QUALITY must be standard or high" ;; esac
-      case "$audio" in auto|off) ;; *) die "RECORD_AUDIO must be auto or off" ;; esac
+      record_args_ok "$name" "$fps" "$quality" "$audio" || exit 1
       case "$mode" in host|guest) ;; *) die "RECORD_TO must be host or guest" ;; esac
+      # It starts the recorder in the guest: not while the user has the computer (but at their own terminal).
+      handoff_hold_unless_user
       if [ -s "$state" ] && [ "$(sed -n 's/^mode=//p' "$state")" = host ]; then
         # A streamed recording whose Mac side has ended (the VM crashed or was stopped without record stop) is
         # saved now rather than blocking this one.
@@ -1850,7 +1865,7 @@ do_record() {
       if [ "$mode" = host ]; then
         # The VM encodes and streams; this Mac saves it as it arrives (detached, so it
         # outlives this command). stop ends ffmpeg in the VM, which ends the stream.
-        daemonize "$dir/$name.stream.log" "$SELF" _record-pipe "$name" "$fps" "$quality" "$dir/$name.mkv" "$audio"
+        record_stream_start "$name" "$fps" "$quality" "$audio" "$dir/$name.mkv" "$dir/$name.stream.log" || exit 1
         local pid=$! i=0
         while [ $i -lt 20 ]; do
           vm_answer 4096 15 /opt/metacomputer/bin/desktop-record status 2>/dev/null | grep -q "^recording stream:$name\$" && break
@@ -1882,6 +1897,7 @@ do_record() {
         ok "recording the guest desktop as '$name' (${fps} fps, $quality) — run your task, then: metacomputer record stop"
       fi ;;
     stop)
+      handoff_hold_unless_user          # it stops the recorder in the guest
       local name mode dir pid started fps quality ended path i=0 out early=""
       rec_fail() { # WHY MESSAGE [REASON]: tell the event stream (a fixed sentence and a fixed category: nothing the
                    # VM said or chose, which could spell a value it was given), then stop with the message
@@ -1959,15 +1975,25 @@ do_record() {
   esac
 }
 
-do_record_pipe() { # NAME FPS QUALITY OUT.mkv [AUDIO] (internal: the detached half of RECORD_TO=host)
+# RECORD_TO=host's Mac half, started by `record start` itself once it has checked the values and held the handoff check
+# (there's no command of its own that another program could run). lib/recording.py save writes the stream to OUT as it
+# arrives (a new file, never through a link) and ends it before this Mac's free space falls below IMPORT_MIN_FREE_GB,
+# since the VM decides how much it sends. It runs ssh itself and ends it when it's stopped. The VM's stderr goes to
+# LOG escaped and capped (1 MB). Space other operations have claimed (a recording being converted to MP4, an S3 sync)
+# counts against the reserve. Detached (daemonize: $! is its pid), so it outlives `record start`; the values are a
+# fixed script's arguments, never part of it, and checked again here since they reach a shell in the VM. It keeps
+# the dispatch lock record start holds (descriptor 6, from handoff_hold_unless_user) until its stream is up (the first
+# bytes or the stream's end; a stream not up within recording.py's HOLD_MAX_S is ended before the lock goes, so it never
+# starts: recording.py save --hold-fd), so a handoff can't open between record start's check and the stream, even if
+# record start is gone by then; the lock isn't kept for the recording.
+record_stream_start() { # NAME FPS QUALITY AUDIO OUT.mkv LOG
+  record_args_ok "$1" "$2" "$3" "$4" || return 1
+  [ "${HANDOFF_HELD:-}" = 1 ] || die "the recording's stream starts only under the handoff check (record start)"
   ssh_base ops
-  # lib/recording.py save writes the stream to OUT as it arrives (a new file, never through a link) and ends it
-  # before this Mac's free space falls below IMPORT_MIN_FREE_GB, since the VM decides how much it sends. It runs
-  # ssh itself and ends it when it's stopped. The VM's stderr goes to the stream log escaped and capped (1 MB).
-  # Space other operations have claimed (a recording being converted to MP4, an S3 sync) counts against the reserve.
-  exec "$PY" "$LAB_ROOT/lib/recording.py" save "$4" --min-free-gb "${IMPORT_MIN_FREE_GB:-10}" -- \
-    ssh -T "${SSH_ARGS[@]}" "/opt/metacomputer/bin/desktop-record stream '$1' $2 $3 ${5:-off}" \
-    2> >("$PY" "$LAB_ROOT/lib/termsafe.py" --max 1048576 >&2)
+  daemonize --keep-fd 6 "$6" /bin/bash -c 'py="$1" lab="$2" out="$3" free="$4"; shift 4
+exec "$py" "$lab/lib/recording.py" save "$out" --min-free-gb "$free" --hold-fd 6 -- "$@" 2> >(exec 6>&-; exec "$py" "$lab/lib/termsafe.py" --max 1048576 >&2)' \
+    record-stream "$PY" "$LAB_ROOT" "$5" "${IMPORT_MIN_FREE_GB:-10}" \
+    ssh -T "${SSH_ARGS[@]}" "/opt/metacomputer/bin/desktop-record stream '$1' $2 $3 $4"
 }
 
 do_recordings() {
@@ -2070,7 +2096,8 @@ do_browser() { # [default firefox|chrome | mode human|page|hybrid | pacing human
       case "${2:-}" in
         --new|--delete)
           { [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$ ]] && [ "$name" != . ] && [ "$name" != .. ]; } \
-            || die "usage: metacomputer browser profiles --new NAME | --delete NAME [--firefox] [--yes] (NAME: letters, digits, . _ -)" ;;
+            || die "usage: metacomputer browser profiles --new NAME | --delete NAME [--firefox] [--yes] (NAME: letters, digits, . _ -)"
+          handoff_hold_unless_user ;;   # they make or delete a profile in the guest
       esac
       case "${2:-}" in
         --new)
@@ -2123,6 +2150,7 @@ do_browser() { # [default firefox|chrome | mode human|page|hybrid | pacing human
 do_rename() { # GUEST_PATH NEW_NAME: rename a file in the VM (e.g. a download saved under its id)
   [ $# -eq 2 ] || die "usage: metacomputer rename GUEST_PATH NEW_NAME"
   need_running
+  handoff_hold_unless_user
   local src new; src="$(guest_path "$1")" || exit 1; new="$2"
   [[ "$new" =~ ^[A-Za-z0-9][A-Za-z0-9._()+\ -]{0,127}$ ]] || die "new name: letters, digits, spaces and ._()+- only, no folders"
   local dst; dst="$(dirname "$src")/$new"
@@ -2188,6 +2216,7 @@ do_who() {
 do_put() { # HOST_PATH... [--to GUEST_DIR] [--overwrite]   (lib/guest_put.py: SHA-256 checked, never overwrites unless asked)
   [ $# -gt 0 ] || die "usage: metacomputer put HOST_PATH... [--to GUEST_DIR] [--overwrite]"
   need_running
+  handoff_hold_unless_user          # it writes in the guest: not while the user has the computer (but at their terminal)
   ssh_base ops
   MCOMP_GUEST_USER="$GUEST_USER" exec "$PY" "$LAB_ROOT/lib/guest_put.py" --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
 }
@@ -2206,7 +2235,7 @@ do_get() { # GUEST_PATH [HOST_DIR] [--task NAME]
   dest="$(abs_host_path "$dest")"; mkdir -p "$dest"
   # Plain files and folders only: links and special files from the VM are left out, and
   # nothing is written through a link (lib/guest_import.py).
-  gssh ops "tar -C $(printf %q "$(dirname "$src")") -cf - $(printf %q "$(basename "$src")")" \
+  gssh ops "tar -C $(printf %q "$(dirname "$src")") -cf - -- $(printf %q "$(basename "$src")")" \
     | guest_import "$dest" || die "could not copy $src from the guest"
   echo "$dest/$(basename "$src")"
 }
@@ -2325,6 +2354,7 @@ do_task() { # start SLUG [--no-sync] | finish NAME
   case "$sub" in
     start)
       need_running
+      handoff_hold_unless_user        # it makes the task's folders in the guest
       local slug="" name guest host sync=1 a
       for a in "$@"; do   # --no-sync: nothing will be recorded (web checks without --record), so no copier
         case "$a" in --no-sync) sync=0 ;; *) [ -n "$slug" ] || slug="$a" ;; esac
@@ -2755,6 +2785,9 @@ EOF
   view_tunnel                       # a computer elsewhere: its live view through an SSH tunnel (none here)
   open "vnc://127.0.0.1:$VNC_PORT" || die "couldn't open Screen Sharing (vnc://127.0.0.1:$VNC_PORT)"
   echo "Opening the live view in Screen Sharing (vnc://127.0.0.1:$VNC_PORT)."
+  # During a handoff, the panel that hands the computer back with one click, if it isn't up yet (lib/handoff.py
+  # run_panel checks the rules itself: HANDBACK_PANEL, this Mac's screen session; only a click in it answers it).
+  ( export_options; "$PY" "$LAB_ROOT/lib/handoff.py" _panel-open ) || true
   return $failed
 }
 
@@ -2835,6 +2868,11 @@ vnc_keychain_put() {
 }
 
 do_vnc_install() { # make sure a live-view password exists in the configured store, then push it to the guest
+  # metacomputer's own (a build runs it), or you at your own terminal; it changes the guest's live-view password and
+  # restarts its VNC server, so not while the user has the computer.
+  "$PY" "$LAB_ROOT/lib/owners.py" internal-caller --user script:build-vm.sh script:remote-build.sh \
+    || die "_vnc-install is metacomputer's own (a build runs it); run it yourself only in your own terminal"
+  handoff_hold_unless_user
   local pw=""
   # The same lock as the build's (held already when the build runs this): one password change per VM at a time.
   vm_lock_or_die "the live-view password of $VM_NAME"
@@ -2869,6 +2907,9 @@ vnc_push() { # PASSWORD -> the VM, on ssh's stdin, within MCOMP_VNC_PUSH_WAIT se
   ok "live view enabled on 127.0.0.1:$VNC_PORT (password: $(vnc_password_hint))"
 }
 do_vnc_push() { # _vnc-push: the password as one line on stdin
+  "$PY" "$LAB_ROOT/lib/owners.py" internal-caller --user \
+    || die "_vnc-push changes the guest's live-view password: only in your own terminal"
+  handoff_hold_unless_user
   local pw=""; IFS= read -r pw || true
   [ -n "$pw" ] || die "_vnc-push reads the password as one line on stdin"
   vnc_push "$pw"
@@ -3124,7 +3165,9 @@ if [ "${MC_REMOTE:-0}" = 1 ]; then
     start)    do_start_remote "$@"; exit $? ;;
     stop)     do_stop_remote "$@"; exit $? ;;
     restart)  do_stop_remote "$@"; do_start_remote; exit $? ;;
-    build)    mc_export_provider_env; exec "$LAB_ROOT/scripts/remote-build.sh" "$@" ;;
+    build)    # It sets the computer up again (services restart): remote-build.sh checks its command line, then holds the
+              # handoff check itself (scripts/lib.sh script_handoff_hold), as it does run on its own.
+              mc_export_provider_env; exec "$LAB_ROOT/scripts/remote-build.sh" "$@" ;;
     reset|baseline|restore|checkpoint|checkpoints)
               if [ "${PROVIDER:-}" = sprites ]; then do_snap_sprite "$cmd" "$@"; exit $?; fi
               remote_only_mac "$cmd" "$("$PY" "$LAB_ROOT/lib/remote.py" missing --provider "${PROVIDER:-}" --feature "$cmd" 2>/dev/null || echo "it has no snapshots")" ;;
@@ -3165,9 +3208,10 @@ case "$cmd" in
   who)        do_who "$@" ;;
   notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
   handoff)    export_options
-              case "${1:-}" in done|cancel|wait|status|guard|-h|--help) exec "$PY" "$LAB_ROOT/lib/handoff.py" "$@" ;; esac
+              case "${1:-}" in done|cancel|status|guard|-h|--help) exec "$PY" "$LAB_ROOT/lib/handoff.py" "$@" ;; esac
               MCOMP_VM_STATE="$(vm_running "$VM_NAME" && echo running || echo off)"; export MCOMP_VM_STATE
-              # Opening one removes the driver's leftover input devices over this SSH command (lib/input_reset.py);
+              # Opening one removes the driver's leftover input devices over this SSH command (lib/input_reset.py),
+              # and waiting for one (open's own wait, or `handoff wait`) makes that reset when opening left it pending;
               # when it can't be set up (SSH_AUTH=cert without its CA), the handoff opens anyway: --transport 0.
               if ( ssh_base ops ) >/dev/null 2>&1; then ssh_base ops
                 exec "$PY" "$LAB_ROOT/lib/handoff.py" --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
@@ -3183,7 +3227,7 @@ case "$cmd" in
   _health)    do_health ;;
   inspect)    do_inspect "$@" ;;
   where)      do_where ;;
-  call)       [ $# -ge 1 ] || die "usage: metacomputer call [--session NAME] TOOL ['JSON']"
+  call)       [ $# -ge 1 ] || die "usage: metacomputer call [--session NAME] TOOL ['JSON' | -]"
               export_options; exec "$PY" "$LAB_ROOT/lib/mcomp_sdk.py" call "$@" ;;
   hub)        do_hub "$@" ;;
   browser)    do_browser "$@" ;;
@@ -3211,17 +3255,30 @@ case "$cmd" in
   list)       . "$LAB_ROOT/scripts/vm-commands.sh"; vm_list "$@" ;;
   default)    [ -z "$MC_VM_SAID" ] || die "metacomputer default takes the computer's name, without --on or --vm: metacomputer default NAME"
               . "$LAB_ROOT/scripts/vm-commands.sh"; vm_default "$@" ;;
-  volume|refdisk) export_options; MCOMP_LAB_ROOT="$LAB_ROOT" exec "$PY" "$LAB_ROOT/lib/storage.py" "$cmd" "$@" ;;
+  volume|refdisk) export_options
+              # A sync changes what the guest sees in an S3 volume's folder: not while the user has the computer
+              [ "$cmd" = volume ] && [ "${1:-}" = sync ] && handoff_hold_unless_user
+              MCOMP_LAB_ROOT="$LAB_ROOT" exec "$PY" "$LAB_ROOT/lib/storage.py" "$cmd" "$@" ;;
   restore)    do_restore "$@" ;;
   record)     do_record "$@" ;;
-  _record-pipe) do_record_pipe "$@" ;;
   _task-sync) do_task_sync "$@" ;;
   recordings) do_recordings "$@" ;;
   view)       do_view "$@" ;;
   sh)         do_sh "$@" ;;
   claude)     do_claude "$@" ;;
   ssh)        role="${1:-ops}"; [ $# -gt 0 ] && shift
-              ssh_base "$role"; exec ssh "${SSH_ARGS[@]}" "$@" ;;
+              # A shell in the guest acts there: held while the user has the computer (but at their own terminal). The
+              # hub's own input reset runs this as its child under the dispatch lock it holds (--hub-child, checked).
+              # ssh is exec'd (signals, job control, its ~^Z, its exit status are its own), and OpenSSH closes the
+              # descriptors it inherits (the dispatch lock's 6 among them) before it connects: a helper started first
+              # keeps that lock until this pid, ssh after the exec, exits (scripts/lib.sh hold_fd_until_exit), as every
+              # acting command holds it for its run.
+              handoff_hold_unless_user --hub-child
+              ssh_base "$role"
+              if [ "${HANDOFF_HELD:-}" = 1 ]; then
+                hold_fd_until_exit 6 || die "couldn't keep this VM's dispatch lock for ssh; nothing was run"
+              fi
+              exec ssh "${SSH_ARGS[@]}" "$@" ;;
   mcp)        # With the hub on, an MCP client here gets the guarded bridge (through the hub); only the hub itself
               # and the transport tests (MCOMP_DIRECT_BRIDGE=1) get the raw connection to the driver.
               if [ "${MCOMP_DIRECT_BRIDGE:-}" != 1 ] && [ "${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" = on ]; then
@@ -3248,7 +3305,10 @@ case "$cmd" in
               [ "${2:-}" = sprites ] || case " $* " in *" teardown "*|*" --forget "*|*" --forget="*)
                 user_tty || die "metacomputer cloud $* deletes what metacomputer left at the provider (servers included) or forgets a launch that may have made one, so it's yours to run: in your own terminal (not through Claude Code, Codex or another agent). Nothing was changed" ;; esac
               PROVIDER="$2" remote_py cloud "$@"; exit $? ;;
-  build)      exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
+  build)      # Every build sets the guest up (--replace stops and deletes it first): build-vm.sh checks its command line,
+              # then holds the handoff check itself for the whole build (scripts/lib.sh script_handoff_hold), so not while
+              # the user has the computer (but at their own terminal), as it does run on its own.
+              exec "$LAB_ROOT/scripts/build-vm.sh" "$@" ;;
   setup)      # ./install.sh; with no terminal to ask on, only with --yes (as the plugin's setup)
               [ "$MC_SETTINGS_KIND" != vm ] || die "setup sets up this checkout's main VM (config/local.env); for $VM_NAME: metacomputer --vm $VM_NAME build"
               case " $* " in *" --yes "*|*" -y "*) ;; *)

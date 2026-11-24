@@ -748,6 +748,78 @@ def owner_checks():
     r.stop()
 
 
+def browser_keep_checks():
+    """A browser browser_prepare launched closes with its driver session, and Cua Driver ends a session after 5
+    minutes without a call in it: during a handoff that was the page the user worked in (seen 2026-11-23 on a test VM:
+    gone after 276 s of the handoff). While one is open, the hub reads in that session (list_windows, never input)."""
+    print("a handoff keeps the browser browser_prepare launched (the driver's session idle TTL)")
+    import handoff
+    clear_claims()
+    real = (mcp_hub.BROWSER_KEEP_S, mcp_hub.BROWSER_KEEP_TICK_S)
+    mcp_hub.BROWSER_KEEP_S, mcp_hub.BROWSER_KEEP_TICK_S = 0.4, 0.05
+    r = Running()
+
+    def kept(since):
+        return [c for c in tool_calls(since=since) if str(c["msg"].get("id", "")).startswith("mcomp-hub-")
+                and c["msg"]["params"]["name"] == "list_windows"
+                and (c["msg"]["params"].get("arguments") or {}).get("session") == "keep-me"]
+    try:
+        cc = client(r, "call", session="keep-me")
+        cc.call("browser_prepare", {"allow_launch": True, "profile": {"mode": "isolated_new"}})
+        cc.close()
+        n0 = len(calls())
+        time.sleep(1.0)
+        check("no handoff: the hub sends nothing of its own (the driver's own rule applies)", kept(n0) == []
+              and "keep-me" in r.hub.driver_browsers, (kept(n0), dict(r.hub.driver_browsers)))
+        now = time.time()
+        handoff.write_record({"v": 1, "id": "h-cccccccccccd", "status": "open", "why": "captcha", "say": "x",
+                              "opened": now, "deadline": now + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None})
+        n1 = len(calls())
+        time.sleep(1.5)
+        during = kept(n1)
+        others = [c["msg"]["params"]["name"] for c in tool_calls(since=n1) if c not in during]
+        check("while a handoff is open, a read in that driver session every BROWSER_KEEP_S keeps it (and its browser) "
+              "from the driver's idle end; nothing else is sent", len(during) >= 2 and others == [], (len(during), others))
+        # A handoff that ends between the keeper's look and its send: looked at again under the owners lock (which the
+        # end takes), so nothing is sent. Here the keeper's own looks see it open, then gone, by turns.
+        real_open = owners.open_handoff
+        turn = {"n": 0}
+
+        def by_turns(*a, **kw):
+            if threading.current_thread().name != "hub-browser-keeper":
+                return real_open(*a, **kw)
+            turn["n"] += 1
+            return real_open(*a, **kw) if turn["n"] % 2 else None
+        owners.open_handoff = by_turns
+        try:
+            time.sleep(0.5)                          # let the keeper finish the tick it's in
+            n_race = len(calls())
+            time.sleep(1.2)
+            raced = kept(n_race)
+        finally:
+            owners.open_handoff = real_open
+        check("a handoff that ends between the keeper's look and its send: looked at again right before the send, "
+              "nothing sent", raced == [] and turn["n"] >= 2, (len(raced), turn))
+        handoff.end("h-cccccccccccd", "done", "process")
+        time.sleep(0.3)
+        n2 = len(calls())
+        time.sleep(1.0)
+        check("once the handoff has ended, nothing more", kept(n2) == [], kept(n2))
+        cc = client(r, "call", session="keep-me")
+        cc.call("end_session", {"session": "keep-me"})
+        cc.close()
+        end = time.time() + 3
+        while time.time() < end and r.hub._browser_keeper is not None:
+            time.sleep(0.05)
+        check("its browser gone (end_session), the keeper ends", not r.hub.driver_browsers
+              and r.hub._browser_keeper is None, (dict(r.hub.driver_browsers), r.hub._browser_keeper))
+    finally:
+        mcp_hub.BROWSER_KEEP_S, mcp_hub.BROWSER_KEEP_TICK_S = real
+        handoff.remove_record()
+        r.stop()
+        clear_claims()
+
+
 def handoff_checks():
     """`metacomputer handoff` (lib/handoff.py): while the user has the computer, the hub refuses every client's acting
     calls, the session that asked for the handoff included, and its claims (web, the GUI tests)."""
@@ -2818,6 +2890,44 @@ def cli_checks():
     check("--raw prints it exactly; --json is the result exactly", evil in raw.stdout and exact == evil, (raw.stdout[:120], exact))
     check("the escaping is the shared helper's (termsafe.escape_for_terminal, as in sh, inspect and web)",
           termsafe.escape_for_terminal(evil).encode() in got)
+    # Text with quotes: inside a single-quoted shell argument the shell takes each ' as a quote and drops it (seen
+    # 2026-11-22: a typed policy lost all 20 apostrophes, and the call still went through). With `-` the arguments
+    # come on stdin, where a quoted heredoc passes them exactly; a JSON argument the shell split into several words
+    # is refused, nothing sent.
+    text = "It's \"quoted\" `tick` ~tilde, café naïve Grüße – €5 日本 'end' $HOME \\n"
+    sdk = os.path.join(LAB, "lib", "mcomp_sdk.py")
+    viash = subprocess.run(["/bin/bash", "-c", f'"$0" "$1" call --json echo - <<\'JSON\'\n{json.dumps({"tag": text}, ensure_ascii=False)}\nJSON',
+                            PY, sdk], env=hub_env, capture_output=True, text=True, timeout=30)
+    got_text = json.loads(viash.stdout)["content"][0]["text"] if viash.returncode == 0 else None
+    check("call TOOL - reads the arguments from stdin: a quoted heredoc passes ' \" ` ~ $ \\ and non-ASCII exactly",
+          got_text == text, (viash.returncode, got_text, viash.stderr[-300:]))
+    broken = subprocess.run(["/bin/bash", "-c", '"$0" "$1" call --json echo \'{"tag": "Allow group \'Default\'/\'x\' to"}\'',
+                             PY, sdk], env=hub_env, capture_output=True, text=True, timeout=30)
+    shown = json.loads(broken.stdout)["content"][0]["text"] if broken.returncode == 0 else None
+    check("…what single quotes do to the same kind of text (why): the apostrophes are gone before metacomputer runs",
+          shown == "Allow group Default/x to", (broken.returncode, shown))
+    split = subprocess.run(["/bin/bash", "-c", '"$0" "$1" call echo \'{"tag": "it\'s and that\'s it"}\'', PY, sdk],
+                           env=hub_env, capture_output=True, text=True, timeout=30)
+    split2 = subprocess.run([PY, sdk, "call", "echo", '{"tag": "a"}', "extra"], env=hub_env, capture_output=True,
+                            text=True, timeout=30)
+    check("a JSON argument the shell split (more than one word after the tool) is refused (exit 2), nothing sent, and "
+          "the message says to use stdin", split.returncode == 2 and split2.returncode == 2
+          and "call TOOL - <<'JSON'" in split.stderr and "the shell split it" in split2.stderr and not split.stdout,
+          (split.returncode, split.stderr[-300:], split2.returncode, split2.stderr[-300:]))
+    n_echo = len(tool_calls("echo"))
+    late = [subprocess.run([PY, sdk, "call", "echo", '{"tag": "x"}', opt], env=hub_env, capture_output=True, text=True,
+                           timeout=30) for opt in ("--raw", "--json")]
+    late.append(subprocess.run([PY, sdk, "call", "echo", '{"tag": "x"}', "--session", "other"], env=hub_env,
+                               capture_output=True, text=True, timeout=30))
+    check("options come before TOOL: one after the arguments (--raw, --json, --session NAME) is an extra argument, "
+          "refused (exit 2) with nothing sent", all(x.returncode == 2 for x in late) and len(tool_calls("echo")) == n_echo,
+          [(x.returncode, x.stderr[-120:]) for x in late])
+    bad = subprocess.run([PY, sdk, "call", "echo", "-"], input=b"\xff\xfe", env=hub_env, capture_output=True, timeout=30)
+    big = subprocess.run([PY, sdk, "call", "echo", "-"], input=b" " * (mcomp_sdk.STDIN_MAX + 1), env=hub_env,
+                         capture_output=True, timeout=60)
+    check("stdin that isn't UTF-8, or is over what the hub takes in one message, is refused (exit 2)",
+          bad.returncode == 2 and b"UTF-8" in bad.stderr and big.returncode == 2 and b"MB" in big.stderr,
+          (bad.returncode, bad.stderr[-200:], big.returncode, big.stderr[-200:]))
     r.stop()
     cfg = os.path.join(TD, "none.env")
     open(cfg, "w").write(f'VM_NAME=mcomp-hub-test-none\nRUN_DIR="{os.path.join(TD, "run2")}"\nLOG_DIR="{os.path.join(TD, "logs2")}"\n')
@@ -4064,6 +4174,7 @@ def main():
         limit_checks()
         owner_checks()
         handoff_checks()
+        browser_keep_checks()
         handoff_teardown_checks()
         handoff_teardown_race_checks()
         chrome_checks()

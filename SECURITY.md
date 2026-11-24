@@ -742,13 +742,38 @@ notice (`--say` cleaned like every event) and writes a record,
   claims from `web` and the GUI tests; reads still work;
 - the hub's own cleanup and teardown wait too: the driver session of a Claude
   Code session that disconnected is ended only when the handoff ends (ending it
-  could close the browser you're in); the Chrome guard's input reset doesn't run;
+  could close the browser you're in); a browser `browser_prepare` launched is kept: Cua Driver ends a driver
+  session after 5 minutes without a call in it, and that browser with it, so while a handoff is open the hub reads
+  in that session (`list_windows`, never input) every 60 s, looking at the handoff again under the owners lock right
+  before each read; the Chrome guard's input reset doesn't run;
   the hub doesn't exit when idle, doesn't restart for a client with other
   settings, and doesn't end a connection whose leased calls outlived their limit
   (it waits for the handoff, at most 2 hours longer); with `MCP_HUB=off`, Claude
   Code's bridge keeps its own connection until the handoff ends;
 - `metacomputer sh` refuses every run that isn't `--read-only`, with or without
-  `--override`;
+  `--override`, and a `--read-only` one too when an agent session runs it: the script runs as the desktop user, and
+  nothing keeps it off the desktop (it can set `DISPLAY` itself). Yours at your own terminal still runs (your terminal
+  on stdin, or on stderr when the script comes on stdin, with no agent session above it either way). Reads that
+  can't act stay: the desktop tools' reads, `inspect`, `get`, `shot`, `input-reset --check`;
+- `put`, `ssh` (any role), `rename`, `task start`, `browser profiles --new|--delete`, `security apply`, `record
+  start|stop`, `build --replace` (and a computer elsewhere's `build`) and `volume sync`, which reach the guest outside
+  the hub and the shell channel, refuse the same way (held like the commands below, under the
+  dispatch lock; `ssh` keeps it until its connection ends, since OpenSSH closes what it inherits: a helper of the
+  command's keeps it until ssh's pid exits, with every other descriptor closed, and says so only once it's set up, or
+  the command refuses; ssh itself is exec'd, so its signals, `~^Z` and exit status are its own), except at your own
+  terminal; an inherited `HANDOFF_HELD` doesn't skip that check. So do
+  `scripts/build-vm.sh` (every build: `--replace` deletes the VM, and any build sets the guest up and stops it) and
+  `scripts/remote-build.sh` run on their own: they check for themselves (the session guard, then the handoff, before
+  anything is stopped, deleted or written, held to the end), however they're run. The hub's own
+  input reset runs `metacomputer ssh` as its child under the lock it holds exclusively, and only with no handoff open:
+  that child alone goes ahead without the lock (it must be the VM's running hub's direct child), and still refuses
+  while one is open. A recording's stream is started by `record start` itself, after its checks (there's no command
+  of its own to run), and keeps `record start`'s dispatch lock until the stream is up, so no handoff opens in between
+  even if `record start` is stopped on the way (a stream not up within 20 s, no bytes from it waiting either, is ended
+  before the lock goes: it never starts); the internal commands that write to the guest are metacomputer's own: `_vnc-install` only from
+  a build or at your own terminal, `_vnc-push` only at your terminal; and every value that reaches the recorder's
+  shell in the VM is checked first (the name by the name rule, the frame rate a number from 1 to 60, the rest from
+  fixed sets);
 - `metacomputer claude` refuses the steps that act (`start`, `send`, `keys`, `show`,
   `stop`), with or without `--override` (`start` before any token is asked for;
   `stop --revoke` still revokes the token), and the inner Claude's keeper renews
@@ -774,7 +799,10 @@ under that lock held exclusively, recorded before the guest is asked (an answer 
 never while an agent call is still running in the driver or when that can't be known (`MCP_HUB=off`, a driver
 connection the shared hub doesn't own, a hub that doesn't answer), since removing the devices could cut that call off. Opening a handoff waits up to 10 s for calls
 already in the driver; if one is still running then, it leaves the devices and its message says the reset is pending
-and how to make it. If the reset fails, the handoff opens anyway and its message tells you to end it and run
+and how to make it. With a pair left, Chrome ignores the live view's keyboard for the whole handoff, so the command
+that waits for it (`handoff` itself, or `handoff wait`) makes that reset as soon as nothing of the agent's runs in the
+driver any more, while the handoff is still open, the same way (`input_reset.at_open_handoff`), and says so; when
+whether something runs can't be known, it never does, and the message says to run `metacomputer input-reset`. If the reset fails, the handoff opens anyway and its message tells you to end it and run
 `metacomputer input-reset` (or to run that in your own terminal now). `metacomputer view --open` removes them too,
 but, unless you run it at your own terminal, not while another controller is active or a handoff is open; the hub's
 Chrome guard makes its own reset the same way. The driver keeps the id of a pair it used, and its next pointer action
@@ -798,6 +826,26 @@ reaches a wrong element. While an answer's ids are translated, every mapping it 
 make room for a new one without forgetting one of them, the answer is refused whole. Reads never restart the driver and never claim the computer (they
 don't use its input devices): a token read before the restart is refused at its first use after it, and reading
 again then gives tokens that work. Nothing else restarts the driver for a reset.
+
+**A panel on the Mac (`HANDBACK_PANEL`, `on` by default).** While a handoff is open, a small floating panel at
+the top right of the Mac's screen has **Hand back to Claude** (the same as `handoff done`) and **Call it off**
+(`cancel`), so you don't have to go back to a terminal from the live view; `view --open` brings it up during one too. It
+isn't shown over SSH or without your screen session (the dialog's rules), it never takes the keyboard from Screen
+Sharing (a non-activating panel: keys you type in the live view can't press it), and it goes when the handoff ends.
+Only a click in it answers it. Nothing in the VM can reach a window on the Mac, and none of an agent's routes (its MCP
+tools, `call`, `sh`, `put`, `ssh`, a VNC client of its own) reaches one either: they act in the VM. It names the VM and
+where it is (in its title and its text), and panels for different VMs take places of their own inside the screen's
+visible area, none covering another (down the right-hand side, then a column to the left, as many as fit); with every
+place taken, a new one waits for a place to come free rather than cover one, and when no place can be reserved at
+all (its folder, or a slot's file, can't be used), none is shown and the command waiting for the handoff tells you to use your terminal.
+So a click can't release the wrong one. A detached helper (`handoff.py _panel ID`) shows it with Apple's `/usr/bin/osascript`, by that
+absolute path, running this checkout's `lib/handback_panel.js` with arguments both sides check (the agent's name, the
+VM's name, where it is, a slot number), and takes only its exact answer ("handback": done, "cancel": cancelled) from an
+osascript that exits 0: one that's killed or fails, or prints anything else, is no answer, and the handoff stays open;
+no variable, argument or file picks the program or the answer, and there is no command that answers it. An agent can
+start the helper (a panel appears); only a click ends anything. A control inside the VM wasn't made, on purpose: the
+live view's own clicks reach the VM as XTest events, the same as a program's, so anything running there could press it
+or fake its signal.
 
 **No action slips in while it opens.** A call is checked when the hub takes it,
 but its guards can then wait on the VM (a window list, an input reset). So every
@@ -848,7 +896,7 @@ It ends with `handoff done` (you're finished; Claude carries on), `handoff
 cancel` (Claude stops and asks), or its time limit (15 minutes by default, at
 most 2 hours), and each ending is an event. A record that can't be read (not
 valid, or a link in its place, which is never followed) counts as open for up to
-2 hours after it was written, so it fails closed; `handoff cancel` removes it.
+2 hours after it was written, so it fails closed; `handoff cancel` at your own terminal removes it.
 The 2 hours run from the file's change time, which the kernel sets (a modification
 time moved into the future doesn't stretch them), or, when not even that can be
 read, from when that was first noticed (kept in `RUN_DIR/handoff-unreadable`); if
@@ -862,10 +910,22 @@ never to (no other browser, mode or profile, no retrying in a loop). Your
 `handoff done --note` reaches only Claude's output, never an event. These limits
 are accepted, not oversights:
 - It isn't a barrier against a program running as you, which can run `handoff
-  done`, remove the record or the vault marker, or use the raw driver connection.
-  The Claude Code session that asked can't say "done" for you from its shell
-  without a terminal (it can cancel its own request); another process running as
-  you can.
+  done`, remove the record or the vault marker, use the raw driver connection, or kill the helper that keeps
+  `metacomputer ssh`'s dispatch lock (the lock goes while that ssh goes on).
+  `done` needs your own terminal (or the panel's click): no process without a terminal of yours says it, an agent host
+  this check doesn't know by name included. A handoff is called off only by the agent session that opened it (its
+  process, by pid and start time, both read: a start time that can't be read now, or a record from before they were
+  kept, doesn't count, nor does a process list that doesn't reach the top) or by you (your terminal, the panel): not
+  another session, nor a process with no agent session this check knows above it (an unknown agent host, a detached
+  worker).
+  A process set on it can still get around that (it can start a command outside the agent's process tree with a
+  pseudo-terminal of its own, or write the record), and so can one with your Mac's Accessibility permission, which
+  could click the panel as it could type in your terminal.
+- Two ways into the VM aren't paused: a VNC client of the agent's own can connect to the live view (its port is on
+  your Mac's loopback and its password is your account's), and a program already running in the VM goes on. Neither
+  can end a handoff, but they can act while you have the computer. The live view takes more than one viewer (your own
+  second device), and telling an agent's connection from yours would need a relay on the Mac that reads Screen
+  Sharing's protocol, so that one stays.
 - What has already left the Mac when the handoff opens goes on: a call written to
   the driver's connection (or forwarded by the relay), a shell run whose script
   was written to SSH, a lease's call. metacomputer has no acknowledgement from

@@ -3990,6 +3990,32 @@ def cli(td):
                   "PLACE=server", "PROVIDER=ubuntu-vm", "TRANSPORT=ssh", "SSH_HOST=192.0.2.10", "SSH_HOST_PORT=2222",
                   "SETUP_USER=owner", "IDLE_STOP=off", "EGRESS=internet")), (r.stderr, text))
         check("...0600, and nothing of the runner's touched", oct(os.stat(f).st_mode & 0o777) == "0o600" and not b.deletes())
+        # While the user has it (a handoff), an agent's `build` of it waits: it sets the computer up again over SSH.
+        od = os.path.join(b.co, ".run-vms", "own1", "owners")
+        os.makedirs(od, mode=0o700, exist_ok=True)
+        now = time.time()
+        hf = os.open(os.path.join(od, "handoff.state"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(hf, "w") as fh:
+            json.dump({"v": 1, "id": "h-dddddddddd01", "status": "open", "why": "login", "say": "x", "opened": now,
+                       "deadline": now + 300, "timeout_s": 300, "cwd": td, "claude_pid": None}, fh)
+        sd = os.path.join(td, "build-held-ssh")
+        os.makedirs(sd)
+        slog = os.path.join(td, "build-held-ssh.log")
+        with open(os.path.join(sd, "ssh"), "w") as fh:
+            fh.write(f'#!/bin/sh\necho "$*" >> "{slog}"\nexit 0\n')
+        os.chmod(os.path.join(sd, "ssh"), 0o755)
+        r = b.run("--vm", "own1", "build", env=b.env(PATH=sd + os.pathsep + os.environ.get("PATH", "")))
+        check("an agent's `build` of a computer elsewhere while the user has it (a handoff): held (exit 4), nothing "
+              "reaches it", r.returncode == 4 and "the user has the computer" in r.stderr and not os.path.exists(slog),
+              (r.returncode, r.stderr[-300:]))
+        # ...and so is scripts/remote-build.sh run on its own, as a program would (it checks itself)
+        r = subprocess.run([os.path.join(b.co, "scripts", "remote-build.sh")], capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL, env=b.env(MCOMP_VM="own1", MCOMP_REMOTE_SSH_WAIT="1",
+                                                               PATH=sd + os.pathsep + os.environ.get("PATH", "")))
+        check("scripts/remote-build.sh run on its own while the user has it: held (exit 4), nothing reaches it",
+              r.returncode == 4 and "the user has the computer" in r.stderr and not os.path.exists(slog),
+              (r.returncode, r.stderr[-300:]))
+        os.remove(os.path.join(od, "handoff.state"))
         r = b.run("vm", "create", "arm1", "--on", "oci", "--size", "arm-1x6", "--egress", "off", "--no-build", "--yes")
         text = open(os.path.join(b.co, "config", "vms", "arm1.env")).read()
         check("vm create --on oci: place, provider, size, egress and the idle stop (15 min)",

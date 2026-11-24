@@ -809,11 +809,11 @@ def main(argv):
     if not transport:
         return finish(o, {"status": "error", "message": "no way to reach the VM (run it as metacomputer sh)"}, EXIT_FAILED)
 
-    res, code = run_guarded(o, transport, script)
+    res, code = run_guarded(o, transport, script, user_script=True)
     return finish(o, res, code)
 
 
-def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=None):
+def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=None, user_script=False):
     """Run a script in the VM under every rule `metacomputer sh` keeps, and return (result, exit code)
     without printing anything: VM_SHELL and the bounded driver, the one-controller check and claim (unless
     o["read_only"]), the action log (the call signed before anything runs, the result after), the deadline
@@ -822,7 +822,10 @@ def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=Non
     - log_args(keep_text) gives the call record's arguments, for a caller whose script and arguments
       the default record (call_args) shouldn't hold;
     - header_extra is merged into the request header the VM's half reads. It is never logged or shown:
-      vm_claude.py passes a token there ("env"), which the VM's half puts in the script's environment."""
+      vm_claude.py passes a token there ("env"), which the VM's half puts in the script's environment.
+    - user_script: the script is the caller's own (`metacomputer sh`), not one of metacomputer's fixed ones
+      (vm_claude.py's read and status): then a --read-only run waits during a handoff too, unless the person runs it
+      at their own terminal, since it runs as the desktop user and nothing keeps it off the desktop."""
     s = settings()
     user = os.environ.get("MCOMP_GUEST_USER") or "cua"
     cwd = guest_cwd(o["cwd"], user)
@@ -883,6 +886,19 @@ def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=Non
     if os.environ.get("MCOMP_VM_STATE", "running") != "running":
         return {**base, "status": "error", "kind": "vm_off",
                 "message": "the virtual computer is off (metacomputer start)"}, EXIT_FAILED
+    # --read-only is a promise, not a sandbox: the script runs as the desktop user and can still reach the desktop
+    # (DISPLAY, the X cookie, the session bus are that user's). While the user has the computer, an agent's waits like
+    # any acting run, here and once more under the dispatch lock right before it starts (gate, below); the person at
+    # their own terminal keeps theirs: their terminal on stdin, or on stderr when stdin brings the script
+    # (`sh --read-only - <<'SCRIPT'`), with the same check that no agent session is above this process.
+    agent_read = (o["read_only"] and user_script
+                  and not (owners.at_user_terminal((0,)) or owners.at_user_terminal((2,))))
+    if agent_read:
+        handoff = owners.open_handoff()
+        if handoff:
+            return refuse(owners.handoff_refusal(handoff) + " A --read-only script waits too: it runs as the desktop "
+                          "user and can still reach the desktop. Reads that can't act still work: the desktop tools' "
+                          "reads, `metacomputer inspect`, `get`, `shot` and `input-reset --check`.")
 
     # One controller at a time: look for others and claim the computer as one step.
     who = None
@@ -956,7 +972,8 @@ def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=Non
     try:
         try:
             res, code = execute(o, transport, header, script, deadline, base,
-                                None if o["read_only"] else refresh, None if o["read_only"] else gate)
+                                None if o["read_only"] else refresh,
+                                gate if (not o["read_only"] or agent_read) else None)
         finally:
             sig_state["defer"] = True
     except owners.HandoffOpen as e:

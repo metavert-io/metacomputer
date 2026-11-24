@@ -1,0 +1,43 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Dialog check</title>
+<style>
+ body { font: 16px sans-serif; margin: 0; }
+ #banner { position: fixed; left: 0; right: 0; bottom: 0; height: 90px; background: #223; color: #fff; display: flex;
+           align-items: center; gap: 20px; padding: 0 30px; z-index: 10; }
+ #banner button { font-size: 18px; padding: 10px 24px; }
+ dialog { width: 420px; }
+ dialog button, dialog input { font-size: 18px; }
+ iframe { position: absolute; left: 560px; top: 120px; width: 300px; height: 200px; border: 2px solid #888; }
+ #open { position: absolute; left: 60px; top: 120px; font-size: 18px; padding: 10px 24px; }
+</style></head>
+<body>
+<h1 style="margin:20px 60px">Dialog check</h1>
+<button id="open">Open dialog</button>
+<iframe id="frame" src="http://127.0.0.1:8411/frame.html" title="Framed dialog"></iframe>
+<dialog id="dlg"><p>Modal dialog</p>
+ <label for="name">Name</label> <input id="name" autocomplete="off">
+ <button id="ok">OK</button></dialog>
+<div id="banner"><span>We use cookies.</span><button id="accept">Accept cookies</button><button id="decline">Decline</button></div>
+<script>
+// Everything the person does here is logged (with whether the browser calls it trusted), with which browser, and the
+// layout in page coordinates, so the test can aim at elements from one calibration click.
+var B = navigator.userAgent.indexOf("Firefox") >= 0 ? "firefox" : "chrome";
+function log(ev) { ev.b = B; navigator.sendBeacon("/log", JSON.stringify(ev)); }
+function rect(id) { var r = document.getElementById(id).getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; }
+function layout(what) {
+  var f = document.getElementById("frame").getBoundingClientRect();
+  log({what: what, open: rect("open"), accept: rect("accept"), name: rect("name"), ok: rect("ok"),
+       frame: [f.left, f.top, f.width, f.height]});
+}
+document.getElementById("open").addEventListener("click", function (e) {
+  document.getElementById("dlg").showModal(); log({what: "open", trusted: e.isTrusted}); layout("layout-modal"); });
+document.getElementById("ok").addEventListener("click", function (e) {
+  log({what: "modal-ok", trusted: e.isTrusted, name: document.getElementById("name").value}); document.getElementById("dlg").close(); });
+document.getElementById("accept").addEventListener("click", function (e) { log({what: "banner-accept", trusted: e.isTrusted}); });
+document.getElementById("name").addEventListener("keydown", function (e) { log({what: "key", key: e.key, trusted: e.isTrusted}); });
+document.addEventListener("pointerdown", function (e) {
+  log({what: "pointerdown", x: e.clientX, y: e.clientY, sx: e.screenX, sy: e.screenY, target: e.target.id || e.target.tagName,
+       trusted: e.isTrusted}); }, true);
+window.addEventListener("load", function () { layout("layout"); });
+</script>
+</body></html>

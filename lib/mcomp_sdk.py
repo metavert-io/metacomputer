@@ -30,10 +30,12 @@ script starts acting (an acting call does the same on its own); it returns
 {"claimed": bool, "others": [...]}.
 
 CLI (what `metacomputer call` runs, and the status probe):
-  mcomp_sdk.py call [--session NAME] [--timeout S] [--json | --raw] TOOL ['JSON']
+  mcomp_sdk.py call [--session NAME] [--timeout S] [--json | --raw] TOOL ['JSON' | -]
   mcomp_sdk.py probe | tools | describe TOOL
 On a terminal, the result's text has control characters escaped (termsafe.py);
---raw prints it exactly, --json prints the whole result as JSON.
+--raw prints it exactly, --json prints the whole result as JSON. `-` reads the
+arguments from stdin (for text with quotes: a quoted heredoc passes it exactly);
+more than one argument after TOOL is refused (a JSON argument the shell split).
 """
 import itertools
 import json
@@ -314,7 +316,12 @@ class Hub:
 
 
 # --- `metacomputer call` ------------------------------------------------------------------
-USAGE = "usage: metacomputer call [--session NAME] [--timeout S] [--json | --raw] TOOL ['JSON']"
+USAGE = "usage: metacomputer call [--session NAME] [--timeout S] [--json | --raw] TOOL ['JSON' | -]"
+# Text with an apostrophe inside a single-quoted shell argument loses it before this program runs: the shell takes
+# each ' as a quote. With `-` the arguments come on stdin, where a quoted heredoc (<<'JSON') passes them exactly.
+QUOTING_HINT = ("Pass the arguments on stdin instead: metacomputer call TOOL - <<'JSON' ... JSON (a quoted heredoc "
+                "keeps every ' and \" exactly; inside '...' the shell takes each ' as a quote and drops it)")
+STDIN_MAX = mcp_hub.MAX_CLIENT_MSG             # what the hub takes in one message
 
 
 def is_tty(f=None):
@@ -340,12 +347,40 @@ CALL_FORMS = ["[--session NAME] [--timeout SECONDS] [--json] [--raw] TOOL [JSON]
 CLI_FORMS = ["call " + f for f in CALL_FORMS] + ["probe", "tools", "describe TOOL"]
 
 
+def _after_tool(argv):
+    """The words after TOOL in `call`'s command line (its options come before it), or None when it has none."""
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--session", "--timeout"):
+            i += 2
+        elif a.startswith("-") and a != "-":
+            i += 1                               # another option (or a misuse of one): expect() says what's wrong
+        else:
+            return argv[i + 1:]
+    return None
+
+
 def call_main(argv, of=None):
     """`metacomputer call`; OF: the forms it's one of (CLI_FORMS, mcp_client.py's), whose first CALL_FORMS are its."""
     # Its command line (lib/strictargs.py): anything it wouldn't use is refused before the hub is reached, a request
     # for usage given as --session's value too (`call --session --help TOOL` once ran TOOL in a session named --help).
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import strictargs
+    # Options come before TOOL, and one JSON argument after it: a word after the tool's name that looks like an
+    # option (`call TOOL '{}' --session other`) is refused rather than taken as one, and more than one word after it
+    # is a JSON argument the shell split (a ' inside '...' ends the quote). Nothing is sent either way.
+    after = _after_tool(argv)
+    if after:
+        late = [w for w in after if w.startswith("-") and w != "-" and w not in strictargs.HELP]
+        if late:
+            say_err(f"options go before the tool's name ('{late[0][:40]}' came after it); nothing was sent. {USAGE}")
+            return 2
+        words = [w for w in after if w not in strictargs.HELP]
+        if len(words) > 1:
+            say_err(f"one JSON argument, please (got {len(words)} words after the tool's name: the shell split it). "
+                    + QUOTING_HINT + f"; nothing was sent. {USAGE}")
+            return 2
     p = strictargs.expect(argv, CALL_FORMS, prog="metacomputer call", usage=USAGE, defer=True)
     session, rest = p.opts.get("--session"), p.words
     as_json, raw = bool(p.opts.get("--json")), bool(p.opts.get("--raw"))
@@ -362,10 +397,21 @@ def call_main(argv, of=None):
               file=sys.stderr)
         return 2
     tool = rest[0]
+    raw_args = rest[1] if len(rest) > 1 else "{}"
+    if raw_args == "-":
+        data = sys.stdin.buffer.read(STDIN_MAX + 1)
+        if len(data) > STDIN_MAX:
+            say_err(f"the arguments on stdin are over {STDIN_MAX >> 20} MB (what the hub takes in one message)")
+            return 2
+        try:
+            raw_args = data.decode("utf-8")
+        except UnicodeDecodeError:
+            say_err("the arguments on stdin aren't UTF-8")
+            return 2
     try:
-        args = json.loads(rest[1]) if len(rest) > 1 else {}
+        args = json.loads(raw_args)
     except ValueError as e:
-        say_err(f"the arguments aren't JSON ({e})")
+        say_err(f"the arguments aren't JSON ({e}). " + QUOTING_HINT)
         return 2
     if not isinstance(args, dict):
         say_err("the arguments must be a JSON object")
