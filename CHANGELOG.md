@@ -71,6 +71,22 @@ All notable changes to metacomputer are recorded here. The format follows
   `sh --read-only - <<'SCRIPT'`), and reads that can't act stay (`inspect`, `get`, `shot`, the desktop tools' reads). A
   `HANDOFF_HELD=1` in the environment no longer skips every handoff check. What's left is in SECURITY.md: an agent's
   own VNC client to the live view, and programs already running in the VM.
+- **Every program that changes a computer waits while you have it, however it's run.** Run by themselves (by an
+  agent, a script or a person), `lib/remote.py` (`exec`, `create`, `wake`, `sleep`, `delete`, `abort`, `checkpoint
+  create|restore|delete`, `allow`, `egress --set`, `resolvers`), `lib/storage.py` (`kill-vm`, `volume sync`, `attach`,
+  `prepare`, `started`, `release`, `checkpoint save|restore|delete`), `lib/netpolicy.py` (`allow`, `remove`, `clear`,
+  `render`) and `lib/guest_put.py` went ahead during a handoff; so did `metacomputer start`, `checkpoint NAME` and
+  `checkpoint --delete` on this Mac, `net allow|remove|clear` and `vm delete --force`. Each now stops with exit 4 (the
+  same words as the other commands) right after its command line, before anything is called or written, and holds the
+  dispatch lock to the end (`lib/handoff_gate.py`); at your own terminal, or under the hold of the command that runs it
+  (a descriptor on that very lock file, checked; never an environment variable), it goes ahead. `lib/remote.py cloud
+  teardown` and `--forget` run by themselves need your own terminal, as `metacomputer cloud` does. `stop` of your own
+  server (it ends this Mac's hub, which keeps your browser alive during a handoff) waits too, and the lifecycle commands
+  that refused during a handoff with exit 1 now exit 4; with `--override` they hold the lock to the end, so what they
+  run goes ahead under it. `tests/acting.py` sorts every program and subcommand by what it does to a computer, and
+  `tests/test_acting.py` (no VM) runs each one that acts while a handoff is open, at your terminal and under a caller's
+  hold: a new program or subcommand fails it until it's sorted. On Fly Sprites, `metacomputer logs` shows no service
+  logs while a handoff is open (they're read through `lib/remote.py exec`, which now waits).
 - **The Hand back panel counts only an exact answer** from an osascript that exits 0: one that's killed or fails, or
   prints anything else around or instead of its answer, leaves the handoff open.
 - **`metacomputer handoff done` needs your own terminal**, whatever runs it: a process without a terminal of yours (a
@@ -89,6 +105,9 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ### Fixed
 
+- **The session guard failed open.** When its check (`lib/sessionvm.py`) crashed or ended with a status it doesn't
+  give, `metacomputer` and the build scripts warned and went on, possibly on another computer than the agent session's.
+  They now refuse, saying the check wasn't made (name the computer with `--vm NAME` to be sure).
 - **`--help` and `-h` print the usage and do nothing else, wherever they're typed**: `metacomputer --vm NAME build --help` started a real build, and other commands reached the VM, its runner, SSH or the vault before reading their arguments. Now any command with `--help` or `-h` after it, its subcommand or its arguments (before a `--`) prints its usage and exits 0 before anything runs: no settings are read, nothing is called and nothing is written (`ssh ROLE CMD` leaves them to the guest's command). Right after an option that takes a value it's that value, as before (`sh --file --help`), and a command's own usage text is asked for with fixed words only, never the rest of what was typed (so `handoff --transport 1 --help cancel` can't cancel a handoff). The scripts a person runs (`scripts/build-vm.sh`, `remote-build.sh`, `fetch-artifacts.sh`, `build-tools.sh`, `safe-rmtree.sh`, `check-public.sh`, `sync-plugin.py`, ...) print their usage too, and `lib/guest_import.py` and `lib/mcp_relay.py` no longer make a folder named `--help` or the action log's key. The plugins' launchers with nothing set up answer `--help` and `-h` with their usage (exit 0) instead of the setup message. `tests/test_help.py` runs every command and subcommand that way, and every program in the repository with the command lines its callers give it (each must be taken) and every misuse its own declaration implies.
 - **`metacomputer view --tunnel` returns once the tunnel is up when a program reads its output**: `ssh -f` kept the caller's pipes open, so an agent's tool call or a script waited about 20 s, until the tunnel closed. What SSH says goes to a private log (`tunnel/view-tunnel.log` in the computer's log folder, 0600 in a 0700 folder; a link there is refused) and is shown once it connects, escaped as before (at most half a second of it is read first, so SSH printing without end can't hold the command up; the rest is drained after); the log keeps at most 1 MB, the line saying the rest was left out included, however much the VM's end makes SSH print. At a terminal nothing changes, and on Fly Sprites the tunnel's ssh still stays in the foreground for its tunnel program.
 - **Oracle Cloud: a computer's network security group is its build's own**: each build makes a new group, tagged with the computer and the build's operation, and journals it from the create's answer before anything configures it (its first rules are written only after it's read again, still tagged for this computer and operation); it never reuses or changes a group found by name (another Mac's computer of the same name, an earlier try's). `net egress`, `vm delete` and a failed build's clean-up act only on the groups the computer's record names, each read by its id and still tagged for this computer and that operation. A group an earlier version made carries no operation, so `net egress` refuses to change it (delete the computer and make it again); `cloud teardown` never deletes a group no record on this Mac names, and says to remove it in Oracle's console; one another Mac makes after teardown looked stops the network's deletion too, with nothing deleted.

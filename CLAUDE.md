@@ -147,7 +147,15 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   keeper renews nothing. Our own scripts that stop, delete or set up a computer (`scripts/build-vm.sh`, every build;
   `scripts/remote-build.sh`) run the same checks themselves, after their command-line check and before anything
   changes, whether bin/metacomputer runs them or something else does (scripts/lib.sh `script_session_guard`,
-  `script_handoff_hold`, held to the end). Every value that
+  `script_handoff_hold`, held to the end); so does every Python program that changes a computer by itself
+  (`lib/remote.py`, `lib/storage.py`, `lib/netpolicy.py`, `lib/guest_put.py`: `lib/handoff_gate.py` `wait_or_hold`,
+  shared code with no provider names, right after its command line: exit 4 with `owners.handoff_refusal`, your
+  terminal goes ahead, and a caller's hold goes ahead only once its descriptor is checked to be that very lock, never by
+  an environment variable; never under MCOMP_PARSE_ONLY, which ends at 99 first), and `start`, `checkpoint`, `net` and
+  `vm delete` (`--force` too) in bin/metacomputer. `--override` on a lifecycle command still holds the lock
+  (`dispatch_hold`) for what it runs. Every program and subcommand is sorted by what it does to a computer in
+  `tests/acting.py`; `tests/test_acting.py` runs each acting one during a handoff and fails on one that isn't sorted.
+  The session guards fail closed (a check that crashes refuses). Every value that
   reaches a shell in the guest is checked first (`record_args_ok`), and file names go after `--`; a recording's
   stream is started by `record start` itself (`record_stream_start`: no internal command for it), keeping its
   dispatch lock until the stream is up (`daemonize --keep-fd 6`, `recording.py save --hold-fd 6`); the internal
@@ -427,7 +435,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, `python3 tests/test_vault_payments.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup`, `test_vault_payments`, `test_help` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup`, `test_vault_payments`, `test_help`, `test_acting` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and

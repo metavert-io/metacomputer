@@ -2057,7 +2057,8 @@ CLAIMS = [
          "-o ForwardAgent=no", "-o ForwardX11=no", "-o ClearAllForwardings=yes", "-o PermitLocalCommand=no",
          "-o RemoteCommand=none", "-o GSSAPIDelegateCredentials=no", "-o Tunnel=no"))),
     ("SECURITY.md", r"`lib/remote.py`\s+takes them out of its own environment first and hands them to the adapter as a value",
-     lambda m: "    take_credentials()\n    try:" in py_top_fn("lib/remote.py", "run")
+     lambda m: (lambda r: r.index("    a = ap.parse_args(argv)\n    take_credentials()\n") < r.index("\n    try:\n"))(
+         py_top_fn("lib/remote.py", "run"))
      and "env=child_env()" in py_top_fn("lib/remote.py", "mac_lock")
      and '{"env": dict(CREDS)}' in py_top_fn("lib/remote.py", "provider_kw")),
     ("SECURITY.md", r"An API token is for the computer it was made for: each request checks that the\s+binding and the identity beside the computer's keys still name it",
@@ -3156,7 +3157,96 @@ CLAIMS = [
      and "os.fchmod(fd, 0o600)" in raw("lib/tunnellog.py") and "os.mkdir(folder, 0o700)" in raw("lib/tunnellog.py")
      and 'tlog="$LOG_DIR/tunnel/view-tunnel.log"' in raw("bin/metacomputer")
      and ">>\"$tlog\"" not in raw("bin/metacomputer")),
+    # Every program that changes a computer waits during a handoff, however it's run (lib/handoff_gate.py).
+    ("SECURITY.md", r"every other program of the repository that changes a computer waits the same way, however it's run "
+                    r"\(by\s+`metacomputer`, by another program, or by itself\)",
+     lambda m: programs_gated()),
+    ("SECURITY.md", r"so do `start`, a checkpoint on this Mac\s+\(`checkpoint NAME`, `checkpoint --delete`\), `net "
+                    r"allow\|remove\|clear` and `vm delete` \(`--force` or not\)",
+     lambda m: bin_commands_held()),
+    ("SECURITY.md", r"a descriptor on that very\s+lock file, checked \(the file's device and inode, and a shared lock held, "
+                    r"never one being taken exclusively\),\s+never an\s+environment variable",
+     lambda m: inherited_hold_checked()),
+    ("SECURITY.md", r"`lib/remote.py cloud teardown` and `--forget` are yours only, at your own terminal",
+     lambda m: (lambda r: r.index("owners.at_user_terminal((0,))") < r.index("handoff_gate.wait_or_hold(")
+                < r.index('if a.cmd == "target":') and 'a.action == "teardown" or a.forget is not None' in r)(
+         py_top_fn("lib/remote.py", "run"))),
+    ("SECURITY.md", r"`tests/acting.py` sorts every program and subcommand by what it does to a computer,\s+and "
+                    r"`tests/test_acting.py` runs each one that acts while a handoff is open",
+     lambda m: os.path.exists(os.path.join(LAB, "tests", "acting.py"))
+     and "test_acting" in re.search(r"NO_VM_SUITES=\((.*?)\)", raw("scripts/release.sh"), re.S).group(1)
+     and "def classify(" in raw("tests/acting.py") and 'not in acting.LABELS' in raw("tests/test_acting.py")),
+    ("SECURITY.md", r"A command whose check of which computer the agent session holds can't be made \(it\s+crashed\) "
+                    r"refuses instead of going on",
+     lambda m: session_guards_fail_closed()),
+    ("SECURITY.md", r"`baseline`, `test` and `desktop-restart` refuse \(exit 4\) unless you add `--override`",
+     lambda m: "printf '%s\\n' \"${c_red}metacomputer: the user has the computer (metacomputer handoff)" in
+     fn_src("bin/metacomputer", "owners_check") and "exit 4; }" in fn_src("bin/metacomputer", "owners_check")),
+    ("SECURITY.md", r"with `--override` they still hold the dispatch lock to the end, so what\s+they run goes ahead under it",
+     lambda m: 'if [ "$OVERRIDE" = 1 ]; then dispatch_hold; else handoff_hold; fi' in raw("bin/metacomputer")
+     and "flockwait.take(6, 10.0, 0.02, shared=True)" in fn_src("bin/metacomputer", "dispatch_hold")),
+    ("SECURITY.md", r"`stop` \(your own server's too: it ends this Mac's hub, which keeps your browser alive\)",
+     lambda m: (lambda f: f.index("handoff_hold_unless_override") < f.index("if ! remote_made; then"))(
+         fn_src("bin/metacomputer", "do_stop_remote"))),
 ]
+
+
+def programs_gated():
+    """lib/remote.py, lib/storage.py, lib/netpolicy.py and lib/guest_put.py call lib/handoff_gate.py's gate after their
+    command line is taken and before they act; the gate exits 4 with owners.handoff_refusal, lets the user's terminal
+    through and holds the lock (no provider names in it)."""
+    r, st, npol, gp, g = (py_top_fn("lib/remote.py", "run"), py_top_fn("lib/storage.py", "main"),
+                          py_top_fn("lib/netpolicy.py", "main"), py_top_fn("lib/guest_put.py", "main"),
+                          raw("lib/handoff_gate.py"))
+    m = re.search(r"^CHANGES = \(([^)]*)\)", raw("lib/remote.py"), re.M)
+    acts = set(re.findall(r'"([a-z-]+)"', m.group(1))) if m else set()
+    return (r.index("a = ap.parse_args(argv)") < r.index("handoff_gate.wait_or_hold(") < r.index('if a.cmd == "target":')
+            and {"exec", "create", "wake", "sleep", "delete", "abort", "resolvers"} <= acts
+            and st.index("a = ap.parse_args(argv)") < st.index("handoff_gate.wait_or_hold(") < st.index("return a.fn(a)")
+            and npol.index("p = paths()") < npol.index("handoff_gate.wait_or_hold(") < npol.index('return {"status":')
+            and '("allow", "remove", "clear", "render")' in npol
+            and gp.index('strictargs.expect(rest') < gp.index("handoff_gate.wait_or_hold()") < gp.index("put(ssh, files")
+            and 'return a.cmd in ("prepare", "started", "attach", "release", "kill-vm")' in
+            py_top_fn("lib/storage.py", "changes_computer")
+            and "EXIT_WAIT = 4" in g and "_refuse(owners.handoff_refusal(h))" in g
+            and "owners.at_user_terminal((0,))" in g and "flockwait.take(fd, owners.DISPATCH_WAIT_S, 0.02, shared=True)" in g
+            and "strictargs.PARSE_ONLY" in g
+            and not re.search(r"\b(oci|sprites?|hetzner|digitalocean|vultr|lume|claude|codex|ubuntu|firefox|chrome)\b",
+                              g, re.I))
+
+
+def bin_commands_held():
+    """start, checkpoint (both forms) and vm delete hold the handoff check before they change anything; net's acting
+    subcommands go through lib/netpolicy.py's gate."""
+    st, ck, vd = (fn_src("bin/metacomputer", "do_start"), fn_src("bin/metacomputer", "do_checkpoint"),
+                  fn_src("scripts/vm-commands.sh", "vm_delete"))
+    return (st.index("handoff_hold_unless_user") < st.index("vm_stop") < st.index('vm_start "$VM_NAME"')
+            and ck.index("handoff_hold_unless_override") < ck.index("runner_delete")
+            and ck.rindex("handoff_hold_unless_override") < ck.index('"$LUME" clone')
+            and vd.index("script_handoff_hold || exit 4") < vd.index("vm_delete_remote") < vd.index("vm_delete_plan")
+            and "MC_SCRIPT_HELD=1" in fn_src("scripts/lib.sh", "script_handoff_hold"))
+
+
+def inherited_hold_checked():
+    """lib/handoff_gate.py inherited_hold: the descriptor's device and inode are the dispatch lock file's, someone holds
+    it shared and nobody exclusively (probes on a description of its own), and a shared lock on it is had at once; the
+    guard (handoff.py) accepts the same, and neither reads the environment for it."""
+    g = py_top_fn("lib/handoff_gate.py", "inherited_hold")
+    guard = py_top_fn("lib/handoff.py", "cmd_guard")
+    return ("(st.st_dev, st.st_ino) == (want.st_dev, want.st_ino)" in g and "stat.S_ISREG(want.st_mode)" in g
+            and g.index("fcntl.LOCK_EX | fcntl.LOCK_NB") < g.index("fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)")
+            < g.index("fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)") and "os.environ" not in raw("lib/handoff_gate.py") and "getenv" not in raw("lib/handoff_gate.py")
+            and guard.index("handoff_gate.inherited_hold(exclude=") < guard.index("flockwait.take(fd")
+            and "if inherited is not None:\n            return 0" in guard)
+
+
+def session_guards_fail_closed():
+    """bin/metacomputer's session_guard and scripts/lib.sh's script_session_guard refuse on any status but a pass, a
+    don't-know, a refusal (and parse-only's 99, which refuses too)."""
+    b, s = fn_src("bin/metacomputer", "session_guard"), fn_src("scripts/lib.sh", "script_session_guard")
+    return ("going on" not in b and "going on" not in s
+            and '*) die "couldn\'t check which computer this agent session holds' in b
+            and "so this doesn't go ahead; nothing was done\"\n       return 1 ;;" in s)
 
 
 def health_categories_only():

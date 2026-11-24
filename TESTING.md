@@ -556,6 +556,24 @@ else is not run). The vault's forms are walked by tests/test_vault_ops.py (each 
 `MCOMP_PARSE_ONLY=1` in a test build, every flag and value option misused, and its `_tunnel` mode), its dispatch
 scanned there too.
 
+## What waits during a handoff, whoever runs it: `tests/test_acting.py`
+
+`python3 tests/test_acting.py` (about 340 checks, two minutes) needs no VM. `tests/acting.py` sorts every program
+tests/entrypoints.py finds, each of its subcommands (its callers' lines and one for each subcommand or form its parser
+declares) and every command of bin/metacomputer's dispatch by what it does to a computer: it changes one itself (and
+must wait), it's a lifecycle command or a fill (waits even at your terminal, `--override` goes ahead), an input reset,
+yours only, judged per call (the hub, the relay, the shell channel), only through other entries, part of a start that
+waited (the folder watcher, an allowlist's own end), the guest's, or nothing of a computer's. A program or subcommand
+that isn't sorted fails, and `lib/remote.py`'s and `lib/storage.py`'s own `changes_computer()` must say what the table
+says on every line. Then, on copies of the checkout (tests/test_help.py's Lab, with a runner whose computers run and an
+ssh that answers only probes), with an open handoff record in the right computer's RUN_DIR, each line of each entry
+that changes a computer is run by itself: plainly (exit 4, the refusal's words, nothing called but the runner's
+lookups, nothing written), at your own terminal (tests/userterm.py: past the gate, saying so) and under a hold handed on
+as an inherited descriptor on that computer's dispatch lock (past the gate). The input resets and the commands that are
+yours only are run by their own rules, and every acting form of bin/metacomputer in tests/test_help.py's FORMS the same
+way (a line that isn't whole there, a word missing or a question with no terminal, only has to call nothing). Last,
+with a `lib/sessionvm.py` that crashes, `metacomputer` and `scripts/build-vm.sh` refuse instead of going on.
+
 ## The Claude Code plugin: `tests/test_plugin.py`
 
 `python3 tests/test_plugin.py` (301 checks) needs no VM. `install.sh` runs against a

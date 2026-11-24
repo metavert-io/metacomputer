@@ -774,6 +774,21 @@ notice (`--say` cleaned like every event) and writes a record,
   a build or at your own terminal, `_vnc-push` only at your terminal; and every value that reaches the recorder's
   shell in the VM is checked first (the name by the name rule, the frame rate a number from 1 to 60, the rest from
   fixed sets);
+- every other program of the repository that changes a computer waits the same way, however it's run (by
+  `metacomputer`, by another program, or by itself): `lib/remote.py` (`exec`, `create`, `wake`, `sleep`, `delete`,
+  `abort`, `checkpoint create|restore|delete`, `allow`, `egress --set`, `resolvers`), `lib/storage.py` (`kill-vm`,
+  `volume sync`, `attach`, `prepare`, `started`, `release`, `checkpoint save|restore|delete`), `lib/netpolicy.py`
+  (`allow`, `remove`, `clear`, `render`) and `lib/guest_put.py`; so do `start`, a checkpoint on this Mac
+  (`checkpoint NAME`, `checkpoint --delete`), `net allow|remove|clear` and `vm delete` (`--force` or not). Each looks
+  right after its command line, before it asks a provider anything, runs anything in the guest or writes anything
+  (`lib/handoff_gate.py`), and stops with exit 4 and the same words; otherwise it holds the dispatch lock to the end of
+  its run. It goes ahead at your own terminal, or under the hold of the command that runs it: a descriptor on that very
+  lock file, checked (the file's device and inode, and a shared lock held, never one being taken exclusively), never an
+  environment variable. `lib/remote.py cloud teardown` and `--forget` are yours only, at your own terminal, run that way
+  as through `metacomputer cloud`. `tests/acting.py` sorts every program and subcommand by what it does to a computer,
+  and `tests/test_acting.py` runs each one that acts while a handoff is open, at your terminal and under a caller's hold
+  (one that isn't sorted fails it). A command whose check of which computer the agent session holds can't be made (it
+  crashed) refuses instead of going on;
 - `metacomputer claude` refuses the steps that act (`start`, `send`, `keys`, `show`,
   `stop`), with or without `--override` (`start` before any token is asked for;
   `stop --revoke` still revokes the token), and the inner Claude's keeper renews
@@ -784,9 +799,10 @@ notice (`--say` cleaned like every event) and writes a record,
   allowed; the code dialog never fills by itself, its value waits for `fill --request`);
   `metacomputer web` leaves the Firefox windows it opened instead of closing them,
   and the GUI tests' own commands in the VM (setup, `pkill`, clean-up) stop;
-- `stop`, `reset`, `restore`, `baseline`, `test` and `desktop-restart` refuse
-  unless you add `--override`, and look again right before they change anything,
-  after any question they ask; so do a Fly Sprite's `checkpoint NAME` and
+- `stop` (your own server's too: it ends this Mac's hub, which keeps your browser alive), `reset`, `restore`,
+  `baseline`, `test` and `desktop-restart` refuse (exit 4) unless you add `--override`, and look again right before they
+  change anything, after any question they ask; with `--override` they still hold the dispatch lock to the end, so what
+  they run goes ahead under it and no handoff opens meanwhile; so do a Fly Sprite's `checkpoint NAME` and
   `checkpoint --delete` (a checkpoint of the running computer would keep what you
   did in it); `release` doesn't end it.
 
@@ -911,7 +927,9 @@ never to (no other browser, mode or profile, no retrying in a loop). Your
 are accepted, not oversights:
 - It isn't a barrier against a program running as you, which can run `handoff
   done`, remove the record or the vault marker, use the raw driver connection, or kill the helper that keeps
-  `metacomputer ssh`'s dispatch lock (the lock goes while that ssh goes on).
+  `metacomputer ssh`'s dispatch lock (the lock goes while that ssh goes on), or take that lock itself and hand it on
+  to a program (a hold is checked to be the lock, not proven to come from a command that looked), or run the
+  provider's own tool, the runner or ssh itself.
   `done` needs your own terminal (or the panel's click): no process without a terminal of yours says it, an agent host
   this check doesn't know by name included. A handoff is called off only by the agent session that opened it (its
   process, by pid and start time, both read: a start time that can't be read now, or a record from before they were
