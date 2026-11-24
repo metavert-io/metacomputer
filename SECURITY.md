@@ -774,37 +774,46 @@ notice (`--say` cleaned like every event) and writes a record,
   a build or at your own terminal, `_vnc-push` only at your terminal; and every value that reaches the recorder's
   shell in the VM is checked first (the name by the name rule, the frame rate a number from 1 to 60, the rest from
   fixed sets);
-- the programs of the repository that change a computer by themselves wait the same way, however they're run (by
-  `metacomputer`, by another program, or by themselves): `lib/remote.py` (`exec`, `create`, `wake`, `sleep`, `delete`,
-  `abort`, `checkpoint create|restore|delete`, `allow` but `--show`, `egress --set`, `resolvers`), `lib/storage.py`
-  (`kill-vm`, `volume sync`, `attach`, `prepare`, `started`, `release`, `checkpoint save|restore|delete`),
-  `lib/netpolicy.py` (`allow`, `remove`, `clear`, `render`) and `lib/guest_put.py`; so do `start`, a checkpoint on this
-  Mac (`checkpoint NAME`, `checkpoint --delete`), `net allow|remove|clear` and `vm delete` (`--force` or not). Each
-  looks right after its command line, before it asks a provider anything, runs anything in the guest or writes anything
-  (`lib/handoff_gate.py`), at the computer it acts on: the one its name and run folder say (they must be one computer's,
-  by this checkout's settings), or the one whose SSH folder its transport names; one that can't be told, or names that
-  disagree, refuse. It stops with exit 4 and the same words, and otherwise holds the dispatch lock to the end of its
-  run. What changes several computers waits for each of them, in one order: a volume sync for every computer that has
-  the volume attached, a volume delete for every computer whose checkpoints keep it (one whose settings this checkout
-  can't read refuses it), and a provider whose setup and creates rewrite a network its computers share (Oracle Cloud's
-  VCN) for every computer of this checkout's there (another checkout's computers there aren't known here). It goes
-  ahead at your own terminal, or under the hold of the command that runs it: a descriptor on that very lock file
-  (bin/metacomputer hands it on as 6, our scripts as 5, and a command run under one keeps it rather than opening its
-  own), checked: the file's device and inode, a description that has taken a flock (the kernel's FHASLOCK on it, read
-  with `proc_pidfdinfo`; nothing lets go of such a hold and keeps the descriptor open), and the lock held shared, never
-  one being taken exclusively; never an environment variable. With `MCP_HUB=off` and `DRIVER_MODE=bounded`,
-  `metacomputer mcp` first looks whether the guest has its driver manifest (a read): writing one waits the same way, so
-  a connection whose manifest isn't there yet waits during a handoff (at your own terminal it goes ahead), and once it's
-  there connections start as before. `lib/remote.py cloud teardown` and `--forget` are yours only, at your own
-  terminal, run that way as through `metacomputer cloud`. `tests/acting.py` sorts every program and subcommand by what
-  it does to a computer (one that isn't sorted fails `tests/test_acting.py`). The test runs each line of every entry
-  sorted as acting by itself while a handoff is open, at your terminal, under a hold on descriptor 6 or 5, and with a
-  descriptor on the lock file that never took it (no hold); and the input resets, the commands that are yours only,
-  bin/metacomputer's acting forms, and fixtures for what changes several computers. It doesn't run what's sorted as
-  reaching a computer only through other entries, as judged per call (the hub, the relay, the shell channel, which take
-  their computer from the run folder they're given, MCOMP_RUN_DIR: their own tests), or as changing none: those rest on
-  how they're sorted. A command whose check of which computer the agent session holds can't be made (it crashed)
-  refuses instead of going on;
+- the programs of the repository that change a computer by themselves wait the same way, when they're run as
+  `metacomputer` and our scripts run them, or by hand with their own settings: `lib/remote.py` (`exec`, `create`,
+  `wake`, `sleep`, `delete`, `abort`, `checkpoint create|restore|delete`, `allow` but `--show`, `egress --set`,
+  `resolvers`), `lib/storage.py` (`kill-vm`, `volume sync`, `attach`, `prepare`, `started`, `release`, `checkpoint
+  save|restore|delete`, and the folder watcher, `watch`), `lib/netpolicy.py` (`allow`, `remove`, `clear`, `render`),
+  `lib/guest_put.py` and `lib/recording.py save` (the recorder's stream); so do `start`, a checkpoint on this Mac
+  (`checkpoint NAME`, `checkpoint --delete`), `net allow|remove|clear` and `vm delete` (`--force` or not). Each looks
+  right after its command line, before it asks a provider anything, runs anything in the guest or writes anything
+  (`lib/handoff_gate.py`), at the computer its own settings and transport name: the one its name and run folder say
+  (one computer's, by this checkout's settings), or the one whose SSH folder its transport names (`put`, `attach`,
+  the recorder's stream); a transport that names none of this checkout's computers is checked at the run folder it's
+  given. Names that disagree, or settings that can't be read, refuse. It stops with exit 4 and the same words, and
+  otherwise holds the dispatch lock to the end of its run (the recorder's stream until it's up; the watcher, which
+  runs for as long as its VM does, looks once when it starts and holds nothing). What changes several computers waits
+  for each of them, in one order: `volume sync` for every computer that has the volume attached, `volume delete` for
+  every computer whose checkpoints keep it, and a provider whose setup and creates rewrite a network its computers share
+  (Oracle Cloud's VCN) for every computer of this checkout's there. It goes ahead at your own terminal, or under the hold
+  of the command that runs it: a descriptor on that very lock file (bin/metacomputer hands it on as 6, our scripts as
+  5, and a command run under one keeps it rather than opening its own), checked: the file's device and inode, a
+  description that has taken a flock (the kernel's FHASLOCK on it, read with `proc_pidfdinfo`), and the lock held
+  shared, never one being taken exclusively; never an environment variable. With `MCP_HUB=off` and
+  `DRIVER_MODE=bounded`, `metacomputer mcp` first looks whether the guest has its driver manifest (a read): writing one
+  waits the same way, so a connection whose manifest isn't there yet waits during a handoff (at your own terminal it
+  goes ahead), and once it's there connections start as before. `lib/remote.py cloud teardown` and `--forget` are
+  yours only, at your own terminal, run that way as through `metacomputer cloud`. A command whose check of which
+  computer the agent session holds can't be made (it crashed, or isn't there to run) refuses instead of going on.
+  What this doesn't cover, the same-account limit below: a helper given settings that name another computer's run
+  folder (`MCOMP_RUN_DIR`) with a hand-written transport, a descriptor handed on that once locked the lock and was let
+  go (FHASLOCK can't tell a past lock from a current one; the probes narrow it), the vault's own CLI run directly
+  (`mcomp-vault fill`: `metacomputer secrets fill`, `login` and `session load`, and the hub's fills, wait), and the S3
+  sync a computer's own `start` and `stop` make, which waits for that computer only: it's part of its start or stop, and
+  skipping it would keep that computer's changes from the bucket (`volume sync` waits for every computer that has the
+  volume). `tests/acting.py` sorts every program and subcommand by what it does to a computer (one that isn't sorted
+  fails `tests/test_acting.py`). The test runs each line of what's sorted as acting by itself while a handoff is open,
+  at your terminal, under a hold on descriptor 6 or 5, and with a descriptor on the lock file that never took it (no
+  hold); and the input resets, the commands that are yours only, bin/metacomputer's acting forms, and fixtures for what
+  changes several computers, for helpers run for another computer, and for settings that can't be read. It doesn't
+  run what's sorted as reaching a computer only through other entries, as judged per call (the hub, the relay, the
+  shell channel, which take their computer from the run folder they're given, MCOMP_RUN_DIR: their own tests), or as
+  changing none: those rest on how they're sorted;
 - `metacomputer claude` refuses the steps that act (`start`, `send`, `keys`, `show`,
   `stop`), with or without `--override` (`start` before any token is asked for;
   `stop --revoke` still revokes the token), and the inner Claude's keeper renews
@@ -944,8 +953,9 @@ are accepted, not oversights:
 - It isn't a barrier against a program running as you, which can run `handoff
   done`, remove the record or the vault marker, use the raw driver connection, or kill the helper that keeps
   `metacomputer ssh`'s dispatch lock (the lock goes while that ssh goes on), or take that lock itself and hand it on
-  to a program (a hold is checked to be a description that took that lock, not proven to come from a command that
-  looked), or run the provider's own tool, the runner or ssh itself.
+  to a program (a hold is checked to be a description that took that lock at some time, not proven to hold it now nor
+  to come from a command that looked), or give a helper settings or a transport of its own writing (another
+  computer's run folder, a host alias), or run the vault's own CLI, the provider's own tool, the runner or ssh itself.
   `done` needs your own terminal (or the panel's click): no process without a terminal of yours says it, an agent host
   this check doesn't know by name included. A handoff is called off only by the agent session that opened it (its
   process, by pid and start time, both read: a start time that can't be read now, or a record from before they were

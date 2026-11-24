@@ -147,22 +147,28 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   keeper renews nothing. Our own scripts that stop, delete or set up a computer (`scripts/build-vm.sh`, every build;
   `scripts/remote-build.sh`) run the same checks themselves, after their command-line check and before anything
   changes, whether bin/metacomputer runs them or something else does (scripts/lib.sh `script_session_guard`,
-  `script_handoff_hold`, held to the end); so does every Python program that changes a computer by itself
-  (`lib/remote.py`, `lib/storage.py`, `lib/netpolicy.py`, `lib/guest_put.py`: `lib/handoff_gate.py` `wait_or_hold`,
-  shared code with no provider names, right after its command line: exit 4 with `owners.handoff_refusal`, your
-  terminal goes ahead; never under MCOMP_PARSE_ONLY, which ends at 99 first). It gates the computer it acts on, told
-  from the same settings it acts with (`owners_dir_for`: name and run folder one computer's, or the SSH folder its
-  transport names; what can't be told refuses); what changes several computers gates each in path order
-  (`wait_or_hold_all`: a volume's users and checkpoint owners, a provider's computers when its adapter says
-  `SHARED_NETWORK_CHANGES`). A caller's hold (bin/metacomputer's fd 6, a script's fd 5, kept by a command run under it:
-  scripts/lib.sh `inherited_dispatch_hold`) goes ahead only once its descriptor is that very lock file, a description
-  that has taken a flock (FHASLOCK, `proc_pidfdinfo`) and holding it shared; never an environment variable. FHASLOCK
-  survives LOCK_UN: never unlock a dispatch descriptor and keep it open (close it). bin/metacomputer gates `start`,
-  `checkpoint`, `net` and `vm delete` (`--force` too), and the bounded driver manifest's write before `mcp`.
-  `--override` on a lifecycle command still holds the lock (`dispatch_hold`) for what it runs. Every program and
-  subcommand is sorted by what it does to a computer in `tests/acting.py`; `tests/test_acting.py` runs each line of the
-  acting ones during a handoff (not the per-call, through-others or none ones) and fails on one that isn't sorted.
-  The session guards fail closed (a check that crashes refuses). Every value that
+  `script_handoff_hold`, held to the end); so do the Python programs that change a computer by themselves, run as
+  metacomputer runs them or by hand with their own settings (`lib/remote.py`, `lib/storage.py` (the watcher too),
+  `lib/netpolicy.py`, `lib/guest_put.py`, `lib/recording.py save`: `lib/handoff_gate.py`, shared code with no provider
+  names, right after the command line: exit 4 with `owners.handoff_refusal`, your terminal goes ahead; never under
+  MCOMP_PARSE_ONLY, which ends at 99 first). `wait_or_hold` holds the lock for the run, `take_hold` until the program
+  closes it (the recorder's stream, once up), `look_once` only for the look (the long-running watcher; `started` hands
+  it its hold). Each gates the computer its own settings and transport name (`owners_dir_for`: name and run folder one
+  computer's, or the SSH folder its transport names; a transport naming none is checked at the run folder given;
+  disagreement or unreadable settings refuse: `labconfig.computers` raises on them); what changes several computers
+  gates each in path order (`wait_or_hold_all`: a volume's users and checkpoint owners, a provider's computers when its
+  adapter says `SHARED_NETWORK_CHANGES`). A caller's hold (bin/metacomputer's fd 6, a script's fd 5, kept by a command
+  run under it: scripts/lib.sh `inherited_dispatch_hold`; a recorder's `--hold-fd`) goes ahead only once its descriptor
+  is that very lock file, a description that has taken a flock (FHASLOCK, `proc_pidfdinfo`: it can't tell a past lock
+  from a current one, so never unlock a dispatch descriptor and keep it open; close it) and the lock held shared; never
+  an environment variable. bin/metacomputer gates `start`, `checkpoint`, `net` and `vm delete` (`--force` too), and the
+  bounded driver manifest's write before `mcp`. `--override` on a lifecycle command still holds the lock
+  (`dispatch_hold`) for what it runs. Not covered (the same-account limit): forged settings with a hand-written
+  transport, a handed-on descriptor that was unlocked, the vault's own CLI, and the S3 sync of a computer's own
+  start/stop (that computer only). Every program and subcommand is sorted by what it does to a computer in
+  `tests/acting.py` (the vault is listed in `tests/entrypoints.py` OUTSIDE); `tests/test_acting.py` runs each line of
+  the acting ones during a handoff (not the per-call, through-others or none ones) and fails on one that isn't sorted.
+  The session guards fail closed (a check that crashes, or is missing or unreadable, refuses). Every value that
   reaches a shell in the guest is checked first (`record_args_ok`), and file names go after `--`; a recording's
   stream is started by `record start` itself (`record_stream_start`: no internal command for it), keeping its
   dispatch lock until the stream is up (`daemonize --keep-fd 6`, `recording.py save --hold-fd 6`); the internal

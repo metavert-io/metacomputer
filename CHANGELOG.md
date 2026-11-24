@@ -71,32 +71,40 @@ All notable changes to metacomputer are recorded here. The format follows
   `sh --read-only - <<'SCRIPT'`), and reads that can't act stay (`inspect`, `get`, `shot`, the desktop tools' reads). A
   `HANDOFF_HELD=1` in the environment no longer skips every handoff check. What's left is in SECURITY.md: an agent's
   own VNC client to the live view, and programs already running in the VM.
-- **The programs that change a computer by themselves wait while you have it, however they're run.** Run by
-  themselves (by an agent, a script or a person), `lib/remote.py` (`exec`, `create`, `wake`, `sleep`, `delete`, `abort`,
+- **The programs that change a computer by themselves wait while you have it**, run as `metacomputer` and our scripts
+  run them, or by hand with their own settings. `lib/remote.py` (`exec`, `create`, `wake`, `sleep`, `delete`, `abort`,
   `checkpoint create|restore|delete`, `allow`, `egress --set`, `resolvers`), `lib/storage.py` (`kill-vm`, `volume
-  sync`, `attach`, `prepare`, `started`, `release`, `checkpoint save|restore|delete`), `lib/netpolicy.py` (`allow`,
-  `remove`, `clear`, `render`) and `lib/guest_put.py` went ahead during a handoff; so did `metacomputer start`,
-  `checkpoint NAME` and `checkpoint --delete` on this Mac, `net allow|remove|clear` and `vm delete --force`. Each now
-  stops with exit 4 (the same words as the other commands) right after its command line, before anything is called or
-  written, and holds the dispatch lock to the end (`lib/handoff_gate.py`). It looks at the computer it acts on: its
-  name and its run folder must be one computer's (a storage command for another VM looked at the main VM's handoff
-  when no run folder was given), or the computer whose SSH folder its transport names; what can't be told refuses. What
-  changes several computers waits for each: `volume sync` for every computer that has the volume attached, `volume
-  delete` for every computer whose checkpoints keep it, and Oracle Cloud's `cloud setup` and creates (they rewrite the
-  network its computers share) for every computer of this checkout's there. At your own terminal, or under the hold of
-  the command that runs it, it goes ahead: a descriptor on that very lock file (6 from `metacomputer`, 5 from our
-  scripts; a command run under one keeps it) that has taken the lock (checked with the kernel's own record of it,
-  never an environment variable). With `MCP_HUB=off` and `DRIVER_MODE=bounded`, `metacomputer mcp` writes the driver's
-  manifest to the guest only when it isn't there yet, and that write waits during a handoff too (so such a first
-  connection does). `lib/remote.py cloud teardown` and `--forget` run by themselves need your own terminal, as
-  `metacomputer cloud` does. `stop` of your own server (it ends this Mac's hub, which keeps your browser alive during a
-  handoff) waits too, and the lifecycle commands that refused during a handoff with exit 1 now exit 4; with
-  `--override` they hold the lock to the end, so what they run goes ahead under it. `tests/acting.py` sorts every
-  program and subcommand by what it does to a computer, and `tests/test_acting.py` (no VM) runs each line of what's
-  sorted as acting while a handoff is open, at your terminal, under a hold on descriptor 6 or 5 and with an unlocked
-  descriptor; what's sorted as acting only through others, per call (hub, relay, shell channel) or not at all isn't run
-  there. A new program or subcommand fails it until it's sorted. On Fly Sprites, `metacomputer logs` shows no service
-  logs while a handoff is open (they're read through `lib/remote.py exec`, which now waits).
+  sync`, `attach`, `prepare`, `started`, `release`, `checkpoint save|restore|delete`, the folder watcher), `lib/netpolicy.py`
+  (`allow`, `remove`, `clear`, `render`), `lib/guest_put.py` and `lib/recording.py save` went ahead during a handoff
+  when run by themselves; so did `metacomputer start`, `checkpoint NAME` and `checkpoint --delete` on this Mac, `net
+  allow|remove|clear` and `vm delete --force`. Each now stops with exit 4 (the same words as the other commands) right
+  after its command line, before anything is called or written, and holds the dispatch lock to the end
+  (`lib/handoff_gate.py`; the recorder's stream until it's up, and the watcher, which runs as long as its VM, looks once
+  when it starts and holds nothing). It looks at the computer its own settings and transport name: its name and run
+  folder (one computer's; a storage command for another VM looked at the main VM's handoff when no run folder was
+  given), or the computer whose SSH folder its transport names (`put`, `attach`, the recorder); a transport that names
+  none of this checkout's computers is checked at the run folder it's given; names that disagree, or settings that can't
+  be read, refuse. What changes several computers waits for each: `volume sync` for every computer that has the volume
+  attached, `volume delete` for every computer whose checkpoints keep it, and Oracle Cloud's `cloud setup` and creates
+  (they rewrite the network its computers share) for every computer of this checkout's there. At your own terminal, or
+  under the hold of the command that runs it, it goes ahead: a descriptor on that very lock file (6 from
+  `metacomputer`, 5 from our scripts; a command run under one keeps it) that has taken the lock (the kernel's own
+  record of it, which can't tell a past lock from a current one; never an environment variable); a recorder's
+  `--hold-fd` is checked the same way, never taken on its number. With `MCP_HUB=off` and `DRIVER_MODE=bounded`,
+  `metacomputer mcp` writes the driver's manifest to the guest only when it isn't there yet, and that write waits during
+  a handoff too (so such a first connection does). `lib/remote.py cloud teardown` and `--forget` run by themselves need
+  your own terminal, as `metacomputer cloud` does. `stop` of your own server (it ends this Mac's hub, which keeps your
+  browser alive during a handoff) waits too, and the lifecycle commands that refused during a handoff with exit 1 now
+  exit 4; with `--override` they hold the lock to the end, so what they run goes ahead under it. Not covered (the
+  same-account limit, SECURITY.md): a helper given another computer's run folder with a hand-written transport, a
+  handed-on descriptor that locked and let go, the vault's own CLI run directly (`metacomputer secrets fill` and the
+  hub's fills wait), and the S3 sync of a computer's own start and stop, which waits for that computer only.
+  `tests/acting.py` sorts every program and subcommand by what it does to a computer, and `tests/test_acting.py` (no
+  VM) runs each line of what's sorted as acting while a handoff is open, at your terminal, under a hold on descriptor 6
+  or 5 and with an unlocked descriptor; what's sorted as acting only through others, per call (hub, relay, shell
+  channel) or not at all isn't run there. A new program or subcommand fails it until it's sorted. On Fly Sprites,
+  `metacomputer logs` shows no service logs while a handoff is open (they're read through `lib/remote.py exec`, which now
+  waits).
 - **The Hand back panel counts only an exact answer** from an osascript that exits 0: one that's killed or fails, or
   prints anything else around or instead of its answer, leaves the handoff open.
 - **`metacomputer handoff done` needs your own terminal**, whatever runs it: a process without a terminal of yours (a
@@ -115,9 +123,10 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ### Fixed
 
-- **The session guard failed open.** When its check (`lib/sessionvm.py`) crashed or ended with a status it doesn't
-  give, `metacomputer` and the build scripts warned and went on, possibly on another computer than the agent session's.
-  They now refuse, saying the check wasn't made (name the computer with `--vm NAME` to be sure).
+- **The session guard failed open.** When its check (`lib/sessionvm.py`) crashed, ended with a status it doesn't
+  give, or wasn't there to run (missing or unreadable: Python's exit 2 read as the check's own "couldn't tell"),
+  `metacomputer` and the build scripts went on, possibly on another computer than the agent session's. They now
+  refuse, saying the check wasn't made (name the computer with `--vm NAME` to be sure).
 - **`--help` and `-h` print the usage and do nothing else, wherever they're typed**: `metacomputer --vm NAME build --help` started a real build, and other commands reached the VM, its runner, SSH or the vault before reading their arguments. Now any command with `--help` or `-h` after it, its subcommand or its arguments (before a `--`) prints its usage and exits 0 before anything runs: no settings are read, nothing is called and nothing is written (`ssh ROLE CMD` leaves them to the guest's command). Right after an option that takes a value it's that value, as before (`sh --file --help`), and a command's own usage text is asked for with fixed words only, never the rest of what was typed (so `handoff --transport 1 --help cancel` can't cancel a handoff). The scripts a person runs (`scripts/build-vm.sh`, `remote-build.sh`, `fetch-artifacts.sh`, `build-tools.sh`, `safe-rmtree.sh`, `check-public.sh`, `sync-plugin.py`, ...) print their usage too, and `lib/guest_import.py` and `lib/mcp_relay.py` no longer make a folder named `--help` or the action log's key. The plugins' launchers with nothing set up answer `--help` and `-h` with their usage (exit 0) instead of the setup message. `tests/test_help.py` runs every command and subcommand that way, and every program in the repository with the command lines its callers give it (each must be taken) and every misuse its own declaration implies.
 - **`metacomputer view --tunnel` returns once the tunnel is up when a program reads its output**: `ssh -f` kept the caller's pipes open, so an agent's tool call or a script waited about 20 s, until the tunnel closed. What SSH says goes to a private log (`tunnel/view-tunnel.log` in the computer's log folder, 0600 in a 0700 folder; a link there is refused) and is shown once it connects, escaped as before (at most half a second of it is read first, so SSH printing without end can't hold the command up; the rest is drained after); the log keeps at most 1 MB, the line saying the rest was left out included, however much the VM's end makes SSH print. At a terminal nothing changes, and on Fly Sprites the tunnel's ssh still stays in the foreground for its tunnel program.
 - **Oracle Cloud: a computer's network security group is its build's own**: each build makes a new group, tagged with the computer and the build's operation, and journals it from the create's answer before anything configures it (its first rules are written only after it's read again, still tagged for this computer and operation); it never reuses or changes a group found by name (another Mac's computer of the same name, an earlier try's). `net egress`, `vm delete` and a failed build's clean-up act only on the groups the computer's record names, each read by its id and still tagged for this computer and that operation. A group an earlier version made carries no operation, so `net egress` refuses to change it (delete the computer and make it again); `cloud teardown` never deletes a group no record on this Mac names, and says to remove it in Oracle's console; one another Mac makes after teardown looked stops the network's deletion too, with nothing deleted.
