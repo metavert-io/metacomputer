@@ -787,11 +787,15 @@ notice (`--say` cleaned like every event) and writes a record,
   the recorder's stream); a transport that names none of this checkout's computers is checked at the run folder it's
   given. Names that disagree, or settings that can't be read, refuse. It stops with exit 4 and the same words, and
   otherwise holds the dispatch lock to the end of its run (the recorder's stream until it's up; the watcher, which
-  runs for as long as its VM does, looks once when it starts and holds nothing). What changes several computers waits
-  for each of them, in one order: `volume sync` for every computer that has the volume attached, `volume delete` for
-  every computer whose checkpoints keep it, and a provider whose setup and creates rewrite a network its computers share
-  (Oracle Cloud's VCN) for every computer of this checkout's there. It goes ahead at your own terminal, or under the hold
-  of the command that runs it: a descriptor on that very lock file (bin/metacomputer hands it on as 6, our scripts as
+  runs for as long as its VM does, looks once when it starts, then closes every descriptor it has on that lock file,
+  so neither it nor what it forks keeps one). Some changes reach several computers, and wait for each that can be told,
+  in one order: `volume sync` for every computer that the holder records show with the volume, or a folder inside or
+  around its copy, attached (records that are there and can't be read refuse; who they are is read again under the
+  sync's own lock before each exchange with the copy, and one that attached meanwhile stops it with exit 4: a computer
+  that attaches during that last exchange isn't seen), `volume delete` for every computer of this checkout's whose
+  checkpoints keep it (one of another checkout's refuses), and a provider whose setup and creates rewrite a network its
+  computers share (Oracle Cloud's VCN) for every computer of this checkout's there. It goes ahead at your own terminal,
+  or under the hold of the command that runs it: a descriptor on that very lock file (bin/metacomputer hands it on as 6, our scripts as
   5, and a command run under one keeps it rather than opening its own), checked: the file's device and inode, a
   description that has taken a flock (the kernel's FHASLOCK on it, read with `proc_pidfdinfo`), and the lock held
   shared, never one being taken exclusively; never an environment variable. With `MCP_HUB=off` and

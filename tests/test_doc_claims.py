@@ -3172,9 +3172,20 @@ CLAIMS = [
                     r"`attach`,\s+the recorder's stream\); a transport that names none of this checkout's computers is "
                     r"checked at the run folder it's\s+given. Names that disagree, or settings that can't be read, refuse",
      lambda m: computer_bound()),
-    ("SECURITY.md", r"What changes several computers waits\s+for each of them, in one order: `volume sync` for every "
-                    r"computer that has the volume attached, `volume delete` for\s+every computer whose checkpoints keep it",
+    ("SECURITY.md", r"Some changes reach several computers, and wait for each that can be told,\s+in one order: `volume "
+                    r"sync` for every computer that the holder records show with the volume, or a folder inside or\s+"
+                    r"around its copy, attached \(records that are there and can't be read refuse; who they are is read "
+                    r"again under the\s+sync's own lock before each exchange with the copy, and one that attached "
+                    r"meanwhile stops it with exit 4",
+     lambda m: volume_users_strict()),
+    ("SECURITY.md", r"`volume delete` for every computer of this checkout's whose\s+checkpoints keep it",
      lambda m: shared_gated()),
+    ("SECURITY.md", r"looks once when it starts, then closes every descriptor it has on that lock file,\s+so neither it "
+                    r"nor what it forks keeps one",
+     lambda m: "close_dispatch_fds()" in py_top_fn("lib/handoff_gate.py", "look_once")
+     and "(st.st_dev, st.st_ino) == (want.st_dev, want.st_ino)" in py_top_fn("lib/handoff_gate.py", "close_dispatch_fds")
+     and (lambda w: w.index("rc = 1") < w.index("start_supervisor("))(py_top_fn("lib/storage.py", "cmd_watch"))
+     and 'if a.cmd == "watch":\n            handoff_gate.look_once(where)' in py_top_fn("lib/storage.py", "main")),
     ("SECURITY.md", r"and the S3\s+sync a computer's own `start` and `stop` make, which waits for that computer only",
      lambda m: (lambda p_, r_: "s3_sync(" in p_ + r_ and "gate_computers(" not in p_ + r_)(
          py_top_fn("lib/storage.py", "cmd_prepare"), py_top_fn("lib/storage.py", "cmd_release"))),
@@ -3278,6 +3289,20 @@ def watcher_and_recorder_gated():
             and "inherited_hold(only=(a.hold_fd,))" in sh and "handoff_gate.take_hold(where)" in sh
             and sv.index("hold = [save_hold(a, cmd)]") < sv.index("fd = os.open(a.out") < sv.index("subprocess.Popen(cmd")
             and "transport=a.rest[:a.transport]" in st)
+
+
+def volume_users_strict():
+    """volume_users reads holder records strictly (holder_records: an unreadable folder or record raises), matches a path
+    inside or around the copy (_related), and cmd_volume_sync checks them again under the sync lock (users_check,
+    called before each exchange in s3_sync) and refuses with exit 4 when a newcomer shows."""
+    hr, vu = py_top_fn("lib/storage.py", "holder_records"), py_top_fn("lib/storage.py", "volume_users")
+    sy, s3 = py_top_fn("lib/storage.py", "cmd_volume_sync"), py_top_fn("lib/storage.py", "s3_sync")
+    return ("except FileNotFoundError:\n        return []" in hr and "raise HoldersUnknown" in hr
+            and "holder_records()" in vu and "_related(" in vu and "inside(a, b) or inside(b, a)" in
+            py_top_fn("lib/storage.py", "_related")
+            and "users_check=same_users" in sy and 'handoff_gate.refuse(f"volume' in sy
+            and s3.index("if users_check:\n                    users_check()") < s3.index("root1 = open_copy_root(rec)")
+            and s3.index("if users_check:\n                        users_check()") < s3.index("after = Exchange("))
 
 
 def shared_gated():

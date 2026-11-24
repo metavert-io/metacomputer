@@ -153,16 +153,21 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   names, right after the command line: exit 4 with `owners.handoff_refusal`, your terminal goes ahead; never under
   MCOMP_PARSE_ONLY, which ends at 99 first). `wait_or_hold` holds the lock for the run, `take_hold` until the program
   closes it (the recorder's stream, once up), `look_once` only for the look (the long-running watcher; `started` hands
-  it its hold). Each gates the computer its own settings and transport name (`owners_dir_for`: name and run folder one
-  computer's, or the SSH folder its transport names; a transport naming none is checked at the run folder given;
-  disagreement or unreadable settings refuse: `labconfig.computers` raises on them); what changes several computers
-  gates each in path order (`wait_or_hold_all`: a volume's users and checkpoint owners, a provider's computers when its
-  adapter says `SHARED_NETWORK_CHANGES`). A caller's hold (bin/metacomputer's fd 6, a script's fd 5, kept by a command
-  run under it: scripts/lib.sh `inherited_dispatch_hold`; a recorder's `--hold-fd`) goes ahead only once its descriptor
-  is that very lock file, a description that has taken a flock (FHASLOCK, `proc_pidfdinfo`: it can't tell a past lock
-  from a current one, so never unlock a dispatch descriptor and keep it open; close it) and the lock held shared; never
-  an environment variable. bin/metacomputer gates `start`, `checkpoint`, `net` and `vm delete` (`--force` too), and the
-  bounded driver manifest's write before `mcp`. `--override` on a lifecycle command still holds the lock
+  it its hold, and it then closes every descriptor it has on the lock file: `close_dispatch_fds`). The main computer's
+  name, when no settings file gives one, is `labconfig.DEFAULT_VM_NAME`. Each gates the computer its own settings and
+  transport name (`owners_dir_for`: name and run folder one computer's, or the SSH folder its transport names; a
+  transport naming none is checked at the run folder given; disagreement or unreadable settings refuse:
+  `labconfig.computers` raises on them); what reaches several computers gates each that can be told, in path order
+  (`wait_or_hold_all`: a volume sync's users by the holder records, read strictly (`holder_records`) and matched by
+  name or a path inside or around the copy, then read again under the sync lock before each exchange (`users_check`: a
+  newcomer refuses; one that attaches during the last exchange isn't seen); a volume delete's checkpoint owners in
+  this checkout; a provider's computers in this checkout when its adapter says `SHARED_NETWORK_CHANGES`). Never take a
+  dispatch lock after the sync lock. A caller's hold (bin/metacomputer's fd 6, a script's fd 5, kept by a command run
+  under it: scripts/lib.sh `inherited_dispatch_hold`; a recorder's `--hold-fd`) goes ahead only once its descriptor is
+  that very lock file, a description that has taken a flock (FHASLOCK, `proc_pidfdinfo`: it can't tell a past lock
+  from a current one, so never unlock a dispatch descriptor and keep it open; close it) and the lock held shared;
+  never an environment variable. bin/metacomputer gates `start`, `checkpoint`, `net` and `vm delete` (`--force` too),
+  and the bounded driver manifest's write before `mcp`. `--override` on a lifecycle command still holds the lock
   (`dispatch_hold`) for what it runs. Not covered (the same-account limit): forged settings with a hand-written
   transport, a handed-on descriptor that was unlocked, the vault's own CLI, and the S3 sync of a computer's own
   start/stop (that computer only). Every program and subcommand is sorted by what it does to a computer in
