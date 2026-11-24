@@ -1558,14 +1558,16 @@ def changes_computer(a):
 def shared_network_computers(a):
     """For `cloud setup PROVIDER` and `create --vm NAME`: this checkout's computers at that provider (config/vms/, by
     their PROVIDER) when its adapter's setup and creates rewrite a network they share; [] otherwise."""
-    import labconfig
-    comps = [c for c in labconfig.computers(LAB) if c["file"].startswith(os.path.join(LAB, "config", "vms") + os.sep)]
-    if a.cmd == "cloud" and a.action == "setup":
-        prov = a.provider
-    elif a.cmd == "create":
-        prov = next((c["provider"] for c in comps if c["name"] == a.vm), "")
-    else:
+    if not ((a.cmd == "cloud" and a.action == "setup") or a.cmd == "create"):
         return []
+    import labconfig
+    try:
+        comps = [c for c in labconfig.computers(LAB) if c["file"].startswith(os.path.join(LAB, "config", "vms") + os.sep)]
+    except Exception as e:      # noqa: BLE001  (settings that can't be read: which computers share it can't be told)
+        import handoff_gate
+        handoff_gate.refuse(f"couldn't read this checkout's computers' settings ({e}), so the handoffs of the computers "
+                            "that share the provider's network can't be checked; nothing was done")
+    prov = a.provider if a.cmd == "cloud" else next((c["provider"] for c in comps if c["name"] == a.vm), "")
     cls = cloud.ADAPTERS.get(prov)
     if not cls or not getattr(cls, "SHARED_NETWORK_CHANGES", False):
         return []

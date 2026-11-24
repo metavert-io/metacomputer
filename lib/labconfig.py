@@ -383,18 +383,36 @@ def _expand(value, root, home):
     return None if "$" in value or "`" in value else value
 
 
+def _parse_strict(path, missing_ok=False):
+    """_parse, except that a file that is there but can't be read raises OSError (a missing one: {} when MISSING_OK)."""
+    try:
+        with open(path) as f:
+            text = f.read()
+    except FileNotFoundError:
+        if missing_ok:
+            return {}
+        raise
+    vals = {}
+    for line in text.splitlines():
+        m = _LINE.match(line)
+        if m:
+            vals[m.group(1)] = m.group(2).strip("\"'")
+    return vals
+
+
 def computers(root=None, home=None):
     """The computers a checkout (ROOT, this one by default) has settings for, each {name, file, run_dir, ssh_dir,
     provider, place}: its main one (config/local.env, else the defaults) and one per config/vms/NAME.env, whose folders
     are fixed by its name (scripts/lib.sh mc_vm_default). A folder its settings spell in a way this can't read is None.
-    Plain values only, as everywhere here; nothing is run."""
+    Plain values only, as everywhere here; nothing is run. Settings that are there but can't be read (a file, or the
+    config/vms folder) raise OSError: what uses this to choose a handoff to check refuses then, never reading them as
+    none. What's missing is missing: no config/vms folder is no computers there, no file no settings in it."""
     root = os.path.abspath(root or LAB)
     home = home or os.environ.get("HOME") or os.path.expanduser("~")
-    base = _parse(os.path.join(root, "config", "defaults.env"))
+    base = _parse_strict(os.path.join(root, "config", "defaults.env"), missing_ok=True)
     main_file = os.path.join(root, "config", "local.env")
     main = dict(base)
-    if os.path.isfile(main_file):
-        main.update(_parse(main_file))
+    main.update(_parse_strict(main_file, missing_ok=True))
     out = [{"name": main.get("VM_NAME") or "", "file": main_file,
             "run_dir": _expand(main.get("RUN_DIR") or os.path.join(root, ".run"), root, home),
             "ssh_dir": _expand(main.get("SSH_DIR") or os.path.join(home, ".ssh", "metacomputer"), root, home),
@@ -402,13 +420,13 @@ def computers(root=None, home=None):
     vms = os.path.join(root, "config", "vms")
     try:
         names = sorted(f[:-4] for f in os.listdir(vms) if f.endswith(".env") and _NAME.fullmatch(f[:-4]))
-    except OSError:
+    except FileNotFoundError:
         names = []
     for n in names:
         s = dict(base)
         for k in IDENTITY:
             s.pop(k, None)
-        s.update(_parse(os.path.join(vms, n + ".env")))
+        s.update(_parse_strict(os.path.join(vms, n + ".env")))
         out.append({"name": n, "file": os.path.join(vms, n + ".env"), "run_dir": os.path.join(root, ".run-vms", n),
                     "ssh_dir": os.path.join(home, ".ssh", "metacomputer-" + n), "provider": s.get("PROVIDER") or "",
                     "place": s.get("PLACE") or ""})

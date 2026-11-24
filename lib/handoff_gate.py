@@ -10,6 +10,8 @@ its command line is taken and before it calls anything, runs anything in the gue
     d = handoff_gate.owners_dir_for(name=..., run_dir=..., transport=...)   # the computer it acts on, or exit 4
     handoff_gate.wait_or_hold(d)                # exits 4 (and says why) while that computer's handoff is open
     handoff_gate.wait_or_hold_all([d1, d2])     # several computers (what one volume changes): each, in path order
+    fd = handoff_gate.take_hold(d)              # the same, for a program that closes it itself once its action is out
+    handoff_gate.look_once(d)                   # one look for a long-running program, holding nothing afterwards
 
 The computer is the one the program acts on, told from the same settings it acts with (owners_dir_for): its name and
 its run folder must be the same computer's, and a transport that names one of this checkout's computers (by its SSH
@@ -24,8 +26,10 @@ It goes ahead:
     on it, read with proc_pidfdinfo: a description that never locked doesn't have it), that someone holds the lock
     shared and nobody exclusively, as a command that already looked passes it on to what it runs (bin/metacomputer's
     descriptor 6, a script's 5). The lock isn't taken again then. An environment variable alone never counts.
-    FHASLOCK stays set after LOCK_UN: so nothing lets go of a dispatch hold while keeping its descriptor open; it
-    closes it (recording.py's let_go, the ssh holder's exit).
+    FHASLOCK says the description has locked the file at some time, not that it holds it now (LOCK_UN leaves it set):
+    so nothing of ours lets go of a dispatch hold while keeping its descriptor open, it closes it (recording.py's
+    let_go, the ssh holder's exit, look_once), and the probes narrow the rest (someone holds the lock shared, nobody
+    exclusively). A program that hands on a descriptor it unlocked gets past this: the same-account limit.
 
 It refuses (exit 4) when the lock can't be had in time (a handoff being opened) or the record can't be looked at: a
 check that can't be made never lets the action through. Under MCOMP_PARSE_ONLY nothing gets here (the program's
@@ -167,9 +171,10 @@ def owners_dir_for(name=None, run_dir=None, transport=None, root=None):
     """The owners folder of the computer a program acts on, from what it acts with: NAME (its VM name), RUN_DIR (its
     run folder, as given) and TRANSPORT (the command that reaches it). A computer of this checkout's (its settings,
     labconfig.computers) is told by its name or by the SSH folder its transport names, and its run folder must be its
-    own; a computer this checkout has no settings for (another checkout's, a test's) needs its run folder given, one
-    that is no computer of this checkout's. Anything else (a name and a folder of different computers, a transport
-    to one and a name of another, nothing to tell it by) refuses with exit 4: its handoff can't be checked."""
+    own; otherwise the run folder given decides (a transport that names no computer of this checkout's: where it goes
+    can't be told here), and a name given must be its computer's. Anything else (a name and a folder of different
+    computers, a transport to one and a name of another, nothing to tell it by, settings that can't be read) refuses
+    with exit 4: its handoff can't be checked."""
     try:
         import labconfig                # (its own settings are read on import: only when a computer must be told)
         comps = labconfig.computers(root)
@@ -187,9 +192,8 @@ def owners_dir_for(name=None, run_dir=None, transport=None, root=None):
             if name and name != named[0]:
                 _refuse(f"this acts on {name}, but the command to reach it is {named[0]}'s; nothing was done")
             name = named[0]
-        elif not run_dir or any(c["run_dir"] and _same(run_dir, c["run_dir"]) for c in comps):
-            _refuse("the command to reach the computer names none of this checkout's computers (by their SSH folders), "
-                    "so which computer's handoff to check can't be told; nothing was done")
+        # A transport that names none of this checkout's computers (a host alias, a plain host and port) is checked at
+        # the run folder it's given, below: this can't tell where such a command goes (the same-account limit).
     owner = None
     if run_dir:
         owner = next((c["name"] for c in comps if c["run_dir"] and _same(run_dir, c["run_dir"])), None)
@@ -205,26 +209,24 @@ def owners_dir_for(name=None, run_dir=None, transport=None, root=None):
     if run_dir:
         if owner and name and owner != name:
             _refuse(f"the run folder {run_dir} is {owner}'s, not {name}'s; nothing was done")
-        if owner or not name or name not in by_name:
-            return os.path.join(run_dir, "owners")
+        return os.path.join(run_dir, "owners")
     _refuse(f"which computer this acts on ({name or 'no name'}) can't be told from this checkout's settings, and no run "
             "folder was given (MCOMP_RUN_DIR), so its handoff can't be checked; nothing was done")
 
 
-def wait_or_hold(owners_dir=None):
-    """The gate (see the module's notes): returns "inherited", "held" or "user" when the program may go on, holding
-    this computer's dispatch lock for the rest of its run; exits 4, saying why, when it must wait."""
+def _parse_only():
     if strictargs.PARSE_ONLY or strictargs.DESCRIBE:
         print("parse only: nothing was done", file=sys.stderr)
         sys.exit(strictargs.PARSE_ONLY_EXIT)
-    use(owners_dir)
+
+
+def _hold():
+    """(descriptor, how): this computer's dispatch lock held shared for the caller, after the look (see the module's
+    notes); exits 4 when it must wait. how: "inherited" (a hold handed on: that descriptor), "user" or "held"."""
     path = owners.dispatch_path()
-    if path in _HELD:
-        return "held"                   # this process looked already, and still holds it
     fd = inherited_hold()
     if fd is not None:
-        _HELD[path] = fd
-        return "inherited"
+        return fd, "inherited"
     try:
         os.makedirs(owners.OWNERS_DIR, exist_ok=True)
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -250,12 +252,50 @@ def wait_or_hold(owners_dir=None):
         if owners.at_user_terminal((0,)):
             print("metacomputer: your handoff is open, and this runs at your own terminal: going ahead.",
                   file=sys.stderr, flush=True)
-            _HELD[path] = fd
-            return "user"
+            return fd, "user"
         os.close(fd)
         _refuse(owners.handoff_refusal(h))
+    return fd, "held"
+
+
+def wait_or_hold(owners_dir=None):
+    """The gate (see the module's notes): returns "inherited", "held" or "user" when the program may go on, holding
+    this computer's dispatch lock for the rest of its run; exits 4, saying why, when it must wait."""
+    _parse_only()
+    use(owners_dir)
+    path = owners.dispatch_path()
+    if path in _HELD:
+        return "held"                   # this process looked already, and still holds it
+    fd, how = _hold()
     _HELD[path] = fd
-    return "held"
+    return how
+
+
+def take_hold(owners_dir=None):
+    """The gate for a program that lets go of the lock itself once its action is on its way (recording.py save: when
+    its stream is up): the descriptor holding it shared (a hold handed on, or one of its own), for it to CLOSE then,
+    never to unlock and keep open; exits 4 when it must wait."""
+    _parse_only()
+    use(owners_dir)
+    return _hold()[0]
+
+
+def look_once(owners_dir=None):
+    """The gate for a long-running program (storage.py watch): one look when it starts, holding nothing afterwards (it
+    would keep every handoff from opening). A hold handed on counts, and this process's copy of it is closed then (the
+    command that handed it on keeps the lock); otherwise the lock is taken shared for the look and let go by closing.
+    Returns how it went ahead; exits 4 when it must wait."""
+    _parse_only()
+    use(owners_dir)
+    fd, how = _hold()
+    os.close(fd)
+    return how
+
+
+def held_fds():
+    """The descriptors this process holds dispatch locks on (wait_or_hold): to hand on to a program it starts that
+    looks once (pass_fds)."""
+    return sorted(_HELD.values())
 
 
 def wait_or_hold_all(owners_dirs):

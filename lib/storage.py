@@ -112,7 +112,13 @@ def run_dir():
     given = os.environ.get("MCOMP_RUN_DIR")
     if given:
         return given
-    mine = next((c["run_dir"] for c in labconfig.computers() if c["name"] == vm_name() and c["run_dir"]), None)
+    try:
+        comps = labconfig.computers()
+    except Exception as e:      # noqa: BLE001  (settings that can't be read: which folder can't be told)
+        import handoff_gate
+        handoff_gate.refuse(f"couldn't read this checkout's settings ({e}), so {vm_name()}'s run folder can't be told; "
+                            "nothing was done")
+    mine = next((c["run_dir"] for c in comps if c["name"] == vm_name() and c["run_dir"]), None)
     return mine or os.path.join(LAB, ".run")
 
 
@@ -4460,9 +4466,12 @@ def watcher_start():
     if watcher_alive():
         return watcher_alive()
     log = os.path.join(os.environ.get("MCOMP_LOG_DIR") or os.path.join(LAB, "logs"), "storage-watcher.log")
+    import handoff_gate
     with open(log, "a") as out:
+        # The hold this command looked under is handed on: the watcher's own one look at its start counts it, then
+        # closes its copy (it runs on, holding nothing).
         p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "watch"], stdin=subprocess.DEVNULL,
-                             stdout=out, stderr=out, start_new_session=True)
+                             stdout=out, stderr=out, start_new_session=True, pass_fds=tuple(handoff_gate.held_fds()))
     for _ in range(40):
         if watcher_alive() == p.pid:
             return p.pid
@@ -4602,16 +4611,17 @@ def cmd_status(a):
 
 # --- the command line ------------------------------------------------------------------------
 # What changes the computer: its start's storage (prepare, started, attach), what it sees of an S3 volume (sync), its
-# volumes' snapshots for a checkpoint, letting its storage go (release: the folder watcher stops, the locks go), and
-# powering it off (kill-vm). Volumes and reference disks themselves are images and records on this Mac, attached at a
-# start (refused while a running computer holds one); the folder watcher runs on as part of the start that waited.
+# volumes' snapshots for a checkpoint, letting its storage go (release: the folder watcher stops, the locks go),
+# powering it off (kill-vm), and the folder watcher (it quarantines and removes what the VM writes, and stops the VM when
+# it can't: it looks once when it starts). Volumes and reference disks themselves are images and records on this Mac,
+# attached at a start (refused while a running computer holds one).
 # tests/acting.py's table names the same.
 def changes_computer(a):
     if a.cmd == "volume":
         return a.op == "sync"
     if a.cmd == "checkpoint":
         return a.op != "list"
-    return a.cmd in ("prepare", "started", "attach", "release", "kill-vm")
+    return a.cmd in ("prepare", "started", "attach", "release", "kill-vm", "watch")
 
 
 def main(argv):
@@ -4697,9 +4707,17 @@ def main(argv):
     # (bin/metacomputer's start, stop, restore, checkpoint and volume sync; scripts/build-vm.sh).
     # The computer is the one it acts on: its name (vm_name()) and its run folder (run_dir()) must be one computer's,
     # told from this checkout's settings (handoff_gate.owners_dir_for); otherwise it refuses.
+    # attach reaches the guest through the transport it's given: that transport's computer is the one checked (a name
+    # that disagrees with it refuses). The folder watcher runs for as long as its VM does: it looks once, when it
+    # starts, and holds nothing (handoff_gate.look_once), the hold of `started`, which starts it, handed on to it.
     if changes_computer(a):
         import handoff_gate
-        handoff_gate.wait_or_hold(handoff_gate.owners_dir_for(name=vm_name(), run_dir=os.environ.get("MCOMP_RUN_DIR")))
+        where = handoff_gate.owners_dir_for(name=vm_name(), run_dir=os.environ.get("MCOMP_RUN_DIR"),
+                                            transport=a.rest[:a.transport] if a.cmd == "attach" else None)
+        if a.cmd == "watch":
+            handoff_gate.look_once(where)
+        else:
+            handoff_gate.wait_or_hold(where)
     try:
         return a.fn(a)
     except StorageError as e:

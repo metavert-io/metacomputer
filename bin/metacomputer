@@ -607,6 +607,10 @@ session_guard() {
   [ "${MCOMP_GUARD_VM:-}" != "$VM_NAME:$SSH_PORT" ] || return 0
   local rc=0 chosen=main
   [ "${MC_FROM_DEFAULT:-0}" != 1 ] || chosen=default
+  # Its 2 ("couldn't tell") is also what Python says when it can't open the program: a check that isn't there, or
+  # can't be read, refuses before it's run.
+  [ -f "$LAB_ROOT/lib/sessionvm.py" ] && [ ! -L "$LAB_ROOT/lib/sessionvm.py" ] && [ -r "$LAB_ROOT/lib/sessionvm.py" ] \
+    || die "the session check (lib/sessionvm.py) is missing or can't be read, so which computer this agent session holds can't be checked; nothing was done"
   "$PY" "$LAB_ROOT/lib/sessionvm.py" guard --vm "$VM_NAME" --ssh-port "$SSH_PORT" --chosen "$chosen" \
     --settings "${MC_SETTINGS_LABEL:-}" -- "$cmd" "$@" || rc=$?
   case "$rc" in

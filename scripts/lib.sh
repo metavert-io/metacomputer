@@ -586,6 +586,12 @@ script_session_guard() { # SAID CMD [ARGS...]
   [ -z "$said" ] || return 0
   [ "${MCOMP_GUARD_VM:-}" != "$VM_NAME:$SSH_PORT" ] || return 0
   [ "${MC_FROM_DEFAULT:-0}" != 1 ] || chosen=default
+  # Its 2 ("couldn't tell") is also what Python says when it can't open the program: one that isn't there, or can't be
+  # read, refuses before it's run.
+  if [ ! -f "$LAB_ROOT/lib/sessionvm.py" ] || [ -L "$LAB_ROOT/lib/sessionvm.py" ] || [ ! -r "$LAB_ROOT/lib/sessionvm.py" ]; then
+    warn "the session check (lib/sessionvm.py) is missing or can't be read, so this doesn't go ahead; nothing was done"
+    return 1
+  fi
   "$PY" "$LAB_ROOT/lib/sessionvm.py" guard --vm "$VM_NAME" --ssh-port "$SSH_PORT" --chosen "$chosen" \
     --settings "${MC_SETTINGS_LABEL:-}" -- "$@" || rc=$?
   case "$rc" in
