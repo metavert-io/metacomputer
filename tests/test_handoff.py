@@ -15,9 +15,11 @@ password reaches the clipboard and never an argument, the output, the logs or th
 cleared after the delay only while it still holds that password; SSH sessions get instructions instead;
 --tailnet prints the commands and runs none of them.
 """
+import fcntl
 import json
 import os
 import pty
+import re
 import secrets
 import select
 import shutil
@@ -27,6 +29,7 @@ import termios
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,7 +44,8 @@ ENV = {"MCOMP_RUN_DIR": os.path.join(TD, "run"), "MCOMP_LOG_DIR": os.path.join(T
        "MCOMP_EVENTS_DIR": os.path.join(TD, "events"), "MCOMP_EVENTS_SPOOL": os.path.join(TD, "spool"),
        "MCOMP_VM_NAME": "hotest", "MCOMP_SSH_PORT": str(SSH_PORT), "MCOMP_SSH_DIR": os.path.join(TD, "ssh"),
        "MCOMP_ACTIVE_S": "600", "MCOMP_SESSIONS_DIR": os.path.join(TD, "sessions"),
-       "MCOMP_LOCK_DIR": os.path.join(TD, "locks")}      # its locks too: never the account's, shared by every run
+       "MCOMP_LOCK_DIR": os.path.join(TD, "locks"),      # its locks too: never the account's, shared by every run
+       "MCOMP_HANDBACK_PANEL": "off"}     # no panel on this Mac's screen from the handoffs below (panel_checks)
 os.environ.update(ENV)
 for k in ("MCOMP_CONFIG", "MCOMP_VM_STATE"):
     os.environ.pop(k, None)
@@ -60,9 +64,15 @@ with open(os.path.join(ENV["MCOMP_SSH_DIR"], "vnc-pass"), "w") as _f:
 os.chmod(os.path.join(ENV["MCOMP_SSH_DIR"], "vnc-pass"), 0o600)
 
 # handoff.py in a fresh Python, as a given Claude Code session (FAKE_CLAUDE: its pid; unset: outside Claude Code,
-# whatever runs this test), with a 1-second minimum time limit so the limit can be tested quickly.
+# whatever runs this test; FAKE_CLAUDE_START: when that session's process started, "none" when it can't be read;
+# FAKE_ANCESTRY=incomplete: the process list doesn't reach the top), with a 1-second minimum time limit so the limit
+# can be tested quickly.
 PRELUDE = ("import os, sys; sys.path.insert(0, os.path.join(%r, 'lib')); import owners; "
            "_c = os.environ.get('FAKE_CLAUDE'); owners.claude_of = (lambda *a: int(_c)) if _c else (lambda *a: None); "
+           "_st = os.environ.get('FAKE_CLAUDE_START', '1700000000.000001'); "
+           "owners._session_start = lambda pid: (None if _st == 'none' or not _c or int(pid) != int(_c) else _st); "
+           "owners.ancestry_complete = ((lambda *a, **k: False) if os.environ.get('FAKE_ANCESTRY') == 'incomplete' "
+           "else owners.ancestry_complete); "
            "_real_ps = owners.ps_table; "
            "owners.ps_table = ((lambda strict=False: (_ for _ in ()).throw(OSError('ps failed')) if strict else {}) "
            "if os.environ.get('FAKE_PS_FAIL') else _real_ps); "
@@ -96,6 +106,17 @@ def hcmd(*args):
 def run(*args, claude=None, stdin=subprocess.DEVNULL, **extra):
     return subprocess.run(hcmd(*args), env=env(FAKE_CLAUDE=claude, **extra), stdin=stdin, capture_output=True,
                           text=True, timeout=60)
+
+
+def user_end(*args, **extra):
+    """handoff.py at the user's own terminal (a pseudo-terminal, no agent session above): `cancel`, `done`."""
+    m, s = pty.openpty()
+    try:
+        return subprocess.run(hcmd(*args), env=env(FAKE_CLAUDE=None, **extra), stdin=s, capture_output=True, text=True,
+                              timeout=60)
+    finally:
+        os.close(s)
+        os.close(m)
 
 
 def start(*args, claude=SESSION_A, stdin=subprocess.DEVNULL, preexec_fn=None, **extra):
@@ -222,10 +243,18 @@ def basic_checks():
     r = run("done", claude=None, FAKE_PS_FAIL="1")
     check("...nor anything when the process list can't be read (unknown is never the user)",
           r.returncode == 3 and "couldn't tell whether" in r.stderr and owners.open_handoff(), (r.returncode, r.stderr))
+    r = run("done", claude=None)
+    check("...nor a process outside any agent session it knows, without the user's terminal (an agent host it doesn't "
+          "know by name, a script): exit 3, still open", r.returncode == 3 and "only the user says they're done"
+          in r.stderr and owners.open_handoff(), (r.returncode, r.stderr))
     note = "solved it\x1b[31m, ‮all good"
-    r = run("done", "--note", note, claude=None)
+    m, s = pty.openpty()
+    r = subprocess.run(hcmd("done", "--note", note), env=env(FAKE_CLAUDE=None), stdin=s, capture_output=True, text=True,
+                       timeout=30)
+    os.close(s)
+    os.close(m)
     rc, o, e = finish(p)
-    check("done from elsewhere: exit 0, and the waiting handoff returns 0", r.returncode == 0 and rc == 0
+    check("done from the user's own terminal: exit 0, and the waiting handoff returns 0", r.returncode == 0 and rc == 0
           and "Handed the virtual computer back" in r.stdout, (r.returncode, r.stderr, rc, e))
     check("its output tells Claude to read the screen again, with the note escaped", "handoff done" in o
           and "Read the screen again" in o and "Their note: solved it" in o and "\x1b" not in o and "‮" not in o, o)
@@ -233,7 +262,7 @@ def basic_checks():
           "metacomputer view --open" in o and "clipboard" in o and "Cmd+V" in o and "metacomputer handoff done" in o
           and "metacomputer handoff cancel" in o and "For you, the agent" in o, o)
     rec = owners.handoff_record()
-    check("the record says done, from where, with the note", rec["status"] == "done" and rec["ended_from"] == "process"
+    check("the record says done, from where, with the note", rec["status"] == "done" and rec["ended_from"] == "terminal"
           and rec["note"].startswith("solved it"), rec)
     check("nothing is paused any more", owners.open_handoff() is None and run("guard").returncode == 0)
     evs = events_log()[n0:]
@@ -276,6 +305,46 @@ def cancel_checks():
     evs = events_log()[n0:]
     check("handoff_cancelled is sent once", [e["type"] for e in evs].count("handoff_cancelled") == 1,
           [e["type"] for e in evs])
+    # An agent session calls off only the handoff its own session opened; the user, any.
+    clear()
+    p = start("--why", "login", "--say", "x")
+    wait_open()
+    r = run("cancel", claude=SESSION_A + 1)
+    r2 = run("cancel", claude=SESSION_A, FAKE_PS_FAIL="1")
+    check("another agent session's cancel is refused (exit 3), as is one that can't tell whether it runs in one; "
+          "still open", r.returncode == 3 and "didn't open this handoff" in r.stderr and r2.returncode == 3
+          and owners.open_handoff(), (r.returncode, r.stderr[-200:], r2.returncode, r2.stderr[-200:]))
+    r = run("cancel", claude=None)
+    check("...and so is one with no agent session this check knows above it and no terminal of the user's (an agent "
+          "host it doesn't know by name, a detached worker): exit 3, still open", r.returncode == 3
+          and "doesn't run at the user's own terminal or in the agent session that opened this handoff" in r.stderr
+          and owners.open_handoff(), (r.returncode, r.stderr[-300:]))
+    h = owners.handoff_record()
+    rec_ok = h and h.get("claude_pid") == SESSION_A and "claude_start" in h
+    handoff.write_record(dict(h, claude_start="1.000001"))
+    r = run("cancel", claude=SESSION_A)
+    handoff.write_record(h)
+    check("the session that opened it is told by its process's pid and start time: the same pid with another start "
+          "(a reused pid) is refused", rec_ok and r.returncode == 3 and owners.open_handoff(), (h, r.returncode, r.stderr[-200:]))
+    # A start time missing on either side never counts as a match, nor does a process list that doesn't reach the top.
+    refused = []
+    for what, rec_change, extra in (("no start time recorded, and none read now", {"claude_start": None},
+                                     {"FAKE_CLAUDE_START": "none"}),
+                                    ("a record from before start times were kept (none in it)", "drop", {}),
+                                    ("the start time can't be read now", {}, {"FAKE_CLAUDE_START": "none"}),
+                                    ("the process list doesn't reach the top", {}, {"FAKE_ANCESTRY": "incomplete"})):
+        changed = {k: v for k, v in h.items() if k != "claude_start"} if rec_change == "drop" else dict(h, **rec_change)
+        handoff.write_record(changed)
+        r = run("cancel", claude=SESSION_A, **extra)
+        refused.append((what, r.returncode == 3 and owners.open_handoff() is not None, r.returncode))
+        handoff.write_record(h)
+    check("...and the opener isn't taken on trust: no start time on either side, an older record without one, or a "
+          "process list that doesn't reach the top is refused (exit 3; the user's terminal or the panel can still end "
+          "it)", all(ok for _, ok, _ in refused), refused)
+    r = user_end("cancel")
+    rc, o, e = finish(p)
+    check("...while the user at their own terminal cancels any", r.returncode == 0 and rc == 4
+          and owners.handoff_record()["ended_from"] == "terminal", (r.returncode, r.stderr[-200:], rc))
     r = run("done", claude=None)
     check("done with nothing open: exit 1, says so", r.returncode == 1 and "no handoff is open" in r.stderr, r.stderr)
 
@@ -313,7 +382,7 @@ def limit_checks():
     clear()
     p = start("--why", "captcha", "--say", SAY, "--timeout", "2h")
     h = wait_open()
-    run("cancel", claude=None)
+    run("cancel", claude=SESSION_A)
     finish(p)
     check("the longest time limit (2h) makes a valid record, not an unreadable one", h and not h.get("unreadable")
           and h.get("id"), h)
@@ -393,7 +462,7 @@ def controller_checks():
               and owners.open_handoff() is None, (r.returncode, r.stderr))
         p = start("--why", "captcha", "--say", SAY, "--override")
         ok = wait_open() is not None
-        run("cancel", claude=None)
+        run("cancel", claude=SESSION_A)
         finish(p)
         check("--override (after the user agreed) opens it", ok)
         clear()
@@ -423,8 +492,11 @@ def unreadable_checks():
           run("guard").stderr)
     r = run("done", claude=None)
     check("done can't hand back what can't be read", r.returncode == 1, r.stderr)
-    r = run("cancel", claude=None)
-    check("cancel removes it", r.returncode == 0 and not os.path.lexists(owners.handoff_path()), r.stderr)
+    r0 = run("cancel", claude=SESSION_A)
+    r = user_end("cancel")
+    check("a record that can't be read names no session: a cancel without the user's terminal is refused (exit 3), "
+          "and theirs removes it", r0.returncode == 3 and r.returncode == 0
+          and not os.path.lexists(owners.handoff_path()), (r0.returncode, r0.stderr[-200:], r.stderr))
     # garbage counts for HANDOFF_MAX_S from when it last changed, and no longer
     open(owners.handoff_path(), "w").write("x")
     check("garbage counts for at most 2 h from when it last changed", owners.open_handoff()
@@ -483,7 +555,7 @@ def unreadable_checks():
     os.symlink(target, owners.handoff_path())
     check("a link in its place isn't followed (it reads as unreadable: closed)", owners.open_handoff()
           and owners.open_handoff().get("unreadable"))
-    r = run("cancel", claude=None)
+    r = user_end("cancel")
     check("cancel removes the link, not what it points to", r.returncode == 0
           and not os.path.lexists(owners.handoff_path()) and os.path.exists(target), r.stderr)
     for what, bad in (("a time limit past 2 h", {"v": 1, "id": "h-aaaaaaaaaaaa", "status": "open", "why": "other",
@@ -514,7 +586,7 @@ def event_checks():
                f"{VNC_PW}")
     p = start("--why", "captcha", "--say", hostile)
     wait_open()
-    run("cancel", claude=None)
+    run("cancel", claude=SESSION_A)
     rc, o, e = finish(p)
     ny = next((e for e in events_log()[n0:] if e["family"] == "needs_you"), {})
     blob = json.dumps(events_log()[n0:])
@@ -529,11 +601,11 @@ def event_checks():
     clear()
     p = start("--why", "captcha", "--say", SAY)
     wait_open()
-    run("cancel", claude=None)
+    run("cancel", claude=SESSION_A)
     finish(p)
     p = start("--why", "captcha", "--say", SAY)
     wait_open()
-    run("cancel", claude=None)
+    run("cancel", claude=SESSION_A)
     rc, o, e = finish(p)
     check("the same notice again within 5 minutes isn't sent again (notify's rule), and it says so",
           "Not sent again" in o, o)
@@ -553,6 +625,95 @@ def shell_checks():
         check(f"sh {' '.join(extra) or '(plain)'}: refused (125) while the user has the computer",
               r.returncode == 125 and "the user has the computer" in res.get("message", ""), (r.returncode, r.stdout,
                                                                                                r.stderr))
+    # --read-only is a promise, not a sandbox: the script runs as the desktop user and could still reach the desktop, so
+    # an agent's waits during a handoff too; the person at their own terminal keeps theirs (a stand-in transport that
+    # notes it ran: the shell channel's VM side is test_vm_shell's).
+    ran = os.path.join(TD, "ro-ran")
+    ro = [sys.executable, os.path.join(LAB, "lib", "vm_shell.py"), "--transport", "3", "/bin/sh", "-c",
+          f"touch {ran}; exit 3", "--read-only", "-c", "true", "--timeout", "5", "--json"]
+    r = subprocess.run(ro, env=e, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+    res = json.loads(r.stdout or "{}")
+    check("sh --read-only from an agent session (no terminal) is refused (125) while the user has the computer, and "
+          "says what reads still work; nothing ran", r.returncode == 125 and "the user has the computer" in
+          res.get("message", "") and "--read-only script waits too" in res.get("message", "")
+          and "metacomputer inspect" in res.get("message", "") and not os.path.exists(ran), (r.returncode, r.stdout[-300:]))
+    m, s = pty.openpty()
+    p = userterm.spawn(ro, env=e, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    os.close(s)
+    try:
+        o, er = p.communicate(timeout=60)
+    finally:
+        os.close(m)
+    check("...but the person's own --read-only run at their terminal goes ahead (it reaches the VM)",
+          os.path.exists(ran) and b"the user has the computer" not in o, (p.returncode, o[-300:], er[-300:]))
+    agent = userterm.fake_agent("codex")
+    if agent:
+        if os.path.exists(ran):
+            os.remove(ran)
+        m, s = pty.openpty()
+        p = userterm.spawn([agent] + ro, env=e, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        os.close(s)
+        try:
+            o, er = p.communicate(timeout=60)
+        finally:
+            os.close(m)
+        check("...and an agent session's --read-only with a terminal of its own is refused (nothing ran)",
+              p.returncode == 125 and not os.path.exists(ran), (p.returncode, o[-300:]))
+    else:
+        print("SKIP sh --read-only from an agent with a terminal: no C compiler for the stand-in agent")
+    # The script on stdin (`sh --read-only - <<'SCRIPT'`): the person's terminal is on stderr then, which counts as
+    # theirs (with the same check that no agent session is above); an agent session's the same way is still refused.
+    ro_in = ro[:ro.index("-c", ro.index("--read-only"))] + ["-"] + ro[ro.index("-c", ro.index("--read-only")) + 2:]
+    script = os.path.join(TD, "ro-script.sh")
+    open(script, "w").write("true\n")
+    for who, argv0 in (("the person's own", []), ("an agent session's", [agent] if agent else None)):
+        if argv0 is None:
+            print("SKIP sh --read-only - from an agent with a terminal: no C compiler for the stand-in agent")
+            continue
+        if os.path.exists(ran):
+            os.remove(ran)
+        m, s_ = pty.openpty()
+        with open(script) as fin:
+            p = userterm.spawn(argv0 + ro_in, env=e, stdin=fin, stdout=subprocess.PIPE, stderr=s_)
+            os.close(s_)
+            try:
+                o, er = p.communicate(timeout=60)
+            finally:
+                os.close(m)
+        if not argv0:
+            check("...the person's own --read-only with the script on stdin (`sh --read-only - <<'SCRIPT'`, their terminal "
+                  "on stderr) goes ahead during their handoff", os.path.exists(ran) and p.returncode != 125,
+                  (p.returncode, o[-300:]))
+        else:
+            check("...and an agent session's the same way (the script on stdin, a terminal of its own on stderr) is "
+                  "refused (nothing ran)", p.returncode == 125 and not os.path.exists(ran), (p.returncode, o[-300:]))
+    clear()
+    if os.path.exists(ran):
+        os.remove(ran)
+    r = subprocess.run(ro, env=e, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+    check("with no handoff open, an agent's --read-only run goes ahead as before", os.path.exists(ran)
+          and "the user has the computer" not in r.stdout, (r.returncode, r.stdout[-300:]))
+    # A handoff that opens after its admission check (here: as that check looks), before the run starts: the last look
+    # under the dispatch lock (the gate) stops an agent's --read-only run too.
+    clear()
+    if os.path.exists(ran):
+        os.remove(ran)
+    rec_ro = {"v": 1, "id": "h-cccccccccccf", "status": "open", "why": "captcha", "say": "x", "opened": now,
+              "deadline": now + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None}
+    code_ro = ("import json, os, sys; sys.path.insert(0, os.path.join(%r, 'lib')); import owners, handoff, vm_shell\n"
+               "real = owners.open_handoff\nseen = []\n"
+               "def first_look(*a, **kw):\n"
+               "    if not seen:\n"
+               "        seen.append(1); handoff.write_record(json.loads(os.environ['REC'])); return None\n"
+               "    return real(*a, **kw)\n"
+               "owners.open_handoff = first_look\n"
+               "sys.exit(vm_shell.main(sys.argv[1:]))\n") % LAB
+    r = subprocess.run([sys.executable, "-c", code_ro] + ro[2:], env=dict(e, REC=json.dumps(rec_ro)),
+                       capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    res = json.loads(r.stdout or "{}")
+    check("sh --read-only: a handoff that opens after the admission check, before the run starts, still stops an "
+          "agent's run (125, nothing ran)", r.returncode == 125 and "the user has the computer" in res.get("message", "")
+          and not os.path.exists(ran), (r.returncode, r.stdout[-300:], r.stderr[-200:], os.path.exists(ran)))
     clear()
     # Admitted with no handoff open; one opens right after (here: as the claim is written), before the run starts.
     mark = os.path.join(TD, "sh-ran")
@@ -1014,9 +1175,563 @@ def input_reset_checks():
             os.environ.pop("MCOMP_MCP_HUB", None)
         check("...with MCP_HUB=off (the bridges' calls can't be seen): never, and says so", ran == []
               and said and "couldn't tell" in said[0], (ran, said))
+
+        # A reset opening left pending (an agent call still in the driver then): while Chrome ignores the live view's
+        # keyboard for as long as a pair is left (seen 2026-11-23 on a test VM), so the command that waits makes it as
+        # soon as nothing of the agent's runs, the way every reset is made, and only while that handoff is open.
+        hid = "h-ffffffffffff"
+
+        def open_pending(state="pending"):
+            clear()
+            t = time.time()
+            handoff.write_record({"v": 1, "id": hid, "status": "open", "why": "captcha", "say": "x", "opened": t,
+                                  "deadline": t + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None,
+                                  "input_reset": state})
+        open_pending()
+        guest.answer = (2, None)
+        for flight, want in ((1, "later"), (None, "unknown")):
+            ran.clear()
+            input_reset.in_flight = lambda: flight
+            got = input_reset.at_open_handoff(["ssh"], hid)
+            check(f"a pending reset during the handoff, an agent call in flight ({flight}): nothing run ({want})",
+                  got[0] == want and ran == [], (got, ran))
+        ran.clear()
+        input_reset.in_flight = lambda: 0
+        got = input_reset.at_open_handoff(["ssh"], hid)
+        check("...nothing in flight any more: made under the dispatch lock held exclusively, while the handoff is open",
+              got == ("removed", 2) and ran == [True], (got, ran))
+        ran.clear()
+        held = owners.dispatch(shared=True, timeout=5)
+        held.__enter__()
+        try:
+            got = input_reset.at_open_handoff(["ssh"], hid)
+        finally:
+            held.__exit__(None, None, None)
+        check("...an action on its way (the dispatch lock taken): later, nothing run", got == ("later", None)
+              and ran == [], (got, ran))
+        handoff.end(hid, "done", "terminal")
+        ran.clear()
+        got = input_reset.at_open_handoff(["ssh"], hid)
+        check("...the handoff ended meanwhile: nothing run", got == ("ended", None) and ran == [], (got, ran))
+        guest.answer = (None, "couldn't reach the VM over SSH")
+        open_pending()
+        got = input_reset.at_open_handoff(["ssh"], hid)
+        check("...a failed guest is a status, never an exception", got[0] == "failed" and "SSH" in got[1], got)
+
+        # The waiting command: it tries while the record says pending, says what it did once, records it as done.
+        real_transport, real_retry = list(handoff.TRANSPORT), handoff.RESET_RETRY_S
+        handoff.TRANSPORT[:] = ["ssh"]
+        handoff.RESET_RETRY_S = 0.05
+        flights = [1, 1, 0]
+        input_reset.in_flight = lambda: flights.pop(0) if flights else 0
+        guest.answer = (1, None)
+        open_pending()
+        ran.clear()
+        lines = []
+        real_out = handoff.out
+        handoff.out = lambda text="": lines.append(text)
+        box = {}
+        th = threading.Thread(target=lambda: box.update(rc=handoff.wait_for(hid, False, False)))
+        try:
+            th.start()
+            end = time.time() + 10
+            while time.time() < end and (owners.handoff_record() or {}).get("input_reset") != "done":
+                time.sleep(0.05)
+            rec_after = owners.handoff_record() or {}
+            handoff.end(hid, "done", "terminal")
+            th.join(10)
+        finally:
+            handoff.out = real_out
+        check("the waiting handoff makes the pending reset once the agent's call has ended: once, recorded as done, "
+              "and it says so", ran == [True] and not flights and rec_after.get("input_reset") == "done"
+              and any("its leftover virtual input devices were removed (1 pair(s))" in x for x in lines)
+              and box.get("rc") == 0, (ran, flights, rec_after.get("input_reset"), lines[-3:], box))
+        handoff.out = lambda text="": None
+        try:
+            for state in ("done", None):
+                open_pending(state)
+                ran.clear()
+                th = threading.Thread(target=lambda: handoff.wait_for(hid, False, False))
+                th.start()
+                time.sleep(0.4)
+                handoff.end(hid, "cancelled", "process")
+                th.join(10)
+                check(f"...nothing pending ({state}): the waiting command runs no reset", ran == [], ran)
+            handoff.TRANSPORT[:] = []
+            open_pending()
+            ran.clear()
+            th = threading.Thread(target=lambda: handoff.wait_for(hid, False, False))
+            th.start()
+            time.sleep(0.4)
+            handoff.end(hid, "cancelled", "process")
+            th.join(10)
+            check("...without bin/metacomputer's transport (handoff.py run by itself): none", ran == [], ran)
+        finally:
+            handoff.out = real_out
+            handoff.TRANSPORT[:], handoff.RESET_RETRY_S = real_transport, real_retry
+        line = handoff.reset_line(("pending", input_reset.PENDING_RUNNING, False), "Claude")
+        line2 = handoff.reset_line(("pending", input_reset.PENDING_UNKNOWN, False), "Claude")
+        check("opening's message: a call still running says the reset follows as soon as it ends; one that can't be "
+              "known says to run input-reset (never made automatically)", "removed as soon as that one has ended" in line
+              and "metacomputer input-reset" in line and "removed as soon" not in line2
+              and "metacomputer input-reset" in line2, (line, line2))
     finally:
         (owners.at_user_terminal, owners.others, input_reset.in_flight, input_reset.run_guest) = real
         os.environ.pop("FAKE_RESET_LOG", None)
+        clear()
+
+
+
+def guest_command_checks():
+    """What reaches a shell in the VM is checked, internal commands are metacomputer's own, and the rest of what writes to
+    the guest or drives it waits during a handoff (record, build --replace, volume sync), except at the user's terminal.
+    A stand-in VM runner and ssh: nothing here reaches a VM; the stand-in ssh notes every run."""
+    print("values that reach the VM's shell; internal commands; recording, builds and volume sync in a handoff")
+    clear()
+    fd = os.path.join(TD, "guestcmd")
+    os.makedirs(fd)
+    lume = os.path.join(fd, "lume")
+    open(lume, "w").write('#!/bin/sh\ncase "$1" in get) echo \'{"name": "gctest", "status": "running"}\' ;; esac\n')
+    os.chmod(lume, 0o755)
+    recdir = os.path.join(fd, "recordings")
+    os.makedirs(recdir)
+    cfg = os.path.join(fd, "test.env")
+    open(cfg, "w").write(f'VM_NAME=gctest\nBASELINE_NAME=gctest-baseline\nSSH_DIR="{fd}/ssh"\nSSH_PORT=59875\n'
+                         f'VNC_PORT=59876\nRUN_DIR="{ENV["MCOMP_RUN_DIR"]}"\nLOG_DIR="{fd}/logs"\nLUME="{lume}"\n'
+                         f'RECORD_DIR="{recdir}"\n')
+    sd = os.path.join(fd, "sshstub")
+    os.makedirs(sd)
+    sshlog = os.path.join(fd, "ssh.log")
+    # The recorder's answers: `status` says the stream named in the last `stream` is recording; `stream` sends a little
+    # and ends; everything else is only noted.
+    open(os.path.join(fd, "stub_proc.py"), "w").write(
+        "import os, signal, sys, time\n"
+        "if os.environ.get('STUB_TSTP'):\n"
+        "    print('STUB-STOPPING', flush=True)\n"
+        "    os.kill(os.getpid(), signal.SIGTSTP)\n"
+        "    print('STUB-RESUMED', flush=True)\n"
+        "    sys.exit(0)\n"
+        "open(os.environ['STUB_PIDFILE'], 'w').write(str(os.getpid()))\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n")
+    hold_probe = os.path.join(fd, "hold_probe.py")
+    open(hold_probe, "w").write("import fcntl, os, sys\nf = os.open(sys.argv[1], os.O_RDWR)\ntry:\n"
+                                "    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n    print('LOCK-UNHELD')\n"
+                                "except BlockingIOError:\n    print('LOCK-HELD')\n")
+    dispatch = os.path.join(ENV["MCOMP_RUN_DIR"], "owners", ".dispatch")
+    open(os.path.join(sd, "ssh"), "w").write(
+        '#!/bin/sh\n'
+        # CHECK_HOLD: as OpenSSH does, close every descriptor it inherited, then look at the dispatch lock
+        'if [ -n "$CHECK_HOLD" ]; then exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-; "%s" "%s" "%s" >> "%s"; fi\n'
+        '[ -n "$STUB_INT" ] && kill -INT $$\n[ -n "$STUB_RC" ] && exit "$STUB_RC"\n'
+        # STUB_HANG: an ssh that stays (its pid in STUB_PIDFILE); STUB_TSTP: one that suspends itself, as ssh's ~^Z does
+        'if [ -n "$STUB_HANG" ] || [ -n "$STUB_TSTP" ]; then exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-; exec "%s" "%s"; fi\n'
+        % (sys.executable, hold_probe, dispatch, sshlog, sys.executable, os.path.join(fd, "stub_proc.py")) +
+        'echo "$*" >> "%s"\ncase "$*" in\n'
+        '  *"desktop-record stream"*) grep -q \'"status": "open"\' "%s" 2>/dev/null && echo STREAM-DURING-HANDOFF >> "%s"; '
+        'printf x; sleep 1 ;;\n'
+        '  *"desktop-record status"*) n=$(sed -n "s/.*desktop-record stream .\\([A-Za-z0-9._-]*\\). .*/\\1/p" "%s" | tail -1); '
+        '[ -n "$n" ] && echo "recording stream:$n" || echo "not recording" ;;\n'
+        '  *"desktop-record stop"*) echo "not recording" ;;\nesac\nexit 0\n'
+        % (sshlog, os.path.join(ENV["MCOMP_RUN_DIR"], "owners", "handoff.state"), sshlog, sshlog))
+    os.chmod(os.path.join(sd, "ssh"), 0o755)
+    e = env(MCOMP_CONFIG=cfg, PATH=sd + os.pathsep + os.environ.get("PATH", ""))
+    for k in ("MCOMP_RUN_DIR", "MCOMP_LOG_DIR", "MCOMP_SSH_DIR", "MCOMP_VM_NAME"):
+        e.pop(k, None)
+    mc = os.path.join(LAB, "bin", "metacomputer")
+
+    def cli(*args, **kw):
+        return subprocess.run([mc, *args], env=dict(e, **kw), capture_output=True, text=True, timeout=90,
+                              stdin=subprocess.DEVNULL)
+
+    def at_pty(*args):
+        m, s = pty.openpty()
+        p = userterm.spawn([mc, *args], env=e, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        os.close(s)
+        try:
+            o, er = p.communicate(timeout=90)
+        finally:
+            os.close(m)
+        return p.returncode, o.decode(errors="replace"), er.decode(errors="replace")
+
+    def guest():
+        return read(sshlog)
+    state = os.path.join(ENV["MCOMP_RUN_DIR"], "manual-recording")
+    # Values that reach the recorder's shell in the VM.
+    for args, what in ((["rec1", "20; touch /tmp/mcomp-injected; #"], "a frame rate with a command in it"),
+                       (["rec1", "0"], "a frame rate of 0"), (["rec1", "999"], "a frame rate of 999"),
+                       (["rec1'; touch x; '", "20"], "a name with a quote in it")):
+        open(sshlog, "w").close()
+        r = cli("record", "start", *args)
+        check(f"record start with {what}: refused before anything reaches the VM", r.returncode != 0
+              and "desktop-record" not in guest() and not os.path.exists(state), (r.returncode, r.stderr[-200:], guest()))
+    gcfg = os.path.join(fd, "guest.env")
+    open(gcfg, "w").write(open(cfg).read() + "RECORD_TO=guest\n")
+    open(sshlog, "w").close()
+    r = cli("record", "start", "rec1", "20; touch /tmp/mcomp-injected; #", MCOMP_CONFIG=gcfg)
+    check("...and with RECORD_TO=guest (the recorder started over SSH): the same check, nothing sent",
+          r.returncode != 0 and not guest(), (r.returncode, r.stderr[-200:], guest()))
+    # The stream's Mac half is record start's own (no command of its own any more): an old `_record-pipe`, run as an
+    # agent would, is no command, and nothing is sent.
+    open(sshlog, "w").close()
+    r = cli("_record-pipe", "rec2", "20; printf INJECTED; #", "standard", os.path.join(recdir, "x.mkv"), "off")
+    r2 = cli("_record-pipe", "rec2", "20", "standard", os.path.join(recdir, "x.mkv"), "off")
+    check("a forged _record-pipe (the stream's half, run directly): refused, nothing reaches the VM", r.returncode != 0
+          and r2.returncode != 0 and not guest(), (r.returncode, r2.returncode, r2.stderr[-200:], guest()))
+
+    def tidy():
+        for f in os.listdir(recdir):
+            os.remove(os.path.join(recdir, f))
+        if os.path.exists(state):
+            os.remove(state)
+    # ...while record start streams, with the checked values.
+    open(sshlog, "w").close()
+    r = cli("record", "start", "rec3", "20")
+    started = "desktop-record stream 'rec3' 20 standard" in guest()
+    cli("record", "stop")
+    tidy()
+    check("record start streams (it starts the Mac half itself): the stream reaches the VM with the checked values",
+          r.returncode == 0 and started, (r.returncode, r.stderr[-300:], guest()))
+    # The stream's Mac half keeps record start's dispatch lock until the stream is up: with record start killed while
+    # the half is still on its way (a slow start, stood in for by a Python that waits 3 s first), a handoff can't open
+    # in between; it opens only once the stream has started.
+    pyw, mark = os.path.join(fd, "pywrap"), os.path.join(fd, "pywrap.started")
+    open(pyw, "w").write('#!/bin/sh\ncase "$*" in *"lib/recording.py save"*) : > "%s"; sleep 3 ;; esac\nexec "%s" "$@"\n'
+                         % (mark, sys.executable))
+    os.chmod(pyw, 0o755)
+    open(sshlog, "w").close()
+    rp = subprocess.Popen([mc, "record", "start", "rec6", "20"], env=dict(e, PY=pyw), stdin=subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    end_t = time.time() + 30
+    while time.time() < end_t and not os.path.exists(mark):
+        time.sleep(0.05)
+    on_way = os.path.exists(mark)
+    rp.kill()
+    rp.wait(10)
+    ho = start("--why", "login", "--say", "x")
+    opened = wait_open(timeout=20)
+    end_t = time.time() + 15
+    while time.time() < end_t and "desktop-record stream 'rec6'" not in guest():
+        time.sleep(0.1)
+    sent = guest()
+    if opened:
+        run("cancel", claude=SESSION_A)
+    finish(ho)
+    time.sleep(1.5)
+    tidy()
+    check("a handoff can't open between record start's check and its stream, even with record start killed on the way: "
+          "the stream starts first (or not at all), never while the user has the computer", on_way
+          and "desktop-record stream 'rec6'" in sent and "STREAM-DURING-HANDOFF" not in sent, (on_way, sent[-400:]))
+    # A stream that isn't up when recording.py save's hold ends (here after 1 s; a stand-in stream that would start
+    # after 3 s) never starts: it's ended first, then the lock is let go, and nothing is saved.
+    drv, late, child = (os.path.join(fd, n) for n in ("hold_driver.py", "stream.late", "stream.pid"))
+    lockf, outf = os.path.join(fd, "hold.lock"), os.path.join(fd, "held.mkv")
+    stream = os.path.join(fd, "slow_stream.py")
+    open(stream, "w").write("import os, sys, time\nopen(%r, 'w').write(str(os.getpid()))\ntime.sleep(3)\n"
+                            "sys.stdout.buffer.write(b'x' * 100); sys.stdout.flush()\nopen(%r, 'w').write('late')\n"
+                            "time.sleep(1)\n" % (child, late))
+    open(drv, "w").write(
+        "import fcntl, json, os, sys, threading, time\nsys.path.insert(0, %r)\nimport recording\n"
+        "recording.HOLD_MAX_S = 1\nfd = os.open(%r, os.O_RDWR | os.O_CREAT, 0o600)\nfcntl.flock(fd, fcntl.LOCK_SH)\n"
+        "seen = {}\n"
+        "def watch():\n"
+        "    w = os.open(%r, os.O_RDWR)\n"
+        "    while True:\n"
+        "        try:\n"
+        "            fcntl.flock(w, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "        except BlockingIOError:\n"
+        "            time.sleep(0.02); continue\n"
+        "        pid = int(open(%r).read() or 0) if os.path.exists(%r) else 0\n"
+        "        try:\n"
+        "            os.kill(pid, 0); alive = pid > 0 and os.waitpid(pid, os.WNOHANG) == (0, 0)\n"
+        "        except (ProcessLookupError, ChildProcessError):\n"
+        "            alive = False\n"
+        "        seen.update(released=True, child_alive=alive); return\n"
+        "threading.Thread(target=watch, daemon=True).start()\n"
+        "sys.argv = ['recording.py', 'save', %r, '--min-free-gb', '0', '--hold-fd', str(fd), '--', sys.executable, %r]\n"
+        "rc = recording.main()\n"
+        "time.sleep(4)\nprint(json.dumps(dict(seen, rc=rc)))\n"
+        % (os.path.join(LAB, "lib"), lockf, lockf, child, child, outf, stream))
+    r = subprocess.run([sys.executable, drv], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    try:
+        res = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        res = {}
+    saved = os.path.getsize(outf) if os.path.exists(outf) else 0
+    check("a stream not up when the hold ends never starts: it's ended before the lock is let go (exit 6), and nothing "
+          "is saved", res.get("rc") == 6 and res.get("released") and res.get("child_alive") is False
+          and not os.path.exists(late) and saved == 0 and "didn't start within" in r.stderr,
+          (res, saved, os.path.exists(late), r.stderr[-300:]))
+    # ...but one whose first bytes are already waiting when the deadline comes (its reader was late: here the first
+    # space check takes 2 s) has started: it's kept, and what it sent is saved.
+    early, outf2 = os.path.join(fd, "early_stream.py"), os.path.join(fd, "early.mkv")
+    open(early, "w").write("import sys, time\nsys.stdout.buffer.write(b'y' * 16); sys.stdout.flush()\ntime.sleep(3)\n")
+    drv2 = os.path.join(fd, "hold_driver2.py")
+    open(drv2, "w").write(
+        "import fcntl, json, os, sys, time\nsys.path.insert(0, %r)\nimport recording\nrecording.HOLD_MAX_S = 1\n"
+        "real = recording.chunk_claim\n"
+        "class Slow:\n"
+        "    def __init__(self, c):\n"
+        "        self.c, self.first = c, True\n"
+        "    def take(self, *a, **k):\n"
+        "        if self.first:\n"
+        "            self.first = False\n"
+        "            time.sleep(2)\n"
+        "        return self.c.take(*a, **k)\n"
+        "    def release(self):\n"
+        "        return self.c.release()\n"
+        "recording.chunk_claim = lambda *a, **k: Slow(real(*a, **k))\n"
+        "fd = os.open(%r, os.O_RDWR | os.O_CREAT, 0o600)\nfcntl.flock(fd, fcntl.LOCK_SH)\n"
+        "sys.argv = ['recording.py', 'save', %r, '--min-free-gb', '0', '--hold-fd', str(fd), '--', sys.executable, %r]\n"
+        "print(json.dumps({'rc': recording.main()}))\n" % (os.path.join(LAB, "lib"), lockf, outf2, early))
+    r = subprocess.run([sys.executable, drv2], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    try:
+        res2 = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        res2 = {}
+    saved2 = read(outf2) if os.path.exists(outf2) else ""
+    check("...but a stream whose first bytes were already waiting at the deadline (a late reader) has started: kept, and "
+          "what it sent is saved", res2.get("rc") == 0 and saved2 == "y" * 16 and "didn't start within" not in r.stderr,
+          (res2, len(saved2), r.stderr[-300:]))
+    # ...and one that ended with nothing (EOF, no bytes) before its late reader looked is a stream that never started:
+    # exit 6, nothing kept.
+    empty, outf3 = os.path.join(fd, "empty_stream.py"), os.path.join(fd, "empty.mkv")
+    open(empty, "w").write("pass\n")
+    drv3 = os.path.join(fd, "hold_driver3.py")
+    open(drv3, "w").write(read(drv2).replace(repr(outf2), repr(outf3)).replace(repr(early), repr(empty)))
+    r = subprocess.run([sys.executable, drv3], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    try:
+        res3 = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        res3 = {}
+    check("...while one that ended with no output (EOF, nothing waiting) before its late reader looked never started: "
+          "exit 6, no file kept", res3.get("rc") == 6 and not os.path.exists(outf3), (res3, os.path.exists(outf3),
+                                                                                       r.stderr[-200:]))
+    # The ssh helper (scripts/lib.sh hold_fd_until_exit), run on its own: it answers "held" only once all of its setup is
+    # done (here its Python can have 5 descriptors, so a step after the kqueue fails: no answer, the command refuses,
+    # never an ssh without the lock), and it closes every descriptor but the lock, whatever its number (a lock on
+    # descriptor 65536 isn't kept for the ssh session).
+    lib_fn = re.search(r"^hold_fd_until_exit\(\) \{.*?^\}$", read(os.path.join(LAB, "scripts", "lib.sh")), re.S | re.M)
+    fnf, standin, pyw2 = (os.path.join(fd, n) for n in ("hold_fn.sh", "standin_ssh.py", "pywrap_nofile"))
+    open(fnf, "w").write((lib_fn.group(0) if lib_fn else "") + "\n")
+    open(standin, "w").write("import os, sys, time\nos.closerange(3, 1 << 20)\ntime.sleep(float(sys.argv[1]))\n")
+    open(pyw2, "w").write('#!/bin/bash\nulimit -n "${PYWRAP_NOFILE:-256}"\nexec "%s" "$@"\n' % sys.executable)
+    os.chmod(pyw2, 0o755)
+    lock1, lock2 = os.path.join(fd, "hold1.lock"), os.path.join(fd, "hold2.lock")
+
+    def lock_free(path):
+        f_ = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(f_, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(f_, fcntl.LOCK_UN)
+            return True
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(f_)
+    script = (f". '{fnf}'; exec 3>>'{lock1}'; '{sys.executable}' -c 'import fcntl; fcntl.flock(3, fcntl.LOCK_SH)'; "
+              f"if hold_fd_until_exit 3; then exec '{sys.executable}' '{standin}' 3; else echo REFUSED; exit 9; fi")
+    hp = subprocess.Popen(["/bin/bash", "-c", script], env=dict(os.environ, PY=pyw2, PYWRAP_NOFILE="5"),
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    time.sleep(1.5)
+    free_while = lock_free(lock1) if hp.poll() is None else None
+    ho_out = hp.communicate(timeout=30)[0]
+    check("the ssh helper answers only once its setup is done: one that fails on the way (its descriptors used up) gives "
+          "no answer, and the command refuses rather than run ssh without the lock", hp.returncode == 9
+          and "REFUSED" in ho_out, (hp.returncode, ho_out[-100:], free_while))
+    hi = os.path.join(fd, "hold_high.py")
+    open(hi, "w").write(
+        "import fcntl, os, resource, subprocess, sys, time\n"
+        "soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)\n"
+        "resource.setrlimit(resource.RLIMIT_NOFILE, (min(70000, hard), hard))\n"
+        "f = os.open(%r, os.O_RDWR | os.O_CREAT, 0o600)\nfcntl.flock(f, fcntl.LOCK_SH)\nos.dup2(f, 65536)\nos.close(f)\n"
+        "p = subprocess.Popen(['/bin/bash', '-c', sys.argv[1]], pass_fds=(65536,), stdin=subprocess.DEVNULL)\n"
+        "os.close(65536)\ntime.sleep(1.5)\n"
+        "g = os.open(%r, os.O_RDWR)\n"
+        "try:\n    fcntl.flock(g, fcntl.LOCK_EX | fcntl.LOCK_NB); print('FREE')\nexcept BlockingIOError:\n    print('HELD')\n"
+        "p.wait(30)\n" % (lock2, lock2))
+    r = subprocess.run([sys.executable, hi, script.replace("exec '%s' '%s' 3" % (sys.executable, standin),
+                                                           "exec '%s' '%s' 3" % (sys.executable, standin))],
+                       env=dict(os.environ, PY=sys.executable), capture_output=True, text=True, timeout=60,
+                       stdin=subprocess.DEVNULL)
+    check("...and it closes every descriptor but the lock, whatever its number: a lock on descriptor 65536 is let go "
+          "while ssh runs (only the dispatch lock is kept)", r.stdout.strip() == "FREE", (r.stdout[-100:], r.stderr[-200:]))
+    # `metacomputer ssh` keeps the dispatch lock while ssh runs: OpenSSH closes the descriptors it inherits (the lock's
+    # among them), so the command isn't exec'd into ssh; ssh's status is the command's, a Ctrl-C's 130 too.
+    open(sshlog, "w").close()
+    r = cli("ssh", "ops", "true", CHECK_HOLD="1", STUB_RC="7")
+    r2 = cli("ssh", "ops", "true", STUB_INT="1")
+    check("metacomputer ssh holds the dispatch lock until ssh ends (ssh closes what it inherits), and passes on ssh's "
+          "status (7) and an interrupt's (130)", "LOCK-HELD" in guest() and r.returncode == 7
+          and r2.returncode in (130, -2), (guest()[-200:], r.returncode, r.stderr[-200:], r2.returncode))
+    # TERM or HUP to `metacomputer ssh`'s pid ends ssh itself (it's exec'd: the pid is ssh's), and the dispatch lock goes
+    # only after ssh has (its helper waits for that pid); never a lock let go while ssh still runs.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        pidfile = os.path.join(fd, "stub.pid")
+        if os.path.exists(pidfile):
+            os.remove(pidfile)
+        sp = subprocess.Popen([mc, "ssh", "ops", "x"], env=dict(e, STUB_HANG="1", STUB_PIDFILE=pidfile),
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        end_t = time.time() + 20
+        while time.time() < end_t and not (os.path.exists(pidfile) and read(pidfile)):
+            time.sleep(0.05)
+        stub_pid = int(read(pidfile) or 0) if os.path.exists(pidfile) else 0
+        seen = {}
+
+        def watch(stub_pid=stub_pid, sp=sp, seen=seen):
+            w = os.open(dispatch, os.O_RDWR)
+            try:
+                end_w = time.time() + 20
+                while time.time() < end_w:
+                    try:
+                        fcntl.flock(w, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        time.sleep(0.01)
+                        continue
+                    fcntl.flock(w, fcntl.LOCK_UN)
+                    sp.poll()
+                    seen["ssh_alive_at_release"] = pid_alive(stub_pid)
+                    return
+            finally:
+                os.close(w)
+        wt = threading.Thread(target=watch, daemon=True)
+        time.sleep(0.3)
+        held_before = True
+        probe = os.open(dispatch, os.O_RDWR)
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held_before = False
+            fcntl.flock(probe, fcntl.LOCK_UN)
+        except BlockingIOError:
+            pass
+        finally:
+            os.close(probe)
+        wt.start()
+        os.kill(sp.pid, sig)
+        wt.join(25)
+        try:
+            sp.wait(10)
+        except subprocess.TimeoutExpired:
+            sp.kill()
+        if stub_pid and pid_alive(stub_pid):
+            os.kill(stub_pid, signal.SIGKILL)
+        check(f"{signal.Signals(sig).name} to metacomputer ssh's pid: ssh itself ends (the pid is ssh's), and the dispatch "
+              "lock, held while it ran, is let go only after it has", stub_pid == sp.pid and held_before
+              and seen.get("ssh_alive_at_release") is False, (stub_pid, sp.pid, held_before, seen))
+    # ssh's own ~^Z (it stops itself): at the user's terminal their shell gets its prompt back, and `fg` carries on.
+    pid_, mfd = pty.fork()
+    if pid_ == 0:
+        os.execve("/bin/bash", ["bash", "--noprofile", "--norc", "-i"],
+                  dict(e, PS1="PROMPT> ", STUB_TSTP="1", TERM="dumb"))
+    out = b""
+
+    def expect(word, after=0, timeout=15):
+        """WORD in the terminal's output after position AFTER: its end there, or 0."""
+        nonlocal out
+        end_x = time.time() + timeout
+        while time.time() < end_x:
+            if word in out[after:]:
+                return out.index(word, after) + len(word)
+            r_, _, _ = select.select([mfd], [], [], 0.2)
+            if r_:
+                try:
+                    out += os.read(mfd, 4096)
+                except OSError:
+                    break
+        return out.index(word, after) + len(word) if word in out[after:] else 0
+    got_prompt = expect(b"PROMPT> ")
+    os.write(mfd, f"'{mc}' ssh ops x\n".encode())
+    at = expect(b"STUB-STOPPING", got_prompt)
+    stopped = bool(at and expect(b"Stopped", at) and expect(b"PROMPT> ", at, 10))
+    os.write(mfd, b"fg\n")
+    at2 = expect(b"STUB-RESUMED", at) if at else 0
+    at3 = expect(b"PROMPT> ", at2) if at2 else 0
+    os.write(mfd, b"echo EXIT=$?\n")
+    resumed = bool(at3 and expect(b"EXIT=0", at3))
+    os.write(mfd, b"exit\n")
+    end_x = time.time() + 15                     # read on while it exits (a closing terminal waits for its output)
+    while time.time() < end_x:
+        try:
+            if os.waitpid(pid_, os.WNOHANG)[0]:
+                break
+        except ChildProcessError:
+            break
+        r_, _, _ = select.select([mfd], [], [], 0.1)
+        if r_:
+            try:
+                out += os.read(mfd, 4096)
+            except OSError:
+                pass
+    else:
+        os.kill(pid_, signal.SIGKILL)
+        os.waitpid(pid_, 0)
+    os.close(mfd)
+    check("ssh suspending itself (its ~^Z) at the user's terminal: their shell gets its prompt back, and fg carries on "
+          "(exit 0)", got_prompt and stopped and resumed, out[-500:])
+    # `get`: a file name that looks like an option is a file name to the VM's tar (after --), never an option.
+    for name in ("--version", "--files-from=-"):
+        open(sshlog, "w").close()
+        cli("get", "/tmp/" + name, os.path.join(fd, "got"))
+        sent = guest()
+        check(f"get /tmp/{name}: the name goes to the VM's tar after --, as a file name", f"-cf - -- {name}" in sent
+              and f"-cf - {name}" not in sent, sent[-300:])
+    # _vnc-install and _vnc-push: a build's, or the user's at their own terminal; never a program's.
+    open(sshlog, "w").close()
+    r = cli("_vnc-install")
+    r2 = subprocess.run([mc, "_vnc-push"], env=e, input="Abc12345\n", capture_output=True, text=True, timeout=60)
+    check("_vnc-install and _vnc-push from a program (no terminal, not a build): refused, nothing reaches the VM",
+          r.returncode != 0 and r2.returncode != 0 and "metacomputer's own" in r.stderr and "your own terminal" in r2.stderr
+          and not guest(), (r.returncode, r.stderr[-200:], r2.returncode, r2.stderr[-200:], guest()))
+    # Who counts as metacomputer itself: this checkout's bin/metacomputer running that command, or its build scripts.
+    real_argv = owners.proc_argv
+    me = os.path.join(LAB, "bin", "metacomputer")
+    table = {os.getppid(): (4242, "bash"), 4242: (1, "bash")}
+    cases = [(["bash", me, "record", "start", "n"], ["cli:record"], True),
+             (["/bin/bash", me, "--vm", "x", "record", "start"], ["cli:record"], True),
+             (["bash", me, "--on=mac", "record"], ["cli:record"], True),
+             (["bash", me, "sh", "record"], ["cli:record"], False),
+             (["bash", me, "recordx"], ["cli:record"], False),
+             (["bash", os.path.join(LAB, "scripts", "build-vm.sh"), "--replace"], ["script:build-vm.sh"], True),
+             (["bash", "/tmp/elsewhere/scripts/build-vm.sh"], ["script:build-vm.sh"], False),
+             (["python3", me, "record"], ["cli:record"], False),
+             (["bash", "-c", f"{me} record"], ["cli:record"], False)]
+    got = []
+    try:
+        for argv, allowed, want in cases:
+            owners.proc_argv = lambda pid, a=argv: a if pid == 4242 else None
+            got.append(owners.internal_caller(allowed, table) == want)
+    finally:
+        owners.proc_argv = real_argv
+    check("owners.internal_caller: this checkout's bin/metacomputer running that command (after --vm/--on), or its build "
+          "script, by real path; another command, another copy, another program or `bash -c` don't count", all(got), got)
+
+    # During a handoff: recording, build --replace and volume sync wait for an agent; the user's own terminal goes on.
+    now = time.time()
+    handoff.write_record({"v": 1, "id": "h-eeeeeeeeeee1", "status": "open", "why": "login", "say": "x", "opened": now,
+                          "deadline": now + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None})
+    try:
+        for args in (["record", "start", "rec4", "20"], ["record", "stop"], ["build", "--replace"],
+                     ["volume", "sync", "nosuch"]):
+            open(sshlog, "w").close()
+            r = cli(*args)
+            check(f"`{' '.join(args[:2])}` from an agent session during a handoff: held (exit 4), the guest isn't reached",
+                  r.returncode == 4 and "the user has the computer" in r.stderr and not guest(),
+                  (r.returncode, r.stderr[-300:], guest()))
+        rc, o, er = at_pty("volume", "sync", "nosuch")
+        check("...the user's own at their terminal goes on (here: to the volume's own error)", rc != 4
+              and "your handoff is open" in er, (rc, er[-300:]))
+        # The user's own recording during their handoff: it streams (the Mac half is record start's own, so nothing
+        # asks again for a terminal it no longer has), and their record stop saves it.
+        open(sshlog, "w").close()
+        rc, o, er = at_pty("record", "start", "rec5", "20")
+        streamed = "desktop-record stream 'rec5' 20 standard" in guest()
+        rc2, o2, er2 = at_pty("record", "stop")
+        tidy()
+        check("the user's own record start at their terminal during their handoff streams, and their record stop isn't "
+              "held either (here the stand-in stream isn't a video: it saves what came)", rc == 0 and streamed
+              and rc2 != 4 and "desktop-record stop" in guest() and "the user has the computer" not in er2,
+              (rc, er[-300:], rc2, er2[-300:], guest()))
+    finally:
         clear()
 
 
@@ -1101,7 +1816,7 @@ def fill_checks():
     rc_h, o_h, e_h = finish(h, 5) if h.poll() is not None else (None, "", "")
     p.wait(30)
     if h.poll() is None:
-        run("cancel", claude=None)
+        run("cancel", claude=SESSION_A)
         finish(h)
     check("a handoff can't open while a fill is on its way (it waits for the dispatch lock, then refuses)",
           not opened_during and rc_h == 3 and "still on its way" in e_h and p.returncode == 0,
@@ -1206,6 +1921,78 @@ def fill_checks():
     r = subprocess.run([mc, "input-reset"], env=eu, capture_output=True, text=True, timeout=60)
     check("...nor without a terminal (exit 4)", r.returncode == 4 and "input-reset" not in read(sshlog),
           (r.returncode, r.stderr[-200:]))
+    # The other commands that act in the guest outside the hub and the shell channel: held the same way, except at the
+    # user's own terminal. (Each would reach the guest through the stand-in ssh, which notes every run.)
+    upfile = os.path.join(fd, "up.txt")
+    open(upfile, "w").write("x")
+    acting = [["ssh", "ops", "echo", "held-ssh"], ["ssh", "admin", "echo", "held-admin"], ["put", upfile],
+              ["rename", "~/a.txt", "b.txt"], ["task", "start", "held-task"], ["browser", "profiles", "--new", "heldp"],
+              ["security", "apply"]]
+    for args in acting:
+        open(sshlog, "w").close()
+        r = subprocess.run([mc] + args, env=eu, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        guest = [x for x in read(sshlog).splitlines() if not x.rstrip().endswith(" true")]   # security reads first
+        check(f"`{' '.join(args[:2])}` from an agent session (no terminal) is held while the user has the computer "
+              "(exit 4, the guest isn't reached)", r.returncode == 4 and "the user has the computer" in r.stderr
+              and not guest, (r.returncode, r.stderr[-300:], guest))
+    if agent:
+        open(sshlog, "w").close()
+        rc, o, er = at_pty([agent, mc, "ssh", "ops", "echo", "held-ssh"])
+        check("...and `ssh` from an agent session with a terminal of its own (exit 4)", rc == 4
+              and "held-ssh" not in read(sshlog), (rc, er[-300:]))
+    open(sshlog, "w").close()
+    rc, o, er = at_pty([mc, "ssh", "ops", "echo", "mine"])
+    check("`ssh` at the user's own terminal goes ahead during their handoff, and says why", rc == 0
+          and "mine" in read(sshlog) and "your handoff is open" in er, (rc, er[-300:], read(sshlog)[-200:]))
+    open(sshlog, "w").close()
+    rc, o, er = at_pty([mc, "put", upfile])
+    check("...and so does `put` (it reaches the guest)", rc != 4 and "your handoff is open" in er and read(sshlog),
+          (rc, er[-300:]))
+    open(sshlog, "w").close()
+    r = subprocess.run([mc, "ssh", "ops", "echo", "held-env"], env=dict(eu, HANDOFF_HELD="1"), capture_output=True,
+                       text=True, timeout=60, stdin=subprocess.DEVNULL)
+    r2 = subprocess.run([mc, "ssh", "ops", "echo", "held-hub"], env=dict(eu, MCOMP_HUB_PID=str(os.getpid())),
+                        capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    check("HANDOFF_HELD=1 in the environment doesn't skip the check, nor does an MCOMP_HUB_PID that isn't this VM's "
+          "hub and parent (exit 4 both)", r.returncode == 4 and r2.returncode == 4 and not read(sshlog),
+          (r.returncode, r2.returncode, read(sshlog)))
+    # The hub's own input reset runs `metacomputer ssh ops input-reset` as its child, under the dispatch lock it holds
+    # exclusively (and only with no handoff open): a stand-in hub here, which holds the hub's record and that lock.
+    hub_py = os.path.join(fd, "fakehub.py")
+    open(hub_py, "w").write(
+        "import fcntl, json, os, subprocess, sys\nsys.path.insert(0, os.path.join(%r, 'lib'))\nimport mcp_hub, owners\n"
+        "p = mcp_hub.paths()['pid']\nos.makedirs(os.path.dirname(p), exist_ok=True)\n"
+        "fd = os.open(p, os.O_RDWR | os.O_CREAT, 0o600)\nfcntl.flock(fd, fcntl.LOCK_EX)\nos.ftruncate(fd, 0)\n"
+        "os.write(fd, json.dumps({'pid': os.getpid()}).encode())\n"
+        "with owners.dispatch(shared=False, timeout=10):\n"
+        "    r = subprocess.run(sys.argv[1:], env=dict(os.environ, MCOMP_HUB_PID=str(os.getpid())), timeout=60)\n"
+        "os.remove(p)\nsys.exit(r.returncode)\n" % LAB)
+    ehub = dict(eu, MCOMP_RUN_DIR=ENV["MCOMP_RUN_DIR"])     # the stand-in hub's record and lock: this VM's
+    open(sshlog, "w").close()
+    r = subprocess.run([sys.executable, hub_py, mc, "ssh", "ops", "echo", "from-hub"], env=ehub, capture_output=True,
+                       text=True, timeout=90, stdin=subprocess.DEVNULL)
+    check("the hub's own child is still refused while a handoff is open (the hub never resets then)",
+          r.returncode == 4 and "from-hub" not in read(sshlog), (r.returncode, r.stderr[-300:]))
+    held_rec = owners.handoff_record()
+    clear()
+    try:
+        t0h = time.time()
+        r = subprocess.run([sys.executable, hub_py, mc, "ssh", "ops", "echo", "from-hub"], env=ehub, capture_output=True,
+                           text=True, timeout=90, stdin=subprocess.DEVNULL)
+        took = time.time() - t0h
+        # Not the hub's own child (one more process between them), with the hub's pid in MCOMP_HUB_PID all the same.
+        r2 = subprocess.run([sys.executable, hub_py, sys.executable, "-c",
+                             "import subprocess, sys; sys.exit(subprocess.run(sys.argv[1:]).returncode)",
+                             mc, "ssh", "ops", "echo", "no-hub"],
+                            env=ehub, capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL)
+    finally:
+        handoff.write_record(held_rec)
+    check("with none open, the VM's hub's own child (its input reset) gets through at once, under the lock that hub "
+          "holds exclusively (no wait on it, no refusal)", r.returncode == 0 and "from-hub" in read(sshlog)
+          and took < owners.DISPATCH_WAIT_S, (r.returncode, round(took, 1), r.stderr[-300:]))
+    check("...while one that isn't its child, MCOMP_HUB_PID or not, waits for the lock that hub holds and is refused "
+          "(exit 4, the guest isn't reached)", r2.returncode == 4 and "no-hub" not in read(sshlog),
+          (r2.returncode, r2.stderr[-200:]))
     t0 = owners.input_reset_at()
     r = subprocess.run([mc, "input-reset", "--check"], env=eu, capture_output=True, text=True, timeout=60)
     check("--check only reads: it runs for anyone, and records nothing", r.returncode == 0 and "--check" in read(sshlog)
@@ -1296,7 +2083,7 @@ def fill_checks():
     os.remove(fail)
     p = start("--why", "captcha", "--say", SAY, **{k: v for k, v in e.items() if k.startswith(("MCOMP_", "VAULT_"))})
     opened = wait_open() is not None
-    run("cancel", claude=None)
+    run("cancel", claude=SESSION_A)
     finish(p)
     check("an unconfirmed request whose settle fails leaves a marker; a handoff settles first and refuses until "
           "it can, then opens", r.returncode == 5 and left and refused and opened and not marks(),
@@ -2000,7 +2787,7 @@ def dialog_checks():
         return False
 
     def end_it(p):
-        run("cancel", claude=None)
+        run("cancel", claude=SESSION_A)
         return finish(p)
 
     p = opened(SAY, prompts=None)
@@ -2123,6 +2910,355 @@ def dialog_checks():
           rec.get("interactive") is True and r.returncode == 0 and not dfile("dialog.args"), (rec, r.returncode))
 
 
+
+def panel_checks():
+    """The "Hand back" panel (HANDBACK_PANEL; lib/handoff.py run_panel, lib/handback_panel.js): only a click in a macOS
+    window answers it. The real panel is built off-screen in its self-test (when this runs in the Mac's screen
+    session); the helper's rules are checked with a stand-in for osascript in this process."""
+    print("the Hand back panel on the Mac's screen")
+    import liveview
+    clear()
+    gui = liveview.gui_reason()
+    if gui is None:
+        r = subprocess.run([handoff.OSASCRIPT, "-l", "JavaScript", handoff.PANEL_SCRIPT, "selftest", "Codex"],
+                           capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        out = r.stdout.strip()
+        check("the real panel (built off-screen): shown without taking the keyboard or activating anything, floating, "
+              "and its Hand back button answers handback", r.returncode == 0 and "visible=true" in out
+              and "floating=true" in out and "nonactivating=true" in out and "key=false" in out
+              and "active=false" in out and "title=Hand back to Codex" in out and out.endswith("answer=handback"), out)
+        frames = []
+        for slot, vm, where in (("0", "vm-a", "on this Mac"), ("1", "vm-b", "on Oracle Cloud")):
+            o2 = subprocess.run([handoff.OSASCRIPT, "-l", "JavaScript", handoff.PANEL_SCRIPT, "selftest", "Codex", vm, where,
+                                 slot], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL).stdout
+            f = dict(w.split("=", 1) for w in o2.split() if "=" in w)
+            frames.append((f.get("window"), f.get("text"), [int(x) for x in f.get("frame", "0,0,0,0").split(",")],
+                           int(f.get("step", 0))))
+        (wa, ta, fa, step), (wb, tb, fb, _) = frames
+        check("two VMs' panels: each names its VM and where it is (title and text), and the second sits below the first "
+              "with room for its title bar (none covers another)", wa == "metacomputer:_vm-a" and wb == "metacomputer:_vm-b"
+              and "vm-a_on_this_Mac" in (ta or "") and "vm-b_on_Oracle_Cloud" in (tb or "") and fa[0] == fb[0]
+              and fa[1] - (fb[1] + fb[3]) >= 30 and step > fa[3], frames)
+        r = subprocess.run([handoff.OSASCRIPT, "-l", "JavaScript", handoff.PANEL_SCRIPT, "selftest", 'x"); $.NSApp',
+                            "../vm;x", "on $(x)", "0"], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        check("…a VM name or place that isn't a plain one is never shown",
+              "window=metacomputer:_the_virtual_computer" in r.stdout and "$" not in r.stdout
+              and "frame=" + ",".join(map(str, fa)) in r.stdout, r.stdout)
+        titles = []
+        for vm in ("_alpha", "_beta"):
+            o3 = subprocess.run([handoff.OSASCRIPT, "-l", "JavaScript", handoff.PANEL_SCRIPT, "selftest", "Codex", vm,
+                                 "on this Mac", "0"], capture_output=True, text=True, timeout=60,
+                                stdin=subprocess.DEVNULL).stdout
+            titles.append(dict(w.split("=", 1) for w in o3.split() if "=" in w).get("window"))
+        check("…a VM name by the naming rule that starts with _ is shown as it is: two such VMs' panels differ",
+              titles == ["metacomputer:__alpha", "metacomputer:__beta"], titles)
+        bad_args = []
+        # (selftest: the same checks as show's, and its panel is built off-screen, so a check that let one through
+        # never puts a panel on the screen)
+        for args in (["selftest", "Claude", "demo", "on this Mac", "-?"], ["selftest", "Claude", "demo", "on this Mac", "1junk"],
+                     ["selftest", "Claude", "demo", "on this Mac", "junk"], ["selftest", "Claude", "demo", "on this Mac", "12"],
+                     ["selftest", "Claude", "demo", "on this Mac", "01"], ["selftest", "-x", "demo", "on this Mac", "0"],
+                     ["layout", "0", "0", "800", "575", "1x"], ["layout", "-10", "0", "800", "575", "0"],
+                     ["capacity", "-?"]):
+            r5 = subprocess.run([handoff.OSASCRIPT, "-l", "JavaScript", handoff.PANEL_SCRIPT, *args], capture_output=True,
+                                text=True, timeout=30, stdin=subprocess.DEVNULL)
+            if r5.returncode == 0 or r5.stdout.strip():
+                bad_args.append((args, r5.returncode, r5.stdout[-100:]))
+        check("…a slot that isn't a whole number from 0 to 11 written plainly, or any word starting with '-': refused, "
+              "nothing shown (osascript exits non-zero, no answer)", not bad_args, bad_args)
+        check("…a name that isn't a plain word is never shown (Claude instead); an unknown mode shows nothing",
+              "title=Hand back to Claude" in r.stdout and subprocess.run(
+                  [handoff.OSASCRIPT, "-l", "JavaScript", handoff.PANEL_SCRIPT, "nope", "Claude"], capture_output=True,
+                  text=True, timeout=60, stdin=subprocess.DEVNULL).stdout.strip() == "", r.stdout)
+    else:
+        print(f"SKIP the real panel's self-test: {gui}")
+    # The VM's name in the panel: scripts/lib.sh's naming rule exactly (mc_valid_vm_name), so a name that starts with _
+    # is shown as it is, and two such VMs' panels say which is which.
+    lib_fn = next(ln for ln in read(os.path.join(LAB, "scripts", "lib.sh")).splitlines()
+                  if ln.startswith("mc_valid_vm_name() {"))
+    names = ["_alpha", "_beta", "a", "A-1.b_c", "9z", "_", "-x", ".x", "", "a" * 64, "a" * 65, "x y", "x/y", "caf\u00e9"]
+    py_ok = [bool(handoff.VM_NAME_RE.fullmatch(n)) for n in names]
+    by_locale = [[subprocess.run(["/bin/bash", "-c", lib_fn + '\nmc_valid_vm_name "$1"', "x", n],
+                                 env=dict(os.environ, LC_ALL=loc)).returncode == 0 for n in names]
+                 for loc in ("C", "en_US.UTF-8")]          # in a UTF-8 locale a range like A-Z matches accented letters
+    bash_ok = by_locale[0] if by_locale[0] == by_locale[1] else by_locale
+    was = os.environ.get("MCOMP_VM_NAME")
+    ids = []
+    try:
+        for n in ("_alpha", "_beta"):
+            os.environ["MCOMP_VM_NAME"] = n
+            ids.append(handoff.panel_identity()[0])
+    finally:
+        os.environ.pop("MCOMP_VM_NAME", None)
+        if was is not None:
+            os.environ["MCOMP_VM_NAME"] = was
+    check("the panel takes a VM's name by scripts/lib.sh's rule exactly, in any locale (_alpha and _beta included: two "
+          "such VMs' panels name each)", bash_ok == py_ok and bash_ok[:6] == [True] * 6 and ids == ["_alpha", "_beta"]
+          and "/^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/.test(vm)" in read(handoff.PANEL_SCRIPT), (names, bash_ok, py_ok, ids))
+    # Where the places are, on screens of several sizes (the script's own arithmetic, `layout X Y W H SLOT`): every
+    # place up to the screen's capacity fits whole inside the visible area (the title bar too) and covers no other;
+    # one past it is still kept inside; the helper's number of places is the script's.
+    js = read(handoff.PANEL_SCRIPT)
+    geo, bad = {}, []
+    for vw, vh in ((1920, 1055), (1440, 875), (1366, 743), (1024, 743), (800, 575), (320, 240)):
+        rects, cap = [], None
+        for slot in range(handoff.PANEL_SLOTS):
+            o4 = subprocess.run([handoff.OSASCRIPT, "-l", "JavaScript", handoff.PANEL_SCRIPT, "layout", "0", "0", str(vw),
+                                 str(vh), str(slot)], capture_output=True, text=True, timeout=60,
+                                stdin=subprocess.DEVNULL).stdout.split()
+            f = dict(w.split("=", 1) for w in o4[1:] if "=" in w)
+            x, y, w, h = (int(v) for v in o4[0].split(","))
+            cap, tb = int(f["capacity"]), int(f["titlebar"])
+            inside = x >= 0 and y >= 0 and y + h + tb <= vh and (x + w <= vw or vw < w)
+            if slot < cap:
+                rects.append((x, y, x + w, y + h + tb))
+                if (f["fits"] != "true" and vw >= w) or not inside:    # narrower than a panel: at the left edge
+                    bad.append((vw, vh, slot, "doesn't fit", o4))
+            elif not (y >= 0 and y + h + tb <= vh):
+                bad.append((vw, vh, slot, "outside", o4))
+        for i, a in enumerate(rects):
+            for b in rects[i + 1:]:
+                if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                    bad.append((vw, vh, "overlap", a, b))
+        geo[(vw, vh)] = cap
+    check("the places: inside the visible area and none covering another, on screens from 1920x1055 down to 320x240 "
+          "(one place there, at its left edge; capacity: %s)" % geo, not bad and geo[(1920, 1055)] == handoff.PANEL_SLOTS and geo[(800, 575)] == 3
+          and geo[(320, 240)] == 1 and "SLOTS = %d;" % handoff.PANEL_SLOTS in js, bad)
+    check("the helper runs Apple's osascript by its absolute path and the panel script beside it (no PATH lookup)",
+          handoff.OSASCRIPT == "/usr/bin/osascript" and handoff.PANEL_SCRIPT == os.path.join(LAB, "lib", "handback_panel.js"))
+
+    d = os.path.join(TD, "panel")
+    os.makedirs(d, exist_ok=True)
+    stand_in = os.path.join(d, "osascript")
+    with open(stand_in, "w") as f:
+        f.write("#!/bin/sh\n[ \"$4\" = capacity ] && { printf '%b' \"${PANEL_CAP:-6\\n}\"; exit 0; }\n"
+                "echo \"$@\" >> " + os.path.join(d, "argv.log") + "\n"
+                "case \"$PANEL_ANSWER\" in sleep) sleep \"${PANEL_SLEEP:-30}\" ;; raw) printf '%b' \"$PANEL_RAW\" ;;"
+                " *) printf '%s\\n' \"$PANEL_ANSWER\" ;; esac\n"
+                "[ -n \"$PANEL_KILL\" ] && kill -9 $$\nexit \"${PANEL_RC:-0}\"\n")
+    os.chmod(stand_in, 0o755)
+    real = (handoff.OSASCRIPT, handoff.panel_off_reason)
+    hid = "h-abcabcabcabc"
+    slot_root = os.path.join(d, "runtime")
+    os.makedirs(slot_root, mode=0o700)
+    handoff.PANEL_SLOT_ROOT = slot_root
+
+    def open_one(i=hid):
+        clear()
+        t = time.time()
+        handoff.write_record({"v": 1, "id": i, "status": "open", "why": "login", "say": "x", "opened": t,
+                              "deadline": t + 120, "timeout_s": 120, "cwd": TD, "claude_pid": None, "agent": "Codex"})
+
+    def panel(answer, i=hid):
+        os.environ["PANEL_ANSWER"] = answer
+        return handoff.run_panel(i)
+    try:
+        handoff.OSASCRIPT = stand_in
+        handoff.panel_off_reason = lambda: None
+        open_one()
+        panel("handback")
+        rec = owners.handoff_record()
+        argv = read(os.path.join(d, "argv.log")).split()
+        check("a click on Hand back ends the handoff as done (ended_from mac_panel); the panel was asked with fixed "
+              "arguments: the script, show, the agent's name, the VM's name and where it is, its slot", rec["status"] == "done"
+              and rec["ended_from"] == "mac_panel" and argv[:9] == ["-l", "JavaScript", handoff.PANEL_SCRIPT, "show", "Codex",
+                                                                    "hotest", "on", "this", "Mac"]
+              and len(argv) == 10 and argv[9].isdigit(), (rec, argv))
+        open_one()
+        panel("cancel")
+        rec = owners.handoff_record()
+        check("Call it off cancels it", rec["status"] == "cancelled" and rec["ended_from"] == "mac_panel", rec)
+        for answer in ("", "handback now", "done", "HANDBACK"):
+            open_one()
+            panel(answer)
+            check(f"any other answer ({answer!r}: the panel closed some other way) changes nothing",
+                  owners.open_handoff() is not None)
+        # Only the exact answer of an osascript that exits 0: one that fails or is killed after printing it, or prints
+        # it with anything around it, is no answer (the handoff stays open).
+        odd = [("exits 1 after printing it", {"PANEL_RC": "1"}, "handback"),
+               ("is killed after printing it", {"PANEL_KILL": "1"}, "handback"),
+               ("prints it without its newline", {"PANEL_RAW": "handback"}, "raw"),
+               ("prints it with a space before it", {"PANEL_RAW": " handback\\n"}, "raw"),
+               ("prints it with another line after it", {"PANEL_RAW": "handback\\nhandback\\n"}, "raw"),
+               ("prints it with 100 spaces after it", {"PANEL_RAW": "handback" + " " * 100 + "\\n"}, "raw"),
+               ("prints it with a carriage return", {"PANEL_RAW": "handback\\r\\n"}, "raw")]
+        for what, extra, answer in odd:
+            open_one()
+            os.environ.update(extra)
+            try:
+                panel(answer)
+            finally:
+                for k in extra:
+                    os.environ.pop(k, None)
+            check(f"an osascript that {what} is no answer: the handoff stays open", owners.open_handoff() is not None)
+        check("...and the exact answers are the only ones taken", handoff.panel_answer(0, b"handback\n") == "done"
+              and handoff.panel_answer(0, b"cancel\n") == "cancelled" and handoff.panel_answer(-9, b"handback\n") is None
+              and handoff.panel_answer(0, b"handback") is None and handoff.panel_answer(1, b"cancel\n") is None)
+        open_one()
+        t0 = time.time()
+        box = {}
+        th = threading.Thread(target=lambda: box.update(rc=panel("sleep")))
+        th.start()
+        time.sleep(1.2)
+        handoff.end(hid, "done", "terminal")
+        th.join(15)
+        check("the panel is taken down when the handoff ends another way", not th.is_alive() and time.time() - t0 < 10
+              and box.get("rc") == 0 and owners.handoff_record()["ended_from"] == "terminal", (box, time.time() - t0))
+        # Two VMs with a handoff open at once: each helper names its own VM, and the second takes the next slot.
+        wrap = os.path.join(d, "two.py")
+        open(wrap, "w").write(
+            "import os, sys, time\nsys.path.insert(0, os.path.join(%r, 'lib'))\nimport handoff\n"
+            "handoff.OSASCRIPT = %r\nhandoff.PANEL_SLOT_ROOT = %r\nhandoff.panel_off_reason = lambda: None\nt = time.time()\n"
+            "handoff.write_record({'v': 1, 'id': sys.argv[1], 'status': 'open', 'why': 'login', 'say': 'x', 'opened': t,"
+            " 'deadline': t + 60, 'timeout_s': 60, 'cwd': '/', 'claude_pid': None})\n"
+            "sys.exit(handoff.run_panel(sys.argv[1]))\n" % (LAB, stand_in, slot_root))
+        open(os.path.join(d, "argv.log"), "w").close()
+        procs = []
+        for i, (vm, place) in enumerate((("vm-a", "mac"), ("vm-b", "mac"))):
+            rd = os.path.join(TD, f"two-run-{vm}")
+            procs.append(subprocess.Popen([sys.executable, wrap, f"h-00000000000{i + 1}"],
+                                          env=dict(os.environ, MCOMP_RUN_DIR=rd, MCOMP_VM_NAME=vm, MCOMP_PLACE=place,
+                                                   PANEL_ANSWER="sleep", PANEL_SLEEP="4")))
+            end = time.time() + 10
+            while time.time() < end and len(read(os.path.join(d, "argv.log")).splitlines()) < i + 1:
+                time.sleep(0.1)
+        for p_ in procs:
+            p_.wait(30)
+        lines = [ln.split() for ln in read(os.path.join(d, "argv.log")).splitlines()]
+        slots = [ln[-1] for ln in lines]
+        check("two VMs' panels at once: each names its own VM, in a slot of its own (stacked, not on top of each other)",
+              len(lines) == 2 and lines[0][5] == "vm-a" and lines[1][5] == "vm-b" and len(set(slots)) == 2, lines)
+        # Every place on the screen taken (here 2 fit, and every slot's lock is held): no panel goes on top of
+        # another; it waits, and takes the place that comes free.
+        import fcntl
+        sd = os.path.join(slot_root, handoff.PANEL_SLOT_DIR)
+        os.makedirs(sd, exist_ok=True)
+        held = {}
+        for n in range(12):
+            held[n] = os.open(os.path.join(sd, f"slot-{n}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(held[n], fcntl.LOCK_EX)
+        open(os.path.join(d, "argv.log"), "w").close()
+        open_one()
+        os.environ.update(PANEL_CAP="2\\n", PANEL_ANSWER="handback")
+        box = {}
+        th = threading.Thread(target=lambda: box.update(rc=handoff.run_panel(hid)))
+        th.start()
+        time.sleep(handoff.PANEL_WAIT_S * 2 + 0.5)
+        shown_early = read(os.path.join(d, "argv.log"))
+        os.close(held.pop(1))
+        th.join(handoff.PANEL_WAIT_S * 3 + 10)
+        shown = read(os.path.join(d, "argv.log")).split()
+        for fd_ in held.values():
+            os.close(fd_)
+        os.environ.pop("PANEL_CAP", None)
+        check("every place taken: no panel covers another (none shown while they're all held); the one that comes "
+              "free is taken, and its click counts", shown_early == "" and shown[-1:] == ["1"]
+              and owners.handoff_record()["status"] == "done", (shown_early, shown, owners.handoff_record()))
+        # A slot folder that can't be made or used reserves nothing: no panel is shown unplaced (two helpers would
+        # both take the top place); after a few looks it's given up, and the command waiting for the handoff tells
+        # the user the terminal's way.
+        blocker = os.path.join(d, "not-a-folder")
+        open(blocker, "w").write("x")
+        handoff.PANEL_SLOT_ROOT, wait_was = blocker, handoff.PANEL_WAIT_S
+        handoff.PANEL_WAIT_S = 0.1
+        open(os.path.join(d, "argv.log"), "w").close()
+        open_one()
+        os.environ["PANEL_ANSWER"] = "handback"
+        rcs = [handoff.run_panel(hid), handoff.run_panel(hid)]
+        handoff.PANEL_SLOT_ROOT, handoff.PANEL_WAIT_S = slot_root, wait_was
+        marked = (owners.handoff_record() or {}).get("panel")
+        shown_none = read(os.path.join(d, "argv.log")) == "" and owners.open_handoff() is not None
+        w = start("wait")
+        time.sleep(1.5)
+        user_end("cancel")
+        rc_w, o_w, e_w = finish(w)
+        check("a slot folder that can't be used: no panel at all (not two on the top place); the waiting command says "
+              "to use the terminal", rcs == [0, 0] and shown_none and marked == "unavailable"
+              and "Hand back panel couldn't be shown" in o_w and "metacomputer handoff done" in o_w,
+              (rcs, marked, read(os.path.join(d, "argv.log")), o_w[-400:]))
+        # A slot folder that's there but can't be written (no slot file can be made or opened): a filesystem problem,
+        # not panels holding their places, so it takes the same bounded way (no panel, the waiting command says so),
+        # never an endless wait.
+        ro_root = os.path.join(d, "ro-runtime")
+        os.makedirs(os.path.join(ro_root, handoff.PANEL_SLOT_DIR), mode=0o700)
+        os.chmod(os.path.join(ro_root, handoff.PANEL_SLOT_DIR), 0o500)
+        handoff.PANEL_SLOT_ROOT, wait_was = ro_root, handoff.PANEL_WAIT_S
+        handoff.PANEL_WAIT_S = 0.1
+        open(os.path.join(d, "argv.log"), "w").close()
+        open_one()
+        box = {}
+        th = threading.Thread(target=lambda: box.update(rc=handoff.run_panel(hid)), daemon=True)
+        t0 = time.time()
+        th.start()
+        th.join(10)
+        bounded = not th.is_alive()
+        if th.is_alive():
+            handoff.end(hid, "cancelled", "terminal")
+            th.join(10)
+        handoff.PANEL_SLOT_ROOT, handoff.PANEL_WAIT_S = slot_root, wait_was
+        os.chmod(os.path.join(ro_root, handoff.PANEL_SLOT_DIR), 0o700)
+        marked = (owners.handoff_record() or {}).get("panel")
+        check("a slot folder that can't be written: given up after a few looks (no endless wait), no panel, the handoff "
+              "marked so the waiting command says to use the terminal", bounded and box.get("rc") == 0
+              and marked == "unavailable" and read(os.path.join(d, "argv.log")) == "",
+              (bounded, round(time.time() - t0, 1), box, marked, read(os.path.join(d, "argv.log"))))
+        stand_cap = handoff.OSASCRIPT
+        caps = []
+        for raw_cap in ("5\\n", "99\\n", "0\\n", "x\\n", "5", "5\\n6\\n"):
+            os.environ["PANEL_CAP"] = raw_cap
+            caps.append(handoff.panel_capacity())
+        os.environ.pop("PANEL_CAP", None)
+        check("the number of places is read strictly from the script (anything but a number: 1), at most %d"
+              % handoff.PANEL_SLOTS, caps == [5, handoff.PANEL_SLOTS, 1, 1, 1, 1] and stand_cap == stand_in, caps)
+        open(os.path.join(d, "argv.log"), "w").close()
+        open_one()
+        panel("handback", i="h-000000000000")
+        open_one()
+        panel("handback", i="not-an-id")
+        check("for another handoff than the open one, or an id that isn't one: no panel, nothing changes",
+              owners.open_handoff() is not None and read(os.path.join(d, "argv.log")) == "")
+        lk = os.open(os.path.join(owners.OWNERS_DIR, handoff.PANEL_LOCK), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            panel("handback")
+        finally:
+            os.close(lk)
+        check("one panel per handoff: while one is up, another helper shows none",
+              owners.open_handoff() is not None and read(os.path.join(d, "argv.log")) == "")
+        handoff.panel_off_reason = real[1]
+        for setting, why in (("off", "off"),):
+            os.environ["MCOMP_HANDBACK_PANEL"] = setting
+            panel("handback")
+            check(f"HANDBACK_PANEL={setting}: none", owners.open_handoff() is not None
+                  and handoff.panel_off_reason() == why and read(os.path.join(d, "argv.log")) == "")
+        os.environ["MCOMP_HANDBACK_PANEL"] = "on"
+        os.environ["SSH_CONNECTION"] = "10.0.0.1 1 10.0.0.2 22"
+        try:
+            panel("handback")
+            check("over SSH (not on the Mac's own screen): none", owners.open_handoff() is not None
+                  and "SSH" in (handoff.panel_off_reason() or "") and read(os.path.join(d, "argv.log")) == "")
+        finally:
+            os.environ.pop("SSH_CONNECTION", None)
+            os.environ["MCOMP_HANDBACK_PANEL"] = "off"
+        clear()
+        r = run("_panel-open", MCOMP_HANDBACK_PANEL="on")
+        check("view --open's hook with no handoff open: nothing", r.returncode == 0 and r.stdout == "", r.stdout)
+    finally:
+        handoff.OSASCRIPT, handoff.panel_off_reason = real
+        handoff.PANEL_SLOT_ROOT = None
+        os.environ.pop("PANEL_ANSWER", None)
+        os.environ["MCOMP_HANDBACK_PANEL"] = "off"
+        clear()
+    # The agent's own routes stay refused: an agent session's `handoff done` (no terminal) is refused as before.
+    open_one()
+    r = run("done", claude=SESSION_A)
+    check("an agent session still can't say done (the panel adds no command that does)", r.returncode == 3
+          and owners.open_handoff() is not None, (r.returncode, r.stderr[-200:]))
+    r = run("_panel", hid, claude=SESSION_A, MCOMP_HANDBACK_PANEL="off")
+    check("…and the helper run from an agent session (here with the panel off) changes nothing: only a click in the "
+          "panel answers", r.returncode == 0 and owners.open_handoff() is not None, r.returncode)
+    clear()
+
 def pid_alive(pid):
     try:
         os.kill(pid, 0)
@@ -2153,12 +3289,14 @@ def main():
         lifecycle_checks()
         web_cleanup_checks()
         fill_checks()
+        guest_command_checks()
         input_reset_checks()
         view_checks()
         remember_checks()
         remember_helper_checks()
         keychain_checks()
         dialog_checks()
+        panel_checks()
     finally:
         clear()
         shutil.rmtree(TD, ignore_errors=True)

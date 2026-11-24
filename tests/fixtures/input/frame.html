@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Framed</title>
+<style> body { font: 16px sans-serif; background: #eef; margin: 0; } #box { margin: 20px; padding: 16px; border: 2px solid #446; background: #fff; }
+ button { font-size: 18px; padding: 10px 24px; } </style></head>
+<body><div id="box" role="dialog" aria-label="Framed dialog"><p>Framed dialog</p>
+<button id="confirm">Confirm</button></div>
+<script>
+var B = navigator.userAgent.indexOf("Firefox") >= 0 ? "firefox" : "chrome";
+function log(ev) { ev.b = B; navigator.sendBeacon("/log", JSON.stringify(ev)); }
+function rect(id) { var r = document.getElementById(id).getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; }
+document.getElementById("confirm").addEventListener("click", function (e) { log({what: "iframe-confirm", trusted: e.isTrusted}); });
+window.addEventListener("load", function () { log({what: "frame-layout", confirm: rect("confirm")}); });
+</script></body></html>

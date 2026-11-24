@@ -52,6 +52,31 @@ LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GET = os.path.join(LAB, "get.sh")
 INSTALL = os.path.join(LAB, "install.sh")
 CLI = os.path.join(LAB, "bin", "metacomputer")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import userterm  # noqa: E402
+
+# Commands only metacomputer itself (a build) or the user at their own terminal may run: run here as the user, at a
+# pseudo-terminal no agent session is above (tests/userterm.py).
+USER_ONLY = ("_vnc-install", "_vnc-push")
+
+
+def as_user_at_terminal(argv, env, stdin_text=None, timeout=90):
+    """argv at a pseudo-terminal in a process no agent session is above; what's in stdin_text is typed there, then the
+    end of input. A CompletedProcess-like result (returncode, stdout, stderr as text)."""
+    m, s = pty.openpty()
+    attrs = termios.tcgetattr(s)
+    attrs[3] &= ~termios.ECHO                    # what's typed isn't echoed back into the test's view
+    termios.tcsetattr(s, termios.TCSANOW, attrs)
+    p = userterm.spawn(argv, env=env, stdin=s, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    os.close(s)
+    try:
+        if stdin_text:
+            os.write(m, stdin_text.encode())
+        os.write(m, b"\x04")                    # end of input (a ^D at the start of a line)
+        o, e = p.communicate(timeout=timeout)
+    finally:
+        os.close(m)
+    return subprocess.CompletedProcess(argv, p.returncode, o.decode(errors="replace"), e.decode(errors="replace"))
 PY = sys.executable
 FAILS = []
 
@@ -704,9 +729,14 @@ def build_root(t):
     root = os.path.join(t, "lab")
     for d in ("scripts", "config", "lib"):
         os.makedirs(os.path.join(root, d))
-    for f in ("scripts/lib.sh", "scripts/build-vm.sh", "config/defaults.env", "lib/vms.py", "lib/termsafe.py",
-              "lib/safedelete.py", "scripts/safe-rmtree.sh", "scripts/strictargs.sh", "lib/strictargs.py"):
+    for f in ("scripts/lib.sh", "scripts/build-vm.sh", "config/defaults.env", "scripts/safe-rmtree.sh",
+              "scripts/strictargs.sh"):
         shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
+    # The Python helpers (vms.py, safedelete.py; handoff.py, owners.py and sessionvm.py: the checks a build run on its
+    # own makes, as bin/metacomputer does before it)
+    for f in os.listdir(os.path.join(LAB, "lib")):
+        if f.endswith(".py"):
+            shutil.copy2(os.path.join(LAB, "lib", f), os.path.join(root, "lib", f))
     write(os.path.join(root, "scripts", "build-tools.sh"), '#!/bin/bash\nsleep "${STUB_TOOLS_SLEEP:-0}"\n', 0o755)
     write(os.path.join(root, "scripts", "fetch-artifacts.sh"), "#!/bin/bash\nexit 0\n", 0o755)
     runner = os.path.join(t, "runner")
@@ -839,6 +869,10 @@ def test_vm_mutation_locks():
         root, runner = build_root(t)
         os.makedirs(os.path.join(root, "bin"))
         shutil.copy(CLI, os.path.join(root, "bin", "metacomputer"))
+        # The command's own Python helpers (the handoff check before build --replace and _vnc-install, who runs it)
+        for f in os.listdir(os.path.join(LAB, "lib")):
+            if f.endswith(".py") and not os.path.exists(os.path.join(root, "lib", f)):
+                shutil.copy2(os.path.join(LAB, "lib", f), os.path.join(root, "lib", f))
         locks = os.path.join(t, "locks")
         conf = os.path.join(t, "m.env")
         write(conf, f'VM_NAME=mcbuild\nBASELINE_NAME=mcbuild-baseline\nLUME="{runner}"\nSSH_DIR="{t}/keys"\n'
@@ -870,11 +904,76 @@ def test_vm_mutation_locks():
             os.remove(state + ".log")
         for cmd in (["reset", "--yes"], ["restore", "one", "--yes"], ["checkpoint", "two"], ["checkpoint", "--delete", "one", "--yes"],
                     ["baseline", "--yes"], ["build", "--replace"], ["_vnc-install"]):
-            p = subprocess.run([mc, *cmd], env=env, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+            if cmd[0] in USER_ONLY:
+                p = as_user_at_terminal([mc, *cmd], env, timeout=60)
+            else:
+                p = subprocess.run([mc, *cmd], env=env, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
             check(f"metacomputer {' '.join(cmd)} while the VM's lock is held: refused, naming the holder, touching nothing",
                   p.returncode != 0 and "the test holder" in p.stdout + p.stderr and not mutations(), (p.returncode, (p.stdout + p.stderr)[-300:], mutations()))
         holder.kill()
         holder.wait()
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+
+
+def test_build_held_in_handoff():
+    """While the user has the VM (a handoff), scripts/build-vm.sh run on its own, as a program would, is held before
+    anything is stopped, deleted or written, --replace or a fresh build (it checks itself, as bin/metacomputer does
+    before it runs it); at the user's own terminal it goes ahead."""
+    t = tempfile.mkdtemp(prefix="mcomp-install-")
+    try:
+        root, runner = build_root(t)
+        conf = os.path.join(t, "m.env")
+        write(conf, f'VM_NAME=mcbuild\nBASELINE_NAME=mcbuild-baseline\nLUME="{runner}"\nSSH_DIR="{t}/keys"\n'
+                    f'RUN_DIR="{t}/run"\nLOG_DIR="{t}/logs"\nSSH_PORT=2997\n')
+        state = os.path.join(t, "vms.json")
+        env = {"HOME": os.path.join(t, "home"), "PATH": f"{os.path.dirname(os.path.realpath(PY))}:/usr/bin:/bin:/usr/sbin:/sbin",
+               "MCOMP_CONFIG": conf, "PY": PY, "MCOMP_LOCK_DIR": os.path.join(t, "locks"), "MCOMP_LOCK_WAIT": "1",
+               "STUB_RUNNER_STATE": state, "LANG": "C.UTF-8"}
+        # While the user has the VM (a handoff), build-vm.sh --replace run on its own, as a program would, is held
+        # before anything is stopped, deleted or written (it checks itself, as bin/metacomputer does before it runs
+        # it); at the user's own terminal it goes ahead.
+        od = os.path.join(t, "run", "owners")
+        os.makedirs(od, mode=0o700, exist_ok=True)
+        now = time.time()
+        hf = os.open(os.path.join(od, "handoff.state"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(hf, "w") as fh:
+            json.dump({"v": 1, "id": "h-bbbbbbbbbb01", "status": "open", "why": "login", "say": "x", "opened": now,
+                       "deadline": now + 600, "timeout_s": 600, "cwd": t, "claude_pid": None}, fh)
+        json.dump(["mcbuild", "mcbuild-baseline"], open(state, "w"))
+        if os.path.exists(state + ".log"):
+            os.remove(state + ".log")
+        keys_before = sorted(os.listdir(os.path.join(t, "keys"))) if os.path.isdir(os.path.join(t, "keys")) else []
+
+        def runner_calls():
+            q = state + ".log"
+            return [c for c in (open(q).read().splitlines() if os.path.exists(q) else [])
+                    if c.split()[0] in ("delete", "clone", "create", "stop", "set")]
+        p = subprocess.run([os.path.join(root, "scripts", "build-vm.sh"), "--replace"], env=env, capture_output=True,
+                           text=True, timeout=120, stdin=subprocess.DEVNULL)
+        keys_after = sorted(os.listdir(os.path.join(t, "keys"))) if os.path.isdir(os.path.join(t, "keys")) else []
+        check("scripts/build-vm.sh --replace run on its own while the user has the VM (a handoff): held (exit 4), "
+              "nothing stopped, deleted or written", p.returncode == 4 and "the user has the computer" in p.stdout + p.stderr
+              and not runner_calls() and keys_after == keys_before
+              and not os.path.exists(os.path.join(t, "run", "build-unfinished-mcbuild")),
+              (p.returncode, (p.stdout + p.stderr)[-400:], runner_calls()))
+        # A fresh build too (no VM yet): it sets the guest up, finalizes it, clears its run files and stops it, so it
+        # holds the check for the whole build as well.
+        json.dump([], open(state, "w"))
+        if os.path.exists(state + ".log"):
+            os.remove(state + ".log")
+        p = subprocess.run([os.path.join(root, "scripts", "build-vm.sh")], env=env, capture_output=True, text=True,
+                           timeout=120, stdin=subprocess.DEVNULL)
+        check("a fresh scripts/build-vm.sh (no VM yet) run while a handoff is open: held as well (exit 4), nothing "
+              "created or written", p.returncode == 4 and "the user has the computer" in p.stdout + p.stderr
+              and not runner_calls() and not os.path.exists(os.path.join(t, "run", "build-unfinished-mcbuild")),
+              (p.returncode, (p.stdout + p.stderr)[-400:], runner_calls()))
+        json.dump(["mcbuild", "mcbuild-baseline"], open(state, "w"))
+        p = as_user_at_terminal([os.path.join(root, "scripts", "build-vm.sh"), "--replace"], env, timeout=120)
+        check("...at the user's own terminal it goes ahead (their own hands)", p.returncode != 4
+              and "this runs at your own terminal: going ahead" in p.stdout + p.stderr
+              and any(c.startswith("delete mcbuild") for c in runner_calls()),
+              (p.returncode, (p.stdout + p.stderr)[-400:], runner_calls()))
     finally:
         shutil.rmtree(t, ignore_errors=True)
 
@@ -1519,8 +1618,11 @@ class VncBox:
             if os.path.exists(os.path.join(self.stubs, f)):
                 os.remove(os.path.join(self.stubs, f))
         t0 = time.time()
-        p = subprocess.run([CLI, *args], env=dict(self.env, **extra), capture_output=True, text=True, timeout=90,
-                           input=stdin if stdin is not None else "")
+        if args and args[0] in USER_ONLY:
+            p = as_user_at_terminal([CLI, *args], dict(self.env, **extra), stdin)
+        else:
+            p = subprocess.run([CLI, *args], env=dict(self.env, **extra), capture_output=True, text=True, timeout=90,
+                               input=stdin if stdin is not None else "")
         took = time.time() - t0
 
         def rd(f):
@@ -1710,18 +1812,16 @@ def test_vnc_real_keychain():
         write(conf, f'VM_NAME=mcrealtest\nSSH_DIR="{t}/keys"\nSSH_PORT=2999\nRUN_DIR="{t}/run"\nLOG_DIR="{t}/logs"\n'
                     f'VNC_PASSWORD_STORE=keychain\nLUME="{t}/no-lume"\n')
         py = os.path.dirname(os.path.realpath(PY))
-        p = subprocess.run([CLI, "_vnc-install"], env={"HOME": home, "PATH": f"{stubs}:{py}:/usr/bin:/bin", "MCOMP_CONFIG": conf,
-                                                       "STUB_DIR": stubs, "PY": PY, "MCOMP_LOCK_DIR": os.path.join(t, "locks")},
-                           capture_output=True, text=True, timeout=90, input="")
+        p = as_user_at_terminal([CLI, "_vnc-install"], {"HOME": home, "PATH": f"{stubs}:{py}:/usr/bin:/bin", "MCOMP_CONFIG": conf,
+                                                        "STUB_DIR": stubs, "PY": PY, "MCOMP_LOCK_DIR": os.path.join(t, "locks")})
         pw = open(os.path.join(stubs, "ssh.stdin")).read().strip() if os.path.exists(os.path.join(stubs, "ssh.stdin")) else ""
         found = subprocess.run([sec, "find-generic-password", "-s", "metacomputer-vnc", "-a", "mcrealtest", kc], env=senv,
                                capture_output=True, text=True, timeout=30)
         check("real security: the password goes into the (throwaway) login keychain through `security -i`, no fallback file",
               p.returncode == 0 and found.returncode == 0 and not os.path.exists(os.path.join(t, "keys", "vnc-pass"))
               and pw and pw not in p.stdout + p.stderr and '"icmt"<blob>="mcomp-' in found.stdout, (p.returncode, found.returncode, p.stderr[-300:]))
-        p2 = subprocess.run([CLI, "_vnc-install"], env={"HOME": home, "PATH": f"{stubs}:{py}:/usr/bin:/bin", "MCOMP_CONFIG": conf,
-                                                        "STUB_DIR": stubs, "PY": PY, "MCOMP_LOCK_DIR": os.path.join(t, "locks")},
-                            capture_output=True, text=True, timeout=90, input="")
+        p2 = as_user_at_terminal([CLI, "_vnc-install"], {"HOME": home, "PATH": f"{stubs}:{py}:/usr/bin:/bin", "MCOMP_CONFIG": conf,
+                                                         "STUB_DIR": stubs, "PY": PY, "MCOMP_LOCK_DIR": os.path.join(t, "locks")})
         found2 = subprocess.run([sec, "find-generic-password", "-s", "metacomputer-vnc", "-a", "mcrealtest", kc], env=senv,
                                 capture_output=True, text=True, timeout=30)
         check("real security, again: the existing item is updated in place (-U) and verified by the new tag, still no fallback file",
@@ -2249,6 +2349,7 @@ test_install_lock()
 test_build_vm_locks()
 test_lock_lifetime()
 test_vm_mutation_locks()
+test_build_held_in_handoff()
 test_build_tools_stamps()
 test_install_existing()
 test_install_tools_and_space()

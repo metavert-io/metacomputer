@@ -257,7 +257,7 @@ FORMS = [
     ([], "logs", [H]), ([], "logs", ["40", H]),
     ([], "help", [H]), ([], "-h", []), ([], "--help", []), ([], "help", []),
     # metacomputer's own plumbing: never typed by a person, and still nothing on --help
-    ([], "_health", [H]), ([], "_runinfo", [H]), ([], "_record-pipe", [H]), ([], "_task-sync", [H]),
+    ([], "_health", [H]), ([], "_runinfo", [H]), ([], "_task-sync", [H]),
     ([], "_vnc-install", [H]), ([], "_vnc-push", [H]),
 ]
 

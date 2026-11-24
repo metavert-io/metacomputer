@@ -156,6 +156,8 @@ ok() { echo "OK $*"; }
 say() { echo "SAY $*"; }
 die() { echo "DIE $*" >&2; exit 9; }
 need_running() { :; }
+handoff_hold_unless_user() { HANDOFF_HELD=1; }   # the handoff hold: tests/test_handoff.py
+ssh_base() { SSH_ARGS=(-F /dev/null); }
 export_options() { :; }
 emit_event() { echo "EVENT $*" >> "$TD/calls"; }
 term_safe() { cat; }
@@ -737,7 +739,7 @@ def _alive(pid):
 
 def record_cli_checks():
     """record start / stop from bin/metacomputer, with a stand-in VM."""
-    funcs = ("record_dir", "record_sidecar", "proc_tree", "run_until", "do_record")
+    funcs = ("record_dir", "record_sidecar", "proc_tree", "run_until", "record_args_ok", "record_stream_start", "do_record")
     td = tempfile.mkdtemp(prefix="mcomp-rec-cli-")
     env = {"MCOMP_EVENTS_DIR": os.path.join(td, "events"), "REC_NAME": "t1"}
     calls = os.path.join(td, "calls")
@@ -754,7 +756,8 @@ def record_cli_checks():
 
         r, log, st = start()
         check("record start with the shipped defaults streams to the Mac (host mode)", r.returncode == 0
-              and "DAEMONIZE" in log and "_record-pipe t1" in log and "mode=host" in st, (r.stderr, log, st))
+              and "DAEMONIZE" in log and "record-stream" in log and "desktop-record stream 't1' 20 standard" in log
+              and "mode=host" in st, (r.stderr, log, st))
         check("...and gives no warning", "WARN" not in r.stderr, r.stderr)
         r, log, st = start(defaults=False)
         check("with RECORD_TO unset altogether, host too", r.returncode == 0 and "mode=host" in st, (r.stderr, st))
