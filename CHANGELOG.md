@@ -83,13 +83,18 @@ All notable changes to metacomputer are recorded here. The format follows
   when it starts and then closes every descriptor it has on that lock). It looks at the computer its own settings and
   transport name: its name and run folder (one computer's; a storage command for another VM looked at the main VM's
   handoff when no run folder was given), or the computer whose SSH folder its transport names (`put`, `attach`, the
-  recorder); a transport that names none of this checkout's computers is checked at the run folder it's given; names
-  that disagree, or settings that can't be read, refuse. Some changes reach several computers and wait for each that can
-  be told: `volume sync` for every computer the holder records show with the volume, or a folder inside or around its
-  copy, attached (records that can't be read refuse; read again under the sync's own lock before each exchange, and one
-  that attached meanwhile stops it, though not one that attaches during the last exchange), `volume delete` for every
-  computer of this checkout's whose checkpoints keep it, and Oracle Cloud's `cloud setup` and creates (they rewrite the
-  network its computers share) for every computer of this checkout's there. At your own terminal, or under the hold of
+  recorder); a transport that names none of this checkout's computers is checked at the run folder it's given. The
+  computers are this checkout's main one, its config/vms/ ones and the one an `MCOMP_CONFIG` file chooses (as
+  scripts/lib.sh chooses it), their settings read without running them and only as bash reads them: `KEY=value`,
+  `KEY="value"` and `KEY='value'` lines, optionally after `export`; a line that sets a computer's name, folders,
+  provider or place any other way, and any `source`, `.`, `eval` or `set -a` line, refuse, as do names that disagree
+  and settings that can't be read. Some changes reach several computers and wait for each that can be told: `volume
+  sync` for every computer the holder records show with the volume, or a folder inside or around its copy, attached
+  (records that can't be read, or whose process can't be told alive or gone, refuse; read again under the sync's own
+  lock before each exchange, and one that attached meanwhile stops it, though not one that attaches during the last
+  exchange), `volume delete` for every computer of this checkout's whose checkpoints keep it, and Oracle Cloud's
+  `cloud setup` and creates (they rewrite the network its computers share) for every computer of this checkout's
+  there. At your own terminal, or under the hold of
   the command that runs it, it goes ahead: a descriptor on that very lock file (6 from `metacomputer`, 5 from our
   scripts; a command run under one keeps it) that has taken the lock (the kernel's own record of it, which can't tell a
   past lock from a current one; never an environment variable); a recorder's `--hold-fd` is checked the same way, never

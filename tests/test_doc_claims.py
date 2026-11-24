@@ -3168,16 +3168,25 @@ CLAIMS = [
                     r"allow\|remove\|clear` and `vm delete` \(`--force` or not\)",
      lambda m: bin_commands_held()),
     ("SECURITY.md", r"at the computer its own settings and transport name: the one its name and run folder say\s+\(one "
-                    r"computer's, by this checkout's settings\), or the one whose SSH folder its transport names \(`put`, "
-                    r"`attach`,\s+the recorder's stream\); a transport that names none of this checkout's computers is "
-                    r"checked at the run folder it's\s+given. Names that disagree, or settings that can't be read, refuse",
-     lambda m: computer_bound()),
+                    r"computer's, by this checkout's settings: the main one, each config/vms/ one, and the one an "
+                    r"`MCOMP_CONFIG` file\s+chooses, as scripts/lib.sh chooses it\), or the one whose SSH folder its "
+                    r"transport names \(`put`, `attach`, the\s+recorder's stream\); a transport that names none of this "
+                    r"checkout's computers is checked at the run folder it's\s+given",
+     lambda m: computer_bound() and config_computer()),
+    ("SECURITY.md", r"Those settings are read without running them, and only as bash reads them: `KEY=value`, "
+                    r"`KEY=\"value\"` and\s+`KEY='value'` lines, optionally after `export` and with a comment after, "
+                    r"with `\$HOME`, `\$LAB_ROOT` and a leading `~`\s+read. A line that sets a computer's name, run or "
+                    r"SSH folder, provider or place any other way \(a backslash, `\+=`,\s+`declare`, text after the "
+                    r"value, inside or after an `if`, a loop, braces or a function\), and any `source`, `.`,\s+`eval` or "
+                    r"`set -a` line, refuse, never read as unset",
+     lambda m: settings_read_strictly()),
     ("SECURITY.md", r"Some changes reach several computers, and wait for each that can be told,\s+in one order: `volume "
                     r"sync` for every computer that the holder records show with the volume, or a folder inside or\s+"
-                    r"around its copy, attached \(records that are there and can't be read refuse; who they are is read "
-                    r"again under the\s+sync's own lock before each exchange with the copy, and one that attached "
-                    r"meanwhile stops it with exit 4",
-     lambda m: volume_users_strict()),
+                    r"around its copy, attached \(records that are there and can't be read refuse, and so does a holder "
+                    r"whose process can't\s+be told alive or gone: no valid pid or start time, or `ps` can't say; who "
+                    r"they are is read again under the\s+sync's own lock before each exchange with the copy, and one that "
+                    r"attached meanwhile stops it with exit 4",
+     lambda m: volume_users_strict() and holder_liveness_strict()),
     ("SECURITY.md", r"`volume delete` for every computer of this checkout's whose\s+checkpoints keep it",
      lambda m: shared_gated()),
     ("SECURITY.md", r"looks once when it starts, then closes every descriptor it has on that lock file,\s+so neither it "
@@ -3303,6 +3312,39 @@ def volume_users_strict():
             and "users_check=same_users" in sy and 'handoff_gate.refuse(f"volume' in sy
             and s3.index("if users_check:\n                    users_check()") < s3.index("root1 = open_copy_root(rec)")
             and s3.index("if users_check:\n                        users_check()") < s3.index("after = Exchange("))
+
+
+def config_computer():
+    """labconfig.computers adds the computer an MCOMP_CONFIG file chooses (after the defaults, as scripts/lib.sh reads
+    it; same-file rule with MCOMP_VM; deduped by real path against config/local.env and config/vms/), first, and the gate
+    takes the first computer of a name."""
+    c, sel = py_top_fn("lib/labconfig.py", "computers"), py_top_fn("lib/labconfig.py", "_selected_file")
+    return ("cfg = _selected_file(env, out[0], vms)" in c and "out.insert(0, c)" in c
+            and "if real == os.path.realpath(main_file):" in c and "os.path.dirname(real) == vms_real" in c
+            and 'env.get("MCOMP_CONFIG")' in sel and 'env.get("MCOMP_VM")' in sel and "choose different settings" in sel
+            and 'by_name.setdefault(c["name"], c)' in py_top_fn("lib/handoff_gate.py", "owners_dir_for"))
+
+
+def settings_read_strictly():
+    """labconfig's strict reader: KEY=value lines (optionally after export) fully matched; a line that names a watched
+    setting otherwise, or after a block, raises; so do source, ., eval and set -a; values only with HOME and LAB_ROOT."""
+    import labconfig
+    ps = py_top_fn("lib/labconfig.py", "_parse_strict")
+    return (set(labconfig.WATCHED) == {"VM_NAME", "RUN_DIR", "SSH_DIR", "PROVIDER", "PLACE"}
+            and {"source", ".", "eval"} <= labconfig._SETTERS and "m = _ASSIGN.fullmatch(line)" in ps
+            and "if m and not block:" in ps and "hit = _WATCHED.search(line)" in ps and "raise Unclear(" in ps
+            and labconfig._ASSIGN.fullmatch('export RUN_DIR="$LAB_ROOT/x"  # c') is not None
+            and labconfig._ASSIGN.fullmatch("RUN_DIR=/x\\ y") is None
+            and 'known = {"HOME": home, "LAB_ROOT": root}' in py_top_fn("lib/labconfig.py", "_value"))
+
+
+def holder_liveness_strict():
+    """volume_users leaves out only a holder whose process is certainly gone (holder_state "dead"); "unknown" (no valid
+    pid or start time, or ps can't say for a pid that's there) raises HoldersUnknown."""
+    hs, vu = py_top_fn("lib/storage.py", "holder_state"), py_top_fn("lib/storage.py", "volume_users")
+    return ("except ProcessLookupError:\n            return \"dead\"" in hs and 'return "unknown"' in hs
+            and "type(pid) is not int" in hs and 'if state == "unknown":\n            raise HoldersUnknown' in vu
+            and "holder_alive(" not in vu)
 
 
 def shared_gated():

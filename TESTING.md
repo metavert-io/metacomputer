@@ -590,8 +590,18 @@ read refuses, and one that attaches after the gate (injected right after it) sto
 exchange; `look_once` with a hold handed on as two descriptors keeps neither (real flocks: an exclusive lock is had
 while it still runs); with no settings files at all the main computer keeps its default name; an Oracle Cloud computer's
 handoff stops `cloud setup oci` and another's create there (Hetzner's setup doesn't wait); settings that can't be read
-(the config/vms folder, a file in it) make `cloud setup`, `put` and `kill-vm` refuse; `metacomputer mcp` with no hub and
-a bounded driver waits before writing a missing manifest. Last, with a `lib/sessionvm.py` that crashes, is missing or
+(the config/vms folder, a file in it) make `cloud setup`, `put` and `kill-vm` refuse. Settings are read as bash reads
+them or refused: `export RUN_DIR=...` is that folder (`put` and `kill-vm` wait for the handoff there), `export
+PROVIDER=oci` puts a computer in Oracle's gate, a folder with a `~` inside quotes (bash leaves it as written) or a
+variable other than `$HOME` and `$LAB_ROOT` can't be told, and a backslash, `+=`, `declare`, `readonly`, `local`, text
+after the value, a block, a here-document, `source`, `.`, `eval` or `set -a` refuse (`kill-vm` and `put` exit 4 with no
+handoff open), while config/local.env.example's settings, uncommented, read cleanly. A computer chosen by `MCOMP_CONFIG`
+(the example's second VM, outside the checkout) is its own: a storage command for it goes ahead with only the main
+computer's handoff open and waits with its own, `put` with a transport to it waits, `MCOMP_VM` naming another computer
+refuses, and `MCOMP_CONFIG` naming config/local.env is the main computer. A volume sync refuses when a holder's process
+may be alive but can't be told (a `ps` that fails, a record with no start time, a pid that isn't a number), and doesn't
+wait for a holder whose process is gone or whose pid is now another process's. `metacomputer mcp` with no hub and a
+bounded driver waits before writing a missing manifest. Last, with a `lib/sessionvm.py` that crashes, is missing or
 can't be read, `metacomputer` and `scripts/build-vm.sh` refuse instead of going on, and `MC_SCRIPT_HELD=1` in a script's
 environment doesn't skip its handoff check.
 

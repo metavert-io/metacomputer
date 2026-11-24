@@ -783,14 +783,22 @@ notice (`--say` cleaned like every event) and writes a record,
   (`checkpoint NAME`, `checkpoint --delete`), `net allow|remove|clear` and `vm delete` (`--force` or not). Each looks
   right after its command line, before it asks a provider anything, runs anything in the guest or writes anything
   (`lib/handoff_gate.py`), at the computer its own settings and transport name: the one its name and run folder say
-  (one computer's, by this checkout's settings), or the one whose SSH folder its transport names (`put`, `attach`,
-  the recorder's stream); a transport that names none of this checkout's computers is checked at the run folder it's
-  given. Names that disagree, or settings that can't be read, refuse. It stops with exit 4 and the same words, and
+  (one computer's, by this checkout's settings: the main one, each config/vms/ one, and the one an `MCOMP_CONFIG` file
+  chooses, as scripts/lib.sh chooses it), or the one whose SSH folder its transport names (`put`, `attach`, the
+  recorder's stream); a transport that names none of this checkout's computers is checked at the run folder it's
+  given. Those settings are read without running them, and only as bash reads them: `KEY=value`, `KEY="value"` and
+  `KEY='value'` lines, optionally after `export` and with a comment after, with `$HOME`, `$LAB_ROOT` and a leading `~`
+  read. A line that sets a computer's name, run or SSH folder, provider or place any other way (a backslash, `+=`,
+  `declare`, text after the value, inside or after an `if`, a loop, braces or a function), and any `source`, `.`,
+  `eval` or `set -a` line, refuse, never read as unset; a folder given with another variable can't be told and refuses
+  where it's needed. So do names that disagree, and settings that can't be read. It stops with exit 4 and the same
+  words, and
   otherwise holds the dispatch lock to the end of its run (the recorder's stream until it's up; the watcher, which
   runs for as long as its VM does, looks once when it starts, then closes every descriptor it has on that lock file,
   so neither it nor what it forks keeps one). Some changes reach several computers, and wait for each that can be told,
   in one order: `volume sync` for every computer that the holder records show with the volume, or a folder inside or
-  around its copy, attached (records that are there and can't be read refuse; who they are is read again under the
+  around its copy, attached (records that are there and can't be read refuse, and so does a holder whose process can't
+  be told alive or gone: no valid pid or start time, or `ps` can't say; who they are is read again under the
   sync's own lock before each exchange with the copy, and one that attached meanwhile stops it with exit 4: a computer
   that attaches during that last exchange isn't seen), `volume delete` for every computer of this checkout's whose
   checkpoints keep it (one of another checkout's refuses), and a provider whose setup and creates rewrite a network its
@@ -814,7 +822,8 @@ notice (`--say` cleaned like every event) and writes a record,
   fails `tests/test_acting.py`). The test runs each line of what's sorted as acting by itself while a handoff is open,
   at your terminal, under a hold on descriptor 6 or 5, and with a descriptor on the lock file that never took it (no
   hold); and the input resets, the commands that are yours only, bin/metacomputer's acting forms, and fixtures for what
-  changes several computers, for helpers run for another computer, and for settings that can't be read. It doesn't
+  changes several computers, for helpers run for another computer, for settings that can't be read or are written in
+  a way this doesn't read, and for an `MCOMP_CONFIG` computer. It doesn't
   run what's sorted as reaching a computer only through other entries, as judged per call (the hub, the relay, the
   shell channel, which take their computer from the run folder they're given, MCOMP_RUN_DIR: their own tests), or as
   changing none: those rest on how they're sorted;
