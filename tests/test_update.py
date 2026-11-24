@@ -152,9 +152,40 @@ co6 = fresh("0.3.0")
 rc, out, calls = upd(co6, "update", "--ref", "v0.2.0")
 check("going back (--ref an older release): refused", rc == 3 and "isn't ahead" in out and "--allow-downgrade" in out
       and not calls, out)
+check("…on main, the refusal says how to go back (check out the tag, then install.sh), not --allow-downgrade alone",
+      "main only moves forward" in out and "git checkout v0.2.0" in out and "./install.sh --allow-downgrade" in out, out)
 rc, out, calls = upd(co6, "update", "--ref", "v0.2.0", "--allow-downgrade")
 check("…and on main it can't be moved back even with --allow-downgrade (main only goes forward)", rc == 3
       and git("rev-parse", "HEAD", cwd=co6) == tags["0.3.0"] and not calls, out)
+# Past the newest release: main pulled from the repository after v0.3.0 (its own origin, so the others' isn't changed).
+past = tempfile.mkdtemp(prefix="origin-past-", dir=TD)
+git("clone", "-q", origin, past, cwd=TD)
+write(os.path.join(past, "NOTES.md"), "after 0.3.0\n")
+git("add", "-A", cwd=past)
+git("commit", "-qm", "after 0.3.0", cwd=past)
+co8 = tempfile.mkdtemp(prefix="co-", dir=TD)
+git("clone", "-q", past, co8, cwd=TD)
+head8 = git("rev-parse", "HEAD", cwd=co8)
+rc, out, calls = upd(co8, "update")
+check("past the newest release on the repository's main: nothing to do (exit 0), not a way back, nothing moved or run",
+      rc == 0 and "past the newest release, v0.3.0" in out and "./install.sh" in out and "allow-downgrade" not in out
+      and git("rev-parse", "HEAD", cwd=co8) == head8 and not calls, (rc, out, calls))
+rc, out, _ = upd(co8, "update", "--check", "--json")
+j = json.loads(out)
+check("…update --check --json: up to date, past the latest", rc == 0 and j["latest"] == "v0.3.0" and j["up_to_date"] is True
+      and j["past_latest"] is True and j["whats_new"] == [], j)
+rc, out, calls = upd(co8, "update", "--ref", "v0.3.0")
+check("…but asking for that release by name is going back: refused", rc == 3 and "main only moves forward" in out
+      and git("rev-parse", "HEAD", cwd=co8) == head8 and not calls, out)
+co9 = fresh("0.3.0")
+write(os.path.join(co9, "MINE.md"), "my commit\n")
+git("add", "-A", cwd=co9)
+git("commit", "-qm", "mine", cwd=co9)
+head9 = git("rev-parse", "HEAD", cwd=co9)
+rc, out, calls = upd(co9, "update")
+check("past the newest release with commits of its own: refused as the owner's to move, not as a way back",
+      rc == 3 and "commits of its own after v0.3.0" in out and "allow-downgrade" not in out
+      and git("rev-parse", "HEAD", cwd=co9) == head9 and not calls, out)
 # An install whose Claude Code step didn't finish (install.sh hands MCOMP_INSTALL_INCOMPLETE=claude to the after-install
 # step) is recorded as such, and `update` runs install.sh again although the checkout is at the release.
 co7 = fresh("0.3.0")
