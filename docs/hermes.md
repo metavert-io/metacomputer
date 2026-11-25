@@ -117,8 +117,9 @@ sign-ins or environment, only the variables you name with `--pass-env`. Each ses
 time never share one. It holds the run's server (with its settings in the entry's `env`, since Hermes passes its MCP
 servers no other variables), tool search off and the skill under test linked in; afterwards the gateway Hermes started
 for that home is stopped (`hermes gateway stop`; Hermes finds it with `ps`, which can't start in macOS's sandbox, so the
-benchmark then stops any gateway of that home still running itself, by its arguments and `HERMES_HOME` as the kernel has
-them) and the home is deleted.
+benchmark then stops any gateway of that home still running itself: a Python interpreter, by its executable, running
+`-m hermes_cli.main gateway run` in exactly those places, with that `HERMES_HOME`, as the kernel has them, and checked
+to be the same process, by its pid and start time read again, before each signal) and the home is deleted.
 
 **What it may do without asking:** Hermes runs a configured server's tools without asking, and has no allowlist for its
 terminal: commands it doesn't rate dangerous run without asking. The session gets only the terminal, skills and

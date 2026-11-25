@@ -178,9 +178,12 @@ Every session gets the same harness, so only the switches differ:
   timeout (the task's `timeout_s`; the process group is stopped when it runs out).
 
 The skill text names the installed launcher (`~/.local/bin/metacomputer`).
-The copy given to the session names this checkout's `bin/metacomputer`
-instead, so a branch is tested with its own CLI. `metacomputer` and `mcomp`
-on the session's PATH point there too.
+The copy given to the session names a launcher in the work folder instead,
+which runs this checkout's `bin/metacomputer`, so a branch is tested with its
+own CLI. `metacomputer` and `mcomp` on the session's PATH and the MCP server
+are that launcher too, for every agent, and it's the only metacomputer
+command the session's approvals allow (the checkout's `bin/metacomputer` by
+its own path isn't one).
 
 ### Isolated sessions
 
@@ -226,8 +229,10 @@ or fails:
 - **The `--pass-env` variables are the agent's only.** metacomputer's own
   commands that the benchmark runs (`reset` and `start`, whose VM runner,
   gateway and hub keep running afterwards, and the rest) get your
-  environment without them, and the session's launchers drop them, so no
-  process of metacomputer's holds your key.
+  environment without them, and the session's launchers (its `metacomputer`
+  and `mcomp` commands and its MCP server, whichever the agent, Claude Code
+  and Codex included) drop them, so no process of metacomputer's holds your
+  key. The agent itself still gets them.
 
 A throwaway HOME is not a sandbox: a command an agent may run still runs as
 you. That's why what each agent may do without asking is kept to

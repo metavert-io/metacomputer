@@ -46,17 +46,22 @@ All notable changes to metacomputer are recorded here. The format follows
   before anything is changed. A VM that is stopped is reported as before.
 - **bench: the `--pass-env` variables (a model key) stay the sessions':** `reset` and `start`, run by bench, got bench's
   whole environment, so the VM runner, the network gateway and the hub they leave running kept the key after the run.
-  metacomputer's own commands that bench runs now go without those variables, and the sessions' `metacomputer`
-  launchers drop them.
+  metacomputer's own commands that bench runs now go without those variables, and so do every session's
+  `metacomputer` and `mcomp` commands and its MCP server, whichever the agent (Claude Code's and Codex's, which keep
+  your environment, included): launchers in the work folder that drop them, the only metacomputer commands the
+  session's approvals allow. The agent itself still gets them.
 - **bench, OpenClaw:** input tokens include the cached prompt tokens OpenClaw reports apart (`cacheRead`,
   `cacheWrite`); they were left out, which understated input by orders of magnitude.
 - **bench, Hermes Agent:** the gateway a session starts is stopped even where Hermes's own `gateway stop` can't find
-  it (it looks with `ps`), so it no longer outlives the session and writes into the home bench has deleted. Where
+  it (it looks with `ps`), so it no longer outlives the session and writes into the home bench has deleted. It's told by
+  its executable, `-m hermes_cli.main` and `gateway run` in their places and the session's `HERMES_HOME`, and checked
+  to be the same process (pid and start time) before each signal. Where
   Hermes can't run git, run.json's version is the release tag of its checkout's HEAD (read from the checkout's
   files), or `unknown`, not "vunknown".
 - **bench's metrics:** a `metacomputer` command run through a variable holding its path (`M=.../metacomputer; $M call
-  ...`, as Hermes Agent's sessions do), by a quoted path or after `--vm` or `env -i` counts as a CLI call, not as other
-  Bash (most of Hermes Agent's calls were counted as other Bash).
+  ...`, as Hermes Agent's sessions do), by a quoted path, after `--vm` or `env -i`, or under `sh`, `bash` or `zsh`
+  with `-c` among other short options (`bash -lc`, `zsh -ic`) counts as a CLI call, not as other Bash (most of Hermes
+  Agent's calls were counted as other Bash); whatever the earlier pattern counted still counts.
 - **Docs:** [docs/openclaw.md](docs/openclaw.md) gives OpenClaw 2026.11.x's Node.js requirement (24.16 or a later 24,
   or 26.1 or later); [docs/hermes.md](docs/hermes.md) says Hermes Agent 0.23.x can't be installed from PyPI or with pip,
   and how a benchmark run installed it (the release tag from GitHub and `uv sync --frozen`).

@@ -20,6 +20,15 @@ HERMES_SETTINGS = (("tools.tool_search.enabled", "off"), ("approvals.mode", "man
 HERMES_MANAGED = "/etc/hermes"
 GATEWAY_STOP_S = 10             # a gateway left running gets SIGTERM (its own shutdown), then SIGKILL after this long
 RELEASE_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")      # Hermes's release tags (its version reader's v[0-9]*)
+# Hermes's gateway, as Hermes starts one for a home (hermes_cli/gateway_runtime_start.py spawn_unmanaged_gateway):
+# [sys.executable, "-m", "hermes_cli.main", (--profile NAME), "gateway", "run", --quiet, ...]. A Python interpreter, by its
+# executable (the kernel's, its text image) and by its first argument; CPython's options that may come before -m (the
+# ones without a value, alone or clustered, and -W/-X with theirs).
+PYTHON = re.compile(r"python(\d+(\.\d+)*t?)?|Python")
+PY_FLAGS = frozenset("bBdEiIOPqRsSuvx")
+PY_VALUE_OPTS = ("-W", "-X")
+GATEWAY_MODULE = "hermes_cli.main"
+PROFILE_OPTS = ("--profile", "-p")
 SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -121,65 +130,91 @@ def end(B, prog, home):
         stop_gateways(B, hh)
 
 
-def is_gateway(args):
-    """Whether a command line is Hermes's gateway: `python -m hermes_cli.main ... gateway run ...` (as Hermes starts it)
-    or its `hermes` command's `... gateway run ...`."""
-    words = args[1:]
-    if "-m" in words:
-        i = words.index("-m")
-        if words[i + 1:i + 2] != ["hermes_cli.main"]:
-            return False
-        rest = words[i + 2:]
-    else:
-        at = [i for i, w in enumerate(args) if os.path.basename(w) == "hermes"]
-        if not at:
-            return False
-        rest = args[at[0] + 1:]
-    return any(rest[j:j + 2] == ["gateway", "run"] for j in range(len(rest)))
+def is_gateway(args, exe):
+    """Whether a process is Hermes's gateway as Hermes starts one: its executable (exe: the realpath of its text image)
+    and its first argument a Python interpreter; then that interpreter's options and nothing else up to `-m
+    hermes_cli.main` (the module it runs); then, after Hermes's profile selector (--profile NAME, -p NAME, --profile=NAME),
+    `gateway run` in exactly those places. A word "hermes", "gateway" or "run" anywhere else (a script's arguments, -c
+    code, another Hermes command's) never makes one."""
+    if not exe or not args or not PYTHON.fullmatch(os.path.basename(exe)) or not PYTHON.fullmatch(os.path.basename(args[0])):
+        return False
+    i = 1
+    while i < len(args) and args[i] != "-m":
+        w = args[i]
+        if w in PY_VALUE_OPTS:
+            i += 2
+        elif w.startswith(PY_VALUE_OPTS) or (len(w) > 1 and w[0] == "-" and set(w[1:]) <= PY_FLAGS):
+            i += 1
+        else:
+            return False                # a script, -c code, or anything else before -m: not the module Hermes runs
+    if args[i + 1:i + 2] != [GATEWAY_MODULE]:
+        return False
+    rest = args[i + 2:]
+    if rest[:1] and rest[0] in PROFILE_OPTS:
+        rest = rest[2:]
+    elif rest[:1] and rest[0].startswith(tuple(o + "=" for o in PROFILE_OPTS)):
+        rest = rest[1:]
+    return rest[:2] == ["gateway", "run"]
+
+
+def same_process(B, pid, start):
+    """Whether pid is still the process that started at start (read fresh from the kernel, kern.proc.pid): False when
+    it ended, is a zombie, its pid is another process's now, or that can't be told."""
+    try:
+        p = B.procinfo.kernel_proc(pid)
+    except Exception:
+        return False
+    return p is not None and not p.zombie and p.start == start
 
 
 def gateways(B, hh):
     """This session's Hermes gateways still running, [(pid, start)]: this account's processes that run Hermes's gateway
-    (is_gateway) with this session's Hermes home as HERMES_HOME in their environment (how Hermes starts one for a home).
-    Read from the kernel (lib/procinfo.py), never ps: arguments and environment exactly, whatever can or can't run."""
+    (is_gateway: by their executable, the module and the arguments' places) with this session's Hermes home as
+    HERMES_HOME in their environment (how Hermes starts one for a home). Read from the kernel (lib/procinfo.py), never
+    ps: executable, arguments and environment exactly, whatever can or can't run; each read again after them to be the
+    process they were read from (its pid and start time), or left out."""
     want = os.path.realpath(hh)
     found = []
     for p in B.procinfo.kernel_procs() or []:
         if p.pid <= 1 or p.uid != os.getuid() or p.zombie:
             continue
         args = B.procinfo.argv(p.pid)
-        if not args or not is_gateway(args):
+        if not args or not is_gateway(args, B.procinfo.exe(p.pid)):
             continue
         home = (B.procinfo.environ(p.pid) or {}).get("HERMES_HOME") or ""
-        if home and os.path.realpath(home.rstrip("/") or "/") == want:
+        if home and os.path.realpath(home.rstrip("/") or "/") == want and same_process(B, p.pid, p.start):
             found.append((p.pid, p.start))
     return found
 
 
+def signal_if_same(B, pid, start, sig):
+    """sig to pid only while it is still the process found (same_process, read fresh right before): never one that
+    took its pid meanwhile, nor when that can't be told."""
+    if not same_process(B, pid, start):
+        return False
+    try:
+        os.kill(pid, sig)
+        return True
+    except OSError:
+        return False
+
+
 def stop_gateways(B, hh):
     """Stop this session's gateways (gateways): SIGTERM, its own shutdown; after GATEWAY_STOP_S, SIGKILL to each still
-    there, found again (the same process: its pid and start time)."""
-    def there(pid, start):
-        p = B.procinfo.kernel_proc(pid)
-        return p is not None and not p.zombie and p.start == start
+    there, found again. Before every signal, the first SIGTERM too, it is checked to be the same process (its pid and
+    start time, read fresh: signal_if_same)."""
     found = gateways(B, hh)
-    for pid, _ in found:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+    for pid, start in found:
+        signal_if_same(B, pid, start, signal.SIGTERM)
     end = time.monotonic() + GATEWAY_STOP_S
-    while found and time.monotonic() < end and any(there(*g) for g in found):
+    while found and time.monotonic() < end and any(same_process(B, *g) for g in found):
         time.sleep(0.2)
-    left = [g for g in found if there(*g)]
+    left = [g for g in found if same_process(B, *g)]
     if left:
         again = set(gateways(B, hh))
         for pid, start in left:
             if (pid, start) in again:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
+                signal_if_same(B, pid, start, signal.SIGKILL)
 
 
 def version(B, line, out):

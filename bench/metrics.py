@@ -32,6 +32,32 @@ VAR = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
 # Words before a command that run it (or start a list): env, command, exec, nohup, time, nice and timeout with their
 # options; a list's keywords.
 KEYWORDS = {"!", "{", "}", "then", "do", "else", "elif", "if", "while", "until", "time"}
+SHELLS = ("sh", "bash", "zsh")
+# The shells' options that take the next word as their value (bash's -o/+o NAME and -O/+O NAME, zsh's -o NAME; their
+# long --rcfile/--init-file FILE): within a cluster too (bash -eo pipefail).
+SHELL_VALUE_LETTERS = "oO"
+SHELL_VALUE_LONG = ("--rcfile", "--init-file")
+
+
+def shell_command_string(rest):
+    """The command string `sh|bash|zsh OPTIONS... -c STRING` runs: -c alone or in a cluster of short options (-lc, -ic,
+    -ec, -xec), past the shell's other options (-o NAME, +O NAME, -eo NAME, --norc, --rcfile FILE), as the shells read
+    it: the first word after the options. None without -c, or when no word follows."""
+    has_c, i = False, 0
+    while i < len(rest):
+        w = rest[i]
+        if w in ("--", "-"):
+            i += 1
+            break
+        if w.startswith("--"):
+            i += 2 if w in SHELL_VALUE_LONG else 1
+            continue
+        if len(w) > 1 and w[0] in "-+" and w[1:].isalpha():
+            has_c = has_c or (w[0] == "-" and "c" in w[1:])
+            i += 1 + sum(w[1:].count(x) for x in SHELL_VALUE_LETTERS)
+            continue
+        break
+    return rest[i] if has_c and i < len(rest) else None
 
 BRIDGE_REFUSED = re.compile(r"Refused by the metacomputer bridge|in use by another controller|"
                             r"bounded session has ended", re.I)
@@ -213,7 +239,7 @@ def cli_subcommands(cmd, names=None, depth=0):
     """The metacomputer commands a shell command runs, in order (call, sh, who...): its program metacomputer or mcomp
     (by any path, quoted or not, or a variable it was put in: M=.../metacomputer; $M call), in any simple command
     (after cd ... &&, in a pipeline), after assignments and env/command/exec/nohup/time/nice/timeout, past its --vm and
-    --on options; and inside sh/bash/zsh -c."""
+    --on options; and inside sh/bash/zsh -c (-lc, -ic, any cluster of short options with c: shell_command_string)."""
     import shlex
     names = dict(names or {})
     subs = []
@@ -263,10 +289,24 @@ def cli_subcommands(cmd, names=None, depth=0):
                 rest = rest[2:] if rest[0] in CLI_OPTIONS else rest[1:]
             if rest and SUBCOMMAND.fullmatch(rest[0]):
                 subs.append(rest[0])
-        elif base in ("sh", "bash", "zsh") and "-c" in rest and depth < 3:
-            j = rest.index("-c")
-            if j + 1 < len(rest):
-                subs += cli_subcommands(rest[j + 1], names, depth + 1)
+        elif base in SHELLS and depth < 3:
+            inner = shell_command_string(rest)
+            if inner is not None:
+                subs += cli_subcommands(inner, names, depth + 1)
+    return subs
+
+
+def command_subcommands(cmd):
+    """The metacomputer commands a Bash call ran (cli_subcommands), and every one the plain regex finds (CLI_RE, what
+    was counted before the parse) that the parse doesn't account for: where the parse is partial (a wrapper it doesn't
+    know, a shell's option it can't read), it never drops what the regex would have counted."""
+    from collections import Counter
+    subs = cli_subcommands(cmd)
+    extra = Counter(CLI_RE.findall(cmd)) - Counter(subs)
+    for s in CLI_RE.findall(cmd):
+        if extra[s] > 0:
+            subs.append(s)
+            extra[s] -= 1
     return subs
 
 
@@ -343,7 +383,7 @@ def analyze(events, times=None):
                 m["actions"][action_route(tool, args)] += 1
         elif name == "Bash":
             cmd = args.get("command") or ""
-            subs = cli_subcommands(cmd) or CLI_RE.findall(cmd)     # the regex: what it always counted
+            subs = command_subcommands(cmd)       # the parse, and whatever the regex counted that it doesn't
             if any(s in SHELL_SUBCMDS for s in subs):
                 m["shell_calls"] += 1
             elif subs:

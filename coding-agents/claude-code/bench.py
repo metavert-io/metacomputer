@@ -1,6 +1,7 @@
 """Claude Code's bench launcher (bench/bench.py --agent claude, the default; the harness calls these with itself as B).
 Its stream-json output is the harness's own format (every other agent's events are turned into it), so it needs no
 events() of its own."""
+import os
 
 SKILL_HOME = ".claude"          # the skill goes in the work folder's .claude/skills/ (a project skill)
 ISOLATED = False                # its sessions run with your HOME (--setting-sources project, --strict-mcp-config)
@@ -11,11 +12,14 @@ VERSION_KEY = "claude_code"     # run.json's older name for its version (agent_v
 
 def args(B, t, sw, cfg):
     # The session's own --mcp-config server gives mcp__metacomputer__*; an older plugin copy's names are allowed too.
+    # Its metacomputer commands: the work folder's launchers (the skill copy names the first; metacomputer and mcomp
+    # are them, first on its PATH), which run the checkout's without the --pass-env variables, never the checkout's own.
+    launchers = B.agent_launchers(os.path.dirname(cfg))
     allowed = ["Skill", "Read", "Glob", "Grep", "ToolSearch", "mcp__metacomputer", "mcp__plugin_metacomputer_metacomputer",
-               f"Bash({B.CLI}:*)", "Bash(metacomputer:*)", "Bash(mcomp:*)"]
+               *(f"Bash({c}:*)" for c in launchers), "Bash(metacomputer:*)", "Bash(mcomp:*)"]
     denied = []
     if sw["shell"] == "forbid":
-        for c in (B.CLI, "metacomputer", "mcomp"):
+        for c in (*launchers, B.CLI, "metacomputer", "mcomp"):
             denied += [f"Bash({c} ssh:*)", f"Bash({c} sh:*)"]
     budget = float(t.get("budget_usd") or sw["budget"])
     a = ["-p", B.PREFIX + t["prompt"].strip() + (B.SHELL_FORBID if sw["shell"] == "forbid" else ""),

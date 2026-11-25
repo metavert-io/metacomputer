@@ -128,8 +128,8 @@ def log(msg):
 # --- the VM, through this checkout's CLI ------------------------------------------------------
 # The variables named with --pass-env (a model key, say) are for the agent sessions only. metacomputer's own commands
 # that bench runs get bench's environment without them: reset and start, whose VM runner, gateway and hub keep running
-# after them, and every other (stop, status, who, put, ssh, the settings it reads); so do the metacomputer commands a
-# session runs through its launchers (prepare_workdir).
+# after them, and every other (stop, status, who, put, ssh, the settings it reads); so do the metacomputer commands of
+# every agent's session, its MCP server's included, through the launchers in its work folder (prepare_workdir).
 SESSION_ONLY = set()
 
 
@@ -353,14 +353,21 @@ def prepare_workdir(run_id, sw):
         sys.exit(f"refusing the work folder {work}: not a private folder of yours")
     skill_dst = os.path.join(work, _hooks_or_default(sw.get("agent")).SKILL_HOME, "skills", "metacomputer")
     shutil.copytree(sw["skill"], skill_dst)
-    # The skill names the installed launcher; point the copy at the checkout under test.
+    # The skill names the installed launcher; point the copy at the session's own (agent-bin, below), which runs the
+    # checkout under test.
     for p in glob.glob(os.path.join(skill_dst, "**", "*.md"), recursive=True):
         s = open(p).read()
-        open(p, "w").write(s.replace("~/.local/bin/metacomputer", CLI))
+        open(p, "w").write(s.replace("~/.local/bin/metacomputer", agent_launcher(work)))
+    # metacomputer's commands for the session, whichever agent it is: launchers in the work folder (agent-bin) that run
+    # this checkout's with your HOME and without the variables named with --pass-env (the agent's, a model key: never
+    # metacomputer's, nor a hub's or gateway's such a command may start). Its MCP server is the first, and the shim
+    # folder (first on PATH where the session keeps your HOME) holds links to them.
+    os.makedirs(os.path.join(work, "agent-bin"), 0o700)
+    write_launchers(work, sw)
     shim = os.path.join(work, "bin")
     os.mkdir(shim, 0o700)
-    for n in ("metacomputer", "mcomp"):
-        os.symlink(CLI, os.path.join(shim, n))
+    for launcher in agent_launchers(work):
+        os.symlink(launcher, os.path.join(shim, os.path.basename(launcher)))
     cfg = os.path.join(work, "mcp.json")
     env = {"MCOMP_CONFIG": os.environ["MCOMP_CONFIG"], "MCOMP_COORD_GUARD": sw["coord_guard"]}
     if os.environ.get("MCOMP_EXPECT_VM"):
@@ -368,29 +375,27 @@ def prepare_workdir(run_id, sw):
     if sw.get("hub"):
         env["MCOMP_MCP_HUB"] = sw.get("hub")
     env.update(lessons_env(sw))
-    json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": CLI, "args": ["mcp-lazy"], "env": env}}},
-              open(cfg, "w"))
+    json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": agent_launcher(work), "args": ["mcp-lazy"],
+                                               "env": env}}}, open(cfg, "w"))
     h = hooks(sw["agent"]) if sw.get("agent") in BENCH_AGENTS else None
     if h is not None and hasattr(h, "prepare"):
         h.prepare(B, work, shim)            # what the agent's session reads in the work folder (its launcher's)
-    if h is not None and h.ISOLATED:
-        # An isolated session's HOME is a throwaway one; metacomputer, the system under test, keeps yours (its settings,
-        # SSH keys and vault are there): its commands for those sessions (metacomputer, mcomp) are launchers that run
-        # this checkout's with your HOME, first on the session's PATH; the skill names the first, and they are the only
-        # commands the sessions' approvals allow. They drop the variables named with --pass-env: those are the agent's
-        # (a model key), never metacomputer's, nor a hub's or gateway's such a command may start.
-        os.makedirs(os.path.join(work, "agent-bin"), 0o700)
-        drop = [n for n in pass_env_names(sw) if ENV_NAME.fullmatch(n)]
-        for launcher in agent_launchers(work):
-            with open(launcher, "w") as f:
-                f.write(f"#!/bin/sh\nHOME={shlex.quote(os.path.expanduser('~'))}; export HOME\n"
-                        + (f"unset {' '.join(drop)}\n" if drop else "")
-                        + f"exec {shlex.quote(CLI)} \"$@\"\n")
-            os.chmod(launcher, 0o700)
-        for p in glob.glob(os.path.join(skill_dst, "**", "*.md"), recursive=True):
-            t = open(p).read()
-            open(p, "w").write(t.replace(CLI, agent_launcher(work)))
+    # An isolated session's HOME is a throwaway one; metacomputer, the system under test, keeps yours (its settings, SSH
+    # keys and vault are there): its launchers go first on that session's PATH, and they are the only commands its
+    # approvals allow. A session that keeps your HOME (its launcher isn't ISOLATED) has the shim folder first instead.
     return work, cfg, shim
+
+
+def write_launchers(work, sw):
+    """The session's metacomputer commands (agent_launchers): each runs this checkout's CLI with your HOME, without the
+    variables named with --pass-env, whatever the agent's own environment holds."""
+    drop = [n for n in pass_env_names(sw) if ENV_NAME.fullmatch(n)]
+    for launcher in agent_launchers(work):
+        with open(launcher, "w") as f:
+            f.write(f"#!/bin/sh\nHOME={shlex.quote(os.path.expanduser('~'))}; export HOME\n"
+                    + (f"unset {' '.join(drop)}\n" if drop else "")
+                    + f"exec {shlex.quote(CLI)} \"$@\"\n")
+        os.chmod(launcher, 0o700)
 
 
 def agent_launchers(work):
