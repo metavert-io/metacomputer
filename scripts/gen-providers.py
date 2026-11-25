@@ -15,7 +15,6 @@ so a new provider is its folder, one registry line and a CHANGELOG line, and the
     python3 scripts/gen-providers.py --check   change nothing; exit 1 and list what isn't current (tests/test_cloud_adapters.py)
 
 Works under any python3 (macOS's 3.9 included)."""
-import argparse
 import os
 import sys
 
@@ -147,19 +146,16 @@ def read(rel):
         return f.read()
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(prog="gen-providers.py", description="Write what's made from the providers' "
-                                 "manifests (docs/providers.md, lib/cloud/providers.sh, the credential lines, "
-                                 "CODEOWNERS' providers).")
-    ap.add_argument("--check", action="store_true", help="change nothing; exit 1 and list what isn't current")
-    a = ap.parse_args(argv)
+def main(argv):
+    import strictargs           # anything but [--check] (-hx, --bogus, a word) is refused before anything is written
+    check = bool(strictargs.expect(argv, ["[--check]"], prog="gen-providers.py", usage=__doc__).opts.get("--check"))
     try:
         want = wanted()
     except (ValueError, OSError) as e:
         print(f"gen-providers.py: {e}", file=sys.stderr)
         return 1
     stale = [rel for rel, text in want.items() if not os.path.isfile(os.path.join(LAB, rel)) or read(rel) != text]
-    if a.check:
+    if check:
         for rel in stale:
             print(f"not current: {rel} (python3 scripts/gen-providers.py writes it)")
         return 1 if stale else 0
@@ -176,4 +172,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
