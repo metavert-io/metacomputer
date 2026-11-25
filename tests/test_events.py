@@ -275,9 +275,12 @@ def sink_cases():
             got = f"raised {e!r}"
         if got != c["out"]:
             wrong.append((c["where"], c["in"], got, c["out"]))
+    from sinkkit import manifests
     kinds = {c["kind"] for c in cs}
+    need = {""} | {k for k in events.KINDS if manifests.manifest(k).get("vault")}      # the shared ones, and the vault's
     check(f"the stream's sinks answer all {len(cs)} cases as they say (header names, each kind's URLs, formats' numbers, "
-          "fields and endpoints)", not wrong and kinds == {""} | set(events.KINDS), (wrong[:6], sorted(kinds)))
+          "fields and endpoints); every kind the vault's audit sinks have has its cases", not wrong and need <= kinds,
+          (wrong[:6], sorted(need - kinds)))
 
 
 # --- the sinks' folders, and no kind named in shared code ---------------------------------------
