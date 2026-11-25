@@ -3,13 +3,14 @@
 
     python3 tests/test_sprites.py
 
-- The `sprite` transport (lib/cloud/sprites.py opener): ssh through `sprite proxy -W :22` as the ProxyCommand, run
-  through lib/proxywrap.py, the host key pinned under mcomp-NAME; bad organizations, Sprite names and CLI paths refused.
+- The `sprite` transport (providers/sprites/adapter.py opener): ssh through `sprite proxy -W :22` as the
+  ProxyCommand, run through lib/proxywrap.py, the host key pinned under mcomp-NAME; bad organizations, Sprite names
+  and CLI paths refused.
 - The network policy: EGRESS=internet allows every name, off denies every name, an allowlist lists names (each with its
   subdomains unless exact); addresses and anything that isn't a DNS name refused (Fly takes anything); what's read
   back is classified (none: nothing enforced).
-- The adapter through the facade of Fly's command (lib/spritecli.py) and a stand-in for it: create (refused when a
-  Sprite of that name exists), wake, sleep, status, delete (never another Sprite of the same name), checkpoints by
+- The adapter through the facade of Fly's command (providers/sprites/cli.py) and a stand-in for it: create (refused
+  when a Sprite of that name exists), wake, sleep, status, delete (never another Sprite of the same name), checkpoints by
   name (create, list, restore, delete), the policy set and read back; the command runs with HOME, PATH and LANG only,
   and `sprite exec` never forwards ports back to the Mac.
 - lib/remote.py: a launch journaled before the Sprite is made; a lost launch (its answer never came) found by name
@@ -38,10 +39,12 @@ sys.path.insert(0, TESTS)
 import cloud  # noqa: E402
 import mcp_hub  # noqa: E402
 import remote  # noqa: E402
-import spritecli  # noqa: E402
 from cloud import capabilities as caps  # noqa: E402
-from cloud import sprites, transport  # noqa: E402
+from cloud import transport  # noqa: E402
 from cloud.adapter import AdapterError  # noqa: E402
+
+sprites = cloud.registry.module("sprites")
+spritecli = cloud.registry.module("sprites", "cli")
 
 FAILS = []
 PY = os.environ.get("MCOMP_TEST_PY") or shutil.which("python3") or sys.executable
@@ -497,7 +500,7 @@ def hub_guard():
 
 def guest():
     print("\nthe guest's services")
-    d = os.path.join(LAB, "provisioning", "sprite", "rootfs", "opt", "metacomputer", "sprite")
+    d = os.path.join(LAB, "providers", "sprites", "guest", "rootfs", "opt", "metacomputer", "sprite")
     hide = open(os.path.join(d, "hide-sprite-api")).read()
     check("hide-sprite-api: an empty tmpfs over /.sprite, then the program", "mount -t tmpfs" in hide
           and "/.sprite" in hide and hide.rstrip().endswith('exec "$@"'))
@@ -537,7 +540,7 @@ def guest():
     svcs = open(os.path.join(d, "services")).read()
     check("services: session first, sshd and xvfb in it, desktop after xvfb",
           "mk session svc-session; mk sshd svc-sshd session" in svcs and "mk xvfb svc-xvfb session; mk desktop svc-desktop xvfb" in svcs)
-    conf = open(os.path.join(LAB, "provisioning", "sprite", "rootfs", "etc", "ssh", "sshd_config.d",
+    conf = open(os.path.join(LAB, "providers", "sprites", "guest", "rootfs", "etc", "ssh", "sshd_config.d",
                              "05-metacomputer-sprite.conf")).read()
     check("sshd listens on the Sprite's loopback, by number", "ListenAddress 127.0.0.1" in conf and "ListenAddress ::1" in conf
           and "localhost" not in conf.replace('"localhost"', "").split("ListenAddress")[1])
@@ -548,7 +551,7 @@ def guest():
     si = open(os.path.join(LAB, "provisioning", "guest", "rootfs", "opt", "metacomputer", "bin", "session-init")).read()
     check("the live view on loopback only: x11vnc's IPv6 listener off too (it opened [::]:5900 despite -noipv6)",
           'LISTEN=127.0.0.1 V6="-rfbportv6 -1"' in si and '-listen "$LISTEN" -noipv6 $V6' in si)
-    boot = open(os.path.join(LAB, "provisioning", "sprite", "bootstrap.sh")).read()
+    boot = open(os.path.join(LAB, "providers", "sprites", "guest", "bootstrap.sh")).read()
     check("bootstrap.sh: the session and sshd as Sprites services, sshd checked to be in the session, its host key last",
           "services sshd" in boot and "tini" in boot and "sshd isn't in the session's namespaces" in boot
           and boot.rstrip().splitlines()[-1].startswith('echo "HOSTKEY'))

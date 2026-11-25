@@ -67,6 +67,12 @@ def num(expr):
     return ev(tree.body)
 
 
+def cloud_provider(name, part="adapter"):
+    """A registered provider's module (providers/<name>/<part>.py), as lib/cloud/registry.py loads it."""
+    import cloud
+    return cloud.registry.module(name, part)
+
+
 def swift(rel, pattern):
     """The first group of PATTERN in a Swift file (vault/...), as written."""
     m = re.search(pattern, raw(rel))
@@ -1987,12 +1993,12 @@ CLAIMS = [
      and "fe80::/10" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
      and "Before=network-pre.target" in raw("provisioning/remote/rootfs/etc/systemd/system/metacomputer-firewall.service")),
     ("SECURITY.md", r"OCI applies no security rule\s+to 169\.254\.0\.0/16",
-     lambda m: '"metadata": False' in raw("lib/cloud/oci.py") and '"169.254.0.0/16"' in raw("lib/cloud/ubuntu_vm.py")
+     lambda m: '"metadata": False' in raw("providers/oci/manifest.py") and '"169.254.0.0/16"' in raw("lib/cloud/ubuntu_vm.py")
      and "169.254" not in "".join(__import__("cloud.ubuntu_vm").ubuntu_vm.public_v4())),
     ("SECURITY.md", r"each computer's own network security group lets out public IPv4 addresses only",
-     lambda m: "egress_security_rules=[]))" in raw("lib/cloud/oci.py") and "for cidr in public_v4()]" in raw("lib/cloud/oci.py")
-     and "nsg_ids=[nsg_id] if nsg_id else None" in raw("lib/cloud/oci.py")
-     and raw("lib/cloud/oci.py").index("nsg = api.make_nsg(name, egress, op=op,") < raw("lib/cloud/oci.py").index("iid = api.launch(")),
+     lambda m: "egress_security_rules=[]))" in raw("providers/oci/adapter.py") and "for cidr in public_v4()]" in raw("providers/oci/adapter.py")
+     and "nsg_ids=[nsg_id] if nsg_id else None" in raw("providers/oci/adapter.py")
+     and raw("providers/oci/adapter.py").index("nsg = api.make_nsg(name, egress, op=op,") < raw("providers/oci/adapter.py").index("iid = api.launch(")),
     ("SECURITY.md", r"rules that don't\s+load give way to an SSH-only fallback \(nothing out but replies, and nothing of the full rules in it\), and if that\s+doesn't load either, the network stays down",
      lambda m: "render_emergency()" in raw("provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall")
      and "set private" not in subprocess.run(["/bin/sh", os.path.join(LAB, "provisioning/remote/rootfs/opt/metacomputer/bin/guest-firewall"),
@@ -2034,19 +2040,19 @@ CLAIMS = [
      and "return a.api.delete_nsg_by_id(gid, name)" in py_top_fn("lib/remote.py", "delete_group")
      and "raise Refused(" in raw("lib/remote.py") and "deleted again" in raw("lib/remote.py")),
     ("SECURITY.md", r"`start` checks\s+that no session or handoff has the computer, and never hard-stops a running instance unless its whole console\s+capture ends with the guest's power-off",
-     lambda m: "def powered_off(self, name):" in raw("lib/cloud/oci.py") and "Nothing was stopped" in raw("lib/cloud/oci.py")
-     and "reboot: Power down" in raw("lib/cloud/oci.py") and "opc-bytes-remaining" in raw("lib/cloud/oci.py")
+     lambda m: "def powered_off(self, name):" in raw("providers/oci/adapter.py") and "Nothing was stopped" in raw("providers/oci/adapter.py")
+     and "reboot: Power down" in raw("providers/oci/adapter.py") and "opc-bytes-remaining" in raw("providers/oci/adapter.py")
      and "owners_check" in fn_src("bin/metacomputer", "do_start_remote")
      and "handoff_hold_unless_override" in fn_src("bin/metacomputer", "do_start_remote")),
     ("SECURITY.md", r"a stop is waited for through OCI's 15-minute shutdown window",
-     lambda m: __import__("cloud.oci").oci.STOP_WAIT_S >= 900 + 60
-     and raw("lib/cloud/oci.py").count('"STOPPED", timeout=STOP_WAIT_S)') >= 3),
+     lambda m: cloud_provider("oci").STOP_WAIT_S >= 900 + 60
+     and raw("providers/oci/adapter.py").count('"STOPPED", timeout=STOP_WAIT_S)') >= 3),
     ("SECURITY.md", r"the shared network\s+is changed only under a lock \(`vm create`, `cloud setup` and `cloud teardown` alike\), and never deleted while a\s+computer is being made in it",
      lambda m: "with network_lock(a.name):" in py_top_fn("lib/remote.py", "cmd_cloud")
      and 'return mac_lock(f"{prov}-network")' in py_top_fn("lib/remote.py", "network_lock")
      and "pending = a.api.nsg_names()" in py_top_fn("lib/remote.py", "cmd_cloud")
      and "**provider_kw(args.provider)" in py_top_fn("lib/remote.py", "cmd_cloud")
-     and "with self._network_lock():" in raw("lib/cloud/oci.py")),
+     and "with self._network_lock():" in raw("providers/oci/adapter.py")),
     ("SECURITY.md", r"A fresh connection is never one shared with a connection you have open \(`ControlMaster=no`, `ControlPath=none`\)",
      lambda m: "MC_OWNER_OPTS=(-o ControlMaster=no -o ControlPath=none" in fn_src("scripts/lib.sh", "mc_owner_ssh_opts")
      and 'OWN=(ssh -o BatchMode=yes "${MC_OWNER_OPTS[@]}"' in raw("scripts/remote-build.sh")
@@ -2077,10 +2083,10 @@ CLAIMS = [
      lambda m: py_top_fn("lib/remote.py", "cmd_abort").index("st.update(instance=next(iter(found)), op=op, kept=now()")
      < py_top_fn("lib/remote.py", "cmd_abort").index('a.api.action(iid, "STOP")')),
     ("SECURITY.md", r"What a build makes of the shared network and its computer's\s+group is recorded under the network lock, by their OCIDs, as it's made, and the clean-up deletes those exact\s+resources and no others;[^;]*; the journal is on the disk \(`F_FULLFSYNC`,\s+or `fsync` where that isn't supported\) before anything billable is launched, and an error making it so refuses the launch",
-     lambda m: 'made("made_network", net["vcn"])' in raw("lib/cloud/oci.py")
-     and 'on_made=lambda gid: made("made_nsg", gid)' in raw("lib/cloud/oci.py")
-     and raw("lib/cloud/oci.py").index("with self._network_lock():\n            # What this operation makes")
-     < raw("lib/cloud/oci.py").index('made("made_network", net["vcn"])')
+     lambda m: 'made("made_network", net["vcn"])' in raw("providers/oci/adapter.py")
+     and 'on_made=lambda gid: made("made_nsg", gid)' in raw("providers/oci/adapter.py")
+     and raw("providers/oci/adapter.py").index("with self._network_lock():\n            # What this operation makes")
+     < raw("providers/oci/adapter.py").index('made("made_network", net["vcn"])')
      and "a.api.delete_network_by_id(made_net)" in py_top_fn("lib/remote.py", "delete_op_parts")
      and "delete_network()" not in py_top_fn("lib/remote.py", "delete_op_parts")
      and "delete_network()" not in py_top_fn("lib/remote.py", "cmd_abort")
@@ -2122,32 +2128,32 @@ CLAIMS = [
      and "computer_id: computerID" in raw("vault/Commands.swift") and '"identity", "--vm", ' not in raw("vault/Commands.swift")),
     # The hourly providers (docs/remote.md "Hetzner Cloud, DigitalOcean and Vultr"; lib/cloud/vps.py and its drivers).
     ("SECURITY.md", r"Vultr's firewall filters only\s+what comes in \(SSH only\): nothing outside a Vultr computer limits what it sends",
-     lambda m: __import__("cloud.vultr").vultr.MANIFEST["outside_egress"] == {"enforced": False, "private_ranges": False,
+     lambda m: cloud_provider("vultr").MANIFEST["outside_egress"] == {"enforced": False, "private_ranges": False,
                                                                            "metadata": False, "off": False}
-     and 'raise NotSupported("vultr", "outside egress rules"' in raw("lib/cloud/vultr.py")
+     and 'raise NotSupported("vultr", "outside egress rules"' in raw("providers/vultr/adapter.py")
      and "if not self.manifest[\"outside_egress\"][\"enforced\"]:" in raw("lib/cloud/vps.py")),
     ("SECURITY.md", r"neither is claimed to refuse the metadata\s+service",
-     lambda m: all(__import__(f"cloud.{p}").__dict__[p].MANIFEST["outside_egress"]["metadata"] is False
-                   and __import__(f"cloud.{p}").__dict__[p].MANIFEST["outside_egress"]["private_ranges"] is True
+     lambda m: all(cloud_provider(p).MANIFEST["outside_egress"]["metadata"] is False
+                   and cloud_provider(p).MANIFEST["outside_egress"]["private_ranges"] is True
                    for p in ("hetzner", "digitalocean"))
      and "169.254" not in "".join(__import__("cloud.ubuntu_vm").ubuntu_vm.public_v4())),
     ("SECURITY.md", r"At Hetzner Cloud, DigitalOcean and Vultr a server is made by one call, never retried;\s+its firewall and first-boot key are made first, under that provider's lock",
      lambda m: 'tries = 5 if method in ("GET", "DELETE") else 1' in raw("lib/cloud/vps.py")
-     and all('self.call("POST", "/' + x in raw(f"lib/cloud/{p}.py") for p, x in (("hetzner", "servers"), ("digitalocean", "droplets"),
+     and all('self.call("POST", "/' + x in raw(f"providers/{p}/adapter.py") for p, x in (("hetzner", "servers"), ("digitalocean", "droplets"),
                                                                                   ("vultr", "instances")))
      and vps_class().index("with self._network_lock():") < vps_class().index('on_made=lambda fid: made("made_nsg", fid)')
      < vps_class().index('made("made_key", kid)') < vps_class().index("iid = api.launch(")
      and "a.api.delete_key_by_id(k, name)" in py_top_fn("lib/remote.py", "delete_op_parts")),
     ("SECURITY.md", r"each by this operation's own create\s+\(never one a listing shows\) and recorded by id the moment that create returns, before anything configures it",
-     lambda m: all("def make_nsg(self, name, egress, op, on_made=None):" in raw(f"lib/cloud/{p}.py")
-                   and "self.nsg(name)" not in raw(f"lib/cloud/{p}.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0]
+     lambda m: all("def make_nsg(self, name, egress, op, on_made=None):" in raw(f"providers/{p}/adapter.py")
+                   and "self.nsg(name)" not in raw(f"providers/{p}/adapter.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0]
                    for p in ("hetzner", "digitalocean", "vultr"))
-     and all(raw(f"lib/cloud/{p}.py").split("def make_nsg(", 1)[1].index("on_made(fw)")
-             < raw(f"lib/cloud/{p}.py").split("def make_nsg(", 1)[1].index(after)
+     and all(raw(f"providers/{p}/adapter.py").split("def make_nsg(", 1)[1].index("on_made(fw)")
+             < raw(f"providers/{p}/adapter.py").split("def make_nsg(", 1)[1].index(after)
              for p, after in (("hetzner", "self._wait_actions("), ("vultr", '/rules", {'), ("digitalocean", "return fw")))),
     ("SECURITY.md", r"the instance's id is journaled the moment its create returns, and the clean-up reads each journaled id directly,\s+never taking an empty listing for proof",
      lambda m: vps_class().index('made("made_instance", iid)') < vps_class().index("api.attach_firewall(fw, iid)")
-     and 'made("made_instance", iid)' in raw("lib/cloud/oci.py")
+     and 'made("made_instance", iid)' in raw("providers/oci/adapter.py")
      and 'found = owned_all(a, recorded, name, op, "journaled")' in py_top_fn("lib/remote.py", "reconcile")
      and "cur = a.api.instance(iid)" in py_top_fn("lib/remote.py", "owned")
      and 'lost = mine and st.get("launch_state") == "sent" and not recorded' in py_top_fn("lib/remote.py", "reconcile")
@@ -2158,9 +2164,9 @@ CLAIMS = [
      lambda m: "raise self._scrubbed(self.refused(status, answer, what))" in raw("lib/cloud/vps.py")
      and 'out = out.replace(self.__token, "[redacted]")' in raw("lib/cloud/vps.py")
      and "TOKEN_SHAPED = re.compile(" in raw("lib/cloud/vps.py") and "self.scrub(e)" in raw("lib/cloud/vps.py")
-     and "never its raw body" in raw("lib/cloud/vultr.py")),
+     and "never its raw body" in raw("providers/vultr/adapter.py")),
     ("SECURITY.md", r"A stopped server there is billed in full, which `vm create`, `stop` and\s+`status` say: only deleting it stops the charges",
-     lambda m: all(__import__(f"cloud.{p}").__dict__[p].MANIFEST["billing"]["stopped"] == "full" for p in ("hetzner", "digitalocean", "vultr"))
+     lambda m: all(cloud_provider(p).MANIFEST["billing"]["stopped"] == "full" for p in ("hetzner", "digitalocean", "vultr"))
      and "bills a stopped server in full, the same as a running one: only deleting it" in raw("scripts/vm-commands.sh")
      and 'warn "$(remote_billing_words)"' in fn_src("bin/metacomputer", "do_stop_remote")
      and 'out["billing"] = a.manifest["billing"]["note"]' in py_top_fn("lib/remote.py", "cmd_status")),
@@ -2179,22 +2185,22 @@ CLAIMS = [
      and all(k in raw("lib/remote.py").split("PROVIDER_ENV = (", 1)[1].split(")", 1)[0]
              for k in ("HCLOUD_TOKEN", "DIGITALOCEAN_TOKEN", "VULTR_API_KEY"))),
     ("docs/remote.md", r"one outbound rule that reaches no one \(ICMP to 192\.0\.2\.1, a documentation address\)",
-     lambda m: '"destination_ips": ["192.0.2.1/32"]' in raw("lib/cloud/hetzner.py")
-     and "return inbound + [dict(OFF_RULE)]" in raw("lib/cloud/hetzner.py")
-     and "return egress_from(rules_, off=[normal(OFF_RULE)])" in raw("lib/cloud/hetzner.py")),
+     lambda m: '"destination_ips": ["192.0.2.1/32"]' in raw("providers/hetzner/adapter.py")
+     and "return inbound + [dict(OFF_RULE)]" in raw("providers/hetzner/adapter.py")
+     and "return egress_from(rules_, off=[normal(OFF_RULE)])" in raw("providers/hetzner/adapter.py")),
     ("docs/remote.md", r"a Droplet it can't be applied to is deleted at once",
      lambda m: "api.attach_firewall(fw, iid)\n        except Exception:" in vps_class()
      and "api.terminate(iid)" in vps_class().split("api.attach_firewall(fw, iid)", 1)[1][:400]),
     ("docs/remote.md", r"So on Vultr `stop`\s+asks the guest itself over SSH \(it must answer: one that doesn't is refused\) and then waits up to 2 minutes for Vultr's\s+own state to say stopped. SSH going quiet proves nothing",
-     lambda m: 'SOFT_STOP = "guest"' in raw("lib/cloud/vultr.py") and "SEES_GUEST_POWEROFF = False" in raw("lib/cloud/vultr.py")
-     and "STOP_WAIT_S = 120" in raw("lib/cloud/vultr.py")
+     lambda m: 'SOFT_STOP = "guest"' in raw("providers/vultr/adapter.py") and "SEES_GUEST_POWEROFF = False" in raw("providers/vultr/adapter.py")
+     and "STOP_WAIT_S = 120" in raw("providers/vultr/adapter.py")
      and "gssh admin 'sudo /usr/local/sbin/metacomputer-admin poweroff'" in fn_src("bin/metacomputer", "do_stop_remote")
      and "gssh admin true >/dev/null 2>&1 || die" in fn_src("bin/metacomputer", "do_stop_remote")
      and "wait_guest_gone" not in raw("lib/remote.py") and "elif asked and guest_up is False:" not in vps_class()
      and "Nothing was halted" in vps_class()),
     ("docs/remote.md", r"`vm create` checks `vpc:read` before it makes anything, and `cloud doctor digitalocean` names each read scope the token lacks",
      lambda m: "api.preflight()" in vps_class() and vps_class().index("api.preflight()") < vps_class().index("api.make_nsg(")
-     and '("vpc:read", "/vpcs")' in raw("lib/cloud/digitalocean.py") and "def scope_checks(self):" in raw("lib/cloud/digitalocean.py")
+     and '("vpc:read", "/vpcs")' in raw("providers/digitalocean/adapter.py") and "def scope_checks(self):" in raw("providers/digitalocean/adapter.py")
      and 'f"token scope {scope}"' in vps_class()),
     ("docs/remote.md", r"a server the provider says runs but whose\s+SSH doesn't answer is never stopped or started by `start`",
      lambda m: 'if cur["state"] == "RUNNING" and guest_up is False:' in vps_class()
@@ -2237,22 +2243,22 @@ CLAIMS = [
     ("SECURITY.md", r"everything `lib/remote.py` prints passes a last filter for the credentials it was given",
      lambda m: "sys.stdout, sys.stderr = NoCreds(real[0]), NoCreds(real[1])" in py_top_fn("lib/remote.py", "main")
      and "no_creds(e)" in py_top_fn("lib/remote.py", "delete_op_parts") and "no_creds(e)" in py_top_fn("lib/remote.py", "cmd_delete")
-     and "why = said(stderr, 200)" in raw("lib/spritecli.py")),
+     and "why = said(stderr, 200)" in raw("providers/sprites/cli.py")),
     ("SECURITY.md", r"nor an instance that doesn't carry its operation's mark",
      lambda m: 'if cur.get("name") != name or cur.get("op") != op:' in py_top_fn("lib/remote.py", "owned")
-     and '"op": (i.freeform_tags or {}).get(OP_TAG)' in raw("lib/cloud/oci.py")),
+     and '"op": (i.freeform_tags or {}).get(OP_TAG)' in raw("providers/oci/adapter.py")),
     ("SECURITY.md", r"read once at its first boot, refused unless it's the VPC's\s+`resolver_ip`, pinned, never read from the computer again",
-     lambda m: 'if str(ip) not in resolvers:' in raw("lib/cloud/digitalocean.py")
-     and 'str(v.get("resolver_ip") or net[-2])' in raw("lib/cloud/digitalocean.py")
+     lambda m: 'if str(ip) not in resolvers:' in raw("providers/digitalocean/adapter.py")
+     and 'str(v.get("resolver_ip") or net[-2])' in raw("providers/digitalocean/adapter.py")
      and "if args.first_boot and st.get(\"resolvers\") is not None:" in py_top_fn("lib/remote.py", "cmd_resolvers")
      and 'remote_py resolvers --vm "$VM_NAME" --pinned' in raw("scripts/remote-build.sh")
      and raw("scripts/remote-build.sh").count("resolv.conf") == 1
-     and 'got["udp"] != want' in raw("lib/cloud/digitalocean.py") and "_vpc_ranges(f.get(" not in raw("lib/cloud/digitalocean.py")
-     and 'return str(net) if net.version == 4 and net.prefixlen == 32 and private(str(net)) else None' in raw("lib/cloud/digitalocean.py")),
+     and 'got["udp"] != want' in raw("providers/digitalocean/adapter.py") and "_vpc_ranges(f.get(" not in raw("providers/digitalocean/adapter.py")
+     and 'return str(net) if net.version == 4 and net.prefixlen == 32 and private(str(net)) else None' in raw("providers/digitalocean/adapter.py")),
     ("SECURITY.md", r"an\s+error inside a successful answer \(Hetzner's failed actions\) too",
-     lambda m: "raise self._scrubbed(ProviderError(self.label, \"action\"" in raw("lib/cloud/hetzner.py")),
+     lambda m: "raise self._scrubbed(ProviderError(self.label, \"action\"" in raw("providers/hetzner/adapter.py")),
     ("docs/remote.md", r"tries each of\s+the region's other domains once and then stops",
-     lambda m: "Every availability domain was tried once" in raw("lib/cloud/oci.py") and "for ad in ads:" in raw("lib/cloud/oci.py")),
+     lambda m: "Every availability domain was tried once" in raw("providers/oci/adapter.py") and "for ad in ads:" in raw("providers/oci/adapter.py")),
     ("SECURITY.md", r"`SSH_AUTH=cert` \(refused: its certificates name the Mac's gateway address\)",
      lambda m: "SSH_AUTH=cert isn't available for a computer reached over SSH" in raw("scripts/lib.sh")),
     ("SECURITY.md", r"Its name, baseline \(always `NAME-baseline`\), previous baseline and checkpoint names may not be another VM's",
@@ -2616,41 +2622,41 @@ CLAIMS = [
                          raw("install.sh")) is not None),
     # Fly Sprites (docs/sprites.md, SECURITY.md "Fly Sprites"): the promises its code keeps.
     ("SECURITY.md", r"sshd, the X server and the desktop join it \(`in-session`\) before anything runs as the desktop's account, the X cookie's `xauth` included: nothing of that account's ever runs outside it",
-     lambda m: "mount -t tmpfs" in raw("provisioning/sprite/rootfs/opt/metacomputer/sprite/hide-sprite-api")
-     and "exec unshare --mount --pid --fork --propagation private --mount-proc --" in raw("provisioning/sprite/rootfs/opt/metacomputer/sprite/svc-session")
-     and all(re.search(r"\b(runuser|su|setpriv)\b", raw(f"provisioning/sprite/rootfs/opt/metacomputer/sprite/{svc}").split(
+     lambda m: "mount -t tmpfs" in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/hide-sprite-api")
+     and "exec unshare --mount --pid --fork --propagation private --mount-proc --" in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/svc-session")
+     and all(re.search(r"\b(runuser|su|setpriv)\b", raw(f"providers/sprites/guest/rootfs/opt/metacomputer/sprite/{svc}").split(
              "/opt/metacomputer/sprite/in-session", 1)[0].split("\nset -eu", 1)[1]) is None
-             and "exec /opt/metacomputer/sprite/in-session" in raw(f"provisioning/sprite/rootfs/opt/metacomputer/sprite/{svc}")
+             and "exec /opt/metacomputer/sprite/in-session" in raw(f"providers/sprites/guest/rootfs/opt/metacomputer/sprite/{svc}")
              for svc in ("svc-xvfb", "svc-desktop", "svc-sshd"))
-     and "xauth" in raw("provisioning/sprite/rootfs/opt/metacomputer/sprite/xvfb-inner")
-     and 'exec nsenter --target "$c" --mount --pid -- "$@"' in raw("provisioning/sprite/rootfs/opt/metacomputer/sprite/in-session")
-     and '/opt/metacomputer/sprite/services sshd' in raw("provisioning/sprite/bootstrap.sh")),
+     and "xauth" in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/xvfb-inner")
+     and 'exec nsenter --target "$c" --mount --pid -- "$@"' in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/in-session")
+     and '/opt/metacomputer/sprite/services sshd' in raw("providers/sprites/guest/bootstrap.sh")),
     ("SECURITY.md", r"no process outside the session is\s+visible, so another process's `/proc/PID/root` \(whose `/\.sprite` would be the real one\) can't be used",
-     lambda m: "--pid --fork" in raw("provisioning/sprite/rootfs/opt/metacomputer/sprite/svc-session")
-     and "--mount-proc" in raw("provisioning/sprite/rootfs/opt/metacomputer/sprite/svc-session")
-     and '"$(readlink "/proc/$c/ns/pid")" != "$(readlink /proc/self/ns/pid)"' in raw("provisioning/sprite/rootfs/opt/metacomputer/sprite/in-session")),
+     lambda m: "--pid --fork" in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/svc-session")
+     and "--mount-proc" in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/svc-session")
+     and '"$(readlink "/proc/$c/ns/pid")" != "$(readlink /proc/self/ns/pid)"' in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/in-session")),
     ("SECURITY.md", r"A change\s+whose resulting policy lets out anything the one in force doesn't runs only at your own terminal, judged on where it\s+ends, never on the step",
      lambda m: "if not cloud_sprites.widens(cur.get(\"outside\"), cur.get(\"allow\") or [], new_rules):" in raw("lib/remote.py")
      and raw("lib/remote.py").count("require_narrowing(s, a, st,") >= 3 and "if st.get(\"setup_done\"):" in raw("lib/remote.py")
      and 'remote_py setup-done --vm "$VM_NAME"' in raw("scripts/remote-build.sh")),
     ("SECURITY.md", r"Every operation \(the network policy, checkpoints,\s+restore, `sprite exec`, each SSH connection, the vault's binding\) checks against Fly's API that the Sprite of that\s+name has that id",
-     lambda m: raw("lib/cloud/sprites.py").count("self._live(name)") >= 6 and "check_sprite(args, ep)" in raw("lib/remote.py")
+     lambda m: raw("providers/sprites/adapter.py").count("self._live(name)") >= 6 and "check_sprite(args, ep)" in raw("lib/remote.py")
      and "if let problem = providerProblem(t.binding) { return problem }" in raw("vault/Guest.swift")
-     and 'body["labels"] = list(labels)' in raw("lib/spritecli.py") and "if OP_LABEL + op in labels" in raw("lib/cloud/sprites.py")),
+     and 'body["labels"] = list(labels)' in raw("providers/sprites/cli.py") and "if OP_LABEL + op in labels" in raw("providers/sprites/adapter.py")),
     ("SECURITY.md", r"it's read with a byte cap on each stream \(4 MB of\s+output, 1 MB for `exec`, 64 KB of errors\)",
-     lambda m: "MAX_STDOUT = 4 << 20" in raw("lib/spritecli.py") and "MAX_STDERR = 64 << 10" in raw("lib/spritecli.py")
-     and 'p.add_argument("--max-output", type=int, default=1 << 20' in raw("lib/remote.py") and "capture_output" not in raw("lib/spritecli.py")),
+     lambda m: "MAX_STDOUT = 4 << 20" in raw("providers/sprites/cli.py") and "MAX_STDERR = 64 << 10" in raw("providers/sprites/cli.py")
+     and 'p.add_argument("--max-output", type=int, default=1 << 20' in raw("lib/remote.py") and "capture_output" not in raw("providers/sprites/cli.py")),
     ("SECURITY.md", r"`stop` closes the hub's, the live view's and the vault's connections",
      lambda m: "    vault_disconnect\n" in raw("bin/metacomputer") and '"$VAULT_BIN" disconnect --vm "$VM_NAME"' in raw("bin/metacomputer")
      and 'case "disconnect": res = opDisconnect(req, who)' in raw("vault/Server.swift")),
     ("SECURITY.md", r"With no rules Fly enforces nothing, so metacomputer always sets one",
      lambda m: 'kind, _ = a.set_policy(s["VM_NAME"], cloud_sprites.rules_for("internet"))' in raw("lib/remote.py")
      and 'remote_py egress --vm "$VM_NAME" --set "$want_egress"' in raw("scripts/remote-build.sh")
-     and 'return [{"domain": "*", "action": "deny"}]' in raw("lib/cloud/sprites.py")
-     and "if not names or len(names) > MAX_NAMES" in raw("lib/cloud/sprites.py")),
+     and 'return [{"domain": "*", "action": "deny"}]' in raw("providers/sprites/adapter.py")
+     and "if not names or len(names) > MAX_NAMES" in raw("providers/sprites/adapter.py")),
     ("SECURITY.md", r"metacomputer runs it with `HOME`, `PATH` and `LANG` only, never reads or prints the token, and runs `sprite exec` with `--no-port-forward`",
-     lambda m: 'return {"HOME": os.environ.get("HOME") or os.path.expanduser("~"), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",' in raw("lib/spritecli.py")
-     and 'env=self.env(), start_new_session=True)' in raw("lib/spritecli.py") and '"exec", "--no-port-forward", "--"' in raw("lib/spritecli.py")
+     lambda m: 'return {"HOME": os.environ.get("HOME") or os.path.expanduser("~"), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",' in raw("providers/sprites/cli.py")
+     and 'env=self.env(), start_new_session=True)' in raw("providers/sprites/cli.py") and '"exec", "--no-port-forward", "--"' in raw("providers/sprites/cli.py")
      and "exec --no-port-forward" not in raw("scripts/remote-build.sh")),
     ("SECURITY.md", r"Every tunnel runs through a wrapper that ends it when ssh goes, and leaves ssh's process group first",
      lambda m: "    leave_group()\n    return run(argv[1:], parent=parent, check=check, want=want)" in raw("lib/proxywrap.py") and "os.setsid()" in raw("lib/proxywrap.py")
@@ -2682,27 +2688,27 @@ CLAIMS = [
      and 'tunnel_program: tunnelProgram, tunnel_sha256: tunnelSHA, tunnel_args: tunnelArgs' in raw("vault/Commands.swift")),
     ("docs/sprites.md", r"A change whose resulting policy lets out anything the one in force doesn't \(adding names, a list where nothing goes out, every name where a list or nothing is in force\) runs only at your own terminal, however it's split into steps",
      lambda m: "if not owners.at_user_terminal((0, 2)):" in raw("lib/remote.py").split("def require_narrowing", 1)[1]
-     and __import__("cloud.sprites").sprites.widens("off", [], __import__("cloud.sprites").sprites.rules_for("internet"))),
+     and cloud_provider("sprites").widens("off", [], cloud_provider("sprites").rules_for("internet"))),
     ("docs/sprites.md", r"Addresses can't be listed: only names",
-     lambda m: not __import__("cloud.sprites").sprites.DOMAIN.fullmatch("10.0.0.1")
-     and not __import__("cloud.sprites").sprites.DOMAIN.fullmatch("169.254.169.254")
-     and __import__("cloud.sprites").sprites.DOMAIN.fullmatch("example.com") is not None),
+     lambda m: not cloud_provider("sprites").DOMAIN.fullmatch("10.0.0.1")
+     and not cloud_provider("sprites").DOMAIN.fullmatch("169.254.169.254")
+     and cloud_provider("sprites").DOMAIN.fullmatch("example.com") is not None),
     ("docs/sprites.md", r"sshd listens on the Sprite's own loopback, by number",
-     lambda m: "ListenAddress 127.0.0.1\nListenAddress ::1" in raw("provisioning/sprite/rootfs/etc/ssh/sshd_config.d/05-metacomputer-sprite.conf")
+     lambda m: "ListenAddress 127.0.0.1\nListenAddress ::1" in raw("providers/sprites/guest/rootfs/etc/ssh/sshd_config.d/05-metacomputer-sprite.conf")
      and "printf '127.0.0.1\\n' > /etc/metacomputer/vnc-listen" in raw("provisioning/guest/provision.sh")),
     ("docs/sprites.md", r"The browsers' own DNS over HTTPS is locked off",
      lambda m: '.policies.DNSOverHTTPS = {"Enabled": false, "Locked": true}' in raw("provisioning/guest/provision.sh")
      and '{"DnsOverHttpsMode": "off"}' in raw("provisioning/guest/provision.sh")),
     ("docs/sprites.md", r"one that exists already in the organization is refused \(metacomputer never takes over a Sprite it didn't make\)",
-     lambda m: 'if self.cli.info(org, sprite) is not None:' in raw("lib/cloud/sprites.py")
-     and 'if cur is not None and cur.get("id") != st["instance"]:' in raw("lib/cloud/sprites.py")
+     lambda m: 'if self.cli.info(org, sprite) is not None:' in raw("providers/sprites/adapter.py")
+     and 'if cur is not None and cur.get("id") != st["instance"]:' in raw("providers/sprites/adapter.py")
      and "return a.owned_lost(s[\"VM_NAME\"], st[\"launching\"])" in raw("lib/remote.py") and "launch_t" not in raw("lib/remote.py").split("def lost_sprite", 1)[1].split("\ndef ", 1)[0]),
     ("SECURITY.md", r"Fly refuses raw IP addresses \(an address is let through only after an allowed name resolved to it\), private ranges, the metadata service and Fly's own private network",
-     lambda m: '"outside_egress": {"enforced": True, "private_ranges": True, "metadata": True, "off": True}' not in raw("lib/cloud/sprites.py")
-     and 'outside_egress={"enforced": True, "private_ranges": True, "metadata": True, "off": True}' in raw("lib/cloud/sprites.py")),
+     lambda m: '"outside_egress": {"enforced": True, "private_ranges": True, "metadata": True, "off": True}' not in raw("providers/sprites/manifest.py")
+     and 'outside_egress={"enforced": True, "private_ranges": True, "metadata": True, "off": True}' in raw("providers/sprites/manifest.py")),
     ("docs/sprites.md", r"The hub sends keys, typing and pixel clicks in the foreground \(the desktop's own pointer and keyboard, XTEST\) and says so in the result, keys and typing aimed at an element too; clicks on an element \(`element_token`\) still go through accessibility",
      lambda m: 'return t in KEY_TOOLS or not a.get("element_token")' in raw("lib/mcp_hub.py") and 'self.foreground_only = self.env.get("MCOMP_BACKGROUND_INPUT", "on") == "off"' in raw("lib/mcp_hub.py")
-     and "sprites) printf off" in raw("scripts/lib.sh") and 'input={"background": False' in raw("lib/cloud/sprites.py")),
+     and "sprites) printf off" in raw("scripts/lib.sh") and 'input={"background": False' in raw("providers/sprites/manifest.py")),
     # Paying for things (vault/Payments.swift, PaymentServer.swift, Merchant.swift, AP2.swift; lib/cardmask.py, lib/mcp_hub.py,
     # lib/actionlog.py, lib/wirelimits.py; the guest's secret-fill)
     ("SECURITY.md", r"No grant or unattended rule covers a card \(`rule add --secret` refuses one\), and a `session` or `unlock` answer doesn't widen it",
@@ -3116,26 +3122,27 @@ CLAIMS = [
      and "except Unreadable as e:" in function_src("lib/session_dbs.py", "sessions")
      and "trs, notes = [], [f\"OpenClaw's and Hermes Agent's sessions weren't read ({type(e).__name__})\"]"
      in function_src("lib/learn_mine.py", "mine_sessions")),
-    # Oracle Cloud's security groups: the create's answer, never a lookup by name (lib/cloud/oci.py, lib/remote.py).
+    # Oracle Cloud's security groups: the create's answer, never a lookup by name (providers/oci/adapter.py,
+    # lib/remote.py).
     ("SECURITY.md", r"at Oracle Cloud each build makes a group of its own, tagged with the computer and its\s+operation, never one found by its name",
-     lambda m: "self.nsg(" not in raw("lib/cloud/oci.py") and "def nsg(self" not in raw("lib/cloud/oci.py")
-     and "def delete_nsg(self, name)" not in raw("lib/cloud/oci.py")
-     and "freeform_tags={TAG: name, OP_TAG: op}" in raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0]
-     and raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("on_made(g.id)")
-     < raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("self.nsg_egress(g.id, egress)")
-     and raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("on_made(g.id)")
-     < raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].index("self.oci.wait_until(")),
+     lambda m: "self.nsg(" not in raw("providers/oci/adapter.py") and "def nsg(self" not in raw("providers/oci/adapter.py")
+     and "def delete_nsg(self, name)" not in raw("providers/oci/adapter.py")
+     and "freeform_tags={TAG: name, OP_TAG: op}" in raw("providers/oci/adapter.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0]
+     and raw("providers/oci/adapter.py").split("def make_nsg(", 1)[1].index("on_made(g.id)")
+     < raw("providers/oci/adapter.py").split("def make_nsg(", 1)[1].index("self.nsg_egress(g.id, egress)")
+     and raw("providers/oci/adapter.py").split("def make_nsg(", 1)[1].index("on_made(g.id)")
+     < raw("providers/oci/adapter.py").split("def make_nsg(", 1)[1].index("self.oci.wait_until(")),
     ("SECURITY.md", r"`net egress` and `vm delete` act only on the OCIDs the computer's record\s+names, each read by its id and still tagged for this computer and one of its recorded operations",
      lambda m: "a.api.nsg_owner(fw)" in py_top_fn("lib/remote.py", "check_firewall")
      and hasattr(__import__("cloud").ADAPTERS["oci"], "delete_groups") and __import__("cloud").ADAPTERS["oci"].groups_by_record
-     and hasattr(__import__("cloud.oci").oci.SDK, "nsg_owner") and hasattr(__import__("cloud.oci").oci.SDK, "nsgs_of_op")
-     and "self.api.nsg_egress(self.recorded_group(name), egress)" in raw("lib/cloud/oci.py")
+     and hasattr(cloud_provider("oci").SDK, "nsg_owner") and hasattr(cloud_provider("oci").SDK, "nsgs_of_op")
+     and "self.api.nsg_egress(self.recorded_group(name), egress)" in raw("providers/oci/adapter.py")
      and "a.delete_groups(name, st)" in py_top_fn("lib/remote.py", "cmd_delete")
      and "return a.api.delete_nsg_by_id(gid, name, op)" in py_top_fn("lib/remote.py", "delete_group")
-     and "if comp != name or not (mark == op if mark is not None else legacy):" in raw("lib/cloud/oci.py")),
+     and "if comp != name or not (mark == op if mark is not None else legacy):" in raw("providers/oci/adapter.py")),
     ("SECURITY.md", r"a group an\s+earlier version made, which carries no operation, gets no rule changed",
-     lambda m: "was made by an earlier version of metacomputer" in raw("lib/cloud/oci.py")
-     and "if who[0] == name and who[1] is None:" in raw("lib/cloud/oci.py")
+     lambda m: "was made by an earlier version of metacomputer" in raw("providers/oci/adapter.py")
+     and "if who[0] == name and who[1] is None:" in raw("providers/oci/adapter.py")
      and "if comp == name and not mark:" in py_top_fn("lib/remote.py", "check_firewall")),
     ("docs/remote.md", r"a group no computer's record on this Mac names, another Mac's or one whose record is gone, is never deleted on\s+its name",
      lambda m: "is never deleted on its name" in py_top_fn("lib/remote.py", "cmd_cloud")
@@ -3145,11 +3152,11 @@ CLAIMS = [
     ("docs/remote.md", r"its\s+first rules, written after it's read again once the create's wait is over",
      lambda m: (lambda mk: mk.index("self.oci.wait_until(") < mk.index("who = self.nsg_owner(g.id)")
                 < mk.index("if who != (name, op):") < mk.index("self.nsg_egress(g.id, egress)"))(
-         raw("lib/cloud/oci.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0])),
+         raw("providers/oci/adapter.py").split("def make_nsg(", 1)[1].split("\n    def ", 1)[0])),
     ("docs/remote.md", r"one another Mac makes\s+after teardown looked stops the network's deletion too, with nothing deleted",
      lambda m: (lambda d: d.index("if others:") < d.index("for gid in ours:") < d.index("self._delete_network_parts(n)")
                 and "(g.freeform_tags or {}).get(TAG)" not in d)(
-         raw("lib/cloud/oci.py").split("def _delete_one_network(", 1)[1].split("\n    def ", 1)[0])),
+         raw("providers/oci/adapter.py").split("def _delete_one_network(", 1)[1].split("\n    def ", 1)[0])),
     # The live view's tunnel log (lib/tunnellog.py): private, and bounded however much ssh prints.
     ("docs/remote.md", r"what SSH says goes to a private log \(`tunnel/view-tunnel.log` in its log folder: 0600, in a\s+0700 "
                        r"folder\), at most (\d) MB of it",
@@ -3223,9 +3230,9 @@ CLAIMS = [
      lambda m: "not that it holds it now (LOCK_UN leaves it set)" in raw("lib/handoff_gate.py")),
     ("SECURITY.md", r"a provider whose setup and creates rewrite a network its computers share \(Oracle Cloud's\s+VCN\) "
                     r"for every computer of this checkout's there",
-     lambda m: "SHARED_NETWORK_CHANGES = True" in raw("lib/cloud/oci.py")
+     lambda m: "SHARED_NETWORK_CHANGES = True" in raw("providers/oci/adapter.py")
      and "SHARED_NETWORK_CHANGES = False" in raw("lib/cloud/adapter.py")
-     and "SHARED_NETWORK_CHANGES" not in raw("lib/cloud/vps.py") + raw("lib/cloud/sprites.py") + raw("lib/cloud/ubuntu_vm.py")
+     and "SHARED_NETWORK_CHANGES" not in raw("lib/cloud/vps.py") + raw("providers/sprites/adapter.py") + raw("lib/cloud/ubuntu_vm.py")
      and (lambda r: r.index("shared_network_computers(a)") < r.index('if a.cmd == "target":'))(py_top_fn("lib/remote.py", "run"))
      and 'getattr(cls, "SHARED_NETWORK_CHANGES", False)' in py_top_fn("lib/remote.py", "shared_network_computers")),
     ("SECURITY.md", r"a descriptor on that very lock file\s+\(bin/metacomputer hands it on as 6, our scripts as 5, and a "

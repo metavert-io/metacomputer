@@ -28,32 +28,18 @@ only deleting it stops the charges."""
 import ipaddress
 import re
 
-from .adapter import AdapterError
-from .ubuntu_vm import public_v4
-from .ubuntu_vm import check_egress
-from .vps import API, OP, Capacity, ProviderError, VPS, egress_from, fw_name, fw_owner, manifest, same_key
+from cloud.adapter import AdapterError
+from cloud.ubuntu_vm import public_v4
+from cloud.ubuntu_vm import check_egress
+from cloud.vps import API, OP, Capacity, ProviderError, VPS, egress_from, fw_name, fw_owner, same_key
 
-ENV_KEY = "DIGITALOCEAN_TOKEN"
-# size -> (architecture, vCPUs, memory GB, disk GB, USD an hour): DigitalOcean's list prices, read from its API on
-# 2026-11-23; billed by the hour up to the monthly price (s-2vcpu-4gb $24, s-4vcpu-8gb $48).
-SIZES = {
-    "s-2vcpu-4gb": ("x86_64", 2, 4, 80, 0.03571),
-    "s-4vcpu-8gb": ("x86_64", 4, 8, 160, 0.07143),
-}
-REGIONS = ("nyc3", "sfo2", "tor1", "lon1", "ams3", "sgp1", "syd1")
+from .manifest import ENV_KEY, MANIFEST, REGIONS, SIZES  # noqa: F401  (its manifest: providers/digitalocean/manifest.py)
+
 IMAGE = "ubuntu-24-04-x64"
 STATES = {"new": "PROVISIONING", "active": "RUNNING", "off": "STOPPED", "archive": "TERMINATED"}
 # A Droplet's name: mc-OPERATION-NAME (DigitalOcean's names allow letters, digits, '.' and '-').
 DROPLET = re.compile(r"mc-([0-9a-f]{32})-([A-Za-z0-9][A-Za-z0-9.-]{0,63})")
 DROPLET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}")
-
-MANIFEST = manifest(
-    "digitalocean", "DigitalOcean", SIZES, REGIONS,
-    # Its own Cloud Firewall (outside the guest): out, public IPv4 addresses only (and DNS to its VPC's resolver), or
-    # nothing at all. The metadata service answers through it (tested live): only the guest refuses it.
-    {"enforced": True, "private_ranges": True, "metadata": False, "off": True},
-    "billed by the hour up to the monthly price; a powered-off Droplet is billed in full: only deleting it "
-    "(metacomputer vm delete) stops the charges, and the idle stop saves nothing")
 
 INBOUND_RULES = [{"protocol": "tcp", "ports": "22", "sources": {"addresses": ["0.0.0.0/0", "::/0"]}}]
 
@@ -456,3 +442,6 @@ class DigitalOcean(VPS):
         self.api.nsg_egress(fw, check_egress(egress), dns=hosts)
         self.states[name] = dict(st, resolvers=hosts)
         return hosts
+
+
+ADAPTER = DigitalOcean

@@ -891,7 +891,7 @@ def entry_point_checks(td):
         if sp["by"] != "sourced" and not sp["rows"]:
             bad.append(key + " (no valid line)")
     check("...each has valid lines, and one run by the repository has a caller in it (bin/, scripts/, lib/, "
-          "provisioning/, vault/, install.sh, get.sh, the launchers, bench/)", not bad, bad)
+          "provisioning/, providers/, vault/, install.sh, get.sh, the launchers, bench/)", not bad, bad)
     for key, o in entrypoints.GUARD_OPTIONS.items():
         rel = key[0] if isinstance(key, tuple) else key
         g = entrypoints.guard_of(rel)

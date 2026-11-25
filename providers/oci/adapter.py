@@ -33,10 +33,11 @@ import re
 import time
 import uuid
 
-from .adapter import AdapterError, NotSupported, check_name
-from .ubuntu_vm import BASE, RemoteVM, check_egress, public_v4
+from cloud.adapter import AdapterError, NotSupported, check_name
+from cloud.ubuntu_vm import RemoteVM, check_egress, public_v4
 
-ENV_KEYS = ("OCI_USER", "OCI_TENANCY", "OCI_FINGERPRINT", "OCI_REGION", "OCI_API_KEY_PEM", "OCI_COMPARTMENT")
+from .manifest import DEFAULT_SIZE, ENV_KEYS, MANIFEST, SIZES  # noqa: F401  (its manifest: providers/oci/manifest.py)
+
 TAG = "metacomputer"
 NETWORK_TAG = "network"
 OP_TAG = "metacomputer-op"      # the build that launched it: a launch whose record was lost is found by this
@@ -45,15 +46,6 @@ VCN_CIDR = "10.77.0.0/16"
 SUBNET_CIDR = "10.77.0.0/24"
 BOOT_GB = 50
 
-# size -> (shape, OCPUs, memory GB, architecture)
-SIZES = {
-    "arm-2x12": ("VM.Standard.A1.Flex", 2, 12, "arm64"),
-    "arm-1x6": ("VM.Standard.A1.Flex", 1, 6, "arm64"),
-    "x86-1x8": ("VM.Standard.E5.Flex", 1, 8, "x86_64"),
-    "x86-2x8": ("VM.Standard.E5.Flex", 2, 8, "x86_64"),
-    "x86-micro": ("VM.Standard.E2.1.Micro", 1, 1, "x86_64"),
-}
-DEFAULT_SIZE = "arm-2x12"
 # Oracle's list prices (USD, read 2026-11): per OCPU-hour and per GB-hour of memory while running, and the boot
 # volume's storage per GB-month whether it runs or not. The Always Free allowance covers Arm (A1) up to 2 OCPU and
 # 12 GB in all for the tenancy, and 200 GB of block volumes: arm-2x12 or arm-1x6 with its 50 GB disk costs nothing
@@ -66,20 +58,6 @@ FREE_SHAPES = ("VM.Standard.A1.Flex", "VM.Standard.E2.1.Micro")
 STATES = {"RUNNING": "awake", "STARTING": "starting", "PROVISIONING": "starting", "STOPPING": "stopping",
           "STOPPED": "stopped", "TERMINATING": "absent", "TERMINATED": "absent", "CREATING_IMAGE": "awake",
           "MOVING": "starting"}
-
-MANIFEST = dict(BASE, name="oci", place="oci", label="Oracle Cloud",
-                # Stop and start: the boot volume keeps everything; running programs don't survive a stop.
-                sleep_wake={"kind": "stop-start", "keeps_processes": False},
-                sizes=tuple(SIZES),
-                # The computer's own network security group (outside the guest): egress only to public addresses,
-                # or none with EGRESS=off. OCI doesn't apply security rules to 169.254.0.0/16, so its metadata
-                # service (and its DNS) can't be refused from outside: only the guest's firewall refuses them.
-                outside_egress={"enforced": True, "private_ranges": True, "metadata": False, "off": True},
-                # Stopped through the API, a standard shape bills only its boot volume. A guest that powers itself
-                # off (the idle stop) still counts as running, and bills, until it's stopped through the API.
-                billing={"stopped": "storage", "guest_poweroff": "nothing",
-                         "note": "stopped through the API: only the boot volume is billed (standard shapes); a guest "
-                                 "that powered itself off is still billed until metacomputer stop"})
 
 
 class Capacity(AdapterError):
@@ -611,7 +589,7 @@ class OCI(RemoteVM):
         is this operation's own, made new (never one found by name) and told to `made` the moment its create returns.
         Returns {instance, ad, shape, size, image, arch, nsg}."""
         check_name(name)
-        from . import capabilities
+        from cloud import capabilities
         if region is not None:
             raise NotSupported(self.name, "region", "Oracle Cloud's region is your credentials' (OCI_REGION)")
         try:
@@ -857,3 +835,6 @@ class OCI(RemoteVM):
                 + free.get(shape, "not in the Always Free allowance"))
         return {"awake_per_hour": round(ocpus * per_ocpu + mem * per_gb + disk, 5), "asleep_per_hour": disk,
                 "currency": "USD", "note": note}
+
+
+ADAPTER = OCI

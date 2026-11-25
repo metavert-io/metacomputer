@@ -331,7 +331,7 @@ except Exception as e: print(e); sys.exit(1)' "$LAB_ROOT/lib" "$host" "$hport")"
       [ -z "$host$huser$hport" ] || die "--host, --user and --port are for your own server; Oracle Cloud gives the computer its address"
       [ -z "$region" ] || die "--region: an Oracle Cloud computer is made in your credentials' region (OCI_REGION)"
       size="${size:-arm-2x12}"
-      a="$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); from cloud import oci
+      a="$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import cloud; oci = cloud.registry.module("oci")
 try: oci.size_of(sys.argv[2])
 except Exception as e: print(e); sys.exit(1)' "$LAB_ROOT/lib" "$size")" || die "$a"
       case "${idle:-15}" in off|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) die "--idle-stop: minutes (1-999), or off" ;; esac
@@ -341,7 +341,7 @@ except Exception as e: print(e); sys.exit(1)' "$LAB_ROOT/lib" "$size")" || die "
       [ -z "$host$huser$hport$size$idle$region" ] || die "--host, --user, --port, --size, --region and --idle-stop aren't for a Sprite: Fly sizes it and chooses where it runs, and it sleeps by itself about 10 s after nothing is connected"
       [ -n "$org" ] || die "a Sprite is made in one of your Fly organizations: --org ORG (or SPRITES_ORG in config/local.env)"
       sprite="${sprite:-$name}"
-      a="$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); from cloud import sprites
+      a="$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import cloud; sprites = cloud.registry.module("sprites")
 try: sprites.org_of({"SPRITE_ORG": sys.argv[2]}); print(sprites.sprite_of({"SPRITE_NAME": sys.argv[3]}))
 except Exception as e: print(e); sys.exit(1)' "$LAB_ROOT/lib" "$org" "$sprite")" || die "$a"
       remote_can_ask_for sprites || die "Fly's sprite command isn't installed: install it and sign in (sprite login), then run this again (docs/sprites.md)"

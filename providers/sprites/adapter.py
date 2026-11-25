@@ -24,17 +24,19 @@ What a Sprite is, as metacomputer found it (docs/sprites.md):
   private ranges and the metadata service are refused. metacomputer always sets one (an empty list enforces nothing):
   EGRESS=internet allows every name, EGRESS=off denies every name, `net allow` lists names.
 
-Nothing here makes a network call or starts a program: the adapter is given the CLI's facade (lib/spritecli.py, which
-only lib/remote.py makes; tests: a stand-in)."""
+Nothing here makes a network call or starts a program: the adapter is given the CLI's facade (providers/sprites/cli.py,
+which only lib/remote.py makes; tests: a stand-in)."""
 import os
 import re
 import shutil
 import time
 
-from . import transport
-from .adapter import AdapterError, NotSupported, check_name
-from .ubuntu_vm import BASE, RemoteVM, check_egress
-from .vps import static_scrub
+from cloud import transport
+from cloud.adapter import AdapterError, NotSupported, check_name
+from cloud.ubuntu_vm import RemoteVM, check_egress
+from cloud.vps import static_scrub
+
+from .manifest import MANIFEST  # noqa: F401  (its manifest: providers/sprites/manifest.py)
 
 SPRITE_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 ORG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}")
@@ -58,31 +60,6 @@ COLD_GB_HOUR = 0.000027
 DESKTOP_DISK_GB = 5          # what a set-up desktop writes (the packages, the driver, the profile)
 DESKTOP_MEM_GB = 1.5         # an idle desktop with Firefox open, as measured
 DESKTOP_CPU = 0.1            # CPUs busy on average while it's driven (mostly idle between calls)
-
-MANIFEST = dict(
-    BASE, name="sprites", place="sprites", label="Fly Sprites",
-    root_disk="persistent",
-    # Checkpoints of the whole disk (copy-on-write): baseline, reset and named checkpoints. A restore restarts the
-    # Sprite's programs (open apps close; the desktop comes back) and cuts its connections.
-    snapshots={"keep": None, "what": "checkpoints of the whole disk, copy-on-write; a restore restarts its programs"},
-    # Asleep about 10 s after its last connection closes; awake again at the next one, its programs as they were.
-    sleep_wake={"kind": "auto-sleep", "keeps_processes": True},
-    # Fly's network policy (DNS names), enforced outside the VM: an allowlist with `net allow`.
-    egress={"model": "dns-allowlist", "allowlist": True, "private_ranges_blocked": True},
-    # Enforced outside the VM (nothing in it, root included, can change it). While a policy is in force Fly refuses
-    # raw IP addresses (an address is let through only after an allowed name resolved to it), private ranges and the
-    # metadata service, even through a name that resolves to one (checked live: 10/8, 172.16/12, 192.168/16,
-    # 100.64/10, 169.254.169.254, Fly's private network); EGRESS=off denies every name.
-    outside_egress={"enforced": True, "private_ranges": True, "metadata": True, "off": True},
-    # Asleep, a Sprite bills only its disk (cold storage); awake, the CPU time it uses, its memory and its disk.
-    billing={"stopped": "storage", "guest_poweroff": "n/a",
-             "note": "asleep (about 10 s after nothing is connected): only its disk, at Fly's storage rate; awake: the "
-                     "CPU time it uses, the memory in use and its disk"},
-    # The Sprite's kernel has no uinput, so the driver has no virtual devices: keys, typing and pixel clicks go in
-    # the foreground (XTEST); clicks and actions on an element go through accessibility, as anywhere.
-    input={"background": False, "note": "no /dev/uinput on a Sprite: keys, typing and pixel clicks go in the "
-                                        "foreground; actions on an element through accessibility"},
-    sizes=(), regions=(), fresh_start=False)
 
 
 def default_cli():
@@ -204,8 +181,9 @@ def policy_kind(rules):
 
 
 class Sprites(RemoteVM):
-    """Sprites that metacomputer makes in a Fly organization. `cli` is the facade of Fly's command (lib/spritecli.py
-    SpriteCLI; default: none, so the adapter alone never runs a program; lib/remote.py gives it one)."""
+    """Sprites that metacomputer makes in a Fly organization. `cli` is the facade of Fly's command
+    (providers/sprites/cli.py SpriteCLI; default: none, so the adapter alone never runs a program; lib/remote.py gives
+    it one)."""
     name = "sprites"
     manifest = MANIFEST
 
@@ -258,7 +236,7 @@ class Sprites(RemoteVM):
         org, sprite = self._where(name)
         if not OP_RE.fullmatch(op or ""):
             raise AdapterError("a Sprite is made by a build's operation (32 hex digits)")
-        from . import capabilities
+        from cloud import capabilities
         if region is not None or size is not None:
             raise NotSupported(self.name, "region or size", "Fly picks a Sprite's region and size (8 CPUs, memory as "
                                                              "needed)")
@@ -472,3 +450,6 @@ class Sprites(RemoteVM):
                          f"${MEM_GB_HOUR}/GB-hour in use, disk ${HOT_GB_HOUR}/GB-hour awake and ${COLD_GB_HOUR:.6f}/GB-hour "
                          f"asleep); all 8 CPUs busy with 8 GB in use: about ${busy:.2f}/h. Asleep (about 10 s after "
                          "nothing is connected): its disk only")}
+
+
+ADAPTER = Sprites

@@ -1,4 +1,4 @@
-"""The facade of Fly's `sprite` command for the Sprites adapter (lib/cloud/sprites.py): the Sprites API through
+"""The facade of Fly's `sprite` command for the Sprites adapter (providers/sprites/adapter.py): the Sprites API through
 `sprite api` (the CLI adds its own sign-in, which it keeps in the login keychain: metacomputer never sees the token),
 and `sprite exec` for the setup's first step. Only lib/remote.py makes one; the adapter takes it as a value, so tests
 hand it a stand-in. Plain values in and out; nothing the command prints is passed on whole."""

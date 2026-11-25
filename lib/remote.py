@@ -305,8 +305,7 @@ def adapter_for(s, state=None):
 def sprite_cli(path):
     if SPRITE_FACTORY is not None:
         return SPRITE_FACTORY(path)
-    import spritecli
-    return spritecli.SpriteCLI(path)
+    return cloud.registry.module("sprites", "cli").SpriteCLI(path)
 
 
 def provider_kw(prov, s=None):
@@ -315,7 +314,7 @@ def provider_kw(prov, s=None):
     or a computer's firewall and key, are changed under; for Fly Sprites, the facade of its sprite command (which keeps
     its own sign-in)."""
     if prov == "sprites":
-        from cloud import sprites as cloud_sprites
+        cloud_sprites = cloud.registry.module("sprites")
         try:
             path = cloud_sprites.cli_path(dict(s or {}, SPRITE_CLI=(s or {}).get("SPRITE_CLI") or os.environ.get("SPRITE_CLI", "")))
         except AdapterError:
@@ -465,7 +464,7 @@ def lost_sprite(a, s, st):
 def create_sprite(s, a, rd, st, op):
     """Fly Sprites: the computer's Sprite, journaled like any launch (lost answers are found by name and time), then
     its network policy at EGRESS=internet for the setup's downloads (the build sets EGRESS when it ends)."""
-    from cloud import sprites as cloud_sprites
+    cloud_sprites = cloud.registry.module("sprites")
     lost = lost_sprite(a, s, st)
     if lost:
         print(f"metacomputer: an earlier launch of {s['VM_NAME']} made a Sprite it never recorded (its label shows it): "
@@ -729,7 +728,7 @@ def cmd_abort(s, args):
 def abort_sprite(s, a, rd, st, op, keep):
     """A failed build's clean-up on Fly Sprites: the Sprite this operation made (its id recorded, or a lost launch
     found by name and time) is deleted; --keep leaves it (asleep, it bills its disk only)."""
-    from cloud import sprites as cloud_sprites
+    cloud_sprites = cloud.registry.module("sprites")
     org, sprite = cloud_sprites.org_of(s), cloud_sprites.sprite_of(s)
     if not st.get("instance") and st.get("launching") == op:
         lost = lost_sprite(a, s, st)
@@ -870,7 +869,7 @@ def cmd_delete(s, args):
         else:
             lost = lost_sprite(a, s, st)
             if lost:
-                from cloud import sprites as cloud_sprites
+                cloud_sprites = cloud.registry.module("sprites")
                 a.cli.destroy(cloud_sprites.org_of(s), cloud_sprites.sprite_of(s))
                 print("deleted a Sprite launched for it that this Mac had no record of (its label shows it)",
                       file=sys.stderr)
@@ -1240,7 +1239,7 @@ def cmd_target(args):
 def sprite_check_argv(args, ep):
     """How Fly's command (the tunnel's own program) is asked about the Sprite: its record from the API, whose "id" must
     be the one recorded when it was made (lib/proxywrap.py --check, and the vault's binding)."""
-    from cloud import sprites as cloud_sprites
+    cloud_sprites = cloud.registry.module("sprites")
     org = cloud_sprites.org_of({"SPRITE_ORG": args.sprite_org})
     return [ep["proxy"][0], "-o", org, "api", f"/v1/sprites/{ep['host']}", "--", "-sS"]
 
@@ -1249,7 +1248,7 @@ def check_sprite(args, ep, state=None):
     """The Sprite a connection (or the vault's binding) goes to is the computer's own: made under the organization and
     name the settings say, and the Sprite of that name at Fly has the id recorded when it was made. Refused otherwise
     (one deleted and made again under the name is another, whoever made it). Returns its record."""
-    from cloud import sprites as cloud_sprites
+    cloud_sprites = cloud.registry.module("sprites")
     state = read_state(args.run_dir) if state is None and args.run_dir else (state or {})
     want = state.get("instance")
     if not want:
@@ -1317,7 +1316,7 @@ def cmd_probe(args):
         word = "unknown"
         if args.transport == "sprite":
             try:
-                from cloud import sprites as cloud_sprites
+                cloud_sprites = cloud.registry.module("sprites")
                 cur = sprite_cli(ep["proxy"][0]).info(cloud_sprites.org_of({"SPRITE_ORG": args.sprite_org}), ep["host"])
                 want = (read_state(args.run_dir) if args.run_dir else {}).get("instance")
                 word = ("absent" if cur is None or (want and cur.get("id") != want)
@@ -1341,7 +1340,7 @@ def require_narrowing(s, a, st, new_rules, setup=False, what="that"):
     only at the user's own terminal, however it's split into steps (judged on the policy it ends with: lib/cloud/
     sprites.py widens). The one exception is the setup's own: --setup, while this computer's setup hasn't finished
     (its record says so: setup-done), opens it for the packages it downloads, and the build sets EGRESS after."""
-    from cloud import sprites as cloud_sprites
+    cloud_sprites = cloud.registry.module("sprites")
     import owners
     cur = a.egress(s["VM_NAME"])
     if not cloud_sprites.widens(cur.get("outside"), cur.get("allow") or [], new_rules):
@@ -1377,7 +1376,7 @@ def cmd_egress(s, args):
         return 0
     if args.set:
         if a.name == "sprites":
-            require_narrowing(s, a, st, __import__("cloud.sprites").sprites.rules_for(args.set), args.setup,
+            require_narrowing(s, a, st, cloud.registry.module("sprites").rules_for(args.set), args.setup,
                               f"net egress {args.set}")
         check_firewall(s, st, a)
         out = a.apply_egress(s["VM_NAME"], args.set)
@@ -1477,7 +1476,7 @@ def cmd_checkpoint(s, args):
     out = fn(s["VM_NAME"], args.label)
     out["seconds"] = round(time.monotonic() - t0, 2)
     if older:                        # --replace: the new one is made first, then the older ones of that name go
-        from cloud import sprites as cloud_sprites
+        cloud_sprites = cloud.registry.module("sprites")
         for v in older:
             a.cli.delete_checkpoint(cloud_sprites.org_of(s), cloud_sprites.sprite_of(s), v)
         out["replaced"] = older
@@ -1493,7 +1492,7 @@ def cmd_allow(s, args):
     a, st = sprites_only(s, "an allowlist of names")
     if not st.get("instance"):
         raise Refused(f"{s['VM_NAME']} has no Sprite that this Mac knows of")
-    from cloud import sprites as cloud_sprites
+    cloud_sprites = cloud.registry.module("sprites")
     name, setting = s["VM_NAME"], (s.get("EGRESS") or "internet")
     cur = a.egress(name)
     kind, have = cur.get("outside"), list(cur.get("allow") or [])

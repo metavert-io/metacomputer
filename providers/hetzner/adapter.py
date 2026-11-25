@@ -19,23 +19,13 @@ primary IPv4 address is deleted with them. Sizes: Arm (CAX, Ampere) cax11 (the d
 cax31; x86 cx23 and cx33. These are in Hetzner's EU locations (fsn1, nbg1, hel1). Billed by the hour, up to the
 size's monthly price; a stopped server is billed in full, and its IPv4 address too: only deleting it stops the
 charges."""
-from .adapter import AdapterError
-from .ubuntu_vm import public_v4
-from .vps import API, OP_TAG, TAG, Capacity, ProviderError, VPS, egress_from, fw_name, manifest, same_key
+from cloud.adapter import AdapterError
+from cloud.ubuntu_vm import public_v4
+from cloud.vps import API, OP_TAG, TAG, Capacity, ProviderError, VPS, egress_from, fw_name, same_key
 
-ENV_KEY = "HCLOUD_TOKEN"
-# size -> (architecture, vCPUs, memory GB, disk GB, USD an hour): Hetzner's list prices for a US-dollar account,
-# read from its API on 2026-11-23 (an account billed in euros pays Hetzner's euro prices); each is billed by the hour
-# up to its monthly price (cax11 $6.99, cax21 $12.49, cax31 $24.99, cx23 $6.49, cx33 $9.99).
-SIZES = {
-    "cax11": ("arm64", 2, 4, 40, 0.0112),
-    "cax21": ("arm64", 4, 8, 80, 0.0200),
-    "cax31": ("arm64", 8, 16, 160, 0.0400),
-    "cx23": ("x86_64", 2, 4, 40, 0.0104),
-    "cx33": ("x86_64", 4, 8, 80, 0.0160),
-}
+from .manifest import ENV_KEY, MANIFEST, REGIONS, SIZES  # noqa: F401  (its manifest: providers/hetzner/manifest.py)
+
 IPV4_PER_HOUR = 0.001           # the server's primary IPv4 address ($0.60 a month), billed while it exists
-REGIONS = ("fsn1", "nbg1", "hel1")
 HETZNER_ARCH = {"arm64": "arm", "x86_64": "x86"}
 STATES = {"initializing": "PROVISIONING", "starting": "STARTING", "running": "RUNNING", "stopping": "STOPPING",
           "off": "STOPPED", "deleting": "TERMINATING", "migrating": "STARTING", "rebuilding": "STARTING"}
@@ -44,14 +34,6 @@ OFF_RULE = {"direction": "out", "protocol": "icmp", "destination_ips": ["192.0.2
             "description": "metacomputer: EGRESS=off (one outbound rule must exist; this one reaches no one)"}
 ALL_PORTS = "1-65535"
 MAX_IPS_PER_RULE = 100          # Hetzner's limit on the addresses of one rule (found live: 103 refused, 100 taken)
-
-MANIFEST = manifest(
-    "hetzner", "Hetzner Cloud", SIZES, REGIONS,
-    # Its own Cloud Firewall (outside the guest): out, public IPv4 addresses only, or nothing. Hetzner's firewalls
-    # don't filter its metadata service (answered locally), DHCP or its DNS resolvers: only the guest refuses those.
-    {"enforced": True, "private_ranges": True, "metadata": False, "off": True},
-    "billed by the hour up to the monthly price; a stopped server is billed in full (and its IPv4 address): only "
-    "deleting it (metacomputer vm delete) stops the charges, and the idle stop saves nothing")
 
 
 def rules(egress):
@@ -319,3 +301,6 @@ class Hetzner(VPS):
         """Where to look for what an operation may have made: the console, and the API call."""
         return (f"Hetzner's console (the project's Servers, label metacomputer-op={op}), or: curl -H \"Authorization: "
                 f"Bearer $HCLOUD_TOKEN\" 'https://api.hetzner.cloud/v1/servers?label_selector=metacomputer-op%3D{op}'")
+
+
+ADAPTER = Hetzner

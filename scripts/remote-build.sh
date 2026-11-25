@@ -210,8 +210,8 @@ if [ "$KIND" = sprite ]; then
   # their key lists and sshd as a Sprites service on the Sprite's loopback, with /.sprite hidden from its sessions.
   # The host key it reports came over that authenticated channel: pinned here, never learned from a first connection.
   BS="$(mktemp -d "$SOCK_DIR/bootstrap.XXXXXX")"
-  cp "$LAB_ROOT/provisioning/sprite/bootstrap.sh" "$BS/"
-  cp -R "$LAB_ROOT/provisioning/sprite/rootfs" "$BS/"
+  cp "$LAB_ROOT/providers/sprites/guest/bootstrap.sh" "$BS/"
+  cp -R "$LAB_ROOT/providers/sprites/guest/rootfs" "$BS/"
   remote_py key-lists --vm "$VM_NAME" --dir "$BS" || die "couldn't write the key lists"
   say "bootstrap through Fly's own channel (sprite exec): accounts, and sshd on the Sprite's loopback with /.sprite hidden"
   out="$( (cd "$BS" && COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -cf - bootstrap.sh keys-guest keys-admin rootfs) \
@@ -362,7 +362,7 @@ mkdir -p "$P/payload/remote"
 cp -R "$LAB_ROOT/provisioning/guest/." "$P/payload/"
 cp -R "$LAB_ROOT/provisioning/remote/rootfs" "$P/payload/remote/"
 cp "$LAB_ROOT/provisioning/remote/bootstrap.sh" "$P/payload/remote/"
-[ "$KIND" != sprite ] || cp -R "$LAB_ROOT/provisioning/sprite" "$P/payload/sprite"
+[ "$KIND" != sprite ] || cp -R "$LAB_ROOT/providers/sprites/guest" "$P/payload/sprite"
 cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$P/payload/"
 echo "$CUA_DRIVER_SHA256  $P/payload/$CUA_DRIVER_TARBALL" | shasum -a 256 -c - >/dev/null || die "the driver in the payload isn't the pinned one"
 cp "$CACHE_DIR/mozilla/pinned-key.asc" "$P/payload/mozilla-repo-signing-key.gpg"

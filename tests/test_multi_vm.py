@@ -100,7 +100,7 @@ class Box:
     def __init__(self, td, tag):
         self.root = os.path.join(td, tag)
         self.co = os.path.join(self.root, "co")
-        for d in ("bin", "scripts", "lib"):
+        for d in ("bin", "scripts", "lib", "providers"):
             shutil.copytree(os.path.join(LAB, d), os.path.join(self.co, d),
                             ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy(os.path.join(LAB, "install.sh"), self.co)

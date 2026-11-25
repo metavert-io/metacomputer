@@ -209,13 +209,16 @@ def registry():
           and cloud.by_place("server").name == "ubuntu-vm" and cloud.by_place("sprites").name == "sprites"
           and call(cloud.by_place, "fake")[0] == "error")
     check("an adapter that isn't registered is a KeyError", call(cloud.adapter, "nosuch")[0] == "error")
-    # Static: the adapters' code imports nothing that reaches the network or starts programs.
+    # Static: the adapters' code imports nothing that reaches the network or starts programs: the framework's
+    # (lib/cloud) and each registered provider's adapter and manifest (providers/<name>/).
     banned = {"socket", "urllib", "http", "subprocess", "requests", "ssl", "asyncio"}
     bad = []
-    for f in sorted(os.listdir(os.path.join(LAB, "lib", "cloud"))):
+    files = [os.path.join("lib", "cloud", f) for f in sorted(os.listdir(os.path.join(LAB, "lib", "cloud")))]
+    files += [os.path.join("providers", n, f + ".py") for n in cloud.registry.PROVIDERS for f in ("adapter", "manifest")]
+    for f in files:
         if not f.endswith(".py"):
             continue
-        tree = ast.parse(open(os.path.join(LAB, "lib", "cloud", f)).read())
+        tree = ast.parse(open(os.path.join(LAB, f)).read())
         for node in ast.walk(tree):
             names = []
             if isinstance(node, ast.Import):
@@ -223,7 +226,8 @@ def registry():
             elif isinstance(node, ast.ImportFrom) and node.level == 0:
                 names = [node.module or ""]
             bad += [f"{f}: {n}" for n in names if n.split(".")[0] in banned]
-    check("lib/cloud imports no network or process module", not bad, bad)
+    check("lib/cloud and the providers' adapters and manifests import no network or process module", not bad and
+          len(files) > 2 * len(cloud.registry.PROVIDERS), bad)
 
 
 def local_lume():
