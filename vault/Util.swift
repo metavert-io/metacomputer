@@ -720,15 +720,17 @@ func procArgsOrNil(_ pid: pid_t) -> [String]? {
 /// (lib/owners.py UNKNOWN_AGENT).
 let unknownAgent = "unidentified agent"
 
-/// The agent session a process is, if any: "Claude Code" (a process named claude, node running a script named
-/// claude*, or the native installer's version file) or "Codex" (its native binary, named codex; npm and Homebrew start
-/// it from a node launcher, and the IDE extensions and the desktop app run `codex app-server`, one process for all of
-/// their conversations); else what it executes (agentKindOf): "OpenClaw", "Hermes Agent", "Gemini CLI",
-/// "Antigravity CLI" or unknownAgent.
+/// The agent session a process is, if any: by its own executable's name (agentExecutables), node running a script
+/// whose name starts with an agent's prefix (agentNodeScripts: its first two arguments), else what it executes
+/// (agentKindOf), or unknownAgent. The tables are the agents' own (coding-agents/<name>/recognition.json), compiled in by
+/// scripts/build-vault.sh (lib/agentkit/recognition.py swift), as lib/owners.py reads them.
 func agentKind(_ p: pid_t, _ e: ProcEntry) -> String? {
-    if e.name == "claude"
-        || (e.name == "node" && procArgs(p).dropFirst().prefix(2).contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("claude") }) {
-        return "Claude Code"
+    if let k = agentExecutables[e.name] { return k }
+    if e.name == "node" {
+        let args = procArgs(p).dropFirst().prefix(2)
+        if let k = agentNodeScripts.first(where: { pre in args.contains { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix(pre.0) } }) {
+            return k.1
+        }
     }
     var unreadable = false
     #if MCOMP_VAULT_TESTING
@@ -749,28 +751,32 @@ func pathDir(_ s: String) -> String {
     return String(s[..<i])
 }
 
-/// The agents' programs by file name, a folder in a script's path, python -m modules, their packages' identifiers,
-/// the interpreters' options that take a value, preload or carry code, and bun's and deno's commands: lib/owners.py
-/// AGENT_NAMES, AGENT_PATH_WORDS, AGENT_MODULES, AGENT_PACKAGE_WORDS, AGENT_PACKAGE_FOLDERS, AGENT_PACKAGES,
-/// OPENCLAW_HELPERS, NODE_VALUE_FLAGS, NODE_PRELOAD_FLAGS, NODE_CODE_FLAGS, DENO_VALUE_FLAGS, PYTHON_VALUE_FLAGS,
-/// BUN_COMMANDS, DENO_COMMANDS, SCRIPT_COMMANDS.
-let agentNames: [String: String] = [
-    "gemini": "Gemini CLI", "gemini.js": "Gemini CLI", "openclaw": "OpenClaw", "openclaw.mjs": "OpenClaw",
-    "openclaw-gateway": "OpenClaw", "hermes": "Hermes Agent", "hermes-agent": "Hermes Agent", "hermes-acp": "Hermes Agent",
-    "agy": "Antigravity CLI", "antigravity": "Antigravity CLI", "Antigravity": "Antigravity app"]
-/// lib/owners.py ANTIGRAVITY_BUNDLE and LANGUAGE_SERVER: the Antigravity app's and IDE's own executables (app_agent).
-let antigravityBundle = "/Antigravity[^/]*\\.app/Contents/MacOS/[^/]+$"
-let languageServer = "^language_server(_(macos|darwin|linux|windows)_(arm|arm64|x64|amd64|x86_64)(\\.exe)?)?$"
-let agentPathWords: [(String, String)] = [("/@google/gemini-cli/", "Gemini CLI"), ("hermes_cli", "Hermes Agent")]
-let agentModules: [String: String] = ["hermes_cli": "Hermes Agent", "hermes_agent": "Hermes Agent"]
-let agentPackageWords: [(String, String)] = [
-    ("@google/gemini-cli", "Gemini CLI"), ("gemini-cli-core", "Gemini CLI"), ("openclaw.mjs", "OpenClaw"),
-    ("hermes_cli", "Hermes Agent"), ("hermes-agent", "Hermes Agent")]
-let agentPackageFolders: [(String, String)] = [("gemini-cli", "Gemini CLI"), ("openclaw", "OpenClaw")]
-let agentPackages: [String: String] = [
-    "@google/gemini-cli": "Gemini CLI", "@google/gemini-cli-core": "Gemini CLI", "openclaw": "OpenClaw",
-    "hermes-agent": "Hermes Agent"]
-let openclawHelpers = ["dist", "process", "supervisor"]
+/// An app whose agent runs inside the app (agentApps): its executables in its bundle (bundle, a regular expression
+/// searched in the path), or a helper of its (helper, matched against the file name) in a folder of its own (a path
+/// component that is or starts with one of folders, case aside).
+struct AgentApp: Sendable {
+    let kind: String
+    let bundle: String
+    let helper: String
+    let folders: [String]
+}
+
+/// An agent process that runs all of its conversations (sharedAgentKinds): always, or with no readable arguments, a
+/// title (argv[0]'s file name) in titles, or one of subcommands among the arguments after the first (only the first
+/// `within` of them, when it's set). label names it in records; under, in the question.
+struct SharedAgentKind: Sendable {
+    let label: String
+    let under: String
+    let always: Bool
+    let titles: [String]
+    let subcommands: [String]
+    let within: Int?
+}
+
+/// The interpreters' options that take a value, preload or carry code, and bun's and deno's commands: lib/owners.py
+/// NODE_VALUE_FLAGS, NODE_PRELOAD_FLAGS, NODE_CODE_FLAGS, DENO_VALUE_FLAGS, PYTHON_VALUE_FLAGS, BUN_COMMANDS,
+/// DENO_COMMANDS, SCRIPT_COMMANDS. (The agents' own words are in the generated tables: agentNames, agentApps,
+/// agentPathWords, agentModules, agentPackageWords, agentPackageFolders, agentPackages.)
 let nodeValueFlags: Set<String> = [
     "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--title",
     "--env-file", "--env-file-if-exists", "--watch-path", "--redirect-warnings", "--secure-heap", "--secure-heap-min",
@@ -795,28 +801,34 @@ let denoCommands: Set<String> = ["run", "serve", "test", "bench", "check", "comp
                                  "init", "jupyter", "publish", "add", "remove", "outdated", "clean", "lsp", "vendor"]
 let scriptCommands: Set<String> = ["run", "serve", "test", "bench", "check", "compile"]
 
-/// The agent a process is by a name (its kernel name or its executable's path), as lib/owners.py agent_kind.
+/// The agent a process is by a name (its kernel name or its executable's path), as lib/owners.py agent_kind: its own
+/// executable's file name, a version file of its installer's (.../FOLDER/1.2.3), a program's file name, or an app's.
 func nameKind(_ s: String) -> String? {
     let base = pathBase(s)
-    if base == "claude" || matches(s, "/claude/versions/[0-9]+\\.[0-9]+\\.[0-9]+[^/]*$") { return "Claude Code" }
-    if base == "codex" { return "Codex" }
+    if let k = agentExecutables[base] { return k }
+    for (folder, kind) in agentVersionFolders
+    where matches(s, "/" + NSRegularExpression.escapedPattern(for: folder) + "/[0-9]+\\.[0-9]+\\.[0-9]+[^/]*$") {
+        return kind
+    }
     return agentNames[base] ?? appAgent(s)
 }
 
-/// Whether a folder on the path is Antigravity's own, as lib/owners.py antigravity_path: a component that is or starts
-/// with "antigravity" (or ".antigravity"), case aside, never the word inside another name.
-func antigravityPath(_ path: String) -> Bool {
+/// Whether a folder on the path is an app's own, as lib/owners.py app_folder: a component that is or starts with one
+/// of prefixes, case aside, never the word inside another name.
+func appFolder(_ path: String, _ prefixes: [String]) -> Bool {
     path.split(separator: "/").contains { c in
         let l = c.lowercased()
-        return l.hasPrefix("antigravity") || l.hasPrefix(".antigravity")
+        return prefixes.contains { l.hasPrefix($0) }
     }
 }
 
-/// "Antigravity app" for an executable of the Antigravity app's or IDE's, as lib/owners.py app_agent: one in the
-/// Contents/MacOS of an Antigravity app bundle, or a language server in a folder of Antigravity's own (antigravityPath).
+/// The agent whose app an executable is, as lib/owners.py app_agent: one in the app's bundle, or a helper of its in a
+/// folder of the app's own (appFolder).
 func appAgent(_ path: String) -> String? {
-    if matches(path, antigravityBundle) { return "Antigravity app" }
-    if matches(pathBase(path), languageServer) && antigravityPath(pathDir(path)) { return "Antigravity app" }
+    for app in agentApps {
+        if matches(path, app.bundle) { return app.kind }
+        if matches(pathBase(path), app.helper) && appFolder(pathDir(path), app.folders) { return app.kind }
+    }
     return nil
 }
 
@@ -830,11 +842,11 @@ func packageAgent(_ text: String, folder: Bool = false) -> String? {
     if let w = agentPackageWords.first(where: { text.contains($0.0) }) { return w.1 }
     let parts = text.components(separatedBy: "/")
     let folders = folder ? parts : Array(parts.dropLast())
-    let helper = parts.indices.contains { i in
-        parts[i] == "openclaw" && Array(parts[min(i + 1, parts.count)..<min(i + 4, parts.count)]) == openclawHelpers
-    }
-    for (name, agent) in agentPackageFolders where folders.contains(name) && !(agent == "OpenClaw" && helper) {
-        return agent
+    for (name, agent, helpers) in agentPackageFolders where folders.contains(name) {
+        let helper = !helpers.isEmpty && parts.indices.contains { i in
+            parts[i] == name && Array(parts[min(i + 1, parts.count)..<min(i + 1 + helpers.count, parts.count)]) == helpers
+        }
+        if !helper { return agent }
     }
     return nil
 }
@@ -987,37 +999,19 @@ func interpreterAgent(_ argv: [String], cwd: @escaping () -> String?, kind: Stri
     return nil
 }
 
-/// An agent process that runs all of its conversations, whose requests therefore name no one session: Codex's app
-/// server (`codex app-server`: the IDE extension, the desktop app, the terminal app's background server), the
-/// Antigravity app and IDE (every conversation runs in the app's language server), OpenClaw's
-/// gateway (`openclaw-gateway`, or `openclaw gateway ...`), Hermes Agent's gateway (every Hermes conversation's tools
-/// run there; its own CLI and TUI are clients of it) and Antigravity CLI serving others (`agy acp`, an editor's agent
-/// server, and `agy remote-control`, its background instance for remote devices; each can run several conversations).
-/// Arguments that can't be read count as shared: unknown never names a session. The label it returns names the process
-/// in the vault's question and records.
+/// An agent process that runs all of its conversations, whose requests therefore name no one session (an app server, a
+/// gateway, an editor's agent server: sharedAgentKinds, the agents' own). Arguments that can't be read count as shared:
+/// unknown never names a session. The label it returns names the process in the vault's question and records.
 func sharedAgentProcess(_ kind: String, _ p: pid_t) -> String? {
-    switch kind {
-    case "Codex":
-        let args = procArgs(p)
-        return args.isEmpty || args.dropFirst().contains("app-server") ? "Codex app server" : nil
-    case "OpenClaw":
-        let args = procArgs(p)
-        let title = args.first.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
-        return args.isEmpty || title == "openclaw-gateway" || args.dropFirst().prefix(3).contains("gateway")
-            ? "OpenClaw gateway" : nil
-    case "Hermes Agent":
-        return "Hermes Agent gateway"
-    case "Antigravity CLI":
-        let args = procArgs(p)
-        let sub = args.dropFirst().prefix(3)
-        return args.isEmpty || sub.contains("acp") || sub.contains("remote-control") ? "Antigravity CLI server" : nil
-    case "Antigravity app":
-        return "Antigravity app"
-    case unknownAgent:
-        return "an unidentified agent's process"
-    default:
-        return nil
-    }
+    if kind == unknownAgent { return "an unidentified agent's process" }
+    guard let s = sharedAgentKinds[kind] else { return nil }
+    if s.always { return s.label }
+    let args = procArgs(p)
+    if args.isEmpty { return s.label }
+    let title = args.first.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+    if s.titles.contains(title) { return s.label }
+    let rest = s.within.map { Array(args.dropFirst().prefix($0)) } ?? Array(args.dropFirst())
+    return s.subcommands.contains(where: { rest.contains($0) }) ? s.label : nil
 }
 
 /// Who sent a request: the client process and the nearest agent session process above it (Claude Code, Codex,
@@ -1105,29 +1099,15 @@ struct Requester {
         if let p = claudePID {
             return clean("\(agent ?? "Claude Code") in \(tildePath(project ?? "?")) (pid \(p))" + claim, max: 300)
         }
-        if agent == "Codex app server" {
-            return clean("\(clientExe) (pid \(clientPID)) under Codex's app server, whose conversations share one process"
+        if let a = agent, let s = sharedAgentKinds.values.first(where: { $0.label == a }) {
+            return clean("\(clientExe) (pid \(clientPID)) under \(s.under), whose conversations share one process"
                          + " (no session's answers apply)" + claim, max: 300)
         }
         if agent == "an unidentified agent's process" {
             return clean("\(clientExe) (pid \(clientPID)) under an interpreter whose arguments couldn't be read, counted as an"
                          + " agent (no session's answers apply)" + claim, max: 300)
         }
-        if agent == "Antigravity app" {
-            return clean("\(clientExe) (pid \(clientPID)) under the Antigravity app or IDE, whose conversations share one"
-                         + " process (no session's answers apply)" + claim, max: 300)
-        }
-        if agent == "Antigravity CLI server" {
-            return clean("\(clientExe) (pid \(clientPID)) under Antigravity CLI serving an editor or remote devices (agy acp,"
-                         + " agy remote-control), whose conversations share one process (no session's answers apply)" + claim,
-                         max: 300)
-        }
-        if let a = agent, a.hasSuffix(" gateway") {
-            return clean("\(clientExe) (pid \(clientPID)) under \(a.dropLast(" gateway".count))'s gateway, whose conversations"
-                         + " share one process (no session's answers apply)" + claim, max: 300)
-        }
-        return clean("\(clientExe) (pid \(clientPID)), not from Claude Code, Codex, OpenClaw, Hermes Agent"
-                     + ", Gemini CLI or Antigravity CLI" + claim, max: 300)
+        return clean("\(clientExe) (pid \(clientPID)), not from \(agentSessionLabels)" + claim, max: 300)
     }
 }
 

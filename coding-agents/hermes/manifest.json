@@ -1,0 +1,11 @@
+{
+  "label": "Hermes Agent",
+  "flag": "hermes",
+  "prog": "hermes",
+  "short": "Hermes",
+  "docs": "docs/hermes.md",
+  "owners": [
+    "@jonradoff"
+  ],
+  "tools": "mcp__metacomputer__*"
+}

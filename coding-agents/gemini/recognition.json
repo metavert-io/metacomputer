@@ -1,0 +1,25 @@
+{
+  "kinds": [
+    "Gemini CLI"
+  ],
+  "names": {
+    "gemini": "Gemini CLI",
+    "gemini.js": "Gemini CLI"
+  },
+  "path_words": {
+    "/@google/gemini-cli/": "Gemini CLI"
+  },
+  "package_words": {
+    "@google/gemini-cli": "Gemini CLI",
+    "gemini-cli-core": "Gemini CLI"
+  },
+  "package_folders": {
+    "gemini-cli": {
+      "kind": "Gemini CLI"
+    }
+  },
+  "packages": {
+    "@google/gemini-cli": "Gemini CLI",
+    "@google/gemini-cli-core": "Gemini CLI"
+  }
+}

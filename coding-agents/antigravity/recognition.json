@@ -1,0 +1,38 @@
+{
+  "kinds": [
+    "Antigravity CLI",
+    "Antigravity app"
+  ],
+  "names": {
+    "agy": "Antigravity CLI",
+    "antigravity": "Antigravity CLI",
+    "Antigravity": "Antigravity app"
+  },
+  "apps": [
+    {
+      "kind": "Antigravity app",
+      "bundle": "/Antigravity[^/]*\\.app/Contents/MacOS/[^/]+$",
+      "helper": "^language_server(?:_(?:macos|darwin|linux|windows)_(?:arm|arm64|x64|amd64|x86_64)(?:\\.exe)?)?$",
+      "folders": [
+        "antigravity",
+        ".antigravity"
+      ]
+    }
+  ],
+  "shared": {
+    "Antigravity CLI": {
+      "label": "Antigravity CLI server",
+      "under": "Antigravity CLI serving an editor or remote devices (agy acp, agy remote-control)",
+      "subcommands": [
+        "acp",
+        "remote-control"
+      ],
+      "within": 3
+    },
+    "Antigravity app": {
+      "label": "Antigravity app",
+      "under": "the Antigravity app or IDE",
+      "always": true
+    }
+  }
+}

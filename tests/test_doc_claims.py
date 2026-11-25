@@ -752,8 +752,9 @@ CLAIMS = [
     ("SECURITY.md", r"commands only you run also refuse when Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI, Antigravity\s+CLI or the Antigravity app or IDE \(whose agent runs inside the app: their own terminals included\) is above them in the\s+process tree.*?and\s+also when a node, bun, deno or python process above them can't be told.*?A process\s+is told by what it executes: its executable \(a native `gemini`.*?the first argument that isn't an option or the value of an option known\s+to take one.*?plus any of its arguments naming an agent's package by an identifier of its own \(`@google/gemini-cli`,.*?A file merely named `gemini` is no agent. It can't\s+be told when its arguments or working folder can't be read or its script isn't there",
      lambda m: "def at_user_terminal(fds=(0,)):" in raw("lib/owners.py")
      and "return ancestry_complete(os.getpid(), table) and claude_of(os.getpid(), table) is None" in raw("lib/owners.py")
-     and 'return "Claude Code"' in function_src("lib/owners.py", "agent_kind")
-     and 'return "Codex"' in function_src("lib/owners.py", "agent_kind")
+     and "got = executable_agent(comm)" in function_src("lib/owners.py", "agent_kind")
+     and '"claude": "Claude Code"' in raw("coding-agents/claude-code/recognition.json")
+     and '"codex": "Codex"' in raw("coding-agents/codex/recognition.json")
      and "got = name_agent(comm)" in function_src("lib/owners.py", "agent_kind")
      and "got = agent_kind(comm) or (agent_kind(exe) if exe else None)" in function_src("lib/owners.py", "process_agent")
      and "if args is None:\n        return UNKNOWN_AGENT" in function_src("lib/owners.py", "process_agent")
@@ -762,18 +763,22 @@ CLAIMS = [
      and "return UNKNOWN_AGENT                    # the script's place, and no file there (or no way to look): can't tell"
      in function_src("lib/owners.py", "_script_at")
      and "got = _package_rule(argv[1:], where)" in function_src("lib/owners.py", "script_agent")
-     and '("@google/gemini-cli", "Gemini CLI")' in raw("lib/owners.py") and '("hermes-agent", "Hermes Agent")' in raw("lib/owners.py")
+     and '"@google/gemini-cli": "Gemini CLI"' in raw("coding-agents/gemini/recognition.json")
+     and '"hermes-agent": "Hermes Agent"' in raw("coding-agents/hermes/recognition.json")
+     and 'AGENT_PACKAGE_WORDS = _TABLES["package_words"]' in raw("lib/owners.py")
      and 'if not eq and (flag in (DENO_VALUE_FLAGS if kind == "deno" else NODE_VALUE_FLAGS)):' in function_src("lib/owners.py", "script_agent")
      and "if let got = packageRule(argv.dropFirst(), cwd: cwd) { return got }" in raw("vault/Util.swift")
      and "if not where:\n            return _UNREADABLE" in function_src("lib/owners.py", "_resolve")
-     and '"gemini": "Gemini CLI"' in raw("lib/owners.py") and "proc_pidpath" in function_src("lib/owners.py", "proc_exe")
+     and '"gemini": "Gemini CLI"' in raw("coding-agents/gemini/recognition.json") and "proc_pidpath" in function_src("lib/owners.py", "proc_exe")
      and "NODE_VALUE_OPTIONS" not in raw("lib/owners.py") and "nodeValueOptions" not in raw("vault/Util.swift")
      and "if let x = exe, let k = nameKind(x) { return k }" in raw("vault/Util.swift")
      and "guard let w = cwd(), !w.isEmpty else { return .unreadable }" in raw("vault/Util.swift")
      and "guard let a = args() else { return unknownAgent }" in raw("vault/Util.swift")
-     and 'case unknownAgent:\n        return "an unidentified agent\'s process"' in raw("vault/Util.swift")
-     and all(f': "{a}"' in raw("lib/owners.py") for a in ("Gemini CLI", "OpenClaw", "Hermes Agent", "Antigravity CLI",
-                                                         "Antigravity app"))
+     and 'if kind == unknownAgent { return "an unidentified agent\'s process" }' in raw("vault/Util.swift")
+     and all(f'"kinds": [' in raw(f"coding-agents/{n}/recognition.json") and f'"{a}"' in raw(f"coding-agents/{n}/recognition.json")
+             for n, a in (("gemini", "Gemini CLI"), ("openclaw", "OpenClaw"), ("hermes", "Hermes Agent"),
+                          ("antigravity", "Antigravity CLI"), ("antigravity", "Antigravity app")))
+     and 'AGENTS = _TABLES["kinds"] + (UNKNOWN_AGENT,)' in raw("lib/owners.py")
      and "got = name_agent(comm) or app_agent(comm)" in function_src("lib/owners.py", "agent_kind")
      and "return agentNames[base] ?? appAgent(s)" in raw("vault/Util.swift")
      and "if agent_of(p, table):" in function_src("lib/owners.py", "claude_of")
@@ -783,7 +788,8 @@ CLAIMS = [
      and "user_tty || die" in raw("bin/metacomputer")
      and "guard atUserTerminal() else {" in raw("vault/TTY.swift")
      and "return agentAbove(getpid()) == false" in raw("vault/TTY.swift")
-     and 'if base == "codex" { return "Codex" }' in raw("vault/Util.swift")
+     and "if let k = agentExecutables[base] { return k }" in raw("vault/Util.swift")
+     and 'recognition="$(python3 "$ROOT/lib/agentkit/recognition.py" swift)"' in raw("scripts/build-vault.sh")
      and "return interpreterAgent(a, cwd: cwd, kind: kind)" in raw("vault/Util.swift")),
     ("docs/codex.md", r"a `metacomputer` command stops at once\s+with exit status (77)",
      lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("bin/metacomputer")
@@ -2854,7 +2860,10 @@ CLAIMS = [
      and "} else if !ending {" in raw("vault/PaymentServer.swift")
      and "if who.claudePID == nil && who.hostPID == nil && (human || fills.isEmpty) {" in raw("vault/PaymentServer.swift")
      and "agent: shared, hostPID: p, hostStart: e.start)" in raw("vault/Util.swift")
-     and '"OpenClaw gateway"' in raw("vault/Util.swift") and 'return "Hermes Agent gateway"' in raw("vault/Util.swift")),
+     and '"label": "OpenClaw gateway"' in raw("coding-agents/openclaw/recognition.json")
+     and '"label": "Hermes Agent gateway"' in raw("coding-agents/hermes/recognition.json")
+     and '"always": true' in raw("coding-agents/hermes/recognition.json")
+     and "guard let s = sharedAgentKinds[kind] else { return nil }" in raw("vault/Util.swift")),
     ("SECURITY.md", r"Node runs with a fixed command and only `PATH=/usr/bin:/bin`,\s+`LANG`, `NO_COLOR`, `OPENSSL_CONF=/dev/null` and `SHOP_AUTH_FILE`",
      lambda m: 'var env = ["PATH=/usr/bin:/bin", "HOME=\\(run)", "TMPDIR=\\(run)/", "LANG=C.UTF-8", "NO_COLOR=1", "OPENSSL_CONF=/dev/null",' in raw("vault/PaymentServer.swift")
      and '"SHOP_AUTH_FILE=\\(pin.auth_file ?? "")"]' in raw("vault/PaymentServer.swift")
@@ -3098,18 +3107,19 @@ CLAIMS = [
                             r"`Contents/MacOS` of an Antigravity app bundle.*?or a language server.*?in a folder of "
                             r"Antigravity's own \(a path component that is or\s+starts with `antigravity`, case aside.*?never the "
                             r"word inside\s+another name, such as `not-antigravity`\).*?so the vault treats them like Codex's app server",
-     lambda m: 'ANTIGRAVITY_BUNDLE = re.compile(r"/Antigravity[^/]*\\.app/Contents/MacOS/[^/]+$")' in raw("lib/owners.py")
-     and 'let antigravityBundle = "/Antigravity[^/]*\\\\.app/Contents/MacOS/[^/]+$"' in raw("vault/Util.swift")
-     and "if LANGUAGE_SERVER.match(os.path.basename(p)) and antigravity_path(os.path.dirname(p)):" in function_src("lib/owners.py", "app_agent")
-     and 'return any(c.lower().startswith(("antigravity", ".antigravity")) for c in (path or "").split("/"))' in function_src("lib/owners.py", "antigravity_path")
-     and 'matches(pathBase(path), languageServer) && antigravityPath(pathDir(path))' in raw("vault/Util.swift")
-     and 'return l.hasPrefix("antigravity") || l.hasPrefix(".antigravity")' in raw("vault/Util.swift")
-     and '"argv": ["/opt/not-antigravity/bin/language_server"], "agent": null' in raw("tests/fixtures/agent_argv.json")
-     and 'case "Antigravity app":\n        return "Antigravity app"' in raw("vault/Util.swift")
-     and '"agent": "Antigravity app"' in raw("tests/fixtures/agent_argv.json")),
+     lambda m: '"bundle": "/Antigravity[^/]*\\\\.app/Contents/MacOS/[^/]+$"' in raw("coding-agents/antigravity/recognition.json")
+     and '"folders": [\n        "antigravity",\n        ".antigravity"\n      ]' in raw("coding-agents/antigravity/recognition.json")
+     and 'if app["helper"].search(os.path.basename(p)) and app_folder(os.path.dirname(p), app["folders"]):' in function_src("lib/owners.py", "app_agent")
+     and 'return any(c.lower().startswith(prefixes) for c in (path or "").split("/"))' in function_src("lib/owners.py", "app_folder")
+     and 'matches(pathBase(path), app.helper) && appFolder(pathDir(path), app.folders)' in raw("vault/Util.swift")
+     and "return prefixes.contains { l.hasPrefix($0) }" in raw("vault/Util.swift")
+     and '"argv": ["/opt/not-antigravity/bin/language_server"], "agent": null' in raw("coding-agents/antigravity/tests/recognition_cases.json")
+     and '"Antigravity app": {\n      "label": "Antigravity app",' in raw("coding-agents/antigravity/recognition.json")
+     and '"agent": "Antigravity app"' in raw("coding-agents/antigravity/tests/recognition_cases.json")),
     ("docs/antigravity.md", r"Antigravity CLI serving an editor \(`agy acp`\)\s+or remote devices \(`agy remote-control`\) runs several "
                             r"conversations in one process, so requests from under those get\s+none of these",
-     lambda m: 'sub.contains("acp") || sub.contains("remote-control") ? "Antigravity CLI server" : nil' in raw("vault/Util.swift")),
+     lambda m: '"subcommands": [\n        "acp",\n        "remote-control"\n      ],\n      "within": 3' in raw("coding-agents/antigravity/recognition.json")
+     and 'return s.subcommands.contains(where: { rest.contains($0) }) ? s.label : nil' in raw("vault/Util.swift")),
     ("docs/learn.md", r"A database\s+of a layout this version doesn't know, or one that can't be read, is counted in the report's notes, "
                       r"and the report\s+goes on",
      lambda m: "except Layout:" in function_src("lib/session_dbs.py", "sessions")

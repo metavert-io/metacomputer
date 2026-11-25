@@ -82,6 +82,7 @@ PROGRAMS = {
     "scripts/safe-rmtree.sh": NONE,                         # this Mac's folders (never a VM's)
     "scripts/sync-plugin.py": NONE,
     "scripts/gen-providers.py": NONE,                      # files of this checkout, made from the manifests
+    "scripts/gen-agents.py": NONE,                         # files of this checkout, made from the agents' manifests
     "scripts/build-openai-plugin.py": NONE,
     "scripts/vendor-driver-skill.py": NONE,
     "scripts/verify-audit.py": NONE,
@@ -94,6 +95,7 @@ PROGRAMS = {
     "bench/guest/calc-overlay.sh": GUEST,
     "bench/guest/server.py": GUEST,
     "lib/actionlog.py": NONE,
+    "lib/agentkit/recognition.py": NONE,                  # the agents' recognition tables, printed
     "lib/agent_setup.py": NONE,
     "lib/agents.py": NONE,
     "lib/botcheck.py": NONE,

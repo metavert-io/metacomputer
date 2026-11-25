@@ -1,0 +1,19 @@
+{
+  "label": "Claude Code",
+  "flag": "claude",
+  "prog": "claude",
+  "short": "Claude",
+  "json_key": "claude_code",
+  "docs": "docs/install.md",
+  "owners": [
+    "@jonradoff"
+  ],
+  "tools": "mcp__metacomputer__*",
+  "install": {
+    "options": [
+      "--no-plugin"
+    ],
+    "missing": "line",
+    "steps": "hooks"
+  }
+}

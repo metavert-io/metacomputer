@@ -1,0 +1,115 @@
+"""What shared code needs from each agent, read from its manifest (coding-agents/<name>/manifest.json), so no shared program
+names an agent: its words, its command, its install options and the parts of install.sh, metacomputer agents, learn
+and bench it takes part in.
+
+A manifest is a JSON object, checked by check():
+    label        its name in messages ("Claude Code", "Hermes Agent")
+    flag         install.sh's word for it: --FLAG, --no-FLAG, --only-FLAG; its key in agents.json (your choices) and in
+                 installed.json's "incomplete"
+    prog         its command on PATH
+    short        the short name a handoff's messages use for it ("Claude needs you")
+    json_key     its key in `metacomputer agents --json` (default: flag)
+    docs         its page for people (docs/<name>.md)
+    owners       who reviews its folder (.github/CODEOWNERS)
+    tools        how it names metacomputer's tools, for messages
+    install      {"options": install.sh options of its own besides --FLAG/--no-FLAG/--only-FLAG, "missing": "line"
+                 (an install that finds it missing says so on a line of its own) or "listed" (with the others in one
+                 "Not installed here" line), "steps": "generic" (lib/agent_setup.py's install and uninstall) or "hooks"
+                 (its setup.sh's), "only_note": what --only-FLAG says last}
+    sessions     {"source": "files" (transcript files: lib/transcripts.py) or "databases" (lib/session_dbs.py),
+                  "key": learn's count of its sessions (report["sources"][KEY]), "kinds": the Transcript kinds its
+                  reader makes}: present when `metacomputer learn` reads its sessions
+    bench        {"switch": its --agent word}: present when bench/bench.py runs it
+Only lib/agentkit, lib/agent_setup.py and scripts/gen-agents.py read it; bash reads it through lib/agentkit/agents.sh
+(generated). Works under any python3 (macOS's 3.9 included)."""
+from . import registry
+
+KEYS = {"label", "flag", "prog", "short", "json_key", "docs", "owners", "tools", "install", "sessions", "bench"}
+REQUIRED = ("label", "flag", "prog", "short", "docs", "owners", "tools")
+INSTALL_KEYS = {"options", "missing", "steps", "only_note"}
+SESSION_KEYS = {"source", "key", "kinds"}
+
+
+def manifest(name):
+    """The agent's manifest with its defaults filled in."""
+    raw = dict(registry.data(name, "manifest"))
+    inst = dict(raw.get("install") or {})
+    out = dict(raw)
+    out["json_key"] = raw.get("json_key") or raw.get("flag")
+    out["owners"] = tuple(raw.get("owners") or ())
+    out["install"] = {"options": tuple(inst.get("options") or ()), "missing": inst.get("missing") or "listed",
+                      "steps": inst.get("steps") or "generic",
+                      "only_note": inst.get("only_note") or f"Start a new {raw.get('label')} session to pick this up."}
+    return out
+
+
+def label(name):
+    return manifest(name)["label"]
+
+
+def labels(names=None):
+    return [label(n) for n in (registry.AGENTS if names is None else names)]
+
+
+def in_words(words, last="or"):
+    """"A, B, C or D" (last="" : "A, B, C, D")."""
+    words = list(words)
+    if not last or len(words) < 2:
+        return ", ".join(words)
+    return ", ".join(words[:-1]) + f" {last} " + words[-1]
+
+
+def by_flag(flag):
+    """The registered agent whose install.sh word is flag, else None."""
+    return next((n for n in registry.AGENTS if manifest(n)["flag"] == flag), None)
+
+
+def generic():
+    """The agents whose install and uninstall are lib/agent_setup.py's (no setup.sh steps of their own)."""
+    return [n for n in registry.AGENTS if manifest(n)["install"]["steps"] == "generic"]
+
+
+def check(name):
+    """What's wrong with an agent's manifest: [str] (empty: nothing)."""
+    try:
+        raw = registry.data(name, "manifest")
+    except (OSError, ValueError) as e:
+        return [f"coding-agents/{name}/manifest.json can't be read ({type(e).__name__})"]
+    bad = []
+    if not isinstance(raw, dict):
+        return [f"coding-agents/{name}/manifest.json isn't an object"]
+    bad += [f"unknown key {k!r}" for k in sorted(set(raw) - KEYS)]
+    bad += [f"{k!r} is missing" for k in REQUIRED if not raw.get(k)]
+    for k in ("label", "flag", "prog", "short", "json_key", "docs", "tools"):
+        if k in raw and not isinstance(raw[k], str):
+            bad.append(f"{k!r} isn't text")
+    flag = raw.get("flag")
+    if isinstance(flag, str) and not registry.PART.fullmatch(flag):
+        bad.append("its flag isn't a plain lowercase word")
+    if not isinstance(raw.get("owners"), list) or not all(isinstance(o, str) and o.startswith("@") for o in raw.get("owners") or [None]):
+        bad.append("'owners' isn't a list of @names")
+    inst = raw.get("install", {})
+    if not isinstance(inst, dict) or set(inst) - INSTALL_KEYS:
+        bad.append("'install' has keys this doesn't know")
+    elif inst.get("missing", "listed") not in ("line", "listed") or inst.get("steps", "generic") not in ("generic", "hooks"):
+        bad.append("'install' says something this doesn't know")
+    ses = raw.get("sessions")
+    if ses is not None and (not isinstance(ses, dict) or set(ses) - SESSION_KEYS
+                            or ses.get("source") not in ("files", "databases")):
+        bad.append("'sessions' isn't one this knows")
+    if isinstance(raw.get("docs"), str) and not raw["docs"].startswith("docs/"):
+        bad.append("its docs page isn't under docs/")
+    return bad
+
+
+def conflicts():
+    """Words two agents both claim (a flag, a label, a JSON key): [str]."""
+    out, seen = [], {}
+    for n in registry.AGENTS:
+        m = manifest(n)
+        for k in ("flag", "label", "json_key", "prog"):
+            v = (k, m.get(k))
+            if v in seen:
+                out.append(f"{n} and {seen[v]} both have {k} {m.get(k)!r}")
+            seen[v] = n
+    return out

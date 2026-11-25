@@ -1,0 +1,11 @@
+{
+  "label": "OpenClaw",
+  "flag": "openclaw",
+  "prog": "openclaw",
+  "short": "OpenClaw",
+  "docs": "docs/openclaw.md",
+  "owners": [
+    "@jonradoff"
+  ],
+  "tools": "metacomputer__*"
+}

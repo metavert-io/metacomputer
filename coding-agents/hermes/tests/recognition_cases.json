@@ -1,0 +1,18 @@
+[
+  {"why": "a dev shell naming hermes_cli, Hermes Agent's package: the package rule", "name": "python3", "argv": ["python3", "@ROOT@/tools/devshell.py", "--project", "hermes_cli"], "agent": "Hermes Agent", "files": ["@ROOT@/tools/devshell.py"]},
+  {"why": "a -c program, then an argument naming hermes_cli: the package rule", "name": "python3", "argv": ["python3", "-c", "print(1)", "hermes_cli"], "agent": "Hermes Agent"},
+  {"why": "Hermes's gateway by module", "name": "python3.14", "argv": ["/x/python3", "-m", "hermes_cli.main", "--profile", "default", "gateway", "run"], "agent": "Hermes Agent"},
+  {"why": "Hermes's launcher: a -c program", "name": "python3", "argv": ["/x/python3", "-I", "-c", "import os\nfrom hermes_cli.main import main", "gateway", "run", "-v"], "agent": "Hermes Agent"},
+  {"why": "clustered options ending in c", "name": "Python", "argv": ["Python", "-Ic", "from hermes_cli.main import main"], "agent": "Hermes Agent"},
+  {"why": "a -W value before -m", "name": "python3", "argv": ["python3", "-W", "ignore", "-m", "hermes_cli.main"], "agent": "Hermes Agent"},
+  {"why": "-X importtime before -m", "name": "python3", "argv": ["python3", "-X", "importtime", "-m", "hermes_cli.main"], "agent": "Hermes Agent"},
+  {"why": "--check-hash-based-pycs and -O -u before -m", "name": "python3.14", "argv": ["python3.14", "--check-hash-based-pycs", "never", "-O", "-u", "-m", "hermes_cli.main", "gateway", "run"], "agent": "Hermes Agent"},
+  {"why": "a hermes script", "name": "python3", "argv": ["python3", "@ROOT@/venv/bin/hermes", "chat"], "agent": "Hermes Agent", "files": ["@ROOT@/venv/bin/hermes"]},
+  {"why": "-W with a filter before a hermes script", "name": "python3", "argv": ["python3", "-W", "error::DeprecationWarning", "@ROOT@/venv/bin/hermes"], "agent": "Hermes Agent", "files": ["@ROOT@/venv/bin/hermes"]},
+  {"why": "a script inside the hermes_cli package", "name": "python3", "argv": ["python3", "@ROOT@/hermes-agent/hermes_cli/main.py", "chat"], "agent": "Hermes Agent", "files": ["@ROOT@/hermes-agent/hermes_cli/main.py"]},
+  {"why": "a -c program that runs hermes_cli by name", "name": "python3", "argv": ["python3", "-c", "import runpy; runpy.run_module('hermes_cli.main')"], "agent": "Hermes Agent"},
+  {"why": "Hermes's process title (setproctitle)", "name": "python3.14", "argv": ["hermes", "", ""], "agent": "Hermes Agent"},
+  {"why": "the kernel's name for a titled Hermes (Linux prctl)", "name": "hermes", "argv": [], "agent": "Hermes Agent"},
+  {"why": "a -m module that isn't Hermes's", "name": "python3", "argv": ["python3", "-m", "http.server"], "agent": null},
+  {"why": "a link to a hermes script, by what it resolves to", "name": "python3", "argv": ["python3", "@ROOT@/bin/h"], "agent": "Hermes Agent", "files": ["@ROOT@/venv/bin/hermes"], "links": {"@ROOT@/bin/h": "@ROOT@/venv/bin/hermes"}}
+]

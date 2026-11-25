@@ -723,6 +723,13 @@ def test_install_lock():
         shutil.rmtree(locks, ignore_errors=True)
 
 
+def copy_agents(root):
+    """The agents' folders and their framework (lib/agentkit), which lib/owners.py and install.sh read."""
+    for d in ("coding-agents", os.path.join("lib", "agentkit")):
+        if not os.path.exists(os.path.join(root, d)):
+            shutil.copytree(os.path.join(LAB, d), os.path.join(root, d), ignore=shutil.ignore_patterns("__pycache__"))
+
+
 def build_root(t):
     """A copy of what scripts/build-vm.sh reads, with stand-ins for its downloads and tools, and a runner whose
     VMs live in a state file (its calls logged)."""
@@ -737,6 +744,7 @@ def build_root(t):
     for f in os.listdir(os.path.join(LAB, "lib")):
         if f.endswith(".py"):
             shutil.copy2(os.path.join(LAB, "lib", f), os.path.join(root, "lib", f))
+    copy_agents(root)               # owners.py's recognition tables: the agents' folders and lib/agentkit
     write(os.path.join(root, "scripts", "build-tools.sh"), '#!/bin/bash\nsleep "${STUB_TOOLS_SLEEP:-0}"\n', 0o755)
     write(os.path.join(root, "scripts", "fetch-artifacts.sh"), "#!/bin/bash\nexit 0\n", 0o755)
     runner = os.path.join(t, "runner")

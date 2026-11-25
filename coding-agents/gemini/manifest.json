@@ -1,0 +1,11 @@
+{
+  "label": "Gemini CLI",
+  "flag": "gemini",
+  "prog": "gemini",
+  "short": "Gemini",
+  "docs": "docs/gemini.md",
+  "owners": [
+    "@jonradoff"
+  ],
+  "tools": "mcp_metacomputer_*"
+}

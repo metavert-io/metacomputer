@@ -1,0 +1,11 @@
+{
+  "label": "Antigravity CLI",
+  "flag": "antigravity",
+  "prog": "agy",
+  "short": "Antigravity",
+  "docs": "docs/antigravity.md",
+  "owners": [
+    "@jonradoff"
+  ],
+  "tools": "call_mcp_tool with server metacomputer"
+}

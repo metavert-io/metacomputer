@@ -1,0 +1,31 @@
+{
+  "kinds": [
+    "Hermes Agent"
+  ],
+  "names": {
+    "hermes": "Hermes Agent",
+    "hermes-agent": "Hermes Agent",
+    "hermes-acp": "Hermes Agent"
+  },
+  "path_words": {
+    "hermes_cli": "Hermes Agent"
+  },
+  "modules": {
+    "hermes_cli": "Hermes Agent",
+    "hermes_agent": "Hermes Agent"
+  },
+  "package_words": {
+    "hermes_cli": "Hermes Agent",
+    "hermes-agent": "Hermes Agent"
+  },
+  "packages": {
+    "hermes-agent": "Hermes Agent"
+  },
+  "shared": {
+    "Hermes Agent": {
+      "label": "Hermes Agent gateway",
+      "under": "Hermes Agent's gateway",
+      "always": true
+    }
+  }
+}
