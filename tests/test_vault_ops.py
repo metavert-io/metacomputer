@@ -127,7 +127,8 @@ authorityKeyIdentifier = keyid
 
 class Receiver(http.server.BaseHTTPRequestHandler):
     """Webhook, OTLP and ntfy endpoints: records each POST; paths in server.down answer 503, paths in
-    server.slow wait 4 s first, paths in server.partial answer 200 with an OTLP partial success."""
+    server.slow wait 4 s first, paths in server.partial answer 200 with an OTLP partial success, paths in
+    server.counts (path: JSON text) answer 200 with a partial success whose rejectedLogRecords is that text."""
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
@@ -143,6 +144,9 @@ class Receiver(http.server.BaseHTTPRequestHandler):
         answer = b""
         if any(self.path.startswith(p) for p in self.server.partial):
             answer = json.dumps({"partialSuccess": {"rejectedLogRecords": "1", "errorMessage": "dummy rejection"}}).encode()
+        count = next((c for p, c in self.server.counts.items() if self.path.startswith(p)), None)
+        if count is not None:
+            answer = ('{"partialSuccess": {"rejectedLogRecords": ' + count + '}}').encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(answer)))
@@ -220,9 +224,13 @@ class Upstream(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def http_server(handler):
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    srv.got, srv.down, srv.slow, srv.partial = [], set(), set(), set()
+class ThreadingHTTPServer6(http.server.ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def http_server(handler, host="127.0.0.1"):
+    srv = (ThreadingHTTPServer6 if ":" in host else http.server.ThreadingHTTPServer)((host, 0), handler)
+    srv.got, srv.down, srv.slow, srv.partial, srv.counts = [], set(), set(), set(), {}
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -1198,6 +1206,26 @@ def run(td, procs):
           rc == 0 and r.returncode == 2 and "rejected 1 record" in js(r.stdout).get("reason", "") and len(calls()) == n, r.stdout)
     rx.partial.discard("/otlpreq")
     tty([BIN, "audit-sink", "remove", "otlpreq"], [("Vault passphrase", current + "\n")])
+    # A partial success whose count of rejected records isn't a non-negative integer is an error reply, never an
+    # acceptance: "x", -1, false and 0.5 were read as none rejected (the use went ahead), true and 2.7 as 1 and 2
+    rc, out = tty([BIN, "audit-sink", "add", "otlpodd", "--kind", "otlp", "--url", f"http://127.0.0.1:{hp}/oddotlp", "--required"],
+                  [("Vault passphrase", current + "\n")])
+    odd = {}
+    for count in ('"x"', "-1", "false", "0.5", "true", "2.7"):
+        rx.counts["/oddotlp"] = count
+        n = len(calls())
+        r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+        odd[count] = (r.returncode, len(calls()) - n, js(r.stdout).get("reason", ""))
+    rx.counts.pop("/oddotlp")
+    check("a required OTLP sink answering 200 with a partial success whose count isn't a whole number (\"x\", -1, false, "
+          "0.5) doesn't count as acceptance: each use is refused before anything reaches the VM",
+          rc == 0 and all(odd[c][:2] == (2, 0) and "can't be read" in odd[c][2] for c in ('"x"', "-1", "false", "0.5")), odd)
+    check("...nor is a count of true or 2.7 read as 1 or 2 records rejected: the answer can't be read",
+          all(odd[c][:2] == (2, 0) and "can't be read" in odd[c][2] and "rejected 1" not in odd[c][2]
+              and "rejected 2" not in odd[c][2] for c in ("true", "2.7")), odd)
+    r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+    check("...and once it answers as OTLP says, uses go ahead again", r.returncode == 0, r.stdout)
+    tty([BIN, "audit-sink", "remove", "otlpodd"], [("Vault passphrase", current + "\n")])
     rx.down.discard("/hook")
     r = client("audit-sink", "test", "hook")
     check("audit-sink test: the optional sink catches up", r.returncode == 0 and "Sent: hook has every event" in r.stdout, r.stdout + r.stderr)
@@ -1229,6 +1257,65 @@ def run(td, procs):
         check("a syslog sink with --ca still checks the host name (the certificate is for 127.0.0.1, the URL says localhost)",
               r.returncode != 0 and sl_bad.handshake_failures > 0 and not sl_bad.got, (r.stdout + r.stderr, sl_bad.handshake_failures))
         tty([BIN, "audit-sink", "remove", "badhost"], [("Vault passphrase", current + "\n")])
+
+    def tty_or_refused(argv, answers):
+        """tty(), or (None, what it said) when it ended before asking (a URL refused before the passphrase)."""
+        try:
+            return tty(argv, answers)
+        except AssertionError as e:
+            return None, str(e)
+
+    # A sink's URL is checked as the event stream checks it when the sink is added: these were taken (a #fragment, a
+    # port outside 1-65535, a syslog URL's path or query), and plain http to [::1] was refused
+    for kind, url in (("webhook", f"http://127.0.0.1:{hp}/x#frag"), ("otlp", "https://h.example:0/"),
+                      ("webhook", "https://h.example:99999/x"), ("ntfy", "https://h.example:65536/t"),
+                      ("syslog", "syslog+tls://h.example:6514/path"), ("syslog", "syslog+tls://h.example:6514?q=1"),
+                      ("syslog", "syslog+tls://h.example:6514#f")):
+        r = client("audit-sink", "add", "x", "--kind", kind, "--url", url)
+        check(f"audit-sink add refuses {kind} {url}, as the event stream does", r.returncode == 64 and "--url:" in r.stderr, r.stderr)
+    v6 = {k: client("audit-sink", "add", "x", "--kind", k, "--url", u)
+          for k, u in (("webhook", "http://[::1]:9/h"), ("otlp", "http://[::1]:4318"), ("ntfy", "http://[::1]:8080/t"))}
+    check("audit-sink add takes plain http to [::1] (this Mac's IPv6 loopback) as the event stream does: only the terminal "
+          "is missing", all(r.returncode != 64 and "own terminal" in r.stderr for r in v6.values()),
+          {k: r.stderr[-160:] for k, r in v6.items()})
+    try:
+        rx6 = http_server(Receiver, "::1")
+    except OSError:
+        rx6 = None
+        print("(no IPv6 loopback: skipped the [::1] delivery check)")
+    if rx6:
+        rc, out = tty_or_refused([BIN, "audit-sink", "add", "v6", "--kind", "webhook", "--url",
+                                  f"http://[::1]:{rx6.server_address[1]}/v6"], [("Vault passphrase", current + "\n")])
+        r = client("audit-sink", "test", "v6")
+        check("...and delivers to it", rc == 0 and r.returncode == 0 and any(g["path"] == "/v6" for g in rx6.got),
+              (out[-200:], r.stdout + r.stderr))
+        if rc == 0:
+            tty([BIN, "audit-sink", "remove", "v6"], [("Vault passphrase", current + "\n")])
+        rx6.shutdown()
+
+    # The URL's query: an OTLP sink's stays after /v1/logs (it went in front of it: the collector got another path),
+    # an ntfy sink's (?auth=, a credential) is kept (it was dropped). Neither is ever shown.
+    q_val = "dummy-auth-query-value"
+    rc1, out1 = tty([BIN, "audit-sink", "add", "qotlp", "--kind", "otlp", "--url", f"http://127.0.0.1:{hp}/qotlp?tenant={q_val}"],
+                    [("Vault passphrase", current + "\n")])
+    rc2, out2 = tty([BIN, "audit-sink", "add", "qntfy", "--kind", "ntfy", "--url",
+                     f"http://127.0.0.1:{hp}/qntfy/topic-q?auth={q_val}"], [("Vault passphrase", current + "\n")])
+    r1, r2 = client("audit-sink", "test", "qotlp"), client("audit-sink", "test", "qntfy")
+    qo = [g["path"] for g in rx.got if g["path"].startswith("/qotlp")]
+    qn = [(g["path"], json.loads(g["body"]).get("topic")) for g in rx.got if g["path"].startswith("/qntfy")]
+    check("an OTLP sink whose URL has a query posts to its path + /v1/logs, then the query", rc1 == 0 and r1.returncode == 0
+          and qo and set(qo) == {f"/qotlp/v1/logs?tenant={q_val}"}, (r1.stdout + r1.stderr, sorted(set(qo))))
+    check("an ntfy sink keeps its URL's query (?auth=): it posts to the server's root with it, the topic in the body",
+          rc2 == 0 and r2.returncode == 0 and qn and set(qn) == {(f"/qntfy/?auth={q_val}", "topic-q")},
+          (r2.stdout + r2.stderr, sorted(set(qn))))
+    states = "".join(open(f).read() for f in glob.glob(os.path.join(vdir, "sinks", "*.state")))
+    shown = {"add": out1 + out2, "test": r1.stdout + r1.stderr + r2.stdout + r2.stderr,
+             "list": client("audit-sink", "list").stdout, "list --json": client("audit-sink", "list", "--json").stdout,
+             "the unlock terminal": u.text(), "the audit log": open(alog).read(), "the sinks' saved state": states}
+    check("...and neither query is shown: not by add, test or list (masked URLs), the unlock terminal, the audit log or the "
+          "sinks' saved state", not [k for k, v in shown.items() if q_val in v], [k for k, v in shown.items() if q_val in v])
+    for n_ in ("qotlp", "qntfy"):
+        tty([BIN, "audit-sink", "remove", n_], [("Vault passphrase", current + "\n")])
 
     # H2: the dispatcher signs only what the vault wrote
     rx.down.add("/hook")
@@ -2004,6 +2091,56 @@ def run(td, procs):
     check("records appended without the vault key (a fill with no MAC, a token with a wrong one) aren't signed for a sink: notices instead",
           d1 and d2 and all(d.get("op") == "audit_tamper" for d in d1 + d2) and "no creation MAC" in d1[0].get("reason", "")
           and "fails its creation MAC" in d2[0].get("reason", "") and "AUDIT LOG CHANGED" in out, (d1, d2))
+
+    # Sinks an earlier vault saved with URLs it refuses now (a test build takes them unchecked, as it did). A port outside
+    # 1-65535 is never sent to, and the sink says how to fix it: the system wrapped such a port (65536 + N reached port
+    # N), and a syslog sink's stopped the process that sent to it. A #fragment (never sent) and a syslog URL's path and
+    # query (never used) still go where they did; an OTLP sink with a fragment to its path + /v1/logs (the fragment used
+    # to swallow /v1/logs).
+    early = {"MCOMP_VAULT_TEST_EARLIER_SINK_URL": "1"}
+    old_sinks = [("wrapport", "webhook", f"http://127.0.0.1:{hp + 65536}/wrapport", []),
+                 ("zeroport", "webhook", "http://127.0.0.1:0/zeroport", []),
+                 ("fraghook", "webhook", f"http://127.0.0.1:{hp}/fraghook#frag", []),
+                 ("fragotlp", "otlp", f"http://127.0.0.1:{hp}/fragotlp#frag", [])]
+    if certs:
+        old_sinks += [("wrapsys", "syslog", f"syslog+tls://127.0.0.1:{sl.port + 65536}", ["--ca", ca]),
+                      ("pathsys", "syslog", f"syslog+tls://127.0.0.1:{sl.port}/path?q=1", ["--ca", ca])]
+    added = {}
+    for name, kind, url, more in old_sinks:
+        added[name] = tty([BIN, "audit-sink", "add", name, "--kind", kind, "--url", url, *more],
+                          [("Vault passphrase", PASS + "\n")], extra=early)[0]
+    n_got, n_sys = len(rx.got), len(sl.got if sl else [])
+    tested = {name: tty([BIN, "audit-sink", "test", name], [("Vault passphrase", PASS + "\n")]) for name, *_ in old_sinks}
+    got_paths = [g["path"] for g in rx.got[n_got:]]
+    fix = lambda name: f"`metacomputer secrets audit-sink remove {name}`" in tested[name][1]  # noqa: E731
+    check("a saved sink whose port is outside 1-65535 is never sent to (65536 + N reached the receiver on port N), and "
+          "audit-sink test says why and to remove it and add it again", added.get("wrapport") == 0 and added.get("zeroport") == 0
+          and all(tested[n_][0] == 4 and "isn't one from 1 to 65535" in tested[n_][1] and fix(n_) for n_ in ("wrapport", "zeroport"))
+          and not any(p_.startswith(("/wrapport", "/zeroport")) for p_ in got_paths),
+          ({n_: (tested[n_][0], tested[n_][1][-300:]) for n_ in ("wrapport", "zeroport")}, got_paths[:6]))
+    if certs:
+        check("...a syslog sink's too: the process that sends to it says so instead of stopping (it trapped)",
+              added.get("wrapsys") == 0 and tested["wrapsys"][0] == 4 and fix("wrapsys"), tested["wrapsys"])
+    check("a saved sink whose URL has a #fragment still delivers where it did (the fragment is never sent); an OTLP one to "
+          "its path + /v1/logs", tested["fraghook"][0] == 0 and tested["fragotlp"][0] == 0 and "/fraghook" in got_paths
+          and set(p_ for p_ in got_paths if p_.startswith("/fragotlp")) == {"/fragotlp/v1/logs"},
+          (tested["fraghook"][0], tested["fragotlp"][1][-200:], sorted(set(got_paths))))
+    if certs:
+        check("a saved syslog sink with a path and a query still delivers to its host and port", tested["pathsys"][0] == 0
+              and len(sl.got) > n_sys, (tested["pathsys"][1][-300:], len(sl.got) - n_sys))
+    r = client("audit-sink", "list")
+    check("audit-sink list (locked) shows each such sink's reason with the fix", r.returncode == 0
+          and all(any(n_ in l and "audit-sink remove " + n_ in l for l in r.stdout.splitlines())
+                  for n_ in ["wrapport", "zeroport"] + (["wrapsys"] if certs else [])), r.stdout)
+    u2 = start_unlock(["--for", "5m", *allow], T, passphrase=PASS)
+    told = wait_for(lambda: all(f"audit sink {n_}: can't deliver" in u2.text() and f"audit-sink remove {n_}" in u2.text()
+                                for n_ in ["wrapport", "zeroport"] + (["wrapsys"] if certs else [])), 20)
+    st = client("status")
+    check("an unlock with such sinks saved keeps running, and its terminal says which can't be sent to and how to fix them",
+          told and "vault:    unlocked until" in st.stdout,
+          ([l for l in st.stdout.splitlines() if l.startswith("vault:")], u2.text()[-300:]))
+    client("lock")
+    u2.wait(20)
     fills = [c for c in calls() if c.get("user") == "mcfill"]
     pin = next((a for a in fills[-1]["argv"] if a.startswith("KnownHostsCommand=")), "") if fills else ""
     sshd = local_sshd(td)

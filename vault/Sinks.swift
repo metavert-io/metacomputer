@@ -73,19 +73,42 @@ func saveSinkState(_ paths: Paths, _ name: String, _ s: SinkState, key: [UInt8])
     if let d = try? JSONEncoder().encode(st) { try? writeFileAtomic(sinkDir(paths) + "/\(name).state", Array(d)) }
 }
 
-/// nil when the URL suits the kind, else why not.
+/// nil when the URL suits the kind, else why not: the event stream's rules (lib/events.py check_url, each kind's
+/// sinks/<kind>/sink.py), checked against the same cases. No #fragment, a port from 1 to 65535 if one is given, plain
+/// http only to this Mac's loopback (127.0.0.1, localhost, [::1]), a syslog URL with no path or query.
 func checkSinkURL(_ kind: String, _ url: String) -> String? {
     guard clean(url, max: 2048) == url, let u = URLComponents(string: url), let host = u.host, !host.isEmpty,
           u.user == nil, u.password == nil else { return "not a plain URL" }
-    let loopback = host == "127.0.0.1" || host == "localhost"
+    if let f = u.fragment, !f.isEmpty { return "the URL can't have a #fragment" }
+    if let why = sinkPortProblem(u) { return why }
+    let loopback = ["127.0.0.1", "localhost", "[::1]", "::1"].contains(host)
     switch kind {
     case "syslog":
         guard u.scheme == syslogScheme else { return "syslog sinks use syslog+tls://host:port (TLS only; no plain TCP or UDP)" }
+        guard u.percentEncodedPath.isEmpty || u.percentEncodedPath == "/", (u.percentEncodedQuery ?? "").isEmpty else {
+            return "a syslog URL is just syslog+tls://host:port"
+        }
     default:
-        guard u.scheme == "https" || (u.scheme == "http" && loopback) else { return "use https:// (http only for 127.0.0.1 or localhost, for testing)" }
+        guard u.scheme == "https" || (u.scheme == "http" && loopback) else { return "use https:// (http only for 127.0.0.1, localhost or [::1], for testing)" }
         if kind == "ntfy", u.path.split(separator: "/").isEmpty { return "an ntfy URL names its topic: https://ntfy.sh/<topic>" }
     }
     return nil
+}
+
+/// nil when the URL names no port or one from 1 to 65535. An earlier vault took any number, and the system's networking
+/// wraps a bigger one (70000 reaches port 4464), so a sink saved with one is never sent to (savedSinkProblem).
+func sinkPortProblem(_ u: URLComponents) -> String? {
+    guard let p = u.port, !(1...65535).contains(p) else { return nil }
+    return "port \(p) isn't one from 1 to 65535"
+}
+
+/// nil when a saved sink can be sent to as it is. One an earlier vault saved with a URL that's refused now: a port
+/// outside 1-65535 isn't sent to at all (it would reach another port, or stop the process), and says how to fix it;
+/// a #fragment (never sent) and a syslog URL's path or query (never used) still go where they did.
+func savedSinkProblem(_ name: String, _ sink: AuditSink) -> String? {
+    guard let u = URLComponents(string: sink.url), let why = sinkPortProblem(u) else { return nil }
+    return "its URL isn't one the vault takes any more (\(why)), so nothing is sent to it: remove it "
+        + "(`metacomputer secrets audit-sink remove \(name)`) and add it again with the right port"
 }
 
 /// A sink's URL without its path and query, which can hold a secret (webhook paths, ntfy topics):
@@ -165,15 +188,33 @@ func httpPostAnswer(_ url: URL, headers: [(String, String)], body: Data, timeout
 }
 
 /// An OTLP export answer that accepted only part of the batch (partialSuccess with rejected
-/// records) is a failure: those records weren't stored. nil when every record was accepted.
+/// records) is a failure: those records weren't stored. So is one whose count of rejected records
+/// isn't a count. nil when every record was accepted.
 func otlpRejection(_ body: Data?) -> String? {
-    guard let b = body, !b.isEmpty, let o = try? JSONSerialization.jsonObject(with: b) as? [String: Any],
-          let ps = (o["partialSuccess"] ?? o["partial_success"]) as? [String: Any] else { return nil }
-    let r = ps["rejectedLogRecords"] ?? ps["rejected_log_records"]
-    let n = (r as? NSNumber)?.int64Value ?? (r as? String).flatMap { Int64($0) } ?? 0
+    guard let (n, msg) = otlpRejected(body) else {
+        return "the collector's answer can't be read: its partial success's count of rejected records isn't a whole number"
+    }
     guard n > 0 else { return nil }
-    let msg = clean((ps["errorMessage"] ?? ps["error_message"]) as? String ?? "", max: 160)
     return "the collector rejected \(n) record(s)" + (msg.isEmpty ? "" : ": \(msg)")
+}
+
+/// How many records an OTLP export answer says were rejected (partialSuccess.rejectedLogRecords, an int64: in JSON a
+/// number or a string of digits; absent or null is 0), with its message; nil when the count isn't a non-negative
+/// integer (true, 2.7, -1, "x"), which is an error reply, never an acceptance.
+func otlpRejected(_ body: Data?) -> (Int64, String)? {
+    guard let b = body, !b.isEmpty, let o = try? JSONSerialization.jsonObject(with: b) as? [String: Any],
+          let ps = (o["partialSuccess"] ?? o["partial_success"]) as? [String: Any] else { return (0, "") }
+    let msg = clean((ps["errorMessage"] ?? ps["error_message"]) as? String ?? "", max: 160)
+    let r = ps["rejectedLogRecords"] ?? ps["rejected_log_records"]
+    if r == nil || r is NSNull { return (0, msg) }
+    if let s = r as? String {
+        guard !s.isEmpty, s.utf8.allSatisfy({ $0 >= 0x30 && $0 <= 0x39 }), let n = Int64(s) else { return nil }
+        return (n, msg)
+    }
+    // A JSON number that's an integer: not a boolean (true is an NSNumber too), not one with a fraction or an exponent.
+    guard let x = r as? NSNumber, CFGetTypeID(x) != CFBooleanGetTypeID(), !CFNumberIsFloatType(x), !(x is NSDecimalNumber),
+          x.int64Value >= 0 else { return nil }
+    return (x.int64Value, msg)
 }
 
 /// The signature a single record carries (OTLP's metacomputer.signature, syslog's sig=): over
@@ -375,14 +416,15 @@ func ntfySummary(_ e: [String: Any]) -> String {
 }
 
 /// ntfy's JSON publishing, as the events stream does it: POST to the server's root with the
-/// topic in the body; priority 4 for warn and error, 3 for info.
+/// topic in the body, keeping the URL's query (ntfy's ?auth= access token: masked like the topic
+/// wherever the URL is shown); priority 4 for warn and error, 3 for info.
 func ntfyRequest(_ sinkURL: String, _ ev: OutEvent) -> (URL, String)? {
     let e = ev.e
     guard var u = URLComponents(string: sinkURL) else { return nil }
     let parts = u.path.split(separator: "/").map(String.init)
     guard let topic = parts.last, !topic.isEmpty else { return nil }
     u.path = parts.count > 1 ? "/" + parts.dropLast().joined(separator: "/") + "/" : "/"
-    u.query = nil
+    if u.percentEncodedQuery == "" { u.percentEncodedQuery = nil }
     u.fragment = nil
     guard let root = u.url else { return nil }
     let sev = severityOf(e)
@@ -498,7 +540,7 @@ func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink, auditKey: [U
         guard let key = Data(base64Encoded: sink.hmac_key).map(Array.init) else {
             return Delivery(problem: "the sink's key is damaged", delivered: state.delivered)
         }
-        var d = Delivery(problem: nil, delivered: state.delivered)
+        var d = Delivery(problem: savedSinkProblem(name, sink), delivered: state.delivered)
         d.stateTrusted = from != nil || trusted
         while d.problem == nil {
             if Date() >= deadline { d.incomplete = true; break }   // the rest goes on the next round
@@ -576,11 +618,20 @@ func sinkHeaders(_ sink: AuditSink, _ body: String, contentType: String) -> [(St
         + sink.headers.compactMap { $0.count == 2 ? ($0[0], $0[1]) : nil }
 }
 
-/// The URL an OTLP sink posts to: its URL with /v1/logs added (one trailing / dropped first), unless it ends with it.
+/// The URL an OTLP sink posts to, as the events stream makes it (from the URL's text, split as Python's urlsplit
+/// does): its scheme and authority as written, its path with /v1/logs added (every trailing / dropped first) unless
+/// it ends with it, then its query; no fragment. "" for a URL without "scheme://" (nothing is sent).
 func otlpLogsURL(_ s: String) -> String {
-    var url = s.hasSuffix("/") ? String(s.dropLast()) : s
-    if !url.hasSuffix(otlpLogsPath) { url += otlpLogsPath }
-    return url
+    let noFragment = s[..<(s.firstIndex(of: "#") ?? s.endIndex)]
+    let q = noFragment.firstIndex(of: "?")
+    let beforeQuery = noFragment[..<(q ?? noFragment.endIndex)]
+    let query = q.map { noFragment[noFragment.index(after: $0)...] } ?? ""
+    guard let sep = beforeQuery.range(of: "://") else { return "" }
+    let pathStart = beforeQuery[sep.upperBound...].firstIndex(of: "/") ?? beforeQuery.endIndex
+    var path = String(beforeQuery[pathStart...])
+    while path.hasSuffix("/") { path.removeLast() }
+    if !path.hasSuffix(otlpLogsPath) { path += otlpLogsPath }
+    return String(beforeQuery[..<pathStart]) + path + (query.isEmpty ? "" : "?" + query)
 }
 
 /// The events not yet delivered to a sink, from its saved place (for display).
