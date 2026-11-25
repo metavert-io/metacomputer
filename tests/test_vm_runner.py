@@ -11,6 +11,8 @@ command, on stderr); with neither, LUME stays as configured and the usual error 
 install.sh: it builds mcomp-vm from MCOMP_VM_REPO at MCOMP_VM_TAG and checks the commit;
 a local.env's LUME_SECURE_* pins still count, the new names win; --lume=secure is an
 alias; an existing lume-secure is left alone; --uninstall names the runner in use.
+vm_status: the runner's "stopped" while this VM's own run process (RUN_DIR/lume.pid) still runs is "unknown" (the
+runner couldn't look: macOS's sandbox), and `start` then refuses to start it again; a VM that is stopped stays "stopped".
 """
 import hashlib
 import os
@@ -56,6 +58,7 @@ def main():
     td = tempfile.mkdtemp(prefix="mcomp-runner-")
     try:
         lib_cases(td)
+        state_cases(td)
         install_cases(td)
     finally:
         shutil.rmtree(td, ignore_errors=True)
@@ -157,6 +160,73 @@ def lib_cases(td):
 NEW_REPO = "https://github.com/metavert-io/metacomputer-vm.git"
 NEW_TAG = "v0.7.2-mcomp.2"
 NEW_COMMIT = "26dc0df2b75edaca26cb2306995a0b6437a87349"
+
+
+# --- scripts/lib.sh vm_status: what the runner can't have seen ----------------------------------------------------
+def state_cases(td):
+    home = os.path.join(td, "state-home")
+    os.makedirs(home)
+    write(os.path.join(home, ".local", "bin", "mcomp-vm"),
+          "#!/bin/sh\n"
+          "case \"$1\" in\n"
+          "  ls) echo '[{\"name\": \"fake-runner-vm\"}]' ;;\n"
+          "  get) printf '[{\"name\": \"%s\", \"status\": \"%s\"}]\\n' \"$2\" \"$FAKE_STATUS\" ;;\n"
+          "  run) echo '  --no-share-clipboard --no-share-audio --no-share-rosetta --no-host-sharing' ;;\n"
+          "  *) exit 1 ;;\n"
+          "esac\n", 0o755)
+    run_dir = os.path.join(home, "run")
+    cfg = os.path.join(home, "test.env")
+    write(cfg, f'VM_NAME=fake-runner-vm\nRUN_DIR="{run_dir}"\nLOG_DIR="{home}/logs"\n')
+    os.makedirs(run_dir, exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if k not in ("MCOMP_LUME_NOTICE", "LUME")}
+    env.update(HOME=home, MCOMP_CONFIG=cfg, MCOMP_EVENTS_DIR=os.path.join(home, "events"))
+
+    def state(status, pid, script='vm_status fake-runner-vm', wrap=()):
+        pidf = os.path.join(run_dir, "lume.pid")
+        if pid is None:
+            if os.path.exists(pidf):
+                os.remove(pidf)
+        else:
+            write(pidf, f"{pid}\n")
+        return subprocess.run([*wrap, "/bin/bash", "-c", f'. "{LIB}"; {script}'], env=dict(env, FAKE_STATUS=status),
+                              capture_output=True, text=True, timeout=60)
+
+    # The VM's run process, as vm_start leaves it in lume.pid: its command line is `LUME run NAME ...`.
+    vm = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "run", "fake-runner-vm", "--display",
+                           "none"])
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "run", "other-vm"])
+    gone = subprocess.Popen(["/usr/bin/true"])
+    gone.wait()
+    try:
+        r = state("stopped", None)
+        check("vm_status: the runner's \"stopped\", with no run process of this VM's recorded: stopped",
+              r.stdout.strip() == "stopped", (r.stdout, r.stderr[-200:]))
+        r = state("stopped", gone.pid)
+        check("...with its recorded run process gone: stopped", r.stdout.strip() == "stopped", (r.stdout, r.stderr[-200:]))
+        r = state("stopped", other.pid)
+        check("...with the pid now another VM's run process: stopped", r.stdout.strip() == "stopped", r.stdout)
+        r = state("running", vm.pid)
+        check("...the runner's \"running\": running", r.stdout.strip() == "running", r.stdout)
+        r = state("stopped", vm.pid)
+        check("...but \"stopped\" while this VM's own run process still runs (the runner couldn't look): unknown",
+              r.stdout.strip() == "unknown", (r.stdout, r.stderr[-200:]))
+        r = state("stopped", vm.pid, 'vm_running fake-runner-vm && echo yes || echo no')
+        check("...which is never running (whatever waits for running keeps waiting)", r.stdout.strip() == "no", r.stdout)
+        r = state("stopped", vm.pid, 'vm_start fake-runner-vm')
+        check("...and start refuses to start it again, saying it can't tell", r.returncode != 0
+              and "can't tell whether the virtual computer is running" in r.stderr and "not starting it again" in r.stderr
+              and str(vm.pid) in r.stderr, (r.returncode, r.stderr[-300:]))
+        sb = "/usr/bin/sandbox-exec"
+        if os.path.exists(sb) and subprocess.run([sb, "-p", "(version 1)(allow default)", "/usr/bin/true"]).returncode == 0:
+            r = state("stopped", vm.pid, wrap=(sb, "-p", "(version 1)(allow default)"))
+            check("...the same under macOS's sandbox, where ps can't start (lib/procinfo.py reads the run process there)",
+                  r.stdout.strip() == "unknown", (r.stdout, r.stderr[-200:]))
+            r = state("stopped", None, wrap=(sb, "-p", "(version 1)(allow default)"))
+            check("...and a stopped VM is stopped there too", r.stdout.strip() == "stopped", (r.stdout, r.stderr[-200:]))
+    finally:
+        for p in (vm, other):
+            p.kill()
+            p.wait()
 
 
 def install_cases(td):

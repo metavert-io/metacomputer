@@ -726,7 +726,15 @@ guest_import() { # DEST [--quiet]
     "$PY" "$LAB_ROOT/lib/guest_import.py" "$@"
 }
 
-need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (metacomputer start)"; }
+need_running() {
+  local st; st="$(vm_status "$VM_NAME")"
+  [ "$st" = running ] && return 0
+  [ "$st" != unknown ] || die "$(vm_unknown_says "$VM_NAME")"
+  die "the virtual computer is off (metacomputer start)"
+}
+vm_state_word() { # running, unknown (vm_status) or off: for the Python commands that need the VM (MCOMP_VM_STATE)
+  case "$(vm_status "$VM_NAME")" in running) echo running ;; unknown) echo unknown ;; *) echo off ;; esac
+}
 
 # --- a computer reached over SSH (scripts/lib.sh MC_REMOTE; lib/remote.py; docs/remote.md) -------------------
 remote_made() { [ "${PROVIDER:-ubuntu-vm}" != ubuntu-vm ]; }    # a provider makes (and starts, stops) it
@@ -2082,7 +2090,7 @@ do_desktop_restart() { # [--override]: log the desktop session out and back in (
 
 do_sh() { # bash in the VM as the desktop user, over the ops connection (lib/vm_shell.py, docs/shell.md)
   export_options
-  local state=off; vm_running "$VM_NAME" && state=running
+  local state; state="$(vm_state_word)"
   ssh_base ops
   MCOMP_VM_STATE="$state" exec "$PY" "$LAB_ROOT/lib/vm_shell.py" --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
 }
@@ -2091,7 +2099,7 @@ do_sh() { # bash in the VM as the desktop user, over the ops connection (lib/vm_
 # the token comes from `metacomputer secrets token` (this file, run again as MCOMP_SELF) through a pipe.
 do_claude() {
   export_options
-  local state=off; vm_running "$VM_NAME" && state=running
+  local state; state="$(vm_state_word)"
   ssh_base ops
   MCOMP_VM_STATE="$state" MCOMP_SELF="$SELF" exec "$PY" "$LAB_ROOT/lib/vm_claude.py" \
     --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
@@ -3099,7 +3107,7 @@ case "$cmd" in
   notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
   handoff)    export_options
               case "${1:-}" in done|cancel|status|guard|-h|--help) exec "$PY" "$LAB_ROOT/lib/handoff.py" "$@" ;; esac
-              MCOMP_VM_STATE="$(vm_running "$VM_NAME" && echo running || echo off)"; export MCOMP_VM_STATE
+              MCOMP_VM_STATE="$(vm_state_word)"; export MCOMP_VM_STATE
               # Opening one removes the driver's leftover input devices over this SSH command (lib/input_reset.py),
               # and waiting for one (open's own wait, or `handoff wait`) makes that reset when opening left it pending;
               # when it can't be set up (SSH_AUTH=cert without its CA), the handoff opens anyway: --transport 0.
@@ -3174,7 +3182,11 @@ case "$cmd" in
               if [ "${MCOMP_DIRECT_BRIDGE:-}" != 1 ] && [ "${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" = on ]; then
                 export_options; exec "$PY" "$LAB_ROOT/lib/mcp_lazy.py"
               fi
-              vm_running "$VM_NAME" || { echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1; }
+              case "$(vm_state_word)" in
+                running) ;;
+                unknown) echo "metacomputer: VM '$VM_NAME': $(vm_unknown_says "$VM_NAME")" >&2; exit 1 ;;
+                *) echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1 ;;
+              esac
               req="$(driver_request)" || exit $?     # 4: its manifest isn't in the guest yet, and the user has it
               ssh_base mcp
               if [ "$ACTION_LOG" = on ]; then

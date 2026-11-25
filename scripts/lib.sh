@@ -686,8 +686,27 @@ if v is None or v == "":
     sys.exit(1)
 print(v)' "$1" "$2"
 }
-vm_status() { lume_field "$1" status; }
+# NAME's status as the runner gives it, but "unknown" for a "stopped" it can't have seen: the runner (Lume) tells a
+# running VM by the process holding its run lock (lsof) and a signal 0 to it, and says "stopped" when it can't look
+# (macOS's sandbox can refuse both), while this VM's own run process, the `LUME run NAME` vm_start left in
+# RUN_DIR/lume.pid, still runs. A VM that is stopped has no such process: still "stopped".
+vm_status() {
+  local s; s="$(lume_field "$1" status)"
+  if [ "$s" = stopped ] && [ "$1" = "${VM_NAME:-}" ] && vm_run_pid "$1" >/dev/null; then s=unknown; fi
+  printf '%s\n' "$s"
+}
+vm_run_pid() { # NAME -> the pid of this VM's own run process (RUN_DIR/lume.pid) while it is that VM's `run NAME`
+  local p=""
+  if [ -s "${RUN_DIR:-}/lume.pid" ]; then p="$(head -1 "$RUN_DIR/lume.pid" 2>/dev/null | tr -cd '0-9')" || p=""; fi
+  [ -n "$p" ] || return 1
+  case " $(proc_field command "$p") " in *" run $1 "*) printf '%s\n' "$p"; return 0 ;; esac
+  return 1
+}
 vm_running() { [ "$(vm_status "$1")" = "running" ]; }
+# What a command that needs the VM says when the runner's "stopped" can't be believed (vm_status "unknown").
+vm_unknown_says() {
+  printf '%s' "can't tell whether the virtual computer is running: the VM runner says it is stopped, but its run process (pid $(vm_run_pid "$1" || echo '?')) is still there; the runner can't see it from here (macOS's sandbox keeps it from looking at other processes): check with \`metacomputer status\` outside the sandbox"
+}
 vm_mac() { lume_field "$1" macAddress; }
 
 # --- a computer reached over SSH (MC_REMOTE=1: lib/remote.py, lib/cloud/) -------------------------------------
@@ -1094,8 +1113,12 @@ host_sharing_args() {
 
 STORAGE_RUN_ARGS=()   # extra `lume run` arguments for this VM's storage (bin/metacomputer storage_prepare)
 vm_start() { # NAME [seed.iso]
-  local name="$1" seed="${2:-}" mac
-  vm_running "$name" && { ok "$name already running"; return 0; }
+  local name="$1" seed="${2:-}" mac st i=0
+  st="$(vm_status "$name")"
+  # Its run process may still be finishing (a stop just now): it gets 10 s to go before it counts.
+  while [ "$st" = unknown ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i+1)); st="$(vm_status "$name")"; done
+  [ "$st" = running ] && { ok "$name already running"; return 0; }
+  [ "$st" != unknown ] || die "$(vm_unknown_says "$name"); not starting it again"
   mac="$(vm_mac "$name")"; [ -n "$mac" ] || die "cannot read $name's MAC address from lume"
   netgw_start "$mac"
   local args="run $name --display none --vnc disabled --network gateway:$SOCK_DIR/net.sock"

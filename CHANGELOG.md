@@ -36,6 +36,10 @@ All notable changes to metacomputer are recorded here. The format follows
   from the kernel (`lib/procinfo.py`: the processes, their parents, start times, names and command lines, as ps prints
   them); ps is still asked first everywhere else. A process whose name the kernel can't give exactly as ps would
   (another account's, or one beyond ASCII) counts as an unidentified agent session, as when ps can't be read.
+- **"The virtual computer is off" when the VM runner couldn't look:** the runner reports a VM as stopped when it can't
+  find or signal the VM's process (as in a sandbox). While this VM's own run process is still there, metacomputer now
+  says it can't tell (`status` shows `unknown`) instead of off, and `start` doesn't start it a second time. A VM that
+  is stopped is reported as before.
 
 ## [0.5.2] - 2026-11-25
 
