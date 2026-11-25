@@ -55,21 +55,21 @@ def test_codex_trust_undo():
         with open(cfg, "w") as f:
             f.write(before + added)
         os.chmod(cfg, 0o600)
-        r = bench.undo_codex_trust(before, work, cfg)
+        r = bench.hooks("codex").undo_codex_trust(bench, before, work, cfg)
         check("the run's own trust table is the only change: the file is put back exactly, its mode kept",
               r == "restored" and open(cfg).read() == before and stat.S_IMODE(os.stat(cfg).st_mode) == 0o600, r)
         with open(cfg, "w") as f:
             f.write(before + added + 'personality = "friendly"\n')
-        r = bench.undo_codex_trust(before, work, cfg)
+        r = bench.hooks("codex").undo_codex_trust(bench, before, work, cfg)
         check("...any other change too: the file is left as it is", r == "left" and "personality" in open(cfg).read(), r)
         other = f'\n[projects."{td}/someone-else"]\ntrust_level = "trusted"\n'
         with open(cfg, "w") as f:
             f.write(before + other)
-        r = bench.undo_codex_trust(before, work, cfg)
+        r = bench.hooks("codex").undo_codex_trust(bench, before, work, cfg)
         check("...another folder's trust (not this run's) is left too", r == "left" and "someone-else" in open(cfg).read(), r)
         with open(cfg, "w") as f:
             f.write(before)
-        check("...and an unchanged file isn't touched", bench.undo_codex_trust(before, work, cfg) == "unchanged")
+        check("...and an unchanged file isn't touched", bench.hooks("codex").undo_codex_trust(bench, before, work, cfg) == "unchanged")
         check("no temporary file is left behind", sorted(os.listdir(td)) == ["config.toml", "work"], os.listdir(td))
     finally:
         shutil.rmtree(td, ignore_errors=True)
@@ -334,8 +334,8 @@ def other_agents(td):
         managed = os.path.join(td, "etc-hermes")
         os.makedirs(inst, exist_ok=True)
         os.makedirs(managed, exist_ok=True)
-        old_managed = getattr(bench, "HERMES_MANAGED", None)
-        bench.HERMES_MANAGED = managed
+        old_managed = getattr(bench.hooks("hermes"), "HERMES_MANAGED", None)
+        bench.hooks("hermes").HERMES_MANAGED = managed
         refused = {}
         try:
             for label, path, says in (("its installation's .env", os.path.join(inst, ".env"), None),
@@ -358,7 +358,7 @@ def other_agents(td):
                     if f and os.path.exists(f):
                         os.remove(f)
         finally:
-            bench.HERMES_MANAGED = old_managed
+            bench.hooks("hermes").HERMES_MANAGED = old_managed
         check("hermes: a .env in Hermes's installation, a managed /etc/hermes .env or config.yaml (Hermes loads them "
               "whatever its home), or an install directory `hermes --version` doesn't name: no session starts, and the "
               "file is named", all(refused.values()) and len(refused) == 4, refused)
@@ -421,7 +421,7 @@ def other_agents(td):
               list(conf.get("mcp", {}).get("servers", {})) == ["metacomputer"] and srv.get("command") == bench.CLI
               and srv.get("env", {}).get("MCOMP_CONFIG") == os.environ["MCOMP_CONFIG"]
               and srv.get("env", {}).get("HOME") == real_home and srv.get("requestTimeoutMs") == 600000
-              and tools.get("profile") == "minimal" and tools.get("alsoAllow") == bench.OPENCLAW_TOOLS
+              and tools.get("profile") == "minimal" and tools.get("alsoAllow") == bench.hooks("openclaw").OPENCLAW_TOOLS
               and tools.get("toolSearch") is False and tools.get("fs") == {"workspaceOnly": True}, conf)
         check("openclaw: exec in allowlist mode (misses refused) with only metacomputer's commands allowed, in the "
               "session's own state folder", tools.get("exec") == {"mode": "allowlist"}
@@ -496,14 +496,14 @@ def run(td, run_id, shared):
         old_cwd = os.getcwd()
         os.chdir(rel_dir)
         try:
-            got = bench.trusted_claude("." + os.pathsep + good_dir)
+            got = bench.trusted_prog("." + os.pathsep + good_dir)
         finally:
             os.chdir(old_cwd)
         check("trusted_claude: an absolute path, never a relative PATH entry", got == os.path.realpath(os.path.join(good_dir, "claude")),
               got)
         os.chmod(os.path.join(good_dir, "claude"), 0o777)
         try:
-            bench.trusted_claude(good_dir)
+            bench.trusted_prog(good_dir)
             refused = False
         except SystemExit:
             refused = True

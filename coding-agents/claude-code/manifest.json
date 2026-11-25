@@ -1,0 +1,30 @@
+{
+  "label": "Claude Code",
+  "flag": "claude",
+  "prog": "claude",
+  "short": "Claude",
+  "json_key": "claude_code",
+  "docs": "docs/install.md",
+  "owners": [
+    "@jonradoff"
+  ],
+  "tools": "mcp__metacomputer__*",
+  "install": {
+    "options": [
+      "--no-plugin"
+    ],
+    "missing": "line",
+    "steps": "hooks",
+    "switch": "Claude Code's plugin and MCP server"
+  },
+  "bench": {
+    "switch": "claude"
+  },
+  "sessions": {
+    "source": "files",
+    "key": "claude_code_sessions",
+    "kinds": [
+      "project"
+    ]
+  }
+}

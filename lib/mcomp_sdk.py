@@ -139,7 +139,7 @@ class Connection:
                     pass
 
     def close(self, keep_for_handoff=False):
-        """With MCP_HUB=off this ends the core's own driver connection too. keep_for_handoff (Claude Code's bridge):
+        """With MCP_HUB=off this ends the core's own driver connection too. keep_for_handoff (the agents' bridge, mcp_lazy):
         while the user has the computer (a handoff), wait until it has ended first, at most its longest time limit:
         ending the connection could close the browser they're working in."""
         self.alive = False

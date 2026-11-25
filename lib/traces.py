@@ -10,7 +10,7 @@
                                    from the accessibility tree, typed text, key presses, checks (expect and
                                    wait_for) as assertions, the address-bar navigations as page.goto
 
-Claude explores a flow once, with judgement; the export replays it deterministically, in CI, without a model. It
+The agent explores a flow once, with judgement; the export replays it deterministically, in CI, without a model. It
 is a draft to review: pixel clicks stay coordinates (marked), steps in apps other than the browsers are left out
 (counted), and sign-ins done through `metacomputer secrets` never pass through the hub, so they aren't in it.
 

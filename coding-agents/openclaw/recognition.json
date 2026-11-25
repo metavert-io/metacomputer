@@ -1,0 +1,39 @@
+{
+  "kinds": [
+    "OpenClaw"
+  ],
+  "names": {
+    "openclaw": "OpenClaw",
+    "openclaw.mjs": "OpenClaw",
+    "openclaw-gateway": "OpenClaw"
+  },
+  "package_words": {
+    "openclaw.mjs": "OpenClaw"
+  },
+  "package_folders": {
+    "openclaw": {
+      "kind": "OpenClaw",
+      "helpers": [
+        "dist",
+        "process",
+        "supervisor"
+      ]
+    }
+  },
+  "packages": {
+    "openclaw": "OpenClaw"
+  },
+  "shared": {
+    "OpenClaw": {
+      "label": "OpenClaw gateway",
+      "under": "OpenClaw's gateway",
+      "titles": [
+        "openclaw-gateway"
+      ],
+      "subcommands": [
+        "gateway"
+      ],
+      "within": 3
+    }
+  }
+}

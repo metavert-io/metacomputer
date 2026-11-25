@@ -150,21 +150,56 @@ def totals(rows):
             "invalid_share": s("invalid") / max(1, s("tool_calls")), "refused_share": s("refused") / max(1, s("tool_calls"))}
 
 
-AGENT_NAMES = {"codex": "Codex", "gemini": "Gemini CLI", "hermes": "Hermes Agent", "openclaw": "OpenClaw"}
+def _agents():
+    """{--agent word: its folder} of the agents bench runs (coding-agents/<name>/manifest.json "bench"), in the
+    registry's order."""
+    if LIB not in sys.path:
+        sys.path.insert(0, LIB)
+    from agentkit import manifests, registry
+    return {m["bench"]["switch"]: n for n, m in ((n, manifests.manifest(n)) for n in registry.AGENTS) if m.get("bench")}
+
+
+def _launcher(agent):
+    from agentkit import registry
+    return registry.module(_agents()[agent], "bench")
+
+
+def default_agent():
+    """The --agent word of a run that names none: the registry's DEFAULT agent's (old runs are its; never a place in
+    the registry's list)."""
+    if LIB not in sys.path:
+        sys.path.insert(0, LIB)
+    from agentkit import manifests, registry
+    return manifests.manifest(registry.DEFAULT)["bench"]["switch"]
+
+
+def agent_word(meta):
+    return (meta.get("switches") or {}).get("agent") or default_agent()
 
 
 def agent_name(meta):
-    return AGENT_NAMES.get((meta.get("switches") or {}).get("agent"), "Claude Code")
+    """The run's agent by its name (one bench doesn't know: the default's)."""
+    from agentkit import manifests
+    a = agent_word(meta)
+    return manifests.label(_agents()[a if a in _agents() else default_agent()])
 
 
-def is_codex(meta):
-    """A run of an agent that reports tokens, never a cost (Codex, Gemini CLI, Hermes Agent, OpenClaw: every one but
-    Claude Code), so its cost cells read n/a rather than 0. The name is older than the other agents."""
-    return ((meta.get("switches") or {}).get("agent") or "claude") != "claude"
+def tokens_run(meta):
+    """A run of an agent that reports tokens, never a cost (its launcher's TOKENS_ONLY; one bench doesn't know counts
+    as one), so its cost cells read n/a rather than 0."""
+    a = agent_word(meta)
+    return a not in _agents() or _launcher(a).TOKENS_ONLY
 
 
-def money(v, codex, fmt="{:.2f}"):
-    return "n/a" if codex else fmt.format(v)
+def version_of(meta):
+    """What run.json says the agent's version is: agent_version, or the older key its launcher names (VERSION_KEY)."""
+    a = agent_word(meta)
+    key = getattr(_launcher(a), "VERSION_KEY", None) if a in _agents() else None
+    return meta.get("agent_version") or (meta.get(key) if key else None)
+
+
+def money(v, tokens, fmt="{:.2f}"):
+    return "n/a" if tokens else fmt.format(v)
 
 
 def header(meta):
@@ -173,14 +208,14 @@ def header(meta):
     return (f"- metacomputer `{(g.get('sha') or '')[:10]}` ({g.get('branch')}{', uncommitted changes' if g.get('dirty') else ''}); "
             f"VM `{meta.get('vm')}` (reset to `{meta.get('baseline')}` before each task: {sw.get('reset')})\n"
             f"- model `{sw.get('model')}`, effort {sw.get('effort') or 'default'}; "
-            f"{(meta.get('agent_version') or agent_name(meta) + ', version not recorded') if is_codex(meta) else (meta.get('agent_version') or meta.get('claude_code'))}\n"
+            f"{(meta.get('agent_version') or agent_name(meta) + ', version not recorded') if tokens_run(meta) else version_of(meta)}\n"
             f"- skill `{sw.get('skill')}` (hash {sw.get('skill_hash')}); shell {sw.get('shell')}; "
             f"coordinate guard {sw.get('coord_guard')}{'' if sw.get('coord_guard_in_bridge') else ' (the bridge does not read it yet)'}; "
             f"hub {sw.get('hub') or 'as configured'}; "
             f"screen {sw.get('screen') or 'VM default'}; "
             f"lessons {sw.get('lessons') or 'off'}"
             + (f" ({sw.get('lessons_count')}, hash {sw.get('lessons_hash')})" if sw.get("lessons_hash") else "") + "\n"
-            + (f"- {agent_name(meta)} reports tokens, not a cost: no budget or cap applies; " if is_codex(meta) else
+            + (f"- {agent_name(meta)} reports tokens, not a cost: no budget or cap applies; " if tokens_run(meta) else
                f"- budget ${sw.get('budget')} per task (task files may differ), cap ${sw.get('cap')}; "
                f"spent ${meta.get('spent_usd', 0):.2f}; ")
             + f"{meta.get('started')} to {meta.get('finished', '?')}"
@@ -192,7 +227,7 @@ def header(meta):
 
 def write_summary(rdir):
     meta, recs = load(rdir)
-    nc = is_codex(meta)
+    nc = tokens_run(meta)
     rows = [row(r) for r in recs]
     env = (recs[0].get("env") or {}) if recs else {}
     calcs = sorted({str((r.get("env") or {}).get("calc")) for r in recs if (r.get("env") or {}).get("calc")})
@@ -288,7 +323,7 @@ def public_summary(rdir):
     t = totals(rows)
     seen, _ = pattern_totals(rows)
     return {
-        "run_id": meta.get("run_id"), "date": str(meta.get("started") or "")[:10], "agent": sw.get("agent") or "claude", "model": sw.get("model"),
+        "run_id": meta.get("run_id"), "date": str(meta.get("started") or "")[:10], "agent": sw.get("agent") or default_agent(), "model": sw.get("model"),
         "cua_driver": (env.get("driver_version") or "").replace("cua-driver ", "") or None,
         "metacomputer": {"commit": g.get("sha"), "uncommitted_changes": bool(g.get("dirty"))},
         "task_set": ", ".join(meta.get("task_sets") or ["standard"]),
@@ -309,7 +344,7 @@ def write_compare(ra, rb):
     A = {r["task"]: row(r) for r in xa}
     B = {r["task"]: row(r) for r in xb}
     sa, sb = ma.get("switches") or {}, mb.get("switches") or {}
-    ca, cb = is_codex(ma), is_codex(mb)
+    ca, cb = tokens_run(ma), tokens_run(mb)
     diffs = [f"`{k}`: {sa.get(k)} → {sb.get(k)}" for k in sorted(set(sa) | set(sb)) if sa.get(k) != sb.get(k)]
     ga, gb = (ma.get("metacomputer") or {}).get("sha", "")[:10], (mb.get("metacomputer") or {}).get("sha", "")[:10]
     if ga != gb:
@@ -341,7 +376,7 @@ def write_compare(ra, rb):
                             ("refused calls", "refused", "{}"), ("invalid-argument calls", "invalid", "{}"),
                             ("input tokens", "in_tok", "{:,}"), ("output tokens", "out_tok", "{:,}")]:
         va, vb = ta[key], tb[key]
-        if key in ("cost", "cost_mean") and (ca or cb):      # Codex reports no cost: nothing to subtract
+        if key in ("cost", "cost_mean") and (ca or cb):      # tokens only: no cost to subtract
             out.append(f"| {label} | {money(va, ca, fmt)} | {money(vb, cb, fmt)} | - |")
             continue
         delta = ("{:+.0%}" if key == "pass_rate" else "{:+,.2f}" if isinstance(va, float) else "{:+,}").format(vb - va)

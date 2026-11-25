@@ -1,0 +1,14 @@
+{
+  "kinds": [
+    "Claude Code"
+  ],
+  "executables": {
+    "claude": "Claude Code"
+  },
+  "version_folders": {
+    "claude/versions": "Claude Code"
+  },
+  "node_scripts": {
+    "claude": "Claude Code"
+  }
+}

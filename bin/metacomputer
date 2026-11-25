@@ -159,6 +159,13 @@ LIB="$(dirname "$SELF")/../scripts/lib.sh"
 . "$(dirname "$SELF")/../scripts/strictargs.sh"
 # The providers' data (their manifests', made into bash by scripts/gen-providers.py): their own options, below.
 . "$(dirname "$SELF")/../lib/cloud/providers.sh" || exit 1
+# The coding agents' data (lib/agentkit/agents.sh, made by scripts/gen-agents.py) and each one's own part of this
+# command (coding-agents/NAME/cli.sh: functions only, ag_FLAG_cli_HOOK).
+. "$(dirname "$SELF")/../lib/agentkit/agents.sh" || exit 1
+for mc_d in $MC_AGENTS; do
+  if [ -f "$(dirname "$SELF")/../coding-agents/$mc_d/cli.sh" ]; then . "$(dirname "$SELF")/../coding-agents/$mc_d/cli.sh"; fi
+done
+unset mc_d
 # --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same);
 # --on PLACE picks it by where it is (lib/placement.py, below, once the settings are read).
 # Each is given once, and its value is a name or a place, never an option or a request for usage (no VM name or place
@@ -500,10 +507,8 @@ mc_strict() { # CMD ARGS...
                        "$MC_PROVIDER_CLOUD_VALUES--forget=" "$@" ;;
     setup)           # install.sh's options (its own loop refuses the rest, but only once a terminal or --yes lets it run)
                      mc_take "setup [--yes] [install.sh's options: ./install.sh --help]" 0 0 "--yes -y --no-chrome --no-build \
-                       --replace-vm --fresh-sources --no-claude --claude --only-agents --no-plugin --only-claude --uninstall \
-                       --switch --allow-downgrade --codex --no-codex --only-codex --openclaw --no-openclaw --only-openclaw \
-                       --hermes --no-hermes --only-hermes --gemini --no-gemini --only-gemini --antigravity --no-antigravity \
-                       --only-antigravity --lume=mcomp-vm \
+                       --replace-vm --fresh-sources --only-agents --uninstall --switch --allow-downgrade \
+                       $MC_AGENT_INSTALL_FLAGS --lume=mcomp-vm \
                        --lume=standard --lume=secure" "" "$@" ;;
     _task-sync)      mc_take "_task-sync NAME" 1 1 "" "" "$@" ;;
   esac
@@ -518,19 +523,12 @@ if [ -n "${MCOMP_PARSE_ONLY:-}" ]; then
   echo "metacomputer: MCOMP_PARSE_ONLY is set (the tests' switch): parse only, nothing was done; unset it" >&2
   exit 99
 fi
-# Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
-# Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
-# confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it
-# (docs/codex.md). The MCP tools aren't affected: Codex starts its MCP servers outside the sandbox. A Codex setup that
-# grants all of that anyway can set MCOMP_CODEX_SANDBOX=allow.
-if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then
-  case "${1:-help}" in
-    help|-h|--help) ;;
-    *) printf '%s\n' "metacomputer: this command is running inside Codex's sandbox ($CODEX_SANDBOX), which blocks what metacomputer needs on this Mac (its state folders, the VM's SSH port, the hub's and the vault's sockets). Nothing was run." \
-         "Run it outside the sandbox: ask for escalated permissions for this command, or add metacomputer's Codex rules (install.sh does it; docs/codex.md) so everyday metacomputer commands run outside it. The metacomputer MCP tools aren't affected." >&2
-       exit 77 ;;
-  esac
-fi
+# Each agent's check before any command runs (its cli.sh's ag_FLAG_cli_start: inside an agent's sandbox, say, what
+# metacomputer needs on this Mac is blocked, so a command stops here and says how to run it outside).
+for mc_f in $MC_AGENT_FLAGS; do
+  if declare -F "ag_${mc_f}_cli_start" >/dev/null; then "ag_${mc_f}_cli_start" "$@"; fi
+done
+unset mc_f
 MC_VM_SAID="$MCOMP_VM_ARG"; MC_ENV_VM="${MCOMP_VM:-}"; MC_ENV_CONFIG="${MCOMP_CONFIG:-}"; MC_ENV_NODEF="${MCOMP_NO_DEFAULT_VM:-}"
 MC_ENV_SAID="$MC_ENV_VM$MC_ENV_CONFIG"
 # The default computer (config/default-vm) is read by scripts/lib.sh as the VM a command acts on when none is named.
@@ -602,7 +600,7 @@ fi
 # Which VM: a checkout with no settings of its own refuses rather than guess (scripts/lib.sh vm_target_check), except
 # for commands that act on no VM. Commands that change a VM, and the vault's, say which VM (and vault) first.
 case "$cmd" in help|-h|--help|where|setup|vm|list|default|events|notify|learn|actions|version|agents|cloud) ;; *) vm_target_check ;; esac
-# The session guard (lib/sessionvm.py): run from an agent session (Claude Code, Codex, ...) that holds a computer, through
+# The session guard (lib/sessionvm.py): run from an agent session that holds a computer, through
 # its MCP tools or a claim, a command that names no computer and would act on another one refuses, saying which and how
 # to go on; one that only reads goes ahead with a note. A computer named with --vm, MCOMP_VM or MCOMP_CONFIG, or pinned
 # by the caller (MCOMP_EXPECT_VM), is the one meant. What passed is passed on (MCOMP_GUARD_VM), so what this command
@@ -645,7 +643,7 @@ esac
 # needs_you.vault_locked goes to the event stream, however its dispatch line is
 # written (an EXIT trap, so the merge needs no edit here). Subcommands that exec the
 # vault directly (list, status, unlock, ...) never come back to run it; the paths
-# Claude uses to fill (fill, session save|load) do. The vault's own events ("approval
+# the agent uses to fill (fill, session save|load) do. The vault's own events ("approval
 # waiting", ...) come through the spool (architecture.md, "Event spool").
 if [ "$cmd" = secrets ]; then trap 'rc=$?; trap - EXIT; events_hook_secrets_exit "$rc"; exit "$rc"' EXIT; fi
 
@@ -2513,7 +2511,7 @@ do_view() { # [--open | --print | --tailnet | --forget] [--remember | --no-remem
   esac
   [ "$flag" = remember ] && { view_remember_now; return $?; }
   # Plain view: a person at a terminal on the Mac's own screen gets the live view itself; anyone else (SSH, another
-  # device, a script or Claude, whose output isn't a terminal) gets how to connect.
+  # device, a script or the agent, whose output isn't a terminal) gets how to connect.
   if [ -t 0 ] && [ -t 1 ] && "$PY" "$LAB_ROOT/lib/liveview.py" gui >/dev/null; then view_open "$flag"; return $?; fi
   view_print
 }
@@ -2595,7 +2593,7 @@ view_remember_decide() {
   [ $rc = 0 ] && { VIEW_SAVE=refresh; return 0; } # there already, with the user's yes: brought up to date
   [ $rc = 1 ] || return 0                         # the keychain couldn't say: the clipboard, as before
   [ "$setting" = on ] && { VIEW_SAVE=create; return 0; }
-  # the question is the user's: a terminal with no agent session above it (Codex can give a command a terminal)
+  # the question is the user's: a terminal with no agent session above it (an agent can give a command a terminal)
   if ! [ -t 1 ] || ! user_tty; then VIEW_HINT=1; return 0; fi
   echo "Screen Sharing can remember the live-view password, so the live view opens without asking for it:"
   echo "metacomputer saves it in your login keychain, where Screen Sharing (and osascript, which writes it) can"

@@ -72,6 +72,8 @@ for i, v in enumerate(["0.1.0", "0.2.0", "0.3.0"]):
         os.makedirs(os.path.join(origin, "lib"))
         shutil.copy(os.path.join(LAB, "lib", "update.py"), os.path.join(origin, "lib", "update.py"))
         shutil.copy(os.path.join(LAB, "lib", "strictargs.py"), os.path.join(origin, "lib", "strictargs.py"))   # its parser
+        for d in (os.path.join("lib", "agentkit"), "coding-agents"):       # the agents' words (lib/agentkit/manifests.py)
+            shutil.copytree(os.path.join(LAB, d), os.path.join(origin, d), ignore=shutil.ignore_patterns("__pycache__"))
         write(os.path.join(origin, "bin", "metacomputer"), STUB_CLI, 0o755)
         write(os.path.join(origin, "install.sh"), STUB_INSTALL, 0o755)
         write(os.path.join(origin, "provisioning", "guest", "provision.sh"), "echo guest\n")

@@ -277,6 +277,19 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `lib/cloud/providers.sh`) or on the hooks it brings, and `tests/test_cloud_adapters.py` fails on a line that names one
   (its LINT_ALLOW says why each exception is there). After changing a manifest or the registry, run
   `python3 scripts/gen-providers.py` (docs/providers.md, providers.sh, the credential lines, CODEOWNERS).
+  Coding agents likewise: each agent's code lives in its own folder, `coding-agents/<name>/` (coding-agents/README.md;
+  not `agents/`, which Gemini CLI would load from the repository's root as its extension's agents): its manifest
+  (its words, flag, command, install options, what learn and bench do with it, its reviewers), its recognition tables
+  (`recognition.json`: read by `lib/owners.py` and compiled into the vault by scripts/build-vault.sh, one copy), its
+  setup steps (`setup.py`: a generic agent's `lib/agent_setup.py` Agent, or its part of `metacomputer agents`;
+  `setup.sh`: its install.sh hooks, `ag_FLAG_HOOK`), and where it has them its session reader (`sessions.py`), bench
+  launcher (`bench.py`), distribution files (`channel.py`), bin/metacomputer hook (`cli.sh`), recognition cases
+  (`tests/`), page for contributors and doc-claims rows. `lib/agentkit/` is the framework: the registry (an explicit
+  list), the manifests, the recognition tables, the MCP entry rule, and `agents.sh` (what bash reads). Shared code
+  never names an agent: it reads the manifests or the hooks a folder brings, and `tests/test_agents.py` fails on a
+  line that names one (its LINT_FILES, PRINTED, LINT_REGIONS, LINT_WORDS and LINT_ALLOW say why each exception is
+  there). After changing a manifest or the registry, run `python3 scripts/gen-agents.py` (docs/agents.md,
+  lib/agentkit/agents.sh, CODEOWNERS).
   Which processes are agent sessions is `lib/owners.py` `agent_kind`/`agent_of` (Claude Code, Codex, OpenClaw, Hermes
   Agent, Gemini CLI, Antigravity CLI; by what a process executes (`process_agent`): its name, its executable (`proc_exe`, the realpath
   of its text image: a native gemini, Antigravity CLI's `agy`/`antigravity`, names matched exactly; the Antigravity app and
@@ -289,7 +302,8 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   OpenClaw's own helpers excepted), read only through ps_table's `ProcTable`; arguments or a working folder that can't be read, or a script
   that isn't there, are `UNKNOWN_AGENT`, an agent: fail closed) and, for the vault, `vault/Util.swift` `agentKindOf` (and `sharedAgentProcess`:
   Codex's app server, OpenClaw's and Hermes Agent's gateways, `agy acp`/`agy remote-control`, the Antigravity app and an unidentified agent get no session answers): keep the
-  two the same; tests/fixtures/agent_argv.json holds the cases both are checked against (test_session_guard, and
+  two the same; tests/fixtures/agent_argv.json (the shared ones) and each agent's
+  `coding-agents/<name>/tests/recognition_cases.json` hold the cases both are checked against (test_session_guard, and
   test_vault_ops through the test build's `test-agent-kind`).
   An agent session's computer (`lib/sessionvm.py`; docs/commands.md "An agent session's computer"): the MCP bridge and
   every claim in an agent session's name leave a record in a private per-account folder (`MCOMP_SESSIONS_DIR` in
@@ -372,8 +386,8 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   GitHub install copies the plugin folder alone, so it must carry the notices). It declares no MCP server and no
   hooks: the directory holds a version for a reviewer when a hook or MCP server command runs a script it can't
   follow (variables other than `${CLAUDE_PLUGIN_ROOT}`, command substitution, another file), and the launcher is
-  such a script. `install.sh` registers the MCP server itself (`register_server`: user scope,
-  `~/.local/bin/metacomputer mcp-lazy`). It reads the user-scope entry exactly (`lib/claude_mcp.py`, which
+  such a script. `install.sh` registers the MCP server itself (`register_server`, in coding-agents/claude-code/setup.sh: user scope,
+  `~/.local/bin/metacomputer mcp-lazy`). It reads the user-scope entry exactly (`coding-agents/claude-code/claude_mcp.py`, which
   `metacomputer agents` uses too: the entry from the configuration file Claude Code itself picks (`config_path()`),
   read before and after `claude mcp get` from an empty folder and checked against it; never display text alone, never
   a scope-blind lookup) and changes only metacomputer's own (`owner()`: canonical command, exact `["mcp-lazy"]`; never
@@ -394,7 +408,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   as incomplete in installed.json by `agent_record`, at the end of each step (Claude Code's before Codex's runs), only
   when the step ran (`CLAUDE_TRIED`, `CODEX_TRIED`: a run that skipped it keeps an earlier marker; a full install's
   `install_incomplete` likewise), so `metacomputer update` runs the install again. Codex's MCP server follows the same
-  ownership rule (`lib/agents.py codex_entry`: exactly the checkout's launcher, a legacy path under its `bin/`, or
+  ownership rule (`coding-agents/codex/setup.py codex_entry`: exactly the checkout's launcher, a legacy path under its `bin/`, or
   `~/.local/bin/metacomputer`, with exactly `mcp-lazy`; the whole entry read again before a change; never a path prefix);
   anything else is left, said value-free, and the Codex step is unfinished. OpenClaw's, Hermes Agent's, Gemini CLI's and
   Antigravity CLI's MCP servers follow the same rule (`lib/agent_setup.py`: `~/.local/bin/metacomputer mcp-lazy`, registered with each

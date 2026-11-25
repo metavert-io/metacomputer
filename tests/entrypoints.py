@@ -70,6 +70,7 @@ PROGRAMS = {
     "scripts/safe-rmtree.sh": P("bash", [[BOX + "/victim"], ["--quiet", BOX + "/victim", BOX + "/victim2"]]),
     "scripts/sync-plugin.py": P("py", [[], ["--check"]], synth=True),
     "scripts/gen-providers.py": P("py", [[], ["--check"]], synth=True, by="person"),
+    "scripts/gen-agents.py": P("py", [[], ["--check"]], synth=True, by="person"),
     "scripts/build-openai-plugin.py": P("py", [["--check"], ["--version", "1.2.3", "--out", "x.zip"]], synth=True),
     "scripts/vendor-driver-skill.py": P("py", [["src"]], synth=True, by="person"),
     "scripts/verify-audit.py": P("py", [["f.jsonl"], ["--key", "k", "--expect-start", "1", "f.jsonl"]], synth=True),
@@ -80,14 +81,15 @@ PROGRAMS = {
     "bench/bench.py": P("py", [["list"], ["run", "--tasks", "ff-form", "--run-id", "try-1"]], synth=True),
     "bench/guest/calc-overlay.sh": P("guard", [["lodeb"]]),
     "bench/guest/server.py": P("py", [["site", "requests.jsonl", "8000"], ["root", "log"]]),
+    "lib/agentkit/recognition.py": P("py", [["swift"], ["check"]], synth=True),
     "lib/actionlog.py": P("py", [["list"], ["show", "latest", "--json"], ["verify", "--all"], ["verify", "f.jsonl"]]),
     "lib/agent_setup.py": P("py", [["link-ours", "p", "--root", "r"], ["install", "openclaw", "--root", "r", "--link", "l"],
                                    ["status", "antigravity", "--root", "r", "--link", "l"]], synth=True),
-    "lib/agents.py": P("py", [["check", "--quiet"], ["status", "--json"], ["codex-entry", "--root", "r", "--link", "l"]],
-                       synth=True),
+    "lib/agents.py": P("py", [["check", "--quiet"], ["status", "--json"]], synth=True),
+    "coding-agents/codex/setup.py": P("py", [["codex-entry", "--root", "r", "--link", "l"]], synth=True),
     "lib/botcheck.py": P("py", [[]], stdin="{}", by="person"),
     "lib/browser_tools.py": P("py", [["read", "https://example.com"], ["page", "open", "https://example.com"]], synth=True),
-    "lib/claude_mcp.py": P("py", [["user-get", "n", "--root", "r", "--link", "l"], ["user-recheck", "n"]], synth=True),
+    "coding-agents/claude-code/claude_mcp.py": P("py", [["user-get", "n", "--root", "r", "--link", "l"], ["user-recheck", "n"]], synth=True),
     "lib/defaultvm.py": P("py", [["read", "f"], ["read"]], synth=True),
     "lib/driver_profiles.py": P("py", [["render"], ["launch-path", "p"]], synth=True),
     "lib/each.py": P("py", [["main,other", "--", "status"], ["--timeout", "5", "main", "--", "reset", "--yes"]], synth=True),
@@ -252,7 +254,7 @@ def caller_lines(rel):
     """The lines of the repository that run REL (by its file name), outside REL itself and comments."""
     base = os.path.basename(rel)
     out = subprocess.run(["git", "-C", LAB, "grep", "-n", "-F", base, "--", "bin", "scripts", "lib", "provisioning",
-                          "providers", "vault", "install.sh", "get.sh", "plugin/bin", "agent-plugin/bin", "tests/run_tests.py", "bench",
+                          "providers", "coding-agents", "vault", "install.sh", "get.sh", "plugin/bin", "agent-plugin/bin", "tests/run_tests.py", "bench",
                           "gemini-extension.json"], capture_output=True, text=True).stdout.splitlines()
     return [ln for ln in out if not ln.startswith(rel + ":") and not re.match(r"^[^:]+:\d+:\s*#", ln)]
 

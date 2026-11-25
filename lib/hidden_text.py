@@ -1,8 +1,8 @@
-"""Hidden and instruction-like page text, marked for Claude by the hub (HIDDEN_TEXT=on; SECURITY.md, "Hidden page
+"""Hidden and instruction-like page text, marked for the agent by the hub (HIDDEN_TEXT=on; SECURITY.md, "Hidden page
 text").
 
 A page in the VM can carry text a person never sees (white 1-pixel type, a block placed off the page) that still
-reaches Claude through the accessibility tree, word for word. This module lets the hub label it, so Claude can tell
+reaches the agent through the accessibility tree, word for word. This module lets the hub label it, so the agent can tell
 the user about it. The hub calls it from two places:
 
 - prepare(tool, args, app): before a window read is passed on, asks the driver for its element list too
@@ -714,8 +714,8 @@ def _bytes(s):
 
 
 def note_text(found, scan, items=True):
-    """The note for Claude, at most NOTE_MAX_BYTES encoded (quotes are left out from the end to stay under it). Claude
-    Code shows the model a result's structured part when it has one, so the same words (without the item lines, which
+    """The note for the agent, at most NOTE_MAX_BYTES encoded (quotes are left out from the end to stay under it). An
+    agent may show the model only a result's structured part when it has one, so the same words (without the item lines, which
     the field lists) also lead the result's metacomputer_hidden_text field."""
     hidden, instr = _counts(found)
     if hidden and instr:

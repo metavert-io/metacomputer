@@ -6,6 +6,30 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Each coding agent's code lives in its own folder** ([coding-agents/README.md](coding-agents/README.md)), for
+  contributors: `coding-agents/<name>/` (`claude-code`, `codex`, `openclaw`, `hermes`, `gemini`, `antigravity`) holds
+  its manifest (its words, install options, what `learn` and `bench` do with it, its reviewers), its recognition tables
+  (how its processes are told, read by `lib/owners.py` and compiled into the vault: one copy for both), its setup steps
+  (was in `install.sh`, `lib/agents.py` and `lib/agent_setup.py`; Claude Code's `lib/claude_mcp.py` moved there too),
+  its session reader for `learn` (was in `lib/transcripts.py` and `lib/session_dbs.py`), its bench launcher (was in
+  `bench/bench.py`), its distribution files (what `scripts/sync-plugin.py` writes for it), Codex's sandbox check (was
+  in `bin/metacomputer`), its page and its doc-claims rows. `lib/agentkit/` keeps the framework, with the registry (one
+  line per agent). Shared code no longer names an agent: it reads the manifests (bash through
+  `lib/agentkit/agents.sh`, made by `scripts/gen-agents.py`, which also writes [docs/agents.md](docs/agents.md) and
+  `.github/CODEOWNERS`) and the hooks each folder brings, and a test fails on a line that names one. Adding an agent
+  is its folder, one registry line and a line here. The folder is `coding-agents/`, not `agents/`: Gemini CLI loads
+  the repository's root as its extension. Nothing a user sees changes: every command, option, message, setting, file
+  location and package is as it was, except the one fix below.
+
+### Fixed
+
+- **`metacomputer learn`**: when reading one agent's sessions fails with an error the reader doesn't expect, the other
+  agents' sessions are still read, and the report's note names the agent whose weren't (`note: OpenClaw: its sessions
+  weren't read (TypeError)`). Before, such an error in OpenClaw's or Hermes Agent's reader left both agents' sessions
+  out of the report, and one while another agent's session files were listed ended the report.
+
 ## [0.5.2] - 2026-11-25
 
 ### Changed

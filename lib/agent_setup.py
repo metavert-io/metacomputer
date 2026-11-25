@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
-"""metacomputer for OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI (docs/openclaw.md, docs/hermes.md, docs/gemini.md,
-docs/antigravity.md): install.sh's step for each, its part of --uninstall, and what `metacomputer agents` reports about
-them.
+"""metacomputer for the coding agents whose steps are generic (lib/agentkit/manifests.py generic(); each one's Agent is
+in its folder, coding-agents/<name>/setup.py, and its page for people is its manifest's docs): install.sh's step for
+each, its part of --uninstall, and what `metacomputer agents` reports about them.
 
   agent_setup.py install NAME --root CHECKOUT --link ~/.local/bin/metacomputer
   agent_setup.py uninstall NAME --root CHECKOUT --link ~/.local/bin/metacomputer
   agent_setup.py status NAME --root CHECKOUT --link ~/.local/bin/metacomputer     (JSON)
 
-NAME is openclaw, hermes, gemini or antigravity. For each agent the step registers metacomputer's MCP server,
-`~/.local/bin/metacomputer mcp-lazy`, in the agent's own configuration, through the agent's own CLI (OpenClaw: `openclaw mcp
-add`; Hermes Agent: `hermes config set`; Gemini CLI: `gemini mcp add -s user`; Antigravity CLI: `agy mcp add`), and links
-the skills metacomputer and cua-driver where the agent reads them (OpenClaw and Gemini CLI: ~/.agents/skills, which Codex
-reads too; Hermes Agent: $HERMES_HOME/skills; Antigravity CLI: ~/.gemini/antigravity-cli/skills). Antigravity CLI's entry
-also gets a tool timeout of 600 s, and its settings.json metacomputer's permission rule when the server is added (taken
-out by --uninstall), written by this step because its CLI has no option for either (Antigravity.settle, added, removed).
+NAME is a generic agent's folder (coding-agents/NAME). For each agent the step registers metacomputer's MCP server,
+`~/.local/bin/metacomputer mcp-lazy`, in the agent's own configuration, through the agent's own CLI (its Agent's
+add_argv, remove_argv and read), and links the skills metacomputer and cua-driver where the agent reads them (its
+Agent's skills_dir: ~/.agents/skills unless it says otherwise). What an agent's CLI has no option for (a tool timeout,
+a permission rule in its settings) its Agent writes itself, in settle, added and removed (its folder's README says
+which).
 
-The MCP server named metacomputer follows the rule Claude Code's and Codex's do (lib/claude_mcp.py, lib/agents.py
-codex_entry): it is metacomputer's own ("ok") only as a local command that is exactly the checkout's bin/metacomputer or
+The MCP server named metacomputer follows the rule every agent's does (lib/agentkit/mcp_entry.py; an agent with steps
+of its own has them in its folder's setup.sh): it is metacomputer's own ("ok") only as a local command that is exactly the checkout's bin/metacomputer or
 ~/.local/bin/metacomputer, with exactly the argument mcp-lazy. Anything else ("foreign") is never changed or removed: the
 run names it by its program and how many arguments it has, or its transport (never an argument, a variable or a URL),
 says how to remove it yourself, and the step is unfinished. An entry that can't be read ("error") is never taken for a
@@ -25,18 +24,18 @@ installs never interleave on one agent), the entry is read again right before an
 still missing), and read back after it. What's left (docs/commands.md, "The other agents", says the same): these agents'
 CLIs have no compare-and-swap, and the lock binds only metacomputer, so another program (the agent itself, an editor,
 another tool) that writes an entry named metacomputer between that last read and the CLI's own write, a window of one
-CLI call, isn't seen: an add replaces it (Gemini CLI's `mcp add`, Hermes Agent's `config set`, Antigravity CLI's `mcp add`;
-OpenClaw's `mcp add` refuses an existing name instead), and a removal, which these CLIs make by name only, removes it. The read-back after
+CLI call, isn't seen: an add replaces it (or, with a CLI whose add refuses an existing name, fails), and a removal, which these CLIs make by name only, removes it. The read-back after
 an add sees what won; the one after a removal can only confirm the name is gone. A skill link swapped for someone else's between metacomputer's
 check and its unlink is removed the same way.
 
 Skill links are metacomputer's only when they point into this checkout's own skill folders (skills/, .claude/skills/;
 a relative target is read from the link's folder): only those are ever replaced or removed. A skill that can't be linked
-(something else there, or an error), or that OpenClaw doesn't offer, leaves the step unfinished. Hermes Agent's profile is
-resolved once (`hermes config path`) and every command and the skills folder use it. Uninstall keeps
+(something else there, or an error), or that the agent doesn't offer (its Agent's check_skill), leaves the step
+unfinished. An agent with profiles has the one in use resolved once (its Agent's pin) and every command and the skills
+folder use it. Uninstall keeps
 ~/.local/bin/metacomputer and mcomp whenever an agent's configuration can't be inspected in full and may still run them
-(its CLI missing or refused: Gemini CLI's settings.json is read directly, all of it or it counts as maybe; the others'
-files are looked through for the names, and a file that includes others, is past the read, can't be read, or sits
+(its CLI missing or refused: an Agent that reads its settings itself, reads_files, has them read directly, all of it
+or it counts as maybe; the others' files are looked through for the names, and a file that includes others, is past the read, can't be read, or sits
 behind a folder that can't be searched or listed counts as maybe too), and on any unexpected error. With the CLI
 there, the profile it selects is acted on and every other profile and location is looked through the same way
 (_mentioned_elsewhere): metacomputer set up in another one keeps them. The step's output, one line each, for install.sh: "ok TEXT", "warn TEXT", "say TEXT", and for --uninstall
@@ -52,14 +51,16 @@ import os
 import stat
 import sys
 
+if __name__ == "__main__":         # the agents' setup.py import this module by its name: the same module, not a second
+    sys.modules.setdefault("agent_setup", sys.modules[__name__])
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "lib"))
 import agents        # noqa: E402  (trusted, run, version, link_target, choices)
-import claude_mcp    # noqa: E402  (words, digest, linked, MCP_ARGS)
+from agentkit import mcp_entry  # noqa: E402  (words, digest, linked, MCP_ARGS)
 import flockwait     # noqa: E402  (the lock's wait)
 
 NAME = "metacomputer"
-TOOL_TIMEOUT = 600          # seconds: as Codex's (install.sh CODEX_TOOL_TIMEOUT); OpenClaw's default is 60 s, Hermes's 300
+TOOL_TIMEOUT = 600          # seconds: what every agent's entry for metacomputer gets (some CLIs' defaults are 60 s)
 SKILLS = ("metacomputer", "cua-driver")
 
 
@@ -73,10 +74,10 @@ def home(env):
     return env.get("HOME") or os.path.expanduser("~")
 
 
-# --- JSON with comments (Gemini CLI's settings.json) -------------------------------------------------------------
+# --- JSON with comments (an agent's settings file) -------------------------------------------------------------
 def jsonc_loads(text, trailing_commas=False):
-    """JSON with // and /* */ comments, as Gemini CLI reads its settings.json (it refuses trailing commas, and so does
-    this unless trailing_commas: Antigravity CLI reads them); ValueError when it isn't that. Comment marks inside strings
+    """JSON with // and /* */ comments, as an agent may read its settings (one refuses trailing commas, and so does
+    this unless trailing_commas: another reads them); ValueError when it isn't that. Comment marks inside strings
     are kept."""
     out, i, n = [], 0, len(text)
     if text.startswith("\ufeff"):
@@ -130,7 +131,7 @@ def jsonc_loads(text, trailing_commas=False):
 
 # --- the agents --------------------------------------------------------------------------------------------------
 def _entry_res(d):
-    """An MCP server entry (a dict, as the agent keeps it) as claude_mcp's result: {"kind", "entry"}; a local command
+    """An MCP server entry (a dict, as the agent keeps it) as mcp_entry.words reads it: {"kind", "entry"}; a local command
     is "stdio" with its command, arguments and variables; an error when its parts have the wrong types."""
     if not isinstance(d, dict):
         return {"kind": "error", "why": "its entry has an unexpected shape"}
@@ -147,13 +148,21 @@ def _entry_res(d):
     return {"kind": "stdio", "entry": {"command": cmd, "args": list(args or []), "env": dict(envs or {})}}
 
 
+def manifest_words(folder):
+    """(name, label, prog, tools, doc) of an agent, from its manifest (coding-agents/FOLDER/manifest.json): its install
+    word (its flag), its name, its command, how it names metacomputer's tools, its page."""
+    from agentkit import manifests
+    m = manifests.manifest(folder)
+    return m["flag"], m["label"], m["prog"], m["tools"], m["docs"]
+
+
 class Agent:
     name = label = prog = ""
     tools = ""              # how the agent names the tools, for the messages
     doc = ""
     note = ""               # said once its MCP server is metacomputer's
-    reads_files = False     # read() works without the agent's CLI (Gemini CLI's settings.json)
-    prefix = ()             # arguments every command gets after the program (Hermes Agent's --profile)
+    reads_files = False     # read() works without the agent's CLI (it reads the agent's settings file itself)
+    prefix = ()             # arguments every command gets after the program (a profile's option, say)
 
     def env(self, env):
         return dict(env)
@@ -210,506 +219,27 @@ class Agent:
         return True
 
 
-class Gemini(Agent):
-    """Gemini CLI: user-scope MCP servers in ~/.gemini/settings.json (JSON with comments; GEMINI_CLI_HOME moves it), set
-    with `gemini mcp add -s user`, which replaces an entry of the same name without asking, so the entry is read (from
-    the file: the CLI has no lookup) right before. `--trust`: the tools act only on the virtual computer, through the
-    hub's guards (Codex's `default_tools_approval_mode = "approve"` likewise). Its default tool timeout is 600 s."""
-    name, label, prog, tools, doc = "gemini", "Gemini CLI", "gemini", "mcp_metacomputer_*", "docs/gemini.md"
-    note = ("Gemini CLI starts MCP servers only in folders you trust: it asks the first time you start it in a folder "
-            "(docs/gemini.md)")
-
-    def env(self, env):
-        return dict(env, GEMINI_CLI_NO_RELAUNCH="true")      # one process for a quick command, not two
-
-    def base(self, env):
-        return env.get("GEMINI_CLI_HOME") or home(env)
-
-    def settings(self, env):
-        return os.path.join(self.base(env), ".gemini", "settings.json")
-
-    reads_files = True
-
-    def skills_dir(self, env):
-        return os.path.join(self.base(env), ".agents", "skills")
-
-    def config_files(self, env):
-        return _distinct([self.settings(env), os.path.join(home(env), ".gemini", "settings.json")])
-
-    def read(self, prog, env):
-        path = self.settings(env)
-        try:
-            with open(path, encoding="utf-8") as f:
-                text = f.read(SETTINGS_CAP + 1)
-        except (FileNotFoundError, NotADirectoryError):
-            return {"kind": "absent"}
-        except (OSError, UnicodeDecodeError):
-            return {"kind": "error", "why": "its settings.json couldn't be read"}
-        if len(text) > SETTINGS_CAP:          # what's past the read could be anything, metacomputer's entry included
-            return {"kind": "error", "why": "its settings.json is larger than 4 MB, so it wasn't read in full"}
-        if not text.strip():
-            return {"kind": "absent"}
-        try:
-            d = jsonc_loads(text)
-        except (ValueError, RecursionError):
-            return {"kind": "error", "why": "its settings.json isn't JSON this can read"}
-        servers = d.get("mcpServers") if isinstance(d, dict) else None
-        if servers is None:
-            return {"kind": "absent"}
-        if not isinstance(servers, dict):
-            return {"kind": "error", "why": "its mcpServers isn't a table"}
-        if NAME not in servers:
-            return {"kind": "absent"}
-        res = _entry_res(servers[NAME])
-        res["raw"] = servers[NAME]
-        return res
-
-    def add_argv(self, prog, link):
-        return [prog, "mcp", "add", "-s", "user", "--trust", NAME, link, *claude_mcp.MCP_ARGS]
-
-    def remove_argv(self, prog):
-        return [prog, "mcp", "remove", "-s", "user", NAME]
-
-    def add_line(self, link_shown):
-        return f"gemini mcp add -s user --trust {NAME} {link_shown} mcp-lazy"
-
-    def remove_line(self):
-        return f"gemini mcp remove -s user {NAME}"
+_AGENTS = None
 
 
-class Antigravity(Agent):
-    """Antigravity CLI (`agy`, Google's successor to Gemini CLI for its free and AI Pro/Ultra users; a Go executable):
-    MCP servers in ~/.gemini/config/mcp_config.json, which the Antigravity app and IDE read too, added with `agy mcp add`
-    (it adds or replaces an entry of the same name without asking, so the entry is read right before: from the file,
-    since `agy mcp list` prints only a table) and removed with `agy mcp remove`. Its CLI rewrites the whole file as plain
-    JSON (sorted keys, two-space indent) and refuses one with comments or trailing commas, which agy itself reads, so the
-    file is read here the way agy reads it. Its tool timeout is 180 s by default and its CLI has no option for one:
-    settle() gives metacomputer's own entry timeoutSeconds 600. It asks before every MCP tool call unless a permission
-    rule allows it: when this run adds the server, added() puts metacomputer's own rule, mcp(metacomputer/*), in
-    permissions.allow of ~/.gemini/antigravity-cli/settings.json (as Gemini CLI's server gets "trust"; it has no CLI for
-    it) and notes that it did (record()), and an uninstall takes that exact rule out again only then (removed()): a rule
-    of the user's stays. A file of these that is a link is never replaced. Skills: ~/.gemini/antigravity-cli/skills, the
-    CLI's own folder (it doesn't read ~/.agents/skills). Checked with agy 1.5.15 in a throwaway home."""
-    name, label, prog, tools, doc = ("antigravity", "Antigravity CLI", "agy", "call_mcp_tool with server metacomputer",
-                                     "docs/antigravity.md")
-    reads_files = True
-    allow = f"mcp({NAME}/*)"            # metacomputer's own permission rule: its server's tools, without asking
-
-    def env(self, env):
-        return dict(env, AGY_CLI_DISABLE_AUTO_UPDATE="true")     # no update for a quick command
-
-    def config(self, env):
-        return os.path.join(home(env), ".gemini", "config", "mcp_config.json")
-
-    def skills_dir(self, env):
-        return os.path.join(home(env), ".gemini", "antigravity-cli", "skills")
-
-    def config_files(self, env):
-        return [self.config(env)]
-
-    def settings(self, env):
-        return os.path.join(home(env), ".gemini", "antigravity-cli", "settings.json")
-
-    def _text(self, path):
-        """The file's text (None: not there), or raises Unreadable-like ValueError with why."""
-        try:
-            with open(path, "rb") as f:
-                data = f.read(SETTINGS_CAP + 1)
-        except (FileNotFoundError, NotADirectoryError):
-            return None, None
-        except OSError:
-            raise ValueError("its mcp_config.json couldn't be read")
-        if len(data) > SETTINGS_CAP:
-            raise ValueError("its mcp_config.json is larger than 4 MB, so it wasn't read in full")
-        try:
-            return data, data.decode("utf-8")
-        except UnicodeDecodeError:
-            raise ValueError("its mcp_config.json isn't text")
-
-    def read(self, prog, env):
-        try:
-            _, text = self._text(self.config(env))
-        except ValueError as e:
-            return {"kind": "error", "why": str(e)}
-        if text is None or not text.strip():
-            return {"kind": "absent"}
-        plain = True
-        try:
-            d = json.loads(text)
-        except ValueError:
-            plain = False
-            try:
-                d = jsonc_loads(text, trailing_commas=True)
-            except (ValueError, RecursionError):
-                return {"kind": "error", "why": "its mcp_config.json isn't JSON this can read"}
-        except RecursionError:
-            return {"kind": "error", "why": "its mcp_config.json isn't JSON this can read"}
-        servers = d.get("mcpServers") if isinstance(d, dict) else None
-        if servers is None:
-            return {"kind": "absent", "plain": plain}
-        if not isinstance(servers, dict):
-            return {"kind": "error", "why": "its mcpServers isn't a table"}
-        if NAME not in servers:
-            return {"kind": "absent", "plain": plain}
-        res = _entry_res(servers[NAME])
-        res["raw"], res["plain"] = servers[NAME], plain
-        return res
-
-    def add_argv(self, prog, link):
-        return [prog, "mcp", "add", NAME, link, *claude_mcp.MCP_ARGS]
-
-    def remove_argv(self, prog):
-        return [prog, "mcp", "remove", NAME]
-
-    def add_line(self, link_shown):
-        full = os.path.expanduser(link_shown)          # in the file, the command's whole path (no shell expands ~ there)
-        return (f"agy mcp add {NAME} {link_shown} mcp-lazy (its mcp command refuses a mcp_config.json with comments or "
-                f"trailing commas: then add \"{NAME}\": {{\"command\": \"{full}\", \"args\": [\"mcp-lazy\"], "
-                f"\"timeoutSeconds\": {TOOL_TIMEOUT}}} under mcpServers in ~/.gemini/config/mcp_config.json yourself)")
-
-    def remove_line(self):
-        return f"agy mcp remove {NAME}"
-
-    def settle(self, prog, root, link, env, out):
-        """metacomputer's own entry gets timeoutSeconds 600 when it has none (one you set stays): the file read whole, the
-        entry checked to be metacomputer's, the file written again as agy's own CLI writes it (plain JSON, sorted keys,
-        two-space indent) to a new file beside it, which replaces it only if the file is still exactly what was read and
-        isn't a link (replace_if_unchanged); then read back. Anything else leaves it as it is, said."""
-        path = self.config(env)
-        by_hand = (f"add \"timeoutSeconds\": {TOOL_TIMEOUT} to metacomputer's entry in ~/.gemini/config/mcp_config.json "
-                   "yourself (without it, Antigravity CLI ends a tool call after 180 s)")
-        try:
-            data, text = self._text(path)
-            d = json.loads(text) if text is not None else None
-        except (ValueError, RecursionError):
-            d = None
-        entry = ((d or {}).get("mcpServers") or {}).get(NAME) if isinstance(d, dict) else None
-        if not isinstance(entry, dict) or classify(_entry_res(entry), root, link) != "ok":
-            out("warn", f"couldn't give metacomputer's MCP server a longer tool timeout (its mcp_config.json isn't plain "
-                        f"JSON, or changed); {by_hand}")
-            return
-        if "timeoutSeconds" in entry:
-            return
-        entry["timeoutSeconds"] = TOOL_TIMEOUT
-        got = replace_if_unchanged(path, data, (json.dumps(d, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
-                                   .encode("utf-8"))
-        if got == "changed":
-            out("warn", f"Antigravity CLI's mcp_config.json changed while metacomputer's tool timeout was added, so it was "
-                        f"left as it is; run ./install.sh --only-{self.name} again, or {by_hand}")
-            return
-        if got == "link":
-            out("warn", f"Antigravity CLI's mcp_config.json is a link, so it was left as it is (a file kept elsewhere "
-                        f"stays linked); {by_hand}")
-            return
-        if got != "ok":
-            out("warn", f"couldn't write Antigravity CLI's mcp_config.json; {by_hand}")
-            return
-        res = self.read(prog, env)
-        if classify(res, root, link) == "ok" and (res.get("raw") or {}).get("timeoutSeconds") == TOOL_TIMEOUT:
-            out("ok", f"tool timeout {TOOL_TIMEOUT} s for metacomputer's MCP server (Antigravity CLI's is 180 s)")
-        else:
-            out("warn", f"couldn't confirm metacomputer's tool timeout in Antigravity CLI's mcp_config.json; {by_hand}")
-
-    def _rules(self, d):
-        """(permissions, allow list) of a settings dict, or None when they have another shape."""
-        perms = d.get("permissions", {})
-        if not isinstance(perms, dict):
-            return None
-        allow = perms.get("allow", [])
-        if not isinstance(allow, list) or not all(isinstance(x, str) for x in allow):
-            return None
-        for k in ("ask", "deny"):
-            v = perms.get(k, [])
-            if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
-                return None
-        return perms, allow
-
-    def _settings_change(self, env, out, add):
-        """Add (add=True) or take out metacomputer's own permission rule, exactly `mcp(metacomputer/*)`, in
-        permissions.allow of Antigravity CLI's settings.json; nothing else in the file changes. Only plain JSON is
-        written (agy keeps it so; one with comments or trailing commas is left as it is, said), to a new file beside it
-        that replaces it only if the file is still exactly what was read, with its mode, and never over a link (a
-        settings.json kept elsewhere stays linked, said); then read back. An ask or deny rule of the user's for
-        metacomputer's tools (or all MCP tools) wins: no allow rule is added next to it. "added", "removed", "there"
-        (already as wanted: present, or absent), "theirs" (the user's ask or deny rule) or None (left as it is, said)."""
-        path, rule = self.settings(env), self.allow
-        by_hand = (f"{'add' if add else 'take'} \"{rule}\" {'to' if add else 'out of'} permissions.allow in "
-                   "~/.gemini/antigravity-cli/settings.json yourself")
-        try:
-            with open(path, "rb") as f:
-                data = f.read(SETTINGS_CAP + 1)
-        except (FileNotFoundError, NotADirectoryError):
-            data = None
-        except OSError:
-            out("say", f"Antigravity CLI's settings.json couldn't be read, so it was left as it is; {by_hand}")
-            return None
-        if data is None:
-            if not add:
-                return "there"
-            d = {}
-        else:
-            try:
-                d = json.loads(data.decode("utf-8")) if len(data) <= SETTINGS_CAP else None
-            except (ValueError, UnicodeDecodeError, RecursionError):
-                d = None
-            got = self._rules(d) if isinstance(d, dict) else None
-            if got is None:
-                out("say", "Antigravity CLI's settings.json isn't plain JSON this can change (comments, trailing commas, "
-                           f"another shape), so it was left as it is; {by_hand}")
-                return None
-        perms, allow = self._rules(d)
-        if add:
-            if rule in allow:
-                return "there"
-            theirs = [x for x in perms.get("ask", []) + perms.get("deny", [])
-                      if x == "mcp(*)" or x.startswith(f"mcp({NAME}/") or x == f"mcp({NAME})"]
-            if theirs:
-                out("say", "your Antigravity CLI settings ask about or deny metacomputer's tools (or every MCP tool), so "
-                           "no rule allowing them was added")
-                return "theirs"
-            d.setdefault("permissions", perms)["allow"] = allow + [rule]
-        else:
-            if rule not in allow:
-                return "there"
-            perms["allow"] = [x for x in allow if x != rule]
-        new = (json.dumps(d, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-        got = replace_if_unchanged(path, data, new)
-        if got != "ok":
-            why = {"changed": "changed while it was being changed",
-                   "link": "is a link (a file kept elsewhere stays linked)"}.get(got, "couldn't be written")
-            out("say", f"Antigravity CLI's settings.json {why}, so it was left as it is; {by_hand}")
-            return None
-        try:
-            with open(path, "rb") as f:
-                back = json.loads(f.read(SETTINGS_CAP + 1).decode("utf-8"))
-            allow_back = ((back.get("permissions") or {}).get("allow") or []) if isinstance(back, dict) else []
-            ok = (rule in allow_back) == add
-        except (OSError, ValueError, KeyError, TypeError, UnicodeDecodeError):
-            ok = False
-        if not ok:
-            out("say", f"couldn't confirm the change to Antigravity CLI's settings.json; {by_hand}")
-            return None
-        return "added" if add else "removed"
-
-    def record(self, env):
-        """metacomputer's own note that its install added the permission rule (to this settings.json): only then does an
-        uninstall take the rule out again; a rule of the user's, the same words included, stays."""
-        return os.path.join(home(env), ".local", "share", "metacomputer", "antigravity-rule.json")
-
-    def _recorded(self, env):
-        try:
-            with open(self.record(env), "rb", opener=_nofollow) as f:
-                d = json.loads(f.read(65536).decode("utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError):
-            return False
-        return isinstance(d, dict) and d.get("rule") == self.allow and d.get("settings") == self.settings(env)
-
-    def _remember(self, env, on):
-        """Write (on) or remove the record: a new file (0600, in a 0700 folder) put in its place, never through a link.
-        False when it couldn't be."""
-        path = self.record(env)
-        try:
-            if not on:
-                if os.path.lexists(path):
-                    os.unlink(path)
-                return True
-            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-            tmp = path + ".metacomputer-new"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            try:
-                os.write(fd, (json.dumps({"rule": self.allow, "settings": self.settings(env)}) + "\n").encode("utf-8"))
-            finally:
-                os.close(fd)
-            os.replace(tmp, path)
-            return True
-        except OSError:
-            return False
-
-    def added(self, prog, root, link, env, out):
-        got = self._settings_change(env, out, add=True)
-        if got == "added" and not self._remember(env, True):
-            out("say", f"couldn't note that this install added \"{self.allow}\" to Antigravity CLI's settings.json, so "
-                       "--uninstall will leave it: take it out yourself then")
-        if got in ("added", "there"):
-            out("ok", f"its tools allowed without asking (\"{self.allow}\" in ~/.gemini/antigravity-cli/settings.json; "
-                      "take it out to be asked before each call)")
-
-    def removed(self, env, out):
-        """The permission rule goes only when this install added it (its record), and the record with it; a rule of the
-        user's stays."""
-        if not self._recorded(env):
-            try:
-                with open(self.settings(env), "rb") as f:
-                    theirs = f'"{self.allow}"'.encode() in f.read(SETTINGS_CAP + 1)
-            except OSError:
-                theirs = False
-            if theirs:
-                out("say", f"\"{self.allow}\" in Antigravity CLI's settings.json stays: metacomputer's install didn't add "
-                           "it (take it out yourself to be asked before each call)")
-            return True
-        got = self._settings_change(env, out, add=False)
-        if got is None:
-            return False
-        self._remember(env, False)
-        if got == "removed":
-            out("ok", f"took \"{self.allow}\" out of Antigravity CLI's settings.json (this install had added it)")
-        return True
+def _agents():
+    """{name: Agent} of the agents whose install and uninstall are these steps (coding-agents/<name>/setup.py's AGENT),
+    in the registry's order."""
+    global _AGENTS
+    if _AGENTS is None:
+        from agentkit import manifests, registry
+        out = {}
+        for n in manifests.generic():
+            a = registry.module(n, "setup").AGENT
+            out[a.name] = a
+        _AGENTS = out
+    return _AGENTS
 
 
-class Hermes(Agent):
-    """Hermes Agent: mcp_servers in $HERMES_HOME/config.yaml (~/.hermes; the active profile's), read with `hermes config
-    get mcp_servers.metacomputer --json` and set with `hermes config set` (`hermes mcp add` starts the server and asks
-    questions), which replaces an entry of the same name, so it's read right before. A timeout of 600 s (its default is
-    300). Skills: $HERMES_HOME/skills (it doesn't read ~/.agents/skills unless told to)."""
-    name, label, prog, tools, doc = "hermes", "Hermes Agent", "hermes", "mcp__metacomputer__*", "docs/hermes.md"
-
-    profile = None          # the named profile this run acts on (None: the default one)
-
-    def hermes_home(self, env):
-        return env.get("HERMES_HOME") or os.path.join(home(env), ".hermes")
-
-    def skills_dir(self, env):
-        return os.path.join(self.hermes_home(env), "skills")
-
-    def pin(self, prog, env):
-        """The profile `hermes` acts on now (its sticky `hermes profile use` choice, or HERMES_HOME), resolved once with
-        `hermes config path` and pinned for every later command: HERMES_HOME set to its folder, and `--profile default`
-        for the default one (a root HERMES_HOME alone still follows the sticky choice). The skills go into the same
-        folder."""
-        self.prefix, self.profile = (), None
-        rc, out, _ = self.run([prog, "config", "path"], env)
-        lines = [x.strip() for x in out.splitlines() if x.strip()]
-        path = lines[-1] if rc == 0 and lines else ""
-        if not (os.path.isabs(path) and os.path.basename(path) == "config.yaml"):
-            return env, "couldn't tell which Hermes Agent profile is in use (hermes config path)"
-        folder = os.path.dirname(path)
-        named = os.path.basename(os.path.dirname(folder)) == "profiles"
-        self.profile = os.path.basename(folder) if named else None
-        self.prefix = () if named else ("--profile", "default")
-        return dict(env, HERMES_HOME=folder), None
-
-    def config_files(self, env):
-        root = os.path.join(home(env), ".hermes")
-        return _distinct(([os.path.join(env["HERMES_HOME"], "config.yaml")] if env.get("HERMES_HOME") else []) +
-                         [os.path.join(root, "config.yaml")] +
-                         [os.path.join(d, "config.yaml") for d in entries(os.path.join(root, "profiles"))])
-
-    def config_dirs(self, env):
-        return [os.path.join(home(env), ".hermes", "profiles")]
-
-    def cli(self):
-        return f"hermes -p {self.profile}" if self.profile else "hermes"
-
-    def read(self, prog, env):
-        rc, out, err = self.run([prog, "config", "get", f"mcp_servers.{NAME}", "--json"], env)
-        if rc == 1 and f"Config key not set: mcp_servers.{NAME}" in (err + out):
-            return {"kind": "absent"}
-        if rc != 0:
-            return {"kind": "error", "why": f"hermes config get failed (exit {rc})"}
-        try:
-            d = json.loads(out)
-        except ValueError:
-            return {"kind": "error", "why": "hermes config get answered in a shape this doesn't know"}
-        res = _entry_res(d)
-        res["raw"] = d
-        return res
-
-    def add_argv(self, prog, link):
-        value = {"command": link, "args": list(claude_mcp.MCP_ARGS), "timeout": TOOL_TIMEOUT}
-        return [prog, "config", "set", f"mcp_servers.{NAME}", json.dumps(value)]
-
-    def remove_argv(self, prog):
-        return [prog, "config", "unset", f"mcp_servers.{NAME}"]
-
-    def add_line(self, link_shown):
-        return (f"{self.cli()} config set mcp_servers.{NAME} '{{\"command\": \"{link_shown}\", \"args\": [\"mcp-lazy\"], "
-                f"\"timeout\": {TOOL_TIMEOUT}}}'")
-
-    def remove_line(self):
-        return f"{self.cli()} config unset mcp_servers.{NAME}"
-
-
-class OpenClaw(Agent):
-    """OpenClaw: mcp.servers in ~/.openclaw/openclaw.json (OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR move it), read with
-    `openclaw mcp show metacomputer --json`, added with `openclaw mcp add --no-probe` (which refuses a name that's
-    there) with a 600 s request timeout (its default is 60 s), removed with `openclaw mcp unset`. Skills: it reads
-    ~/.agents/skills with its default state folder; `openclaw skills info` says whether it sees them."""
-    name, label, prog, tools, doc = "openclaw", "OpenClaw", "openclaw", "metacomputer__*", "docs/openclaw.md"
-
-    def env(self, env):
-        return dict(env, OPENCLAW_NO_AUTO_UPDATE="1")        # no update check for a quick command
-
-    def homes(self, env):
-        """The homes OpenClaw keeps its folders in: OPENCLAW_HOME (when set) and yours."""
-        return _distinct([env.get("OPENCLAW_HOME") or home(env), home(env)])
-
-    def config_files(self, env):
-        # The one its CLI uses: OPENCLAW_CONFIG_PATH, else OPENCLAW_STATE_DIR's, else a named OPENCLAW_PROFILE's
-        # (~/.openclaw-PROFILE), else ~/.openclaw's; then every other one: ~/.openclaw and every ~/.openclaw-NAME.
-        base, prof = self.homes(env)[0], env.get("OPENCLAW_PROFILE") or ""
-        state = env.get("OPENCLAW_STATE_DIR") or os.path.join(
-            base, f".openclaw-{prof}" if prof and prof != "default" else ".openclaw")
-        return _distinct([env.get("OPENCLAW_CONFIG_PATH") or os.path.join(state, "openclaw.json")] +
-                         [f for h in self.homes(env) for f in [os.path.join(h, ".openclaw", "openclaw.json")] +
-                          [os.path.join(d, "openclaw.json") for d in entries(h, ".openclaw-")]])
-
-    def config_dirs(self, env):
-        return self.homes(env)
-
-    def read(self, prog, env):
-        rc, out, err = self.run([prog, "mcp", "show", NAME, "--json"], env)
-        try:
-            d = json.loads(out)
-        except ValueError:
-            d = None
-        # Missing: exit 1 and, with --json, {"ok": false, "error": {"message": "No MCP server named \"metacomputer\" in ..."}}
-        failed = isinstance(d, dict) and d.get("ok") is False
-        said = (d.get("error") or {}).get("message") if failed and isinstance(d.get("error"), dict) else ""
-        if rc == 1 and failed and isinstance(said, str) and said.startswith(f'No MCP server named "{NAME}" in '):
-            return {"kind": "absent"}
-        if rc != 0 or failed:
-            return {"kind": "error", "why": f"openclaw mcp show failed (exit {rc})"}
-        if d is None:
-            return {"kind": "error", "why": "openclaw mcp show answered in a shape this doesn't know"}
-        res = _entry_res(d)
-        res["raw"] = d
-        return res
-
-    def add_argv(self, prog, link):
-        return [prog, "mcp", "add", NAME, "--command", link, *[x for a in claude_mcp.MCP_ARGS for x in ("--arg", a)],
-                "--timeout", str(TOOL_TIMEOUT), "--no-probe"]
-
-    def remove_argv(self, prog):
-        return [prog, "mcp", "unset", NAME]
-
-    def add_line(self, link_shown):
-        return f"openclaw mcp add {NAME} --command {link_shown} --arg mcp-lazy --timeout {TOOL_TIMEOUT} --no-probe"
-
-    def remove_line(self):
-        return f"openclaw mcp unset {NAME}"
-
-    def check_skill(self, prog, env):
-        missing, hidden = [], []
-        for name in SKILLS:
-            rc, out, _ = self.run([prog, "skills", "info", name, "--json"], env)
-            try:
-                d = json.loads(out) if rc == 0 else None
-            except ValueError:
-                d = None
-            if not isinstance(d, dict) or d.get("ok") is False:
-                missing.append(name)
-            elif d.get("eligible") is False:
-                hidden.append(name)
-        if missing:
-            return (False, f"OpenClaw doesn't list the skill{'s' if len(missing) > 1 else ''} {' and '.join(missing)} "
-                           "(with a state folder of its own, it doesn't read ~/.agents/skills: docs/openclaw.md)")
-        if hidden:
-            return (False, f"OpenClaw lists the skill{'s' if len(hidden) > 1 else ''} {' and '.join(hidden)} but doesn't "
-                           f"offer {'them' if len(hidden) > 1 else 'it'} (openclaw skills info {hidden[0]} says why)")
-        return (True, "OpenClaw sees both skills")
-
-
-AGENTS = {a.name: a for a in (OpenClaw(), Hermes(), Gemini(), Antigravity())}
+def __getattr__(name):              # AGENTS, made when first asked for (an agent's setup.py imports this module)
+    if name == "AGENTS":
+        return _agents()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # --- ownership ---------------------------------------------------------------------------------------------------
@@ -719,18 +249,18 @@ def classify(res, root, link):
     if res["kind"] in ("absent", "error"):
         return res["kind"]
     e = res["entry"]
-    if (res["kind"] == "stdio" and e.get("args") == claude_mcp.MCP_ARGS
+    if (res["kind"] == "stdio" and e.get("args") == mcp_entry.MCP_ARGS
             and e.get("command") in (os.path.join(root, "bin", "metacomputer"), link)):
         return "ok"
     return "foreign"
 
 
 def digest(res):
-    return "" if res["kind"] == "absent" else claude_mcp.digest(res.get("raw"))
+    return "" if res["kind"] == "absent" else mcp_entry.digest(res.get("raw"))
 
 
 def describe(res, own, env):
-    return claude_mcp.words(res, env, own)
+    return mcp_entry.words(res, env, own)
 
 
 def points_here(link, root):
@@ -835,9 +365,9 @@ def entries(folder, prefix=""):
 
 
 MENTIONS_CAP = 16 << 20
-SETTINGS_CAP = 4 << 20          # Gemini CLI's settings.json, read whole
-# What makes a configuration file pull in others, which an uninstall without the agent's CLI doesn't follow: OpenClaw's
-# `$include` (JSON5), and YAML's `!include` tag.
+SETTINGS_CAP = 4 << 20          # an agent's settings file that read() reads itself, whole
+# What makes a configuration file pull in others, which an uninstall without the agent's CLI doesn't follow: an `$include`
+# key (JSON5), and YAML's `!include` tag.
 INCLUDES = (b"$include", b"!include")
 
 
@@ -982,7 +512,7 @@ def _register(agent, prog, root, link, env, out):
         out("ok", f"MCP server {NAME} already registered (tools: {agent.tools})")
         agent.settle(prog, root, link, env, out)
         return True, True
-    # Missing: read again right before the add (Gemini's and Hermes's adds replace an entry of the same name), then add
+    # Missing: read again right before the add (most of these CLIs' adds replace an entry of the same name), then add
     # it and read it back.
     if classify(agent.read(prog, env), root, link) != "absent":
         out("warn", f"{agent.label}'s MCP server {NAME} changed since it was read, so it was left as it is; run "
@@ -1073,7 +603,7 @@ def _unregister(agent, prog, root, link, env, out):
     if not here:
         out("say", f"{agent.label}'s MCP server {NAME} stays: it runs {describe(res, own, env)}, which isn't this "
                    "checkout's")
-        if claude_mcp.linked(res, link):
+        if mcp_entry.linked(res, link):
             out("keep", f"{agent.label}'s")
         return True
     if prog is None:
@@ -1151,7 +681,7 @@ def uninstall(agent, root, link, env, out):
 
 
 def status(agent, root, link, env):
-    """What `metacomputer agents` reports for one agent (no secrets: the server only in claude_mcp's words)."""
+    """What `metacomputer agents` reports for one agent (no secrets: the server only in mcp_entry's words)."""
     prog, why = agents.trusted(agent.prog)
     st = {"installed": bool(prog or why), "version": agents.version(prog, env=agent.env(env)) if prog else None,
           "choice": agents.choices().get(agent.name)}
@@ -1181,17 +711,17 @@ def main(argv):
     import strictargs           # its command line, by metacomputer's rules, before anything is done
     strictargs.expect(argv, ["link-ours PATH --root CHECKOUT", "install|uninstall|status AGENT --root CHECKOUT --link LINK"],
                       prog="agent_setup.py")
-    if argv[:1] == ["link-ours"]:          # install.sh's Codex step: the same ownership rule for its skill links
+    if argv[:1] == ["link-ours"]:          # an agent's own setup.sh steps: the same ownership rule for their skill links
         if len(argv) != 4 or argv[2] != "--root":
             print("usage: agent_setup.py link-ours PATH --root CHECKOUT", file=sys.stderr)
             return 2
         return 0 if os.path.islink(argv[1]) and ours_link(argv[1], argv[3]) else 1
-    if len(argv) != 6 or argv[0] not in ("install", "uninstall", "status") or argv[1] not in AGENTS \
+    if len(argv) != 6 or argv[0] not in ("install", "uninstall", "status") or argv[1] not in _agents() \
             or argv[2] != "--root" or argv[4] != "--link":
-        print("usage: agent_setup.py install|uninstall|status openclaw|hermes|gemini|antigravity --root CHECKOUT --link "
+        print(f"usage: agent_setup.py install|uninstall|status {'|'.join(_agents())} --root CHECKOUT --link "
               "~/.local/bin/metacomputer\n       agent_setup.py link-ours PATH --root CHECKOUT", file=sys.stderr)
         return 2
-    what, agent, root, link = argv[0], AGENTS[argv[1]], argv[3], argv[5]
+    what, agent, root, link = argv[0], _agents()[argv[1]], argv[3], argv[5]
     env = dict(os.environ)
     if what == "status":
         print(json.dumps(status(agent, root, link, env), indent=2))

@@ -586,7 +586,7 @@ def _names(recs):
 
 
 def holding(recs, agent_name):
-    """"this Codex session's MCP tools act on demo" and the like."""
+    """"this NAME session's MCP tools act on demo" and the like (NAME: the agent's label)."""
     who = f"this {agent_name or 'agent'} session"
     if recs and recs[0]["kind"] == "mcp":
         if all(r["selected"] for r in recs):
@@ -705,7 +705,8 @@ def show(argv):
         print(json.dumps({"agent_pid": agent, "records": recs, "folder": sessions_dir()}, indent=2))
         return 0
     if not agent:
-        print("Not run from an agent session (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI).")
+        from agentkit import manifests
+        print(f"Not run from an agent session ({manifests.in_words(manifests.labels())}).")
         return 0
     if not recs:
         print("This agent session holds no computer yet.")

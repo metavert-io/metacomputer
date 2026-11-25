@@ -73,8 +73,8 @@ TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
 
-# Which code path made an event, set by that code, never by the caller: a metacomputer command (cli), Claude
-# Code's bridge or the action-log relay (bridge), the watcher, another program through the spool, or
+# Which code path made an event, set by that code, never by the caller: a metacomputer command (cli), the
+# agents' bridge or the action-log relay (bridge), the watcher, another program through the spool, or
 # `metacomputer events emit` (script: anything that can run a command can call it).
 ORIGINS = ("cli", "bridge", "watcher", "spool", "script", "claude")
 # Types only their own code path may produce: `events emit` and spool files can't use them (nor the
@@ -578,7 +578,7 @@ def iso_to_ns(t):
 
 
 def caller_project():
-    """The project folder of the Claude Code session that ran this command, else the current folder."""
+    """The project folder of the agent session that ran this command, else the current folder."""
     try:
         import owners
         pid = owners.claude_of(os.getpid(), owners.ps_table())

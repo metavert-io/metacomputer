@@ -5,11 +5,11 @@ as a ZIP to upload (nothing is uploaded or submitted here).
     python3 scripts/build-openai-plugin.py [--version X.Y.Z] [--out FILE.zip]   # build it (default: results/)
     python3 scripts/build-openai-plugin.py --check                              # build in memory, check, write nothing
 
-It is made from the same files as the Claude Code plugin (plugin/, which scripts/sync-plugin.py keeps equal to the
+It is made from the same files as the plugin (plugin/, which scripts/sync-plugin.py keeps equal to the
 repository's own files): the skills metacomputer and learn (plugin/skills/) and Cua Driver's pack
 (plugin/.claude/skills/cua-driver/, its links to ../../../skills/metacomputer/ pointed at ../metacomputer/, as
-agent-plugin/ has them), the icon, the license and the notices. The manifest is Codex's (plugin/.codex-plugin/plugin.json)
-with what the directory adds: a version (the release's: gemini-extension.json's, which scripts/release.sh sets), the
+agent-plugin/ has them), the icon, the license and the notices. The manifest is the OpenAI channel's (an agent's channel.py OPENAI)
+with what the directory adds: a version (the release's: the release_file's, which scripts/release.sh sets), the
 skills folder as one path, the icon under assets/, and "requires_local_executor": true, which makes the plugin
 "Desktop only" (installed from the ChatGPT desktop app, used in threads that run on the Mac). No MCP server, hooks,
 commands, launcher or scripts: the skills run the metacomputer installed on the Mac (~/.local/bin/metacomputer), and say
@@ -42,10 +42,6 @@ import zipfile
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "scripts"))
 ROOT = "metacomputer"
-SKILLS = [("plugin/skills/metacomputer", "skills/metacomputer"), ("plugin/skills/learn", "skills/learn"),
-          ("plugin/.claude/skills/cua-driver", "skills/cua-driver")]
-FILES = [("plugin/icon.png", "assets/icon.png"), ("plugin/LICENSE", "LICENSE"),
-         ("plugin/THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")]
 DRIVER_LINK, PACKAGE_DRIVER_LINK = "../../../skills/metacomputer/", "../metacomputer/"
 DATE = (1980, 1, 1, 0, 0, 0)
 MAX_ENTRIES, MAX_BYTES, MAX_DESCRIPTION, MAX_SKILL_NAME, MAX_LABEL = 5000, 100 << 20, 1024, 64, 30
@@ -56,6 +52,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
 
 
+def _package():
+    """The package's description, an agent's channel's OPENAI (coding-agents/<name>/channel.py): its manifest's path in
+    the package and the channel file it's made from, its skills and its other files, (source, path in the package)."""
+    from agentkit import registry
+    for n in registry.AGENTS:
+        if registry.has(n, "channel.py") and getattr(registry.module(n, "channel"), "OPENAI", None):
+            return registry.module(n, "channel").OPENAI
+    raise SystemExit("build-openai-plugin: no agent's channel describes the package")
+
+
+PACKAGE = _package()
+SKILLS, FILES, MANIFEST = PACKAGE["skills"], PACKAGE["files"], PACKAGE["manifest"]
+
+
 def sync_plugin():
     import importlib.util
     spec = importlib.util.spec_from_file_location("sync_plugin", os.path.join(LAB, "scripts", "sync-plugin.py"))
@@ -64,8 +74,16 @@ def sync_plugin():
     return mod
 
 
+def release_file():
+    """The channel file that carries the release's version (an agent's manifest's "release_file")."""
+    from agentkit import manifests
+    return manifests.release_file()
+
+
 def release_version():
-    return json.load(open(os.path.join(LAB, "gemini-extension.json"), encoding="utf-8"))["version"]
+    """The release's version: the one its channel file carries (an agent's manifest's "release_file"), which
+    scripts/release.sh sets."""
+    return json.load(open(os.path.join(LAB, release_file()), encoding="utf-8"))["version"]
 
 
 def no_link(rel):
@@ -112,8 +130,9 @@ def regular_files(src):
 
 
 def manifest(version):
-    """The package's .codex-plugin/plugin.json: Codex's manifest (sync-plugin.py's) for the directory."""
-    d = json.loads(sync_plugin().codex_plugin_json())
+    """The package's manifest (MANIFEST): the channel file it's made from (sync-plugin.py writes it) for the
+    directory."""
+    d = json.loads(dict(sync_plugin().WRITTEN)[PACKAGE["from"]]())
     d["version"] = version
     d["skills"] = "./skills/"
     d["requires_local_executor"] = True
@@ -125,7 +144,7 @@ def manifest(version):
 
 def contents(version):
     """[(path in the package, bytes, mode)] in order: the manifest, the skills, the other files."""
-    out = [(".codex-plugin/plugin.json", manifest(version), 0o644)]
+    out = [(MANIFEST, manifest(version), 0o644)]
     for src_rel, dst_rel in SKILLS:
         for rel, path in regular_files(no_link(src_rel)):
             data = regular_file(os.path.relpath(path, LAB))
@@ -200,9 +219,9 @@ def problems(zbytes):
             out.append(f"not a regular file: {n}")
         files[n.split("/", 1)[1]] = z.read(i)
     try:
-        m = json.loads(files[".codex-plugin/plugin.json"])
+        m = json.loads(files[MANIFEST])
     except (KeyError, ValueError):
-        return out + ["no readable .codex-plugin/plugin.json"]
+        return out + [f"no readable {MANIFEST}"]
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", m.get("name") or ""):
         out.append("the plugin's name isn't 1-64 letters, digits, - or _")
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", str(m.get("version") or "")):
@@ -271,7 +290,7 @@ def problems(zbytes):
 
 def main(argv):
     ap = strictargs.Parser(description="Package metacomputer's skills for OpenAI's plugin directory.")
-    ap.add_argument("--version", default=None, help="the package's version (default: gemini-extension.json's)")
+    ap.add_argument("--version", default=None, help=f"the package's version (default: {release_file()}'s)")
     ap.add_argument("--out", default=None, help="the ZIP to write (default: results/openai-plugin/metacomputer-VERSION.zip)")
     ap.add_argument("--check", action="store_true", help="build in memory and check it; write nothing")
     a = ap.parse_args(argv)

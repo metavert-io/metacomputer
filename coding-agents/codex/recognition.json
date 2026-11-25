@@ -1,0 +1,17 @@
+{
+  "kinds": [
+    "Codex"
+  ],
+  "executables": {
+    "codex": "Codex"
+  },
+  "shared": {
+    "Codex": {
+      "label": "Codex app server",
+      "under": "Codex's app server",
+      "subcommands": [
+        "app-server"
+      ]
+    }
+  }
+}

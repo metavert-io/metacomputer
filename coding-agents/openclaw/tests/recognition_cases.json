@@ -1,0 +1,12 @@
+[
+  {"why": "...--unhandled-rejections", "name": "node", "argv": ["node", "--unhandled-rejections", "strict", "@ROOT@/lib/node_modules/openclaw/openclaw.mjs", "agent"], "agent": "OpenClaw", "files": ["@ROOT@/lib/node_modules/openclaw/openclaw.mjs"]},
+  {"why": "...--stack-size and --max-semi-space-size", "name": "node", "argv": ["node", "--stack-size", "4000", "--max-semi-space-size", "64", "@ROOT@/x/bin/openclaw"], "agent": "OpenClaw", "files": ["@ROOT@/x/bin/openclaw"]},
+  {"why": "OpenClaw's launcher", "name": "node", "argv": ["node", "@ROOT@/lib/node_modules/openclaw/openclaw.mjs", "gateway"], "agent": "OpenClaw", "files": ["@ROOT@/lib/node_modules/openclaw/openclaw.mjs"]},
+  {"why": "OpenClaw's gateway, by its title", "name": "node", "argv": ["openclaw-gateway", "", ""], "agent": "OpenClaw"},
+  {"why": "OpenClaw's command, by its title", "name": "node", "argv": ["openclaw"], "agent": "OpenClaw"},
+  {"why": "OpenClaw's own helper", "name": "node", "argv": ["node", "@ROOT@/lib/node_modules/openclaw/dist/process/supervisor/service-child-relay.js"], "agent": null, "files": ["@ROOT@/lib/node_modules/openclaw/dist/process/supervisor/service-child-relay.js"]},
+  {"why": "OpenClaw's own helper, installed under another folder named openclaw", "name": "node", "argv": ["node", "@ROOT@/tools/openclaw/prefix/lib/node_modules/openclaw/dist/process/supervisor/service-child-group-anchor.js"], "agent": null, "files": ["@ROOT@/tools/openclaw/prefix/lib/node_modules/openclaw/dist/process/supervisor/service-child-group-anchor.js"]},
+  {"why": "OpenClaw built as one executable, under another name", "name": "oc", "argv": ["oc"], "agent": "OpenClaw", "exe": "@ROOT@/opt/tools/openclaw"},
+  {"why": "a preload of OpenClaw's package by its name", "name": "node", "argv": ["node", "--import", "openclaw", "--eval", "0"], "agent": "OpenClaw"},
+  {"why": "an argument that resolves into OpenClaw's package (a link): the package rule", "name": "python3", "argv": ["python3", "@ROOT@/tools/run.py", "./cfg"], "agent": "OpenClaw", "cwd": "@ROOT@/w2", "files": ["@ROOT@/tools/run.py", "@ROOT@/opt/openclaw/openclaw.mjs"], "links": {"@ROOT@/w2/cfg": "@ROOT@/opt/openclaw/openclaw.mjs"}}
+]

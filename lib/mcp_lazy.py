@@ -192,7 +192,7 @@ class Front:
                 else:
                     self.send({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": DROPPED_MSG}})
 
-    # --- messages from Claude Code --------------------------------------------------------
+    # --- messages from the agent --------------------------------------------------------
     def handle(self, msg):
         method, mid = msg.get("method"), msg.get("id")
         if method is None:                       # an answer to a server request: the hub never sends those
@@ -248,7 +248,7 @@ class Front:
         return sessionvm.computer_of(self.env)
 
     def register(self):
-        """The agent session above this bridge (Claude Code or Codex), and a record that this session's tools act on
+        """The agent session above this bridge, and a record that this session's tools act on
         this bridge's computer (lib/sessionvm.py). Nothing without an agent session above it. Never fails."""
         try:
             table = owners.ps_table()
@@ -287,7 +287,7 @@ class Front:
         return mcp_hub.clean(" ".join((text or "").split()), 100000)[-n:]
 
     def reply_tool(self, msg, text, structured):
-        """A result with its words in both parts: Claude Code shows the model the structured one."""
+        """A result with its words in both parts: an agent may show the model only the structured one."""
         self.reply(msg, {"content": [{"type": "text", "text": text}], "structuredContent": structured})
 
     def list_computers(self, msg):
@@ -511,7 +511,7 @@ class Front:
         os._exit(0)
 
     def watch_parent(self):
-        """Claude Code went away without closing our stdin: don't linger (and keep the computer claimed)."""
+        """The agent went away without closing our stdin: don't linger (and keep the computer claimed)."""
         while True:
             time.sleep(WATCH_PARENT_S)
             if os.getppid() == 1:
@@ -519,7 +519,7 @@ class Front:
                 return
 
     def read_stdin(self, stdin):
-        """Claude Code's messages, handled on this thread of their own; the end of input asks for the shutdown. Once the
+        """The agent's messages, handled on this thread of their own; the end of input asks for the shutdown. Once the
         server is ending, a request gets an error and nothing else is done for it."""
         for line in stdin:
             line = line.strip()

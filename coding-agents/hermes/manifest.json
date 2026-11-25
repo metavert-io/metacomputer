@@ -1,0 +1,21 @@
+{
+  "label": "Hermes Agent",
+  "flag": "hermes",
+  "prog": "hermes",
+  "short": "Hermes",
+  "docs": "docs/hermes.md",
+  "owners": [
+    "@jonradoff"
+  ],
+  "tools": "mcp__metacomputer__*",
+  "bench": {
+    "switch": "hermes"
+  },
+  "sessions": {
+    "source": "databases",
+    "key": "hermes_sessions",
+    "kinds": [
+      "hermes"
+    ]
+  }
+}

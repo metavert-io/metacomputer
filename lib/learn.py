@@ -347,8 +347,8 @@ def require_sealed():
 
 
 def is_tty():
-    """The user's own terminal: stdin is a terminal and no agent session (Claude Code or Codex) is above this
-    process (owners.at_user_terminal; Codex can give its commands a pseudo-terminal)."""
+    """The user's own terminal: stdin is a terminal and no agent session is above this process
+    (owners.at_user_terminal; an agent can give its commands a pseudo-terminal)."""
     try:
         import owners
         return owners.at_user_terminal((0,))
@@ -454,10 +454,8 @@ def print_report(rep, out=sys.stdout):
     src = rep["sources"]
     p(f"Sessions with the metacomputer tools: {rep['sessions']} ({_window(rep)}; since {esc(rep['since'])}"
       + (f"; project {esc(rep['project'])}" if rep.get("project") else "") + ")")
-    p(f"  sources: {src['claude_code_sessions']} Claude Code sessions, {src.get('codex_sessions', 0)} Codex sessions, "
-      f"{src.get('gemini_sessions', 0)} Gemini CLI sessions, {src.get('antigravity_sessions', 0)} Antigravity CLI sessions, "
-      f"{src.get('openclaw_sessions', 0)} OpenClaw sessions, "
-      f"{src.get('hermes_sessions', 0)} Hermes Agent sessions, "
+    agents = "".join(f"{src.get(key, 0)} {label} sessions, " for _n, key, label in learn_mine.session_sources())
+    p(f"  sources: {agents}"
       f"{src['headless_transcripts']} headless transcripts, "
       f"{src['benchmark_sessions']} benchmark sessions ({src['scanned_files']} recent transcript files looked at"
       + (f", {src['session_databases']} session databases" if src.get("session_databases") else "")

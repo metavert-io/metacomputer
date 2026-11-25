@@ -183,9 +183,9 @@ def main():
     import owners
     native = "/Users/someone/.local/share/claude/versions/2.1.325"
     check("Claude Code is recognized however it's installed (npm/Homebrew, IDE native binary, native installer)",
-          all(owners.is_claude(c) for c in ("claude", "/opt/homebrew/bin/claude", native,
+          all(owners.executable_agent(c) == "Claude Code" for c in ("claude", "/opt/homebrew/bin/claude", native,
               "/Users/someone/.vscode/extensions/anthropic.claude-code-2.1.322-darwin-arm64/resources/native-binary/claude")))
-    check("...and other processes aren't", not any(owners.is_claude(c) for c in (
+    check("...and other processes aren't", not any(owners.executable_agent(c) == "Claude Code" for c in (
         "/usr/bin/python3", "/bin/zsh", "", "/x/claude/versions/notes.txt", "/x/claude/versions/2.1.325/helper", "claude-helper")))
     table = {300: (200, "/bin/bash"), 200: (100, native), 100: (1, "/bin/zsh")}
     check("claude_of finds a natively installed Claude Code above a tool's shell (its claim goes with that session)",

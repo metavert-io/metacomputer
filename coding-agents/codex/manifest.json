@@ -1,0 +1,25 @@
+{
+  "label": "Codex",
+  "flag": "codex",
+  "prog": "codex",
+  "short": "Codex",
+  "docs": "docs/codex.md",
+  "owners": [
+    "@jonradoff"
+  ],
+  "tools": "mcp__metacomputer__*",
+  "install": {
+    "missing": "line",
+    "steps": "hooks"
+  },
+  "bench": {
+    "switch": "codex"
+  },
+  "sessions": {
+    "source": "files",
+    "key": "codex_sessions",
+    "kinds": [
+      "codex"
+    ]
+  }
+}

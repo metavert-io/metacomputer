@@ -1,4 +1,4 @@
-"""Turn a headless Claude Code session (stream-json events) into benchmark
+"""Turn a headless session (stream-json events: every launcher's are in that format) into benchmark
 metrics, and make the compact transcript the benchmark keeps.
 
 Metrics follow HCU's: steps (turns), tokens, time, cost, the tool-call mix

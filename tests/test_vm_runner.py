@@ -170,6 +170,8 @@ def install_cases(td):
               "scripts/strictargs.sh", "lib/strictargs.py", "lib/cloud/providers.sh"):   # every recursive delete goes through it; the rules of its command lines
         os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
         shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
+    for d in ("coding-agents", os.path.join("lib", "agentkit")):     # the agents' data and steps, which install.sh reads
+        shutil.copytree(os.path.join(LAB, d), os.path.join(root, d), ignore=shutil.ignore_patterns("__pycache__"))
     write(os.path.join(root, "scripts", "build-vault.sh"), "#!/bin/sh\necho 'vault: skipped by the test'\n", 0o755)
     write(os.path.join(root, "scripts", "build-tools.sh"), "#!/bin/sh\nexit 0\n", 0o755)   # host tools: up to date
     conf = os.path.join(root, "config", "local.env")

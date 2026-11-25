@@ -403,7 +403,7 @@ def remember_setting(env=None):
 
 
 def consent_refusal(what, from_view):
-    """None when stdin is the user's own terminal (a terminal with no agent session above it: Codex can give its
+    """None when stdin is the user's own terminal (a terminal with no agent session above it: an agent can give its
     commands a pseudo-terminal), or the caller is bin/metacomputer view (--from-view), which checked first. A guard
     against mistakes, not a barrier (the docstring above)."""
     import owners

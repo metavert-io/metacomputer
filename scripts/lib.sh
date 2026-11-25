@@ -1169,8 +1169,8 @@ emit_event() { # FAMILY TYPE SEVERITY MESSAGE ACTION [KEY=VALUE ...] (ACTION may
     "$PY" "$LAB_ROOT/lib/events.py" emit "$fam" "$typ" --severity "$sev" --message "$msg" \
       ${act:+--action "$act"} ${f[@]+"${f[@]}"} --quiet ) >/dev/null 2>&1 || true
 }
-# The user's own terminal: standard input is a terminal and no agent session (Claude Code or Codex) is above this
-# process (lib/owners.py at_user_terminal). Codex can give its commands a pseudo-terminal, so `[ -t 0 ]` alone can't
+# The user's own terminal: standard input is a terminal and no agent session is above this process (lib/owners.py
+# at_user_terminal). An agent can give its commands a pseudo-terminal, so `[ -t 0 ]` alone can't
 # tell the user from the agent. For checks that only the user may pass.
 user_tty() {
   [ -t 0 ] || return 1

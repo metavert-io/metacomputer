@@ -82,6 +82,7 @@ PROGRAMS = {
     "scripts/safe-rmtree.sh": NONE,                         # this Mac's folders (never a VM's)
     "scripts/sync-plugin.py": NONE,
     "scripts/gen-providers.py": NONE,                      # files of this checkout, made from the manifests
+    "scripts/gen-agents.py": NONE,                         # files of this checkout, made from the agents' manifests
     "scripts/build-openai-plugin.py": NONE,
     "scripts/vendor-driver-skill.py": NONE,
     "scripts/verify-audit.py": NONE,
@@ -94,13 +95,15 @@ PROGRAMS = {
     "bench/guest/calc-overlay.sh": GUEST,
     "bench/guest/server.py": GUEST,
     "lib/actionlog.py": NONE,
+    "lib/agentkit/recognition.py": NONE,                  # the agents' recognition tables, printed
     "lib/agent_setup.py": NONE,
     "lib/agents.py": NONE,
+    "coding-agents/codex/setup.py": NONE,                 # Codex's MCP server, read (codex mcp get)
     "lib/botcheck.py": NONE,
     # the hub, metacomputer sh, ssh, task, get, and its cleanup under owners.acting()
     "lib/browser_tools.py": {k: THROUGH for k in ("compare", "responsive", "a11y", "open-untrusted", "gpu", "debug",
                                                   "read", "page")},
-    "lib/claude_mcp.py": NONE,
+    "coding-agents/claude-code/claude_mcp.py": NONE,
     "lib/defaultvm.py": NONE,
     "lib/driver_profiles.py": NONE,
     "lib/each.py": THROUGH,                                 # metacomputer --vm NAME COMMAND, each holding its own

@@ -55,6 +55,12 @@ import userterm  # noqa: E402
 import mcp_hub  # noqa: E402
 import transcripts  # noqa: E402
 import session_dbs  # noqa: E402
+from agentkit import registry as agent_registry  # noqa: E402  (each agent's session reader, in its folder)
+
+
+def agent_sessions(name):
+    """coding-agents/NAME/sessions.py, the agent's session reader for learn."""
+    return agent_registry.module(name, "sessions")
 
 FAILS = []
 P1, P2 = "mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__"
@@ -1418,7 +1424,7 @@ def write_oc_db(path, sessions, compress=False):
             if compress and role == "toolResult":
                 b = raw.encode()
                 con.execute("INSERT INTO transcript_events VALUES (?, ?, NULL, ?, ?, ?, ?)",
-                            (sid, seq, when, session_dbs._zstd.compress(b), len(b), role))
+                            (sid, seq, when, agent_sessions("openclaw")._zstd.compress(b), len(b), role))
             else:
                 con.execute("INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL, NULL, ?)",
                             (sid, seq, raw, when, role))
@@ -1505,7 +1511,7 @@ def test_db_sessions():
     # a profile's state folder (~/.openclaw-<profile>), its tool results compressed when this Python can compress
     db2 = os.path.join(oc, ".openclaw-work", "agents", "ops", "agent", "openclaw-agent.sqlite")
     write_oc_db(db2, [("oc-prof-5555", oc_events("oc-prof-5555", os.path.join(TD, "elsewhere"), now - 900,
-                                                 DB_CALLS[:3]))], compress=session_dbs._zstd is not None)
+                                                 DB_CALLS[:3]))], compress=agent_sessions("openclaw")._zstd is not None)
     hdb = os.path.join(hroot, "state.db")
     write_he_db(hdb, [("local-he-aaaa", None, he_rows("local-he-aaaa", now - 1000, DB_CALLS))])
     pdb = os.path.join(hroot, "profiles", "work", "state.db")
@@ -1553,17 +1559,17 @@ def test_db_sessions():
         sp = learn_mine.mine(env, since="7d", project=proj, log_dirs=[], bench_dirs=[])["sources"]
         check("--project: the session's folder decides (OpenClaw's session event, Hermes Agent's sessions.cwd)",
               sp.get("openclaw_sessions") == 2 and sp.get("hermes_sessions") == 2, sp)
-        if session_dbs._zstd is None:
+        if agent_sessions("openclaw")._zstd is None:
             check("without Python 3.14's zstd, OpenClaw's compressed rows are counted in a note, not read",
                   any("compressed" in n for n in src.get("notes", [])), src.get("notes"))
         else:
             check("OpenClaw's compressed rows are expanded (Python 3.14's compression.zstd) and read",
                   not src.get("notes"), src.get("notes"))
-            zstd, session_dbs._zstd = session_dbs._zstd, None       # as with Python 3.11 to 3.13
+            zstd, agent_sessions("openclaw")._zstd = agent_sessions("openclaw")._zstd, None       # as with Python 3.11 to 3.13
             try:
                 notes = learn_mine.mine(env, since="7d", log_dirs=[], bench_dirs=[])["sources"].get("notes") or []
             finally:
-                session_dbs._zstd = zstd
+                agent_sessions("openclaw")._zstd = zstd
             check("…and without it (Python before 3.14) they're counted in a note, not read",
                   notes == ["OpenClaw: compressed entries weren't read (they need Python 3.14 or later) (3)"], notes)
         out = []
@@ -1819,7 +1825,7 @@ def test_db_bounds():
         for kind, path in (("openclaw", ldb), ("hermes", hdbl)):
             con, _ = session_dbs.open_db(path)
             cc, notes = Counting(con), session_dbs.Notes()
-            read = session_dbs.READERS[kind][1]
+            read = {k: r for _n, k, _w, r in session_dbs.readers()[0]}[kind]
             ids = [tr.session_id for tr in read(cc, path, now - 3600, notes, time.monotonic() + 60)]
             con.close()
             got[kind] = (cc.fetched, ids, notes.lines())
@@ -1896,7 +1902,7 @@ def test_db_bounds():
         session_dbs.MAX_SNAPSHOT = 1024
         session_dbs._in_place = swapped
         try:
-            con, _ = session_dbs.open_db(session_dbs.openclaw_dbs(_db_env(sb))[0])
+            con, _ = session_dbs.open_db(agent_sessions("openclaw").databases(_db_env(sb))[0])
             seen = [r[0] for r in con.execute("SELECT DISTINCT session_id FROM transcript_events")]
             con.close()
         except session_dbs.Unreadable as e:
@@ -1908,6 +1914,129 @@ def test_db_bounds():
           "other database isn't read)", "oc-other-6666" not in seen and "link" in str(seen), seen)
 
 
+# Runs learn's mining in a fresh interpreter: argv LAB, a copy of coding-agents/ to read the agents from ("-": the
+# repository's own), and the agents whose session readers are loaded first (comma-separated, maybe none).
+READERS_DRIVER = r'''
+import json, os, sys
+lab, root, first = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, os.path.join(lab, "lib"))
+from agentkit import registry
+if root != "-":
+    registry.ROOT = root
+for n in filter(None, first.split(",")):
+    registry.module(n, "sessions")
+import learn_mine
+rep = learn_mine.mine(dict(os.environ), since="7d", log_dirs=[], bench_dirs=[])
+print(json.dumps({"sources": rep["sources"], "labels": sorted(s["label"] for s in rep["per_session"])}))
+'''
+
+
+def test_reader_failures():
+    """One agent's session reader that can't be loaded, or that fails while it reads, never ends the report: the other
+    agents' sessions are still read, and a note names the agent whose weren't. The readers load in any order (an
+    agent's before lib/session_dbs.py, which reads them), and a database agent's session without a folder is labelled
+    with the agent's name whatever its reader's KIND."""
+    print("One agent's session reader failing")
+    now = time.time()
+    base = os.path.join(TD, "readers")
+    proj = os.path.join(base, "proj")
+    os.makedirs(proj, exist_ok=True)
+    conf = os.path.join(base, "claude")
+    write_jsonl(os.path.join(conf, "projects", "-proj", "cccc1111-session.jsonl"),
+                events_for([("list_windows", {}, LW, False)], P1, now - 1300, False, "cccc1111-session", proj))
+    day = time.strftime("%Y/%m/%d", time.localtime(now - 1200))
+    write_jsonl(os.path.join(base, "codex", "sessions", day, "rollout-x-dddd2222-session.jsonl"),
+                codex_rollout("dddd2222-session", proj, now - 1200, [("metacomputer", "list_windows", {}, LW, False)]))
+    _oc_home(base, "oc-rd-1111", now - 1100)
+    write_he_db(os.path.join(base, ".hermes", "state.db"),
+                [("local-rd-2222", None, he_rows("local-rd-2222", now - 1000, DB_CALLS))])
+    env = _db_env(base, CLAUDE_CONFIG_DIR=conf, CODEX_HOME=os.path.join(base, "codex"),
+                  GEMINI_CLI_HOME=os.path.join(base, "nogemini"), ANTIGRAVITY_APP_DATA_DIR=os.path.join(base, "noagy"))
+    driver = os.path.join(TD, "readers_driver.py")
+    with open(driver, "w") as f:
+        f.write(READERS_DRIVER)
+    keys = ("claude_code_sessions", "codex_sessions", "openclaw_sessions", "hermes_sessions")
+
+    def mined(changes=None, first=""):
+        """(counts by agent, notes, labels, what went wrong) with each agent's folder changed as in changes
+        {agent: (old, new) or a line to add to its sessions.py}."""
+        root = "-"
+        if changes:
+            root = os.path.join(base, "agents-" + hashlib.sha256(repr(sorted(changes.items())).encode()).hexdigest()[:8])
+            shutil.rmtree(root, ignore_errors=True)
+            shutil.copytree(os.path.join(LAB, "coding-agents"), root, ignore=shutil.ignore_patterns("__pycache__"))
+            for n, ch in changes.items():
+                p = os.path.join(root, n, "sessions.py")
+                text = open(p).read()
+                text = text.replace(*ch) if isinstance(ch, tuple) else text + "\n" + ch + "\n"
+                with open(p, "w") as fh:
+                    fh.write(text)
+        r = subprocess.run([sys.executable, driver, LAB, root, first], env=env, capture_output=True, text=True,
+                           timeout=120, stdin=subprocess.DEVNULL)
+        try:
+            out = json.loads(r.stdout)
+        except ValueError:
+            return None, None, None, (r.returncode, r.stderr.strip().splitlines()[-1:])
+        src = out["sources"]
+        return [src.get(k) for k in keys], src.get("notes") or [], out["labels"], None
+
+    got = mined()
+    check("the fixture: one session of each of Claude Code, Codex, OpenClaw and Hermes Agent, and no note",
+          got[0] == [1, 1, 1, 1] and got[1] == [], got)
+    got = mined(first="hermes,openclaw")
+    check("the agents' session readers load in any order: Hermes Agent's and OpenClaw's before lib/session_dbs.py "
+          "(which their readers import), every session still read", got[0] == [1, 1, 1, 1] and got[1] == [], got)
+    got = mined({"openclaw": "from session_dbs import _no_such_name"})
+    check("a database agent's reader that can't be loaded (OpenClaw's: a failed import): the report goes on, the "
+          "others' sessions are read, and a note names it", got[0] == [1, 1, 0, 1]
+          and got[1] == ["OpenClaw: its sessions weren't read (ImportError)"], got)
+    got = mined({"openclaw": "def read(con, path, cutoff, notes, deadline, slim=True):\n    raise TypeError('a bug')"})
+    check("...one that fails while it reads (an exception none of the database checks expect): the same, by its type",
+          got[0] == [1, 1, 0, 1] and got[1] == ["OpenClaw: its sessions weren't read (TypeError)"], got)
+    got = mined({"openclaw": "def databases(env):\n    raise KeyError('a bug')"})
+    check("...one that fails while it lists its databases: the same", got[0] == [1, 1, 0, 1]
+          and got[1] == ["OpenClaw: its sessions weren't read (KeyError)"], got)
+    got = mined({"codex": "import mcomp_no_such_module"})
+    check("an agent whose sessions are files, with a reader that can't be loaded (Codex's): the others' sessions are "
+          "read, and a note names it", got[0] == [1, 0, 1, 1]
+          and got[1] == ["Codex: its sessions weren't read (ModuleNotFoundError)"], got)
+    got = mined({"codex": "def roots(env):\n    raise RuntimeError('a bug')"})
+    check("...one whose reader fails while it lists its folders: the same", got[0] == [1, 0, 1, 1]
+          and got[1] == ["Codex: its sessions weren't read (RuntimeError)"], got)
+    # The agents whose sessions are files share each transcript: every one's FORMAT is tried on every event and one
+    # marker made of all their MARKERs finds the files (lib/transcripts.py), so one that fails there is left out alone
+    got = mined({"gemini": "def _mcomp_broken(*a):\n    raise TypeError('a bug')\nFORMAT = (30, _mcomp_broken)"})
+    check("an agent's file format (FORMAT) that raises on every event (Gemini CLI's): Claude Code's and Codex's "
+          "transcripts, which it's tried on too, are still read, and a note names it", got[0] == [1, 1, 1, 1]
+          and got[1] == ["Gemini CLI: its sessions weren't read (its FORMAT failed: TypeError)"], got)
+    got = mined({"codex": "_mcomp_take = FORMAT[1]\ndef _mcomp_half(tr, *a):\n    took = _mcomp_take(tr, *a)\n"
+                          "    if took and tr.calls:\n        raise KeyError('a bug')\n    return took\n"
+                          "FORMAT = (40, _mcomp_half)"})
+    check("...one that fails partway through its own transcript (Codex's, at its first call, after it took the "
+          "session's first lines): that transcript, read in part, isn't counted, the others are read, and a note names "
+          "it", got[0] == [1, 0, 1, 1]
+          and got[1] == ["Codex: its sessions weren't read (its FORMAT failed: KeyError)"], got)
+    got = mined({"gemini": "FORMAT = (30, None)"})
+    check("...one that isn't (ORDER, take): the same", got[0] == [1, 1, 1, 1]
+          and got[1] == ["Gemini CLI: its sessions weren't read (its FORMAT isn't (ORDER, take))"], got)
+    got = mined({"gemini": "MARKER = rb'\"name\":\\s?\"(unclosed'"})
+    check("a malformed marker (MARKER, a pattern that doesn't compile: Gemini CLI's) doesn't hide the other agents' "
+          "files: Claude Code's and Codex's transcripts are found and read, and a note names it", got[0] == [1, 1, 1, 1]
+          and got[1] == ["Gemini CLI: its sessions weren't read (its MARKER isn't a regular expression of bytes)"], got)
+    got = mined({"codex": "MARKER = MARKER.decode()"})
+    check("...nor one that isn't bytes (Codex's, as text): Claude Code's transcript is still read, Codex's isn't, and "
+          "the note names Codex", got[0] == [1, 0, 1, 1]
+          and got[1] == ["Codex: its sessions weren't read (its MARKER isn't a regular expression of bytes)"], got)
+    got = mined({"gemini": "MARKER = rb'(?i)\"name\":\\s?\"mcp_metacomputer_[a-z_]'"})
+    check("...nor one that would change the others' (a flag of its own, mid-pattern: an error or a warning, by "
+          "Python's version)", got[0] == [1, 1, 1, 1]
+          and got[1] == ["Gemini CLI: its sessions weren't read (its MARKER isn't a regular expression of bytes)"], got)
+    got = mined({"hermes": ('KIND = "hermes"', 'KIND = "hermes_db"')})
+    check("a database agent's session without a folder is labelled with the agent's name (its folder's), not by its "
+          "reader's KIND, which may differ", got[0] == [1, 1, 1, 1] and "hermes" in (got[2] or [])
+          and not any(lb.startswith((".hermes", "_hermes")) for lb in got[2] or []), got)
+
+
 def main():
     try:
         shot = build_world()
@@ -1917,6 +2046,7 @@ def main():
         test_gemini_sessions()
         test_db_sessions()
         test_db_bounds()
+        test_reader_failures()
         test_antigravity_sessions()
         test_approval_flow.rep = rep
         test_proposals_and_injection(rep, shot)

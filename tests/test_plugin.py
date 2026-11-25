@@ -1206,16 +1206,18 @@ def test_scopes():
 
 def old_layout_checkout(t):
     """A checkout as v0.4.4 had it for Claude Code: its plugin declares the MCP server (plugin.json's mcpServers).
-    Only what install.sh's Claude Code step reads: install.sh, lib/claude_mcp.py, the command, the skill and the plugin."""
+    Only what install.sh's Claude Code step reads: install.sh, the agents' folders (Claude Code's claude_mcp.py), the
+    command, the skill and the plugin."""
     co = os.path.join(t, "checkout")
     os.makedirs(co)
     shutil.copy2(os.path.join(LAB, "install.sh"), co)
     write(os.path.join(co, "bin", "metacomputer"), "#!/bin/sh\nexit 0\n", 0o755)
     os.makedirs(os.path.join(co, "lib"))
-    shutil.copy2(os.path.join(LAB, "lib", "claude_mcp.py"), os.path.join(co, "lib"))
     shutil.copy2(os.path.join(LAB, "lib", "strictargs.py"), os.path.join(co, "lib"))       # the rules of its command lines
     os.makedirs(os.path.join(co, "scripts"), exist_ok=True)
     shutil.copy2(os.path.join(LAB, "scripts", "strictargs.sh"), os.path.join(co, "scripts"))
+    for d in ("coding-agents", os.path.join("lib", "agentkit")):     # the agents' data and steps, which install.sh reads
+        shutil.copytree(os.path.join(LAB, d), os.path.join(co, d), ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copytree(os.path.join(LAB, "skills", "metacomputer"), os.path.join(co, "skills", "metacomputer"))
     shutil.copytree(os.path.join(LAB, ".claude-plugin"), os.path.join(co, ".claude-plugin"))
     shutil.copytree(os.path.join(LAB, "plugin"), os.path.join(co, "plugin"))
@@ -1563,7 +1565,8 @@ def test_incomplete_marker():
         def fn(name):
             i = src.index(f"\n{name}() {{")
             return src[i:src.index("\n}\n", i) + 3]
-        more = src[src.index("\nMORE_AGENTS="):].split("\n", 2)[1] + "\n"
+        more = next(ln for ln in open(os.path.join(LAB, "lib", "agentkit", "agents.sh")).read().splitlines()
+                    if ln.startswith("MC_AGENT_FLAGS=")) + "\n"     # the agents' flags (lib/agentkit/agents.sh)
         script = ("set -Eeuo pipefail\ntrap 'echo ERR-TRAP >&2' ERR\n" + more + fn("agent_upper") + fn("agent_var")
                   + fn("stamp_incomplete") + fn("install_incomplete") + 'printf "[%s]" "$(install_incomplete)"\n')
         # (CLAUDE_FAILED, CLAUDE_TRIED, CODEX_FAILED, CODEX_TRIED), and the other agents' (FAILED, TRIED): each agent by
@@ -1742,10 +1745,11 @@ def test_owned_replace_lookup_fails():
 
 
 def test_claude_mcp_unit():
-    """lib/claude_mcp.py on its own: the configuration file Claude Code picks (R4), a byte-order mark (R5), the read
+    """coding-agents/claude-code/claude_mcp.py on its own: the configuration file Claude Code picks (R4), a byte-order mark (R5), the read
     right before a removal (R3) and the words for a server that isn't metacomputer's (R2)."""
     sys.path.insert(0, os.path.join(LAB, "lib"))
-    import claude_mcp
+    from agentkit import registry as agent_registry
+    claude_mcp = agent_registry.module("claude-code", "claude_mcp")
     t = tempfile.mkdtemp(prefix="mcomp-cmcp-")
     try:
         def fresh(name):
@@ -1831,7 +1835,8 @@ def test_config_choice_real():
     `.config.json` and `.claude.json`, the file claude_mcp reads is the one Claude Code uses (`claude mcp get` shows that
     file's server), and a byte-order mark doesn't stop either of them."""
     sys.path.insert(0, os.path.join(LAB, "lib"))
-    import claude_mcp
+    from agentkit import registry as agent_registry
+    claude_mcp = agent_registry.module("claude-code", "claude_mcp")
     entry = lambda c: {"type": "stdio", "command": c, "args": ["probe"], "env": {}}
     for why, legacy, modern, want in (
             ("an empty legacy file beside a populated .claude.json", "", entry("/bin/echo"), "/bin/echo"),
@@ -1874,7 +1879,7 @@ def test_prefixes():
     check("bench metrics: both prefixes count as metacomputer tools",
           metrics.mcp_tool("mcp__metacomputer__click") == "click" and metrics.mcp_tool(PLUGIN_PREFIX + "zoom") == "zoom"
           and metrics.mcp_tool("mcp__other__click") is None)
-    args, _ = bench.session_args({"prompt": "x"}, {"shell": "allow", "budget": 1, "model": "m", "effort": ""}, "cfg.json")
+    args, _ = bench.hooks("claude").args(bench, {"prompt": "x"}, {"shell": "allow", "budget": 1, "model": "m", "effort": ""}, "cfg.json")
     allowed = args[args.index("--allowedTools") + 1:]
     check("bench sessions allow both servers' tools",
           "mcp__metacomputer" in allowed and "mcp__plugin_metacomputer_metacomputer" in allowed, allowed)
@@ -1955,8 +1960,10 @@ def test_codex_openai():
                     "THIRD_PARTY_NOTICES.md", "gemini-extension.json", "lib/strictargs.py"):   # (their command lines' rules)
             os.makedirs(os.path.dirname(os.path.join(lab, rel)), exist_ok=True)
             shutil.copy2(os.path.join(LAB, rel), os.path.join(lab, rel))
-        for rel in ("plugin", "agent-plugin", ".agents", "skills/metacomputer", ".claude/skills/cua-driver"):
-            shutil.copytree(os.path.join(LAB, rel), os.path.join(lab, rel), symlinks=True)
+        for rel in ("plugin", "agent-plugin", ".agents", "skills/metacomputer", ".claude/skills/cua-driver",
+                    "coding-agents", "lib/agentkit"):       # (the agents' channel files, and the registry that lists them)
+            shutil.copytree(os.path.join(LAB, rel), os.path.join(lab, rel), symlinks=True,
+                            ignore=shutil.ignore_patterns("__pycache__"))
         outside = os.path.join(t, "outside")
         os.makedirs(outside)
 

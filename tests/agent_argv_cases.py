@@ -1,7 +1,8 @@
-"""The shared recognition cases (fixtures/agent_argv.json) that lib/owners.py (tests/test_session_guard.py) and the
-vault (tests/test_vault_ops.py, its test-agent-kind) are both checked against, ready to use: `@ROOT@` replaced by a
-folder of the test's, where the files and links a case names are made (empty files; a link and the file it points to)
-and its working folder too.
+"""The recognition cases that lib/owners.py (tests/test_session_guard.py) and the vault (tests/test_vault_ops.py, its
+test-agent-kind) are both checked against, ready to use: each agent's own (coding-agents/<name>/tests/recognition_cases.json,
+in the registry's order) after the shared ones (fixtures/agent_argv.json: the interpreters' rules, and what can't be
+told), with `@ROOT@` replaced by a folder of the test's, where the files and links a case names are made (empty files;
+a link and the file it points to) and its working folder too.
 
 Each case: "name" the kernel's name for the process, "argv" its exact arguments (null: they can't be read), "exe" the
 realpath of its executable (absent: not known), "cwd" its working folder (absent: @ROOT@; null: it can't be read),
@@ -13,13 +14,23 @@ realpath of its executable (absent: not known), "cwd" its working folder (absent
 import json
 import os
 
-FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "agent_argv.json")
+TESTS = os.path.dirname(os.path.abspath(__file__))
+FIXTURE = os.path.join(TESTS, "fixtures", "agent_argv.json")
+
+
+def fixtures():
+    """The case files: the shared one, then each registered agent's that has one."""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(TESTS), "lib"))
+    from agentkit import registry
+    own = [os.path.join(registry.folder(n), "tests", "recognition_cases.json") for n in registry.AGENTS]
+    return [FIXTURE] + [f for f in own if os.path.isfile(f)]
 
 
 def load(root):
     def sub(v):
         return v.replace("@ROOT@", root) if isinstance(v, str) else v
-    cases = json.load(open(FIXTURE))
+    cases = [c for f in fixtures() for c in json.load(open(f))]
     for c in cases:
         if c.get("argv") is not None:
             c["argv"] = [sub(a) for a in c["argv"]]

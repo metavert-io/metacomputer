@@ -442,7 +442,7 @@ shared by every VM, and each event names its VM.
   restart, or `/mcp` in an open session; the install says so when it added one.
 
 **An MCP server already named `metacomputer`.** The installer reads Claude Code's
-user-scope entry exactly (`lib/claude_mcp.py`): from the file Claude Code itself uses
+user-scope entry exactly (`coding-agents/claude-code/claude_mcp.py`): from the file Claude Code itself uses
 (`~/.claude.json`, or `.claude.json` in `CLAUDE_CONFIG_DIR`; its older `.config.json`
 there while Claude Code still uses that one), before and after `claude mcp get`, whose
 output from an empty folder, where no project or local server can stand in for it,

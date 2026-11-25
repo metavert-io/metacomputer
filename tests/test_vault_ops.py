@@ -486,6 +486,21 @@ def spec_walk(BIN, env, vdir, calls, audit_recs):
           and ok.returncode == 0, (rr.returncode, rr.stderr[-120:], rv.returncode, rv.stderr[-120:], ok.returncode))
 
 
+def app_pattern_cases(owners, argv_cases, cases):
+    """{(kind, field, pattern): [the indexes of the cases lib/owners.py tells otherwise when that pattern never
+    matches]} for each app's bundle and helper in the agents' tables (owners.AGENT_APPS): the cases only it decides."""
+    real, never, out = owners.AGENT_APPS, re.compile("(?!)"), {}
+    try:
+        for i, app in enumerate(real):
+            for field in ("bundle", "helper"):
+                owners.AGENT_APPS = tuple(dict(a, **{field: never}) if j == i else a for j, a in enumerate(real))
+                out[(app["kind"], field, app[field].pattern)] = [
+                    k for k, c in enumerate(cases) if owners.agent_of(7, argv_cases.table(owners, c)) != c["agent"]]
+    finally:
+        owners.AGENT_APPS = real
+    return out
+
+
 def run(td, procs):
     BIN = os.environ.get("MCOMP_VAULT_TEST_BIN")
     if not BIN:
@@ -1289,6 +1304,13 @@ def run(td, procs):
     check("the audit log records the requester and the approval scope", recs[-2].get("approval") == "each:session"
           and recs[-1].get("approval") == "grant:session" and recs[-1].get("requester", {}).get("project") == proj1
           and recs[-1].get("requester", {}).get("claude_pid") == p.pid, recs[-2:])
+    import owners as mcowners   # lib/owners.py: how claims, handoffs and the vault's records are read
+    named = re.search(r"Asked by (.+?) in ", asked)
+    check("the vault leaves the records' default agent out of a record (this Claude Code session's), and lib/owners.py "
+          "reads a record without one as the agent the vault's prompt named: one default for both (lib/agentkit's "
+          "registry DEFAULT, compiled into the vault)", named and "agent" not in recs[-1].get("requester", {})
+          and recs[-1].get("requester", {}).get("claude_pid") and mcowners._agent(recs[-1]["requester"]) == named.group(1),
+          (named and named.group(1), recs[-1:]))
     p, outs = as_claude(proj1, ["fill", "web-each", "--vm", "opsvm", "--field", "password"])
     u.expect(f"(pid {p.pid})")
     u.expect("Type web-each to allow")
@@ -1428,11 +1450,13 @@ def run(td, procs):
     # reading of them
     sys.path.insert(0, TESTS)
     import agent_argv_cases
+    import owners as mcowners
     links = tempfile.mkdtemp(prefix="mcomp-argv-")
     try:
         cases_file = agent_argv_cases.write(links)
         cases = json.load(open(cases_file))
         r = subprocess.run([BIN, "test-agent-kind", cases_file], env=env, capture_output=True, text=True, timeout=60)
+        decided = app_pattern_cases(mcowners, agent_argv_cases, cases)
     finally:
         shutil.rmtree(links, ignore_errors=True)
     got = r.stdout.splitlines()
@@ -1442,6 +1466,13 @@ def run(td, procs):
           "agent's package named in any argument, relative paths from the process's folder, links, titles, unreadable "
           "arguments)", r.returncode == 0 and len(got) == len(cases) and not wrong,
           (wrong, r.stderr[-300:]))
+    # A pattern the vault's ICU can't compile never matches there (vault/Util.swift matches): the vault telling a case
+    # only that pattern decides as lib/owners.py does is the pattern compiled and read alike in ICU
+    unproved = {k: [cases[i]["why"] for i in v] for k, v in decided.items()
+                if not v or any(i >= len(got) or (None if got[i] == "-" else got[i]) != cases[i]["agent"] for i in v)}
+    check(f"every app pattern in the agents' tables ({len(decided)}: each app's bundle and helper) compiles in the "
+          "vault's ICU and matches there as in Python: each decides a case (lib/owners.py tells it otherwise without "
+          "that pattern) that the vault tells right", decided and not unproved, (unproved, sorted(decided)))
     h = detached_start("fill", "web-each", "--vm", "opsvm", "--field", "password")
     u.expect("Type web-each to allow")
     u.send("web-each unlock\n")
