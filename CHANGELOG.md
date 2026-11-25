@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-25
+
 ### Changed
 
 - **Each provider's code lives in its own folder** ([providers/README.md](providers/README.md)), for contributors:
