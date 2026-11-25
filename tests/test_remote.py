@@ -4380,7 +4380,117 @@ def view_tunnel_pipes():
         shutil.rmtree(td, ignore_errors=True)
 
 
+def firefox_origin(td):
+    """provision.sh's firefox_from_mozilla: apt's Firefox candidate must come from Mozilla's repository, or the setup
+    fetches the lists again and then fails plainly (found live on a Sprite, 2026-11-24: an index that didn't arrive left
+    Ubuntu's snap installer as the candidate, and the install failed on the no-snap pin)."""
+    print("\nprovision.sh: Firefox from Mozilla's repository, or a plain failure")
+    prov = open(os.path.join(LAB, "provisioning", "guest", "provision.sh")).read()
+
+    def in_order(src, *keys):
+        """Each key in src, each found after the one before (a key may appear more than once)."""
+        at = 0
+        for k in keys:
+            at = src.find(k, at)
+            if at < 0:
+                return False
+            at += len(k)
+        return True
+    fn = "firefox_from_mozilla() {" + prov.split("firefox_from_mozilla() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n" \
+        if "firefox_from_mozilla() {" in prov else ""
+    moz = "       1000 https://packages.mozilla.org/apt mozilla/main amd64 Packages\n"     # as apt 3.2 aligns it
+    ubu = "        500 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 Packages\n"
+    cases = (
+        ("Mozilla's version is the candidate", True,
+         "firefox:\n  Installed: (none)\n  Candidate: 161.0~build1\n  Version table:\n     161.0~build1 1000\n" + moz
+         + "     1:1snap1-0ubuntu9.1 500\n" + ubu),
+        ("Mozilla's version installed and the candidate (***)", True,
+         "firefox:\n  Installed: 161.0~build1\n  Candidate: 161.0~build1\n  Version table:\n *** 161.0~build1 1000\n" + moz
+         + "        100 /var/lib/dpkg/status\n"),
+        ("no index from Mozilla: Ubuntu's snap installer is the candidate", False,
+         "firefox:\n  Installed: (none)\n  Candidate: 1:1snap1-0ubuntu9.1\n  Version table:\n     1:1snap1-0ubuntu9.1 500\n" + ubu),
+        ("Mozilla's listed, but an older version than the candidate from Ubuntu", False,
+         "firefox:\n  Installed: (none)\n  Candidate: 1:1snap1-0ubuntu9.1\n  Version table:\n     1:1snap1-0ubuntu9.1 500\n" + ubu
+         + "     160.0~build2 1000\n" + moz),
+        ("no candidate at all", False, "firefox:\n  Installed: (none)\n  Candidate: (none)\n  Version table:\n"),
+        ("apt-cache prints nothing", False, ""))
+    stub = os.path.join(td, "bin")
+    os.makedirs(stub, exist_ok=True)
+    for what, want, out in cases:
+        with open(os.path.join(td, "policy.txt"), "w") as f:
+            f.write(out)
+        with open(os.path.join(stub, "apt-cache"), "w") as f:
+            f.write('#!/bin/sh\n[ "$1 $2" = "policy firefox" ] && cat "$POLICY"\n')
+        os.chmod(os.path.join(stub, "apt-cache"), 0o755)
+        r = subprocess.run(["/bin/bash", "-c", fn + "firefox_from_mozilla"], capture_output=True, text=True,
+                           env=dict(os.environ, PATH=stub + ":/usr/bin:/bin", POLICY=os.path.join(td, "policy.txt")))
+        check(f"firefox_from_mozilla, {what}: {'yes' if want else 'no'}", bool(fn) and (r.returncode == 0) == want,
+              (r.returncode, r.stderr[-200:]))
+    check("...checked after the lists are fetched and before the install, as a plain command (so set -e applies)",
+          in_order(prov, 'step "apt: update + full upgrade"', "\nensure_firefox_from_mozilla\n",
+                   '"${APT[@]}" install --no-install-recommends "${PKGS[@]}"'))
+    # Codex check: the block as provision.sh runs it (its text from firefox_from_mozilla's definition up to the install
+    # step), under provision.sh's set -Eeuo pipefail and an ERR trap like its own, on a server whose apt speaks German
+    # (the apt-cache stand-in does unless LC_ALL=C), with apt-get update's exit chosen per case.
+    start = prov.find("\nfirefox_from_mozilla() {")
+    end = prov.find('\nstep "apt: desktop, accessibility, apps, recording"')
+    block = prov[start + 1:end] if 0 <= start < end else ""
+    st = os.path.join(td, "ff-state")
+    for name, text in (("apt-cache", '#!/bin/sh\n[ "$1 $2" = "policy firefox" ] || exit 64\n'
+                                     'if [ -s "$FF_STATE/updates" ]; then f="$FF_POLICY1"; else f="$FF_POLICY0"; fi\n'
+                                     'if [ "${LC_ALL:-}" = C ]; then cat "$f"; else sed -e "s/^  Installed:/  Installiert:/" '
+                                     '-e "s/^  Candidate:/  Installationskandidat:/" -e "s/^  Version table:/  Versionstabelle:/"'
+                                     ' "$f"; fi\n'),
+                       ("apt-get", '#!/bin/sh\necho "apt-get $*" >> "$FF_STATE/calls"\n'
+                                   'case " $* " in *" update "*) echo 1 >> "$FF_STATE/updates"; exit "${FF_UPDATE_RC:-0}" ;; esac\n'),
+                       ("sleep", "#!/bin/sh\nexit 0\n")):
+        with open(os.path.join(stub, name), "w") as f:
+            f.write(text)
+        os.chmod(os.path.join(stub, name), 0o755)
+    mozp, ubup = os.path.join(td, "policy-mozilla.txt"), os.path.join(td, "policy-ubuntu.txt")
+    with open(mozp, "w") as f:
+        f.write(cases[0][2])
+    with open(ubup, "w") as f:
+        f.write(cases[2][2])
+    harness = ('set -Eeuo pipefail\ntrap \'echo "PROVISION FAILED at line $LINENO: $BASH_COMMAND"\' ERR\n'
+               'step() { echo; echo "=== $*"; }\nAPT=(apt-get -y -o Acquire::Retries=5)\n' + block +
+               '\necho "INSTALL WOULD RUN"\n')
+    plain = "gave apt no Firefox after two tries"
+    for what, before, after, update_rc, lang, goes_on in (
+            ("Mozilla's the candidate, apt in German", mozp, mozp, 0, "de_DE.UTF-8", True),
+            ("Mozilla's the candidate, apt in English (LC_ALL=C already)", mozp, mozp, 0, "C", True),
+            ("not Mozilla's, then it is after the second fetch", ubup, mozp, 0, "de_DE.UTF-8", True),
+            ("not Mozilla's after the second fetch either", ubup, ubup, 0, "de_DE.UTF-8", False),
+            ("the second fetch fails (exit 100), still not Mozilla's", ubup, ubup, 100, "de_DE.UTF-8", False),
+            ("the second fetch fails (exit 100), but Mozilla's list did arrive", ubup, mozp, 100, "de_DE.UTF-8", True)):
+        shutil.rmtree(st, ignore_errors=True)
+        os.makedirs(st)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LC_") and k != "LANG" and k != "LANGUAGE"}
+        env.update(PATH=stub + ":/usr/bin:/bin", FF_STATE=st, FF_POLICY0=before, FF_POLICY1=after,
+                   FF_UPDATE_RC=str(update_rc))
+        env.update(LC_ALL=lang, LANG=lang)
+        r = subprocess.run(["/bin/bash", "-c", harness], capture_output=True, text=True, env=env, timeout=60)
+        out = r.stdout + r.stderr
+        fetches = len(open(os.path.join(st, "updates")).read().split()) if os.path.exists(os.path.join(st, "updates")) else 0
+        want_fetches = 0 if before == mozp else 1
+        if goes_on:
+            ok = (bool(block) and r.returncode == 0 and "INSTALL WOULD RUN" in out and plain not in out
+                  and "PROVISION FAILED" not in out and fetches == want_fetches)
+        else:
+            ok = (bool(block) and r.returncode != 0 and plain in out and "INSTALL WOULD RUN" not in out
+                  and "PROVISION FAILED" in out and fetches == 1)
+        check(f"provision.sh's Firefox check, {what}: "
+              + ("it goes on to the install" + (" (one more fetch)" if want_fetches else " (no fetch again)") if goes_on
+                 else "stops before the install with the plain message (and the setup's failure handling)"),
+              ok, (r.returncode, fetches, out[-400:]))
+
+
 def main():
+    td = tempfile.mkdtemp(prefix="mcff-")
+    try:
+        firefox_origin(td)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
     transports()
     proxywrap()
     guest_side()
