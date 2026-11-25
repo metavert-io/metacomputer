@@ -20,8 +20,8 @@ coding-agents/<name>/
                        Transcript kinds); bench (its --agent word); release_file (a channel file carrying the
                        release's version)
   recognition.json     how its processes are told (lib/agentkit/recognition.py says each table; an app's folders in
-                       lowercase): read by lib/owners.py and compiled into the vault by scripts/build-vault.sh, one
-                       copy for both
+                       lowercase, its patterns in what Python and the vault's ICU both read alike): read by
+                       lib/owners.py and compiled into the vault by scripts/build-vault.sh, one copy for both
   setup.py             its install, uninstall and status steps: for a "generic" agent, lib/agent_setup.py's Agent
                        (AGENT = its instance: how its MCP server is read, added and removed, where its skills go);
                        for one with hooks, its part of `metacomputer agents` (status, line, check)
@@ -80,7 +80,8 @@ Shared code finds an agent's own behaviour by what its folder brings, never by i
   `MARKER` (how a file that used metacomputer's tools is spotted) and `FORMAT = (ORDER, take)`, which
   lib/transcripts.py's parse() tries in ORDER (Antigravity CLI's 20, Gemini CLI's 30, Codex's 40); one whose sessions
   are SQLite databases gives `KIND`, `databases(env)` and `read(...)` (lib/session_dbs.py opens them, read only). A
-  reader that can't be loaded or fails is noted by the agent's name in learn's report, and the others are still read.
+  reader that can't be loaded or fails (its MARKER or FORMAT too) is noted by the agent's name in learn's report, and
+  the others are still read.
 - **bench** (from bench.py, with the harness as B): `SKILL_HOME`, `ISOLATED`, `TOKENS_ONLY`, `args` or `isolate`,
   `events` (or `ENVELOPE` and `envelope_events`), `model`, `prepare`, `before`/`after`, `refuse`, `end`.
 

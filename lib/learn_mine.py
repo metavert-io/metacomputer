@@ -604,7 +604,7 @@ def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), proje
     """Each session mined once (a headless copy wins over the agent's own file of the same session),
     filtered by time and project; a transcript is parsed, mined and dropped before the next one is read.
     Returns (mined sessions in time order, stats)."""
-    failed = transcripts.unread_agents()        # agents whose readers couldn't be loaded, then those that failed
+    failed = transcripts.unread_agents()        # readers not loaded or malformed, then those that failed
     found, scanned, unreadable = candidates(env, cutoff, project, extra_dirs, bench_dirs, projects, failed)
     items, cut = [], 0
     for path, source in found:
@@ -617,6 +617,8 @@ def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), proje
             continue
         cut += 1 if item.pop("cut") else 0
         items.append(item)
+    for n, why in transcripts.unread_agents().items():     # ...and those whose format failed on an event
+        failed.setdefault(n, why)
     # The database agents' sessions, from their SQLite databases (lib/session_dbs.py): read, never written or
     # locked; what couldn't be read is in the notes, never fatal
     dbs, notes, with_tools = 0, [], len(found)

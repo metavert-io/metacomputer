@@ -534,6 +534,51 @@ def records_default_checks():
           [ln for ln in util.splitlines() if "recordDefaultAgent" in ln or f'"{owners.RECORD_DEFAULT_AGENT}"' in ln])
 
 
+def portable_checks(real, app):
+    """An app's bundle and helper are read by Python's re (lib/owners.py) and by the vault's ICU: recognition.py check
+    keeps them to what both read alike (test_vault_ops runs every shipped one through the vault itself)."""
+    unportable = getattr(recognition, "unportable", None)
+    shipped = [(n, i, f, a[f]) for n in registry.AGENTS for i, a in enumerate(real(n, "recognition").get("apps") or ())
+               for f in ("bundle", "helper")]
+    alike = ["[a-z0-9_]+", "^(?:x|y){1,3}$", "\\d{2,}[^/]*\\.app", "\\/\\-\\(\\)\\[\\]\\{\\}\\^\\$\\|\\?\\*\\+\\\\",
+             "[\\]\\-\\\\^$.|?*+(){}/]", "a|", "(|b)c?"]
+    got = {p: unportable(p) for _n, _i, _f, p in shipped + [(0, 0, 0, p) for p in alike]} if unportable else None
+    check("every shipped app pattern (and the forms of the shared subset: classes, ranges, escapes, repeats, groups, "
+          "alternatives, anchors) is one Python and the vault's ICU read alike (recognition.unportable)",
+          shipped and got is not None and not any(got.values()), (shipped, got))
+
+    def refused(field, pattern):
+        broken = dict(real(app, "recognition"))
+        broken["apps"] = [dict(broken["apps"][0], **{field: pattern})]
+        try:
+            registry.data = lambda n, part: broken if (n, part) == (app, "recognition") else real(n, part)
+            return recognition.check()
+        finally:
+            registry.data = real
+    # Codex's reproduction: Python matches /Applications/Antigravity.app/Contents/MacOS/Electron with it; ICU doesn't
+    # compile it (U_REGEX_INVALID_CAPTURE_GROUP_NAME), so the vault would stop counting that executable as the agent's
+    caps = refused("bundle", "/(?P<app>Antigravity)[^/]*\\.app/Contents/MacOS/[^/]+$")
+    check("...a Python-only pattern is refused, naming the agent, the field and what it uses (a (?P<name>...) group in "
+          "an app's bundle)", any(b.startswith(f"{app}: apps[0].bundle uses ") and "(?P<name>...)" in b for b in caps),
+          caps)
+    tried = {}
+    for pattern, words in (("(?P=x)", "(?P=name)"), ("(?#note)language_server", "(?#...)"),
+                           ("(?<=/)language_server", "lookbehind"), ("(?<!x)language_server", "lookbehind"),
+                           ("(?i)language_server", "inline flags"), ("language_(?i:server)", "inline flags"),
+                           ("(?<n>language_server)", "(?<name>...)"), ("(?'n'language_server)", "(?'name'...)"),
+                           ("(?=l)language_server", "lookahead"), ("^\\w+$", "\\w"), ("^language.server$", "unescaped ."),
+                           ("^language_server_?\\s?$", "\\s"), ("^language_server.*?$", "unescaped ."),
+                           ("^language_server_*?$", "repeat after a repeat"), ("^language_server{,2}$", "{"),
+                           ("^[[:alpha:]_]+$", "[ inside a class"), ("^[a-z&&x]+$", "&& inside a class"),
+                           ("^language_server\\Z", "\\Z"), ("", "empty pattern"), ("^lánguage_server$", "printable ASCII")):
+        caps = refused("helper", pattern)
+        tried[pattern] = [b for b in caps if b.startswith(f"{app}: apps[0].helper uses ") and words in b]
+    check("...as is every other construct outside it, by name: (?P=name), (?#...), lookbehinds and lookaheads, inline "
+          "flags, named groups in either syntax, \\w, \\s, the dot, a lazy repeat, a { that isn't a repeat, nested "
+          "classes and set operations, \\Z, a letter outside ASCII and the empty pattern (in an app's helper)",
+          all(tried.values()), {p: v for p, v in tried.items() if not v})
+
+
 def packages():
     print("\nagent packages (coding-agents/<name>/)")
     root = os.path.join(LAB, "coding-agents")
@@ -577,6 +622,7 @@ def packages():
         registry.data = real
     check("...an app's folder that isn't lowercase is refused (lib/owners.py and the vault lowercase each folder of a "
           "path before they compare it, so it would never match)", any("lowercase" in b for b in caps), caps)
+    portable_checks(real, app)
     records_default_checks()
     with_hooks = [n for n in registry.AGENTS if manifests.manifest(n)["install"]["steps"] == "hooks"]
     no_sh = [n for n in with_hooks if not registry.has(n, "setup.sh")]

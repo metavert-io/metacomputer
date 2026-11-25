@@ -2003,6 +2003,34 @@ def test_reader_failures():
     got = mined({"codex": "def roots(env):\n    raise RuntimeError('a bug')"})
     check("...one whose reader fails while it lists its folders: the same", got[0] == [1, 0, 1, 1]
           and got[1] == ["Codex: its sessions weren't read (RuntimeError)"], got)
+    # The agents whose sessions are files share each transcript: every one's FORMAT is tried on every event and one
+    # marker made of all their MARKERs finds the files (lib/transcripts.py), so one that fails there is left out alone
+    got = mined({"gemini": "def _mcomp_broken(*a):\n    raise TypeError('a bug')\nFORMAT = (30, _mcomp_broken)"})
+    check("an agent's file format (FORMAT) that raises on every event (Gemini CLI's): Claude Code's and Codex's "
+          "transcripts, which it's tried on too, are still read, and a note names it", got[0] == [1, 1, 1, 1]
+          and got[1] == ["Gemini CLI: its sessions weren't read (its FORMAT failed: TypeError)"], got)
+    got = mined({"codex": "_mcomp_take = FORMAT[1]\ndef _mcomp_half(tr, *a):\n    took = _mcomp_take(tr, *a)\n"
+                          "    if took and tr.calls:\n        raise KeyError('a bug')\n    return took\n"
+                          "FORMAT = (40, _mcomp_half)"})
+    check("...one that fails partway through its own transcript (Codex's, at its first call, after it took the "
+          "session's first lines): that transcript, read in part, isn't counted, the others are read, and a note names "
+          "it", got[0] == [1, 0, 1, 1]
+          and got[1] == ["Codex: its sessions weren't read (its FORMAT failed: KeyError)"], got)
+    got = mined({"gemini": "FORMAT = (30, None)"})
+    check("...one that isn't (ORDER, take): the same", got[0] == [1, 1, 1, 1]
+          and got[1] == ["Gemini CLI: its sessions weren't read (its FORMAT isn't (ORDER, take))"], got)
+    got = mined({"gemini": "MARKER = rb'\"name\":\\s?\"(unclosed'"})
+    check("a malformed marker (MARKER, a pattern that doesn't compile: Gemini CLI's) doesn't hide the other agents' "
+          "files: Claude Code's and Codex's transcripts are found and read, and a note names it", got[0] == [1, 1, 1, 1]
+          and got[1] == ["Gemini CLI: its sessions weren't read (its MARKER isn't a regular expression of bytes)"], got)
+    got = mined({"codex": "MARKER = MARKER.decode()"})
+    check("...nor one that isn't bytes (Codex's, as text): Claude Code's transcript is still read, Codex's isn't, and "
+          "the note names Codex", got[0] == [1, 0, 1, 1]
+          and got[1] == ["Codex: its sessions weren't read (its MARKER isn't a regular expression of bytes)"], got)
+    got = mined({"gemini": "MARKER = rb'(?i)\"name\":\\s?\"mcp_metacomputer_[a-z_]'"})
+    check("...nor one that would change the others' (a flag of its own, mid-pattern: an error or a warning, by "
+          "Python's version)", got[0] == [1, 1, 1, 1]
+          and got[1] == ["Gemini CLI: its sessions weren't read (its MARKER isn't a regular expression of bytes)"], got)
     got = mined({"hermes": ('KIND = "hermes"', 'KIND = "hermes_db"')})
     check("a database agent's session without a folder is labelled with the agent's name (its folder's), not by its "
           "reader's KIND, which may differ", got[0] == [1, 1, 1, 1] and "hermes" in (got[2] or [])

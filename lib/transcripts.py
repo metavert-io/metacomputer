@@ -22,6 +22,7 @@ import re
 import stat
 import time
 import sys
+import warnings
 import zlib
 from datetime import datetime
 
@@ -34,16 +35,43 @@ MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__"
 # A tool_use of a metacomputer tool, as both of those formats write it (compact JSON; a space allowed); each agent's own
 # format brings its MARKER (use_marker).
 STREAM_MARKER = rb'"name":\s?"mcp__(?:plugin_metacomputer_)?metacomputer__[a-z_]'
-_USE_MARKER = []
+_READERS = []
 _FILE_AGENTS = []
+# {name: why}: the agents whose sessions are files and whose MARKER or FORMAT is malformed, or whose FORMAT failed on an
+# event (parse()): left out from then on, the others still read, and noted (unread_agents).
+_FAILED = {}
+
+
+def _readers():
+    """(USE_MARKER, [(order, name, take)]), made once: the stream's marker or any agent's (its sessions.py MARKER), and
+    the agents' formats in their order. An agent whose MARKER isn't a regular expression of bytes (it doesn't compile
+    after the ones before it, or only with a warning) or whose FORMAT isn't (ORDER, take) is left out of both."""
+    if not _READERS:
+        parts, takes = [STREAM_MARKER], []
+        for n, m in _file_agents():
+            mark, fmt = getattr(m, "MARKER", None), getattr(m, "FORMAT", None)
+            if fmt and not (isinstance(fmt, tuple) and len(fmt) == 2 and isinstance(fmt[0], (int, float))
+                            and not isinstance(fmt[0], bool) and callable(fmt[1])):
+                _FAILED.setdefault(n, "its FORMAT isn't (ORDER, take)")
+                continue
+            if mark:
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error")
+                        re.compile(b"|".join(parts + [mark]))
+                except Exception:               # not bytes, not a pattern, or one that changes the others' (a flag)
+                    _FAILED.setdefault(n, "its MARKER isn't a regular expression of bytes")
+                    continue
+                parts.append(mark)
+            if fmt:
+                takes.append((fmt[0], n, fmt[1]))
+        _READERS.append((re.compile(b"|".join(parts)), sorted(takes, key=lambda x: x[0])))
+    return _READERS[0]
 
 
 def use_marker():
     """USE_MARKER, made once: the stream's marker, or any agent format's (its sessions.py MARKER)."""
-    if not _USE_MARKER:
-        _USE_MARKER.append(re.compile(b"|".join([STREAM_MARKER,
-                                                 *(m.MARKER for _n, m in _file_agents() if getattr(m, "MARKER", None))])))
-    return _USE_MARKER[0]
+    return _readers()[0]
 
 
 def _loaded():
@@ -64,16 +92,40 @@ def _file_agents():
 
 
 def unread_agents():
-    """{name: why} of the agents whose sessions are files and whose sessions.py couldn't be loaded: their sessions
-    aren't read (learn notes it), and the others' are."""
-    return dict(_loaded()[1])
+    """{name: why} of the agents whose sessions are files and whose sessions aren't read: their sessions.py couldn't be
+    loaded, its MARKER or FORMAT is malformed, or its FORMAT failed on an event so far (parse()). learn notes them, and
+    the others' sessions are read."""
+    _readers()
+    return {**_loaded()[1], **_FAILED}
 
 
 def formats():
     """[(order, take)] of the agents' transcript formats (their sessions.py FORMAT), in order: parse() tries each
     take(tr, ev, typ, t, st, slim) in turn, the first that says it's its own wins."""
-    out = [m.FORMAT for _n, m in _file_agents() if getattr(m, "FORMAT", None)]
-    return sorted(out, key=lambda x: x[0])
+    return [(order, take) for order, n, take in _readers()[1] if n not in _FAILED]
+
+
+def _agent_format(takes, taken, tr, ev, typ, t, st, slim):
+    """Whether an agent's format takes the event (the first of takes [(name, take)] that says it's its own). One whose
+    take raises is left out from then on, for every transcript, and noted (unread_agents), and the event goes on to the
+    others; this transcript is given up (the exception goes on) only when that format had already taken an event of it
+    (taken) or added a call: it's that agent's, read in part."""
+    i = 0
+    while i < len(takes):
+        n, take = takes[i]
+        calls = len(tr.calls)
+        try:
+            if take(tr, ev, typ, t, st, slim):
+                taken.add(n)
+                return True
+        except Exception as e:
+            _FAILED.setdefault(n, f"its FORMAT failed: {type(e).__name__}")
+            del takes[i]
+            if n in taken or len(tr.calls) != calls:
+                raise
+            continue
+        i += 1
+    return False
 
 
 class State:
@@ -312,7 +364,7 @@ def parse(path, events=None, slim=False):
     tr = Transcript(path)
     tr.info = {}
     st = State()
-    takes = [take for _order, take in formats()]
+    takes, taken = [(n, take) for _order, n, take in _readers()[1] if n not in _FAILED], set()
     for ev in (events if events is not None else read_events(path, tr.info)):
         typ = ev.get("type")
         t = _ts(ev)
@@ -329,7 +381,7 @@ def parse(path, events=None, slim=False):
             tr.final = ev
             tr.kind = "stream"
             continue
-        if any(take(tr, ev, typ, t, st, slim) for take in takes):        # an agent's own format
+        if takes and _agent_format(takes, taken, tr, ev, typ, t, st, slim):        # an agent's own format
             continue
         if typ not in ("assistant", "user"):
             continue

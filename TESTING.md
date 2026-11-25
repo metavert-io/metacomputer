@@ -1516,8 +1516,10 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
   Its agent packages part (`coding-agents/<name>/`, coding-agents/README.md): the registry is an explicit list of the
   folders in `coding-agents/` (every folder registered, none named `agents/`), each with its manifest, recognition
   tables, setup steps, page and doc-claims rows; every manifest and recognition table is sound, and a broken manifest
-  (or an app folder that isn't lowercase) is refused; a record without an agent field is Claude Code's whatever the
-  registry's order (the list reversed, in a fresh interpreter: owners, handoffs, bench, its reports and the vault's
+  (or an app folder that isn't lowercase) is refused, as is an app pattern outside what Python's re and the vault's
+  ICU both read alike (a `(?P<name>...)` group, Codex's case, and every other construct outside it, each named); a
+  record without an agent field is Claude Code's whatever the registry's order (the list reversed, in a fresh
+  interpreter: owners, handoffs, bench, its reports and the vault's
   tables), and the vault reads that name from the tables its build compiles in (test_vault_ops checks the same at run
   time); an agent with steps of its own brings `status` and `line`, a generic one its `AGENT`, and what `metacomputer
   agents` takes from a setup.py follows its manifest and its own functions (a framework function it imports isn't taken;
@@ -1582,9 +1584,10 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
   app's and IDE's (the app's main executable and its language server, the IDE's Electron and a helper, a language server
   named for its platform in an Antigravity folder, one under `~/.antigravity`), and what isn't either (another app's
   Electron, another product's language server of the same name, one under `/opt/not-antigravity`, `python3 -m
-  antigravity`, an editor opening a file named agy). test_session_guard
-  runs a stand-in copied into an Antigravity app bundle's places (main executable, language server, the IDE's Electron),
-  and test_handoff checks that `input-reset` and `handoff done` refuse under them.
+  antigravity`, an editor opening a file named agy); each app pattern in the agents' tables (a bundle, a helper)
+  decides one of them that the test build tells right, so each compiles and matches in the vault's ICU.
+  test_session_guard runs a stand-in copied into an Antigravity app bundle's places (main executable, language
+  server, the IDE's Electron), and test_handoff checks that `input-reset` and `handoff done` refuse under them.
 - Tests of commands only the user runs type at a pty in a process launchd has adopted
   (`tests/userterm.py`), so an agent running the suite isn't above it; `userterm.fake_agent`
   builds a small program named `codex` to stand for one. The vault suites use the TEST
@@ -1616,7 +1619,7 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
 
 ## Lessons from sessions: `tests/test_learn.py`
 
-`python3 tests/test_learn.py` (182 checks, about 50 s) needs no VM and no network.
+`python3 tests/test_learn.py` (188 checks, about 50 s) needs no VM and no network.
 Everything lives in a temporary folder (`CLAUDE_CONFIG_DIR`, `MCOMP_LESSONS_DIR`, logs,
 events, benchmark results); it checks at the end that the real store
 (`~/.local/share/metacomputer/lessons`) was never touched. Synthetic sessions, in
@@ -1643,7 +1646,9 @@ results, window titles, app names, typed text, errors and the model's own text.
   itself linked is read), a folder or the database owned by another account (a stand-in `fstat`; refused), and a
   database swapped for a link just before the in-place read (refused; the other database isn't read). One agent's
   reader failing (a copy of coding-agents/ with OpenClaw's or Codex's sessions.py changed: an import that fails, or an
-  error while it lists or reads its sessions) leaves the others' sessions read, with a note naming that agent; the
+  error while it lists or reads its sessions) leaves the others' sessions read, with a note naming that agent; so does
+  a file agent's FORMAT that raises (on every event, Gemini CLI's, or partway through its own transcript, Codex's) or
+  isn't (ORDER, take), and a MARKER that doesn't compile, isn't bytes or carries a flag of its own; the
   readers load in any order (Hermes Agent's and OpenClaw's before lib/session_dbs.py); and a database agent's session
   without a folder is labelled with the agent's name whatever its reader's KIND.
 - Injection: nothing injected reaches the report, a proposal or its evidence, the
@@ -2338,7 +2343,7 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_vault_ops.py` (215 checks, about 3 minutes) reuses that stub and
+`python3 tests/test_vault_ops.py` (235 checks, about 3 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
 - **declarations:** every form of every command, as the test build lists them (`_argspecs`), given an unknown
   option, another form's option, a word too many, a request for usage as an option's value (`--site --help`,

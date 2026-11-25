@@ -35,6 +35,19 @@ When two agents' words both match (a nonsensical process), the longest word is t
 the registry's order. A record without an agent field (a claim, a handoff, the vault's records) is the registry's DEFAULT
 agent's (record_default: its label), for lib/owners.py and the vault alike.
 
+An app's bundle and helper are searched by Python's re (lib/owners.py) and by the vault's Foundation/ICU
+(vault/Util.swift matches), so they keep to what both compile and read alike (unportable() says what's outside it):
+printable ASCII characters other than \\ . ^ $ | ? * + ( ) [ ] { } as themselves; one of those, / or - escaped (\\.
+\\/); \\d and \\D; a class [...] or [^...] of such characters, escapes and ranges (a-z), with \\d or \\D, never [
+inside it, && || ~~, an unescaped - that isn't a range, or ] first; * + ? {m} {m,} {m,n} (n at most 1000) after one
+of those or a group, never after another; (...) and (?:...); | ; ^ and $. Everything else is refused: the dot (ICU's
+doesn't match \\r, U+0085, U+2028 or U+2029), \\w and \\s (they differ outside ASCII and on U+001C to U+001F), other
+escapes, every other (?...) (named groups in either syntax, (?P=...), (?#...), lookarounds, inline flags), lazy or
+possessive quantifiers, a { that isn't one, characters outside printable ASCII (ICU repeats a letter with its
+combining marks as one), and the empty pattern (Python's matches everything, ICU's doesn't compile). What still
+differs: $ before a line break that ends the text (Python's matches before a final \\n, ICU's before U+0085 and U+2028
+too, and the vault's call not always before \\n), which an executable's path never ends with.
+
     python3 lib/agentkit/recognition.py swift     the tables as Swift (scripts/build-vault.sh)
     python3 lib/agentkit/recognition.py check     exit 1 and say what's wrong with the agents' recognition.json files
 Works under any python3 (macOS's 3.9 included)."""
@@ -93,6 +106,137 @@ def record_default():
     return manifests.label(registry.DEFAULT)
 
 
+# What both engines read as one character when it's escaped (outside a class and in one), and the escapes that differ.
+_ESCAPED = frozenset("\\.^$|?*+()[]{}/-")
+_ESCAPE_WHY = {"w": "Python's and ICU's differ outside ASCII (combining marks, superscripts): write [A-Za-z0-9_]",
+               "s": "Python's also matches U+001C to U+001F: write the characters",
+               "b": "a word boundary, by \\w, which differs",
+               "Z": "Python's is the end, ICU's also before a final line break",
+               "v": "Python's is U+000B, ICU's any vertical space"}
+_OUTSIDE_ASCII = ("a character outside printable ASCII (ICU repeats a letter with its combining marks as one: write a "
+                  "class such as [^/] for the rest)")
+MAX_REPEAT = 1000
+_REPEAT = re.compile(r"\{([0-9]+)(?:(,)([0-9]*))?\}")
+_GROUPS = (("P<", "a named group (?P<name>...)"), ("P=", "a named backreference (?P=name)"),
+           ("P>", "a group call (?P>name)"), ("#", "a comment (?#...)"), ("<=", "a lookbehind (?<=...)"),
+           ("<!", "a lookbehind (?<!...)"), ("=", "a lookahead (?=...)"), ("!", "a lookahead (?!...)"),
+           ("<", "a named group (?<name>...)"), ("'", "a named group (?'name'...)"), (">", "an atomic group (?>...)"),
+           ("(", "a conditional (?(...)...)"), ("|", "a branch reset (?|...)"))
+
+
+def _escape(e):
+    """The words for an escape outside the shared set (\\e)."""
+    why = "a backreference" if e.isdigit() else _ESCAPE_WHY.get(e) or _ESCAPE_WHY.get(e.lower())
+    return f"\\{e}" + (f" ({why})" if why else ", an escape outside the shared set")
+
+
+def _group(rest):
+    """The words for a group (?REST... that isn't (?:...)."""
+    for start, words in _GROUPS:
+        if rest.startswith(start):
+            return words
+    flags = re.match(r"[-A-Za-z]+", rest)
+    return f"inline flags (?{flags.group(0)}...)" if flags else f"the group (?{rest[:1]}"
+
+
+def _class(p, i):
+    """(the index after the class that starts at p[i], None), or (None, what in it is outside the shared set)."""
+    j, n = i + 1, len(p)
+    if j < n and p[j] == "^":
+        j += 1
+    if j < n and p[j] == "]":
+        return None, "a class whose first character is ] (write \\])"
+    while j < n:
+        c = p[j]
+        if c == "]":
+            return j + 1, None
+        if c == "[":
+            return None, "[ inside a class (ICU reads a nested set: write \\[)"
+        if c in "&|~" and p.startswith(c * 2, j):
+            return None, f"{c * 2} inside a class (read as a set operation)"
+        if c == "-":
+            return None, "an unescaped - inside a class that isn't a range (write \\-)"
+        if c == "\\":
+            e = p[j + 1:j + 2]
+            if e in ("d", "D"):
+                j += 2
+                continue                    # a class of its own: no range starts from it
+            if e not in _ESCAPED:
+                return (None, "a trailing \\") if not e else (None, _escape(e))
+            lo, j = e, j + 2
+        elif not " " <= c <= "~":
+            return None, _OUTSIDE_ASCII
+        else:
+            lo, j = c, j + 1
+        if p.startswith("-", j) and j + 1 < n and p[j + 1] != "]":     # a range lo-hi
+            k = j + 1
+            if p[k] == "\\" and p[k + 1:k + 2] in _ESCAPED and p[k + 1:k + 2]:
+                hi, k = p[k + 1], k + 2
+            elif p[k] in "\\[-":
+                return None, "a range that doesn't end in one character"
+            elif not " " <= p[k] <= "~":
+                return None, _OUTSIDE_ASCII
+            else:
+                hi, k = p[k], k + 1
+            if hi < lo:
+                return None, f"the range {lo}-{hi}, from a later character to an earlier one"
+            j = k
+    return None, "an unterminated class ["
+
+
+def unportable(p):
+    """What in the regular expression p (an app's bundle or helper) is outside what Python's re and the vault's ICU both
+    compile and read alike (the module's docstring has the list), in words; None when nothing is."""
+    if not isinstance(p, str):
+        return "a pattern that isn't a string"
+    if not p:
+        return "the empty pattern (Python's matches everything; ICU's doesn't compile)"
+    i, n, depth, atom = 0, len(p), 0, False     # atom: what came last may be repeated
+    while i < n:
+        c = p[i]
+        if c == "\\":
+            e = p[i + 1:i + 2]
+            if not e:
+                return "a trailing \\"
+            if e not in _ESCAPED and e not in ("d", "D"):
+                return _escape(e)
+            i, atom = i + 2, True
+        elif c == "[":
+            i, why = _class(p, i)
+            if why:
+                return why
+            atom = True
+        elif c == "(":
+            if p.startswith("(?", i) and not p.startswith("(?:", i):
+                return _group(p[i + 2:])
+            i, depth, atom = i + (3 if p.startswith("(?:", i) else 1), depth + 1, False
+        elif c == ")":
+            if not depth:
+                return "an unbalanced )"
+            i, depth, atom = i + 1, depth - 1, True
+        elif c in "*+?{":
+            m = _REPEAT.match(p, i) if c == "{" else None
+            if c == "{" and (not m or (m.group(3) and int(m.group(3)) < int(m.group(1)))
+                             or max(int(m.group(1)), int(m.group(3) or 0)) > MAX_REPEAT):
+                return (f"a {{ that isn't a repeat {{m}}, {{m,}} or {{m,n}} with m <= n <= {MAX_REPEAT} (write \\{{ "
+                        f"for the character)")
+            q = p[i:m.end()] if m else c
+            if not atom:
+                return f"{q} with nothing before it to repeat"
+            i, atom = i + len(q), False
+            if i < n and p[i] in "*+?{":
+                return f"a repeat after a repeat ({q}{p[i]}: lazy, possessive or doubled)"
+        elif c == ".":
+            return "an unescaped . (ICU's doesn't match \\r, U+0085, U+2028 or U+2029: write [^/] or \\.)"
+        elif c in "]}":
+            return f"an unescaped {c} (write \\{c})"
+        elif not " " <= c <= "~":
+            return _OUTSIDE_ASCII
+        else:                                       # | ^ $ and the characters that are themselves
+            i, atom = i + 1, c not in "|^$"
+    return "an unbalanced (" if depth else None
+
+
 def check():
     """What's wrong with the agents' recognition.json files: [str] (empty: nothing)."""
     bad, kinds, words = [], {}, {}
@@ -125,9 +269,14 @@ def check():
         for f, v in (r.get("package_folders") or {}).items():
             if not isinstance(v, dict) or v.get("kind") not in own or not all(isinstance(h, str) for h in v.get("helpers") or ()):
                 bad.append(f"{n}: package_folders {f!r} isn't {{kind, helpers}} of its own")
-        for a in r.get("apps") or ():
+        for i, a in enumerate(r.get("apps") or ()):
+            odd = {f: unportable(a[f]) for f in ("bundle", "helper")
+                   if isinstance(a, dict) and isinstance(a.get(f), str)}
+            odd = {f: what for f, what in odd.items() if what}
+            bad += [f"{n}: apps[{i}].{f} uses {what}, which the vault's regular expressions (ICU) don't read as "
+                    f"Python's do (lib/agentkit/recognition.py says what both read alike)" for f, what in odd.items()]
             try:
-                ok = a["kind"] in own and re.compile(a["bundle"]) and re.compile(a["helper"]) and \
+                ok = a["kind"] in own and all(f in odd or re.compile(a[f]) for f in ("bundle", "helper")) and \
                     all(isinstance(x, str) and x for x in a["folders"])
             except (KeyError, TypeError, re.error):
                 ok = False
