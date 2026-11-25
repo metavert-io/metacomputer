@@ -19,6 +19,14 @@ All notable changes to metacomputer are recorded here. The format follows
   a test fails on a line that names one. Adding a provider is its folder, one registry line and a line here. Nothing a
   user sees changes: every command, option, message, setting and file location is as it was.
 
+### Fixed
+
+- **`metacomputer update` on a checkout past the newest release** (main pulled after it) said the release "isn't ahead
+  of this checkout" and pointed at `--allow-downgrade`, which main then refuses anyway. It now says there's nothing
+  newer to update to yet and exits 0 (`--check --json`: `up_to_date`, `past_latest`); a checkout with commits of its
+  own after the release is the owner's to update; and going back on main says how (check out the tag, then
+  `./install.sh --allow-downgrade`). A detached checkout still goes back to the release with `--allow-downgrade`.
+
 ## [0.5.1] - 2026-11-24
 
 ### Added

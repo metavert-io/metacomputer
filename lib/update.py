@@ -500,12 +500,26 @@ def cmd_update(a):
     same = tcommit == st["commit"]
     forward = same or is_ancestor(st["commit"], tcommit)
     if not forward:
-        if not a.allow_downgrade:
-            raise Refused(f"{target} isn't ahead of this checkout ({st['version']}): going back needs --allow-downgrade, "
-                          "and a checkout with commits of its own is yours to move")
+        if not a.ref and not a.allow_downgrade and is_ancestor(tcommit, st["commit"]):
+            # Past the newest release. On the repository's own main (a checkout that pulled main) there's nothing newer
+            # to move to yet: not an error, and not a way back. With --allow-downgrade it is the way back: a detached
+            # checkout goes back to the release, and main still only moves forward (below).
+            if is_ancestor(st["commit"], "refs/remotes/origin/main"):
+                if a.json:
+                    print(json.dumps({"current": st["version"], "latest": target, "up_to_date": True,
+                                      "past_latest": True, "whats_new": []}))
+                else:
+                    print(f"metacomputer {st['version']} is past the newest release, {target}: this checkout has the "
+                          f"repository's commits from after it, so there's nothing newer to update to yet (the next "
+                          "release will be). To set up what this checkout has, run ./install.sh")
+                return 0
+            raise Refused(f"this checkout ({st['version']}) has commits of its own after {target}, the newest release, "
+                          "so it's yours to update (with git), then ./install.sh")
         if st["branch"] == "main":
-            raise Refused("main only moves forward: to go back, check out the tag yourself (git checkout TAG), then "
-                          "./install.sh --allow-downgrade")
+            raise Refused(f"{target} isn't ahead of this checkout ({st['version']}), and main only moves forward: to go "
+                          f"back, check out the tag yourself (git checkout {target}), then ./install.sh --allow-downgrade")
+        if not a.allow_downgrade:
+            raise Refused(f"{target} isn't ahead of this checkout ({st['version']}): going back needs --allow-downgrade")
         if not (git("branch", "-r", "--contains", st["commit"], check=False) or
                 git("tag", "--contains", st["commit"], check=False)):
             raise Refused("this checkout has commits that no branch or tag of the repository has: they'd be left behind")
