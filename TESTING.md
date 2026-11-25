@@ -163,9 +163,9 @@ runner's does.
   a SIGINT as the watch is first closed; a SIGINT as the watch is closed after a good record still kills its group and
   reaps it; a kqueue registration that fails leaves no kqueue open; one that has exited (not reaped) before the watch
   starts, which macOS's kqueue reports as no such process, is told by its own status: exit 0 resolves demo, exit 7 is
-  refused for that, not as lost, and nothing is sent. And nothing in `bin/`, `scripts/`, `lib/` or
-  `install.sh` reaps children it didn't start: Python read as code (`ast`, imports and aliases resolved: any-child
-  `waitpid`/`waitid`, `os.wait`/`wait3`/`wait4`, SIGCHLD, Safe/Fast child watchers), shell by text (a trap on CHLD);
+  refused for that, not as lost, and nothing is sent. And nothing in `bin/`, `scripts/`, `lib/`, `providers/` (less
+  their `guest/`) or `install.sh` reaps children it didn't start: Python read as code (`ast`, imports and aliases
+  resolved: any-child `waitpid`/`waitid`, `os.wait`/`wait3`/`wait4`, SIGCHLD, Safe/Fast child watchers), shell by text (a trap on CHLD);
   the scanner is checked against 20 forbidden forms (a multi-line `waitpid(-1, ...)`, `waitid(P_ALL, ...)`, `from os
   import wait; wait()` among them) and the allowed `os.waitpid(pid, 0)`.
 - `vm create`: the file (0600; identity, vault and spool; this Mac's choices copied, never
@@ -269,10 +269,10 @@ runner's does.
   quarantined (left, counted in `spool.json`, said once; never deleted) while valid events are consumed; with
   a `.quarantine` folder, the invalid file is moved there.
 - No bare recursive delete: every `rm -r`, `rmtree`, `removedirs` and runner delete in `bin/`, `scripts/`,
-  `lib/` and `install.sh` goes through `lib/safedelete.py`, or is in `DELETE_EXCEPTIONS`: the runner's
-  delete is one line, in `runner_delete` (which must call `safedelete.py check-runner` first, and whose every
-  caller must run after the identity rule), deletes inside the VM, printed hints. A Python function that
-  lists a folder (`os.walk`, `fwalk`, `listdir`, `scandir`, `glob`, `rglob`, `iterdir`), itself or through
+  `lib/`, `providers/` (less their `guest/`) and `install.sh` goes through `lib/safedelete.py`, or is in
+  `DELETE_EXCEPTIONS`: the runner's delete is one line, in `runner_delete` (which must call `safedelete.py
+  check-runner` first, and whose every caller must run after the identity rule), deletes inside the VM, printed hints.
+  A Python function that lists a folder (`os.walk`, `fwalk`, `listdir`, `scandir`, `glob`, `rglob`, `iterdir`), itself or through
   any function of its module it calls, and deletes, moves or rewrites files itself (`unlink`, `rmdir`,
   `rmtree`, `os.remove`, `os.rename`, `os.replace`, `shutil.move`, the programs' file writers) is in
   `DELETE_WALK_EXCEPTIONS` with why and the code that keeps it safe (each fragment must stay in the

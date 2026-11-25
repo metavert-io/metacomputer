@@ -2876,7 +2876,7 @@ DELETE_EXCEPTIONS = [
     ("scripts/remote-build.sh", "rc=\\$?; rm -rf ~/$rdir; exit \\$rc", "guest"),
     ("scripts/remote-build.sh", "gssh admin 'sudo rm -rf /opt/metacomputer-payload && sudo install -d", "guest"),
     # ...and a Fly Sprite's bootstrap folder, a temporary one in the Sprite, removed there by the command Fly's exec runs
-    ("scripts/remote-build.sh", 'bash "$d/bootstrap.sh" "$d"; rc=$?; rm -rf "$d"; exit $rc', "guest"),
+    ("providers/sprites/build.sh", 'bash "$d/bootstrap.sh" "$d"; rc=$?; rm -rf "$d"; exit $rc', "guest"),
     ("install.sh", "rm -r $SSH_DIR; and last", "text"),
     ("install.sh", "is installed too: rm -rf ~/.local/share/lume-secure", "text"),
     ("install.sh", 'echo "    rm -rf ~/.local/share/lume-secure', "text"),
@@ -3123,12 +3123,24 @@ REAP_ALLOWED = {
 }
 
 
+def mac_side_files():
+    """What runs on this Mac: install.sh and every file of bin/, scripts/, lib/ and the providers' folders
+    (providers/<name>/), less what a provider puts into the computer (its guest/, as provisioning/ is left out)."""
+    out = []
+    for top in ("bin", "scripts", "lib", "providers"):
+        for d, _, fs in os.walk(os.path.join(LAB, top)):
+            rel_d = os.path.relpath(d, LAB)
+            if "__pycache__" in d or (top == "providers" and "guest" in rel_d.split(os.sep)[2:3]):
+                continue
+            out += [os.path.relpath(os.path.join(d, f), LAB) for f in fs]
+    return ["install.sh"] + sorted(out)
+
+
 def reap_inventory(td):
-    """No code in bin/, scripts/, lib/ or install.sh reaps children it didn't start (lib/labconfig.py signals the
+    """No code in bin/, scripts/, lib/, the providers' folders or install.sh reaps children it didn't start (lib/labconfig.py signals the
     resolver's group only while it's unreaped, and relies on that). Python is read as code; comments don't count:
     labconfig's says what it relies on."""
-    files = ["install.sh"] + sorted(os.path.relpath(os.path.join(d, f), LAB) for top in ("bin", "scripts", "lib")
-                                    for d, _, fs in os.walk(os.path.join(LAB, top)) if "__pycache__" not in d for f in fs)
+    files = mac_side_files()
     hits, pys = [], 0
     for rel in files:
         try:
@@ -3140,8 +3152,8 @@ def reap_inventory(td):
             hits += [f"{rel}:{n}: {what}" for n, what in reap_findings_py(text)]
         else:
             hits += [f"{rel}:{n}: {what}" for n, what in reap_findings_text(text)]
-    check(f"nothing in bin/, scripts/, lib/ or install.sh reaps children it didn't start ({pys} Python files read as "
-          "code, the rest as text)", not hits and pys > 20, "\n".join(hits) or pys)
+    check(f"nothing in bin/, scripts/, lib/, providers/ or install.sh reaps children it didn't start ({pys} Python files "
+          "read as code, the rest as text)", not hits and pys > 20, "\n".join(hits) or pys)
     missed = [k for k, src in REAP_FORBIDDEN.items() if not reap_findings_py(src)]
     check(f"...the scanner finds each of {len(REAP_FORBIDDEN)} forbidden forms (a multi-line waitpid(-1, ...), "
           "waitid(P_ALL, ...), from os import wait, aliases, SIGCHLD, the watchers, ...)", not missed, missed)
@@ -3155,13 +3167,12 @@ def reap_inventory(td):
 
 
 def delete_inventory(td):
-    """No bare recursive delete: every rm -r, rmtree and removedirs in bin/, scripts/, lib/ and install.sh goes
-    through lib/safedelete.py (scripts/safe-rmtree.sh), except those in DELETE_EXCEPTIONS (the runner's own deletes,
-    which run after the identity rule; deletes inside the VM; printed hints). A new one, or an exception no longer in
-    the code, fails this test."""
+    """No bare recursive delete: every rm -r, rmtree and removedirs in what runs on this Mac (mac_side_files: bin/,
+    scripts/, lib/, the providers' folders less their guest/, install.sh) goes through lib/safedelete.py
+    (scripts/safe-rmtree.sh), except those in DELETE_EXCEPTIONS (the runner's own deletes, which run after the identity
+    rule; deletes inside the VM; printed hints). A new one, or an exception no longer in the code, fails this test."""
     pat = re.compile(DELETE_PAT)
-    files = ["install.sh"] + sorted(os.path.relpath(os.path.join(d, f), LAB) for top in ("bin", "scripts", "lib")
-                                    for d, _, fs in os.walk(os.path.join(LAB, top)) if "__pycache__" not in d for f in fs)
+    files = mac_side_files()
     bare, used, runner_lines = [], set(), []
     for rel in files:
         if rel in DELETE_HELPER:
