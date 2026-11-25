@@ -481,10 +481,10 @@ LINT_ALLOW = [
      "usage text, as above"),
     ("bin/metacomputer", "#                                  what metacomputer made at a provider (oci, sprites, hetzner, digitalocean, vultr),",
      "usage text, as above"),
-    ("scripts/vm-commands.sh", '*) die "usage: metacomputer vm list [--on PLACE] [--json] | create NAME',
+    ("scripts/vm-commands.sh", '*) die "usage: metacomputer vm list [--on PLACE] [--json] | create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes] | create NAME --on server --host ADDRESS --user ACCOUNT [--port P] | create NAME --on oci|hetzner|digitalocean|vultr [--size SIZE] [--region REGION] [--egress internet|off] | create NAME --on sprites --org ORG [--sprite SPRITE] [--egress internet|off] | delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes] [--checked-provider]" ;;',
      "a usage message: it groups Oracle Cloud with the hourly three and lists Sprites last, which isn't the "
      "registry's order, so it can't be made from the manifests without changing it"),
-    ("scripts/vm-commands.sh", '-*) die "unknown option $1 (metacomputer vm create NAME',
+    ("scripts/vm-commands.sh", '-*) die "unknown option $1 (metacomputer vm create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes]; elsewhere: --on server --host ADDRESS --user ACCOUNT [--port P], --on oci [--size SIZE], --on hetzner|digitalocean|vultr [--size SIZE] [--region REGION], or --on sprites --org ORG [--sprite SPRITE]; all: [--egress internet|off])" ;;',
      "a usage message whose grouping (Oracle Cloud, the hourly three, then Sprites) isn't the registry's order, as above"),
     ("scripts/release.sh", "test_traces test_page_guest test_update test_agents test_cloud_adapters test_session_guard test_remote test_sprites",
      "a test suite's name in the no-VM suites a release runs (the list CLAUDE.md and the release's tests check)"),
@@ -543,15 +543,19 @@ def _read_text(rel):
 
 def naming_lines(words, files, read=_read_text):
     """[(file, line number, line, providers it names)] of the shared files, less the allowed files and the generated
-    blocks (only in GEN_BLOCK_FILES, each closed); lines of files that aren't text are skipped. A block's marker where
-    the generator writes none, a nested or unclosed block, or an end with no beginning is a hit of its own."""
+    blocks (only in GEN_BLOCK_FILES, each closed). A file that isn't UTF-8 text, a block's marker where the generator
+    writes none, a nested or unclosed block, or an end with no beginning is a hit of its own."""
     hits = []
     for rel in files:
         if rel in LINT_FILES:
             continue
         try:
             text = read(rel)
-        except (UnicodeDecodeError, OSError):
+        except UnicodeDecodeError:
+            # Never skipped: a file in another encoding could hide anything from a UTF-8 read (codex check of 4bf80e2).
+            hits.append((rel, 1, "", ["a shared file that isn't UTF-8 text, so the lint can't read it"]))
+            continue
+        except OSError:
             continue
         generated, opened = False, 0
         for i, line in enumerate(text.split("\n"), 1):
@@ -575,6 +579,15 @@ def naming_lines(words, files, read=_read_text):
         if generated:
             hits.append((rel, opened, MARK_BEGIN, ["a generated block that isn't closed"]))
     return hits
+
+
+def allowed_index(rel, line, words):
+    """The LINT_ALLOW entry that allows this line, or None: its file, its piece in the line, and nothing else on the line
+    naming a provider once the piece is taken out (a piece allows only itself, never code beside it on the line)."""
+    for j, (f, piece, _why) in enumerate(LINT_ALLOW):
+        if f == rel and piece in line and not any(p.search(line.replace(piece, "", 1)) for p in words.values()):
+            return j
+    return None
 
 
 def packages():
@@ -672,10 +685,20 @@ def packages():
           and any("isn't closed" in n for n in by.get("scripts/lib.sh", []))
           and "oci" in by.get("scripts/remote-build.sh", []) and any("no beginning" in n for n in by.get("scripts/remote-build.sh", []))
           and "bin/metacomputer" not in by, by)
+    def latin1(rel):
+        raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid start byte")
+    got = naming_lines(words, ["lib/latin1.py"], read=latin1)
+    check("...a shared file that isn't UTF-8 is a hit, never skipped (codex check of 4bf80e2)",
+          len(got) == 1 and "isn't UTF-8" in got[0][3][0], got)
+    f0, piece0, _w = next(e for e in LINT_ALLOW if e[0] == "bin/metacomputer")
+    sneaky = 'case "$on" in oci) evil ;; esac   # ' + piece0
+    check("...an allowed line's piece allows only itself: provider branching beside it on the same line isn't allowed "
+          "(codex check of 4bf80e2)", allowed_index(f0, piece0, words) is not None
+          and allowed_index(f0, sneaky, words) is None, (piece0, sneaky))
     hits = naming_lines(words, files)
     used, unallowed = set(), []
     for rel, i, line, named in hits:
-        k = next((j for j, (f, piece, _why) in enumerate(LINT_ALLOW) if f == rel and piece in line), None)
+        k = allowed_index(rel, line, words)
         if k is None:
             unallowed.append(f"{rel}:{i}: {line.strip()[:140]} ({', '.join(named)})")
         else:
