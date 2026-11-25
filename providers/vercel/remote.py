@@ -115,8 +115,10 @@ def stop_broker(R, s):
 
 # --- lifecycle -------------------------------------------------------------------------------------------------------
 # A launch whose answer was lost may show at Vercel only later (its create may still be in flight, or its listing lag
-# behind): it's looked for again and again, LOST_GAP_S apart, until VISIBILITY_WINDOW_S have passed since it was sent,
-# twice the create call's own 60 s timeout. Until then nothing says "nothing was made", and the journal stays.
+# behind): it's looked for again and again, LOST_GAP_S apart, until it has been missing for VISIBILITY_WINDOW_S of
+# consecutive lookups in this attempt, twice the create call's own 60 s timeout. The window counts from this attempt's
+# first empty lookup, never from the launch: a retry hours later still waits the whole window. Until then nothing says
+# "nothing was made", and the journal stays.
 LOST_GAP_S = 10
 VISIBILITY_WINDOW_S = 120
 
@@ -124,21 +126,25 @@ VISIBILITY_WINDOW_S = 120
 def resolve_lost(R, a, s, st):
     """The sandbox a launch journaled in `st` (launching, launch_t) made though its answer was lost: only one tagged
     with that launch's operation (adapter.owned_lost; a name alone is never enough). It's looked for until it shows,
-    or until VISIBILITY_WINDOW_S after the launch was sent, LOST_GAP_S apart: None only then. A lookup that fails, or a
-    sandbox of that name without the tag, raises: the journal is left as it is."""
+    LOST_GAP_S apart, or until VISIBILITY_WINDOW_S of consecutive empty lookups in this call, counted from its first
+    empty one however long ago the launch was: None only then. A lookup that fails, or a sandbox of that name without
+    the tag, raises: the journal is left as it is."""
     op = st.get("launching")
     if not op:
         return None
-    sent = st.get("launch_t") if isinstance(st.get("launch_t"), (int, float)) else time.time()
+    first_empty = None
     while True:
         found = a.owned_lost(s["VM_NAME"], op)
         if found:
             return found
-        if time.time() >= sent + VISIBILITY_WINDOW_S:
+        now = time.time()
+        if first_empty is None:
+            first_empty = now
+        if now - first_empty >= VISIBILITY_WINDOW_S:
             return None
-        print(f"metacomputer: {s['VM_NAME']}'s launch got no answer and its sandbox doesn't show yet: looking again until "
-              f"{VISIBILITY_WINDOW_S} s after it was sent", file=sys.stderr)
-        time.sleep(min(LOST_GAP_S, max(0.0, sent + VISIBILITY_WINDOW_S - time.time())) or LOST_GAP_S)
+        print(f"metacomputer: {s['VM_NAME']}'s launch got no answer and its sandbox doesn't show yet: looking again every "
+              f"{LOST_GAP_S} s until {VISIBILITY_WINDOW_S} s of lookups have found nothing", file=sys.stderr)
+        time.sleep(LOST_GAP_S)
 
 
 def delete_everything(R, s, a, rd, st):

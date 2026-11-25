@@ -828,16 +828,61 @@ if argv[:2] == ["list", "table"]:
     print("\t}\n}"); done(0)
 done(0)
 """
-PROC_STANDIN = r"""#!/bin/bash
-# pkill / pgrep stand-ins: each call logged; pgrep finds the desktop's account running (the desktop-restart case).
-echo "$(basename "$0") $*" >> "$PROC_LOG"
-case "$(basename "$0")" in pgrep) exit 0 ;; *) exit 0 ;; esac
+PROC_STANDIN = r"""#!PY
+# ps, kill, pkill, pgrep and id over one process table in a JSON file (pid, uid, user, comm): each call logged; kill and
+# pkill take processes out of it, as the real ones end them.
+import json, os, sys
+tab_f, me = os.environ["PROC_TABLE"], os.path.basename(sys.argv[0])
+procs = json.load(open(tab_f))
+argv = sys.argv[1:]
+with open(os.environ["PROC_LOG"], "a") as f:
+    f.write(me + " " + " ".join(argv) + "\n")
+def save():
+    json.dump(procs, open(tab_f, "w"))
+USERS = {"root": 0, "ubuntu": 1000, "cua": 1001, "cuaadmin": 1002, "mcfill": 998, "mcproxy": 997, "nobody": 65534}
+if me == "id":
+    print(USERS[argv[-1]] if argv[-1] in USERS else os.getuid()); sys.exit(0 if argv[-1] in USERS else 1)
+if me == "ps":
+    for p in procs:
+        print("%7d %6d" % (p["pid"], p["uid"]))
+    sys.exit(0)
+if me == "kill":
+    pids = [int(x) for x in argv if x.isdigit()]
+    procs[:] = [p for p in procs if p["pid"] not in pids]; save(); sys.exit(0)
+def match(p):
+    if "-x" in argv:
+        return p["comm"] == argv[-1]
+    if "-u" in argv:
+        u = argv[argv.index("-u") + 1]
+        return p["user"] == u or str(p["uid"]) == u
+    return False
+hit = [p for p in procs if match(p)]
+if me == "pkill":
+    procs[:] = [p for p in procs if p not in hit]; save()
+sys.exit(0 if hit else 1)
 """
+# The accounts as a Vercel sandbox has them after the setup: Vercel's `ubuntu` (its API, PID 1 too), the desktop's and
+# the maintenance account (useradd: 1001, 1002), the vault's (useradd --system: below 1000), nobody.
 GETENT_STANDIN = r"""#!/bin/bash
 [ "$1" = passwd ] || exit 2
 printf '%s\n' root:x:0:0::/root:/bin/bash ubuntu:x:1000:1000::/vercel:/bin/bash cua:x:1001:1001::/nonexistent:/bin/bash \
-  cuaadmin:x:1002:1002::/nonexistent:/bin/bash mcfill:x:1003:1003::/nonexistent:/bin/bash nobody:x:65534:65534::/:/sbin/nologin
+  cuaadmin:x:1002:1002::/nonexistent:/bin/bash mcfill:x:998:998::/nonexistent:/usr/sbin/nologin \
+  mcproxy:x:997:997::/nonexistent:/usr/sbin/nologin nobody:x:65534:65534::/:/sbin/nologin
 """
+# A sandbox's processes while the desktop runs: Vercel's (PID 1 and its API's commands, as ubuntu), root's (the boot
+# itself, sshd), the desktop's, a maintenance session, the vault's fill and proxy sessions, nobody's, and one of a uid
+# no account has (a user namespace's).
+PROCESSES = [{"pid": 1, "uid": 1000, "user": "ubuntu", "comm": "sandbox-init"},
+             {"pid": 40, "uid": 1000, "user": "ubuntu", "comm": "bash"},
+             {"pid": 41, "uid": 0, "user": "root", "comm": "bash"},
+             {"pid": 50, "uid": 0, "user": "root", "comm": "sshd"},
+             {"pid": 60, "uid": 1001, "user": "cua", "comm": "firefox"},
+             {"pid": 61, "uid": 1001, "user": "cua", "comm": "xfce4-session"},
+             {"pid": 70, "uid": 1002, "user": "cuaadmin", "comm": "bash"},
+             {"pid": 80, "uid": 998, "user": "mcfill", "comm": "secret-fill"},
+             {"pid": 81, "uid": 997, "user": "mcproxy", "comm": "sshd"},
+             {"pid": 90, "uid": 65534, "user": "nobody", "comm": "sleep"},
+             {"pid": 95, "uid": 101000, "user": "", "comm": "python3"}]
 
 
 def boot_firewall_part():
@@ -852,14 +897,19 @@ def run_firewall(td, fail=False):
     """The boot's firewall part under stand-ins: (exit code, output, nft's log entries, the process calls)."""
     bin_ = os.path.join(td, "bin")
     os.makedirs(bin_, exist_ok=True)
-    for name, body in (("nft", NFT_STANDIN.replace("#!PY", "#!" + sys.executable, 1)), ("pkill", PROC_STANDIN),
-                       ("pgrep", PROC_STANDIN), ("getent", GETENT_STANDIN)):
+    proc = PROC_STANDIN.replace("#!PY", "#!" + sys.executable, 1)
+    for name, body in (("nft", NFT_STANDIN.replace("#!PY", "#!" + sys.executable, 1)), ("pkill", proc), ("pgrep", proc),
+                       ("ps", proc), ("kill", proc), ("id", proc), ("getent", GETENT_STANDIN)):
         with open(os.path.join(bin_, name), "w") as f:
             f.write(body)
         os.chmod(os.path.join(bin_, name), 0o755)
-    script = 'say() { echo "SAY $*"; }\nfail() { echo "FAIL $*"; exit 1; }\nset -u\n' + boot_firewall_part() + '\necho PART-DONE\n'
+    # kill is a bash builtin: a function puts the stand-in in its place, so no signal ever reaches this machine's processes.
+    script = ('say() { echo "SAY $*"; }\nfail() { echo "FAIL $*"; exit 1; }\nkill() { "%s/kill" "$@"; }\nset -u\n' % bin_
+              + boot_firewall_part() + '\necho PART-DONE\n')
     env = {"PATH": bin_ + ":/usr/bin:/bin", "NFT_STATE": os.path.join(td, "nft.json"), "NFT_LOG": os.path.join(td, "nft.log"),
-           "PROC_LOG": os.path.join(td, "proc.log"), "NFT_FAIL": "1" if fail else "0", "HOME": td}
+           "PROC_LOG": os.path.join(td, "proc.log"), "NFT_FAIL": "1" if fail else "0", "HOME": td,
+           "PROC_TABLE": os.path.join(td, "procs.json")}
+    json.dump(PROCESSES, open(env["PROC_TABLE"], "w"))
     for f in ("nft.log", "proc.log"):
         open(os.path.join(td, f), "w").close()
     r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
@@ -888,11 +938,12 @@ def review_firewall(td):
     d2 = os.path.join(td, "fw2")
     os.makedirs(d2)
     rc, out, nlog, plog = run_firewall(d2, fail=True)
-    killed = {x.split()[-1] for x in plog if x.startswith("pkill") and " -u " in x}
-    check("nft refusing it with none in force: the boot stops, and every process of every account but root and "
-          "Vercel's own is ended (the desktop's, the maintenance account's, the vault's), and sshd",
-          rc != 0 and "PART-DONE" not in out and {"cua", "cuaadmin", "mcfill"} <= killed and "ubuntu" not in killed
-          and "root" not in killed and any(x.startswith("pkill") and "sshd" in x for x in plog), (rc, plog, out[-200:]))
+    left = json.load(open(os.path.join(d2, "procs.json")))
+    check("nft refusing it with none in force: the boot stops", rc != 0 and "PART-DONE" not in out, (rc, out[-200:]))
+    check("...and every process whose uid isn't root's or Vercel's own (ubuntu) is ended: the desktop's, the "
+          "maintenance account's, the vault's system accounts (below uid 1000), nobody's, a uid no account has",
+          {p["uid"] for p in left} <= {0, 1000} and {1, 40, 41} <= {p["pid"] for p in left}, left)
+    check("...and sshd", not [p for p in left if p["comm"] == "sshd"], left)
 
 
 def review_cleanup():
@@ -982,6 +1033,33 @@ def review_lost_launch():
                 e = raises(hooks.delete, remote, box.s, a, box.rd, rec, None)
             check(f"{hk}: looks again until it shows (within Vercel's delay), then deletes it: never 'nothing was made' "
                   "while it may still appear", e is None and "box" not in st.sandboxes, (e, list(st.sandboxes)))
+    for hk in ("abort", "delete", "create"):
+        st = Stand()
+        with tempfile.TemporaryDirectory(prefix="mcvt.") as td:
+            box = Box(td)
+            a = vc.Vercel({"box": box.s}, {}, api=api_on(st))
+            hooks.LOST_GAP_S = 0.01
+            hooks.VISIBILITY_WINDOW_S = 0.2
+            st.lose_create = True
+            raises(hooks.create, remote, box.s, a, box.rd, {}, OP)
+            st.lose_create = False
+            rec = dict(remote.read_state(box.rd), launch_t=time.time() - 3 * 3600)     # a journal hours old
+            remote.write_state(box.rd, rec)
+            st.hidden["box"] = 2            # the next two lookups don't show it, the third does
+            if hk == "abort":
+                e = raises(hooks.abort, remote, box.s, a, box.rd, rec, OP, False)
+            elif hk == "delete":
+                e = raises(hooks.delete, remote, box.s, a, box.rd, rec, None)
+            else:
+                real_broker, hooks.start_broker = hooks.start_broker, lambda *x, **k: None    # the broker: not this check's
+                try:
+                    e = raises(hooks.create, remote, box.s, a, box.rd, rec, "a" * 32)
+                finally:
+                    hooks.start_broker = real_broker
+            ours = [x for x in st.sandboxes.values() if x["sandbox"]["tags"].get("mcop") == OP]
+            check(f"{hk}, a journal hours old and a lookup briefly empty: the window counts from this attempt's first "
+                  "empty lookup, so the sandbox is found, adopted and deleted, never forgotten", e is None and not ours
+                  and (hk != "create" or st.sandboxes["box"]["sandbox"]["tags"]["mcop"] == "a" * 32), (e, list(st.sandboxes)))
     st = Stand()
     with tempfile.TemporaryDirectory(prefix="mcvt.") as td:
         box = Box(td)

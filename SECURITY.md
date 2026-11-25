@@ -2015,7 +2015,8 @@ the first connection, read over Vercel's authenticated API), with these differen
   made again in one script, which nft applies whole or not at all), so a boot run again while the desktop runs
   (`desktop-restart`) never leaves a moment without the rule (found by review: it was deleted, then made again); if no
   rule can be put in force, every process of every account but root's and Vercel's own is ended, sshd too, and the
-  boot stops. Checked live: the desktop's
+  boot stops: every process whose uid isn't 0 or `ubuntu`'s, the setup's system accounts below uid 1000 and uids no
+  account has included (found by review: only uids 1000 and up were ended). Checked live: the desktop's
   account, Vercel's `ubuntu` account and an account in a user namespace of its own get a refused connection on every
   address; root still gets its 404; no account but root can remove the rule (EPERM, from a user namespace too); Vercel's
   command API, policy changes and snapshots work with it in force.
@@ -2043,8 +2044,9 @@ the first connection, read over Vercel's authenticated API), with these differen
   command, delete, each SSH connection right before its relay starts, and the broker again before it runs the relay)
   checks that the sandbox of that name was made at that time and carries those tags, and does nothing otherwise. A
   build whose answer was lost deletes only a sandbox carrying its operation's tag, and says nothing was made only
-  after looking again over Vercel's visibility delay (two minutes from the launch, found by review: one look could miss
-  a create that completed later); until then its journal stays.
+  after looking again over Vercel's visibility delay (two minutes of consecutive empty lookups, every 10 s, counted
+  from the first one of that attempt and never from the launch, found by review: one look could miss a create that
+  completed later, and a retry long after the launch got only one); until then its journal stays.
 - **Every snapshot is deleted with the computer.** Vercel keeps a sandbox's snapshots when the sandbox is deleted
   unless they're orphans, deletes those later, and lists none of them by the sandbox's name once it's gone (all found
   live), and snapshots bill: `vm delete` journals each one in the computer's record (its checkpoints, and those

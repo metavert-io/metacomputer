@@ -49,7 +49,8 @@ The build (`metacomputer --vm work build`, about 6 minutes):
 
 1. **The sandbox**, through Vercel's API, journaled first and tagged with the computer and the build's operation: a
    build that fails or is interrupted deletes what it made and nothing else (a launch whose answer was lost is found by
-   its name and that tag, looked for again until two minutes after the launch, Vercel's visibility delay; a sandbox
+   its name and that tag, looked for again every 10 s until two minutes of lookups have found nothing, Vercel's
+   visibility delay, however long ago the launch was; a sandbox
    of that name without it is never touched). `build --keep-on-failure` keeps it
    instead (stopped). Its network policy is `internet` while it's set up, then `EGRESS`, read back. Its snapshots never
    expire by themselves (`snapshotExpiration` 0).
@@ -161,7 +162,8 @@ the one layer, and the manifest's `outside_egress` says so.
   refuses it to every account but root: an nftables rule by uid (`tcp dport 23456 meta skuid != 0 reject`), put back
   by the boot script at every start (a stop clears it) before anything of the desktop's runs, replaced in one
   transaction so it never lapses (`desktop-restart` runs the boot script with the desktop still up); if no rule can be
-  put in force, the processes of every account but root's and Vercel's own are ended, sshd too, and the boot stops.
+  put in force, the processes of every account but root's and Vercel's own are ended (every uid but 0 and `ubuntu`'s,
+  the setup's system accounts too), sshd too, and the boot stops.
   Checked live: the desktop's account, Vercel's `ubuntu` account and an account in a user namespace of its own
   are refused, root still gets its 404, and no account but root can remove the rule.
 - **SSH only through Vercel's API.** sshd listens on the sandbox's own loopback, reached from your Mac only through the

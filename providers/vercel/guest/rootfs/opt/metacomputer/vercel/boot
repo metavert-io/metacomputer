@@ -48,12 +48,20 @@ table inet metacomputer_vercel {
   }
 }
 NFT
+# With no rule in force, every process that could reach the port is ended: every one whose uid isn't root's or Vercel's
+# own (`ubuntu`, its API's commands): the desktop's, the maintenance account's, the system accounts the setup adds
+# (mcfill, mcproxy: below uid 1000) and any uid no account has alike; sshd first, so no new session starts meanwhile.
 if ! rule_in_force; then
   pkill -KILL -x sshd 2>/dev/null
-  for u in $(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "ubuntu" { print $1 }'); do
-    pkill -KILL -u "$u" 2>/dev/null
+  keep="$(id -u ubuntu 2>/dev/null)" || keep=""
+  for _ in 1 2 3 4 5; do
+    left=""
+    for p in $(ps -eo pid=,uid= | awk -v keep="$keep" '$2 != 0 && $2 != keep { print $1 }'); do
+      left=1; kill -KILL "$p" 2>/dev/null
+    done
+    [ -n "$left" ] || break
   done
-  fail "the rule keeping Vercel's agent port from the desktop isn't in force: the desktop's processes and sshd were ended, nothing else was started"
+  fail "the rule keeping Vercel's agent port from the desktop isn't in force: sshd and every process of every account but root's and Vercel's own were ended, nothing else was started"
 fi
 say "Vercel's agent port ($PORT) refused to every account but root"
 
