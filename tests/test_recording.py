@@ -191,6 +191,8 @@ def cli_script(td, funcs, body, defaults=True, cfg=""):
     os.makedirs(os.path.join(lab, "recordings"), exist_ok=True)
     if not os.path.exists(os.path.join(lab, "lib")):
         os.symlink(os.path.join(LAB, "lib"), os.path.join(lab, "lib"))
+    if not os.path.exists(os.path.join(lab, "coding-agents")):     # the agents' tables, which lib/agentkit reads beside lib/
+        os.symlink(os.path.join(LAB, "coding-agents"), os.path.join(lab, "coding-agents"))
     return "\n".join([
         f'TD="{td}"',
         f'. "{LAB}/config/defaults.env"' if defaults else "unset RECORD_TO",
