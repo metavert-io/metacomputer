@@ -40,6 +40,14 @@ def credential_block():
             END]
 
 
+def cloud_usage():
+    """`cloud`'s usage words for the providers' own options: " [--org ORG]" for --org."""
+    out = ""
+    for opt, _env in manifests.cloud_options():
+        out += f" [{opt} {opt[2:].upper().replace('-', '_')}]"
+    return out
+
+
 def providers_sh():
     out = ["# metacomputer's providers, as bash reads them: made from providers/<name>/manifest.py by",
            "# scripts/gen-providers.py (don't edit by hand: its --check fails a copy that isn't current). Sourced by",
@@ -50,6 +58,9 @@ def providers_sh():
            f"MC_PROVIDER_CREATE_OPTIONS={sh_quote(' '.join(o[0] for o in manifests.create_options()))}",
            f"MC_PROVIDER_CREATE_ONLY={sh_quote(' '.join(o[0] for o in manifests.create_options() if o[3]))}",
            f"MC_PROVIDER_CLOUD_OPTIONS={sh_quote(' '.join(o for o, _e in manifests.cloud_options()))}",
+           # `cloud`'s usage and its value options, as metacomputer's command-line rules take them (bin/metacomputer)
+           f"MC_PROVIDER_CLOUD_USAGE={sh_quote(cloud_usage())}",
+           f"MC_PROVIDER_CLOUD_VALUES={sh_quote(''.join(o + '= ' for o, _e in manifests.cloud_options()))}",
            f"MC_TRANSPORT_SETTINGS={sh_quote(' '.join(manifests.transport_settings()))}",
            "mc_pv() { # PROVIDER KEY: that provider's word for KEY (lib/cloud/manifests.py shell_words); status 1: none",
            "  case \"$1:$2\" in"]

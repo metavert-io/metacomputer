@@ -496,8 +496,8 @@ mc_strict() { # CMD ARGS...
                      [ $# -eq 0 ] || [ "$*" = --json ] || case " $* " in *" apply "*) ;; *)
                        mc_usage_error "usage: metacomputer security [apply] [--json]" ;; esac ;;
     test)            mc_take "test [A B C D E F | all] [--run-id ID] [--override]" 0 99 "--override" "--run-id" "$@" ;;
-    cloud)           mc_take "cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG] [--forget OP]" 2 2 "--json" \
-                       "--org= --forget=" "$@" ;;
+    cloud)           mc_take "cloud status|doctor|setup|teardown PROVIDER [--json]$MC_PROVIDER_CLOUD_USAGE [--forget OP]" 2 2 "--json" \
+                       "$MC_PROVIDER_CLOUD_VALUES--forget=" "$@" ;;
     setup)           # install.sh's options (its own loop refuses the rest, but only once a terminal or --yes lets it run)
                      mc_take "setup [--yes] [install.sh's options: ./install.sh --help]" 0 0 "--yes -y --no-chrome --no-build \
                        --replace-vm --fresh-sources --no-claude --claude --only-agents --no-plugin --only-claude --uninstall \
@@ -3190,7 +3190,7 @@ case "$cmd" in
   shop)       export_options; MCOMP_VAULT_BIN="$VAULT_BIN" MCOMP_VM_NAME="$VM_NAME" MCOMP_SELF="$0" exec "$PY" "$LAB_ROOT/lib/shop.py" "$@" ;;
   learn)      export_options; exec "$PY" "$LAB_ROOT/lib/learn.py" "$@" ;;
   agents)     exec "$PY" "$LAB_ROOT/lib/agents.py" "$@" ;;
-  cloud)      [ $# -ge 2 ] || die "usage: metacomputer cloud status|doctor|setup|teardown PROVIDER [--json]$(for mc_o in $MC_PROVIDER_CLOUD_OPTIONS; do mc_u="${mc_o#--}"; printf ' [%s %s]' "$mc_o" "$(printf '%s' "$mc_u" | tr '[:lower:]-' '[:upper:]_')"; done) [--forget OP]   (PROVIDER: ${MC_PROVIDERS// /, })"
+  cloud)      [ $# -ge 2 ] || die "usage: metacomputer cloud status|doctor|setup|teardown PROVIDER [--json]$MC_PROVIDER_CLOUD_USAGE [--forget OP]   (PROVIDER: ${MC_PROVIDERS// /, })"
               # teardown deletes what metacomputer left at the provider, servers included, and --forget drops the
               # record of a launch that may have made one: the user's own call, at their own terminal (an agent says
               # the command instead). A provider with nothing to tear down (its manifest's teardown) says so itself

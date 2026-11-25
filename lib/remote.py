@@ -24,8 +24,9 @@ remote half asks `target` here (lib/cloud/transport.py) once per command.
     remote.py status --vm NAME [--json]        the provider's view of it (and the address, when it runs)
     remote.py state --vm NAME                  one word: awake, stopped, starting, stopping, absent, unknown
     remote.py rates --vm NAME [--json]         what it costs awake and asleep
-    remote.py cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG] [--forget OP]
-        what metacomputer has made at a provider (tagged), checks, the provider's network, and removing it
+    remote.py cloud status|doctor|setup|teardown PROVIDER [--json] [--forget OP] [its own options]
+        what metacomputer has made at a provider (tagged), checks, the provider's network, and removing it; a
+        provider's own options are its manifest's cloud_options
     remote.py exec --vm NAME [--stdin] -- ARGV...   a command in the computer through its provider's own
                                                authenticated channel (the setup's first step: before its own SSH
                                                exists), where the provider has one

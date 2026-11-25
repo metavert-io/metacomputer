@@ -7,6 +7,8 @@ MC_PROVIDER_COPY_KEYS='OCI_PYTHON'
 MC_PROVIDER_CREATE_OPTIONS='--org --sprite'
 MC_PROVIDER_CREATE_ONLY='--sprite'
 MC_PROVIDER_CLOUD_OPTIONS='--org'
+MC_PROVIDER_CLOUD_USAGE=' [--org ORG]'
+MC_PROVIDER_CLOUD_VALUES='--org= '
 MC_TRANSPORT_SETTINGS='SPRITE_ORG SPRITE_NAME SPRITE_CLI'
 mc_pv() { # PROVIDER KEY: that provider's word for KEY (lib/cloud/manifests.py shell_words); status 1: none
   case "$1:$2" in
