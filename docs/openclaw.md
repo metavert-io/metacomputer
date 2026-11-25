@@ -10,6 +10,9 @@ connecting to metacomputer's MCP server (`openclaw mcp probe metacomputer`: its 
 (`openclaw skills info`), the Agent Plugins package below (`openclaw plugins install`), and that its processes are
 recognized as an agent session. No model was run: a benchmark run needs a model provider's key.
 
+OpenClaw 2026.11.x needs Node.js 24.16 or a later 24 (not 25), or 26.1 or later: Node 22 can't run it. A benchmark
+run checked it on Node 26.13.0 (Homebrew's `node@26`).
+
 ## Set it up
 
 Every run of `install.sh` (the `curl ... | bash` line, `metacomputer update`, the install line again) sets metacomputer

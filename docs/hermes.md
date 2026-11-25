@@ -116,7 +116,9 @@ terminal,skills,metacomputer`, in a throwaway HOME made for that session and del
 sign-ins or environment, only the variables you name with `--pass-env`. Each session has its own, so runs at the same
 time never share one. It holds the run's server (with its settings in the entry's `env`, since Hermes passes its MCP
 servers no other variables), tool search off and the skill under test linked in; afterwards the gateway Hermes started
-for that home is stopped (`hermes gateway stop`) and the home is deleted.
+for that home is stopped (`hermes gateway stop`; Hermes finds it with `ps`, which can't start in macOS's sandbox, so the
+benchmark then stops any gateway of that home still running itself, by its arguments and `HERMES_HOME` as the kernel has
+them) and the home is deleted.
 
 **What it may do without asking:** Hermes runs a configured server's tools without asking, and has no allowlist for its
 terminal: commands it doesn't rate dangerous run without asking. The session gets only the terminal, skills and
@@ -131,7 +133,21 @@ its install directory) and the administrator-managed `/etc/hermes` (`.env`, `con
 home. While any of them is there, or can't be looked at, the benchmark doesn't run Hermes and names the file: move it
 away for the run, or use a Hermes installed without one.
 
-A pip-installed Hermes (in a venv) works in any Hermes home at once (checked). With Hermes's own installer, Hermes says
+**Installing it:** Hermes Agent 0.23.x isn't on PyPI (PyPI's `hermes-agent` stops at 0.19.0), and pip can't install
+it from a checkout either: its pinned dependencies conflict (Pillow 13 against browser-harness's 12.3, which uv's
+override settles) and it refuses to build a wheel. What a benchmark run used: the release's tag from GitHub, then
+uv, the version Hermes pins (0.13.5), installing it editable into a venv of its own, on a Python Hermes accepts (3.11 or
+later, before 3.15):
+
+```bash
+git clone --depth 1 --branch v0.23.3 https://github.com/NousResearch/hermes-agent.git
+cd hermes-agent && uv sync --frozen        # the venv in .venv; its bin/hermes is the command
+```
+
+Hermes reads its own version with git; where git can't run, `hermes --version` says `vunknown`, and the benchmark
+records the release tag on that checkout's HEAD instead (read from the checkout's files), or `unknown`.
+
+A Hermes installed in a venv of its own works in any Hermes home at once (checked). With Hermes's own installer, Hermes says
 a new home gets its own copy of Hermes's dependencies the first time Hermes runs there; the benchmark does that before
 the session's clock starts, allowing it 15 minutes (not checked here). It
 needs your provider's key, given to that command only and named with `--pass-env`, and a model of that provider

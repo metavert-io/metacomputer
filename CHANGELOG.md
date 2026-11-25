@@ -53,6 +53,9 @@ All notable changes to metacomputer are recorded here. The format follows
 - **bench's metrics:** a `metacomputer` command run through a variable holding its path (`M=.../metacomputer; $M call
   ...`, as Hermes Agent's sessions do), by a quoted path or after `--vm` or `env -i` counts as a CLI call, not as other
   Bash (most of Hermes Agent's calls were counted as other Bash).
+- **Docs:** [docs/openclaw.md](docs/openclaw.md) gives OpenClaw 2026.11.x's Node.js requirement (24.16 or a later 24,
+  or 26.1 or later); [docs/hermes.md](docs/hermes.md) says Hermes Agent 0.23.x can't be installed from PyPI or with pip,
+  and how a benchmark run installed it (the release tag from GitHub and `uv sync --frozen`).
 
 ## [0.5.2] - 2026-11-25
 
