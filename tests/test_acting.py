@@ -983,6 +983,58 @@ def strict_reader_checks(td):
         check(f"vm create's quoting of {val!r} ({line}): /bin/bash gives it back, and so does this reader",
               got.returncode == 0 and got.stdout == val and cs is not None and cs["mainvm"]["run_dir"] == val,
               (line, got.stdout, got.stderr[-200:], e, cs and cs["mainvm"]["run_dir"]))
+    # Codex reader check: a quote with a backslash, and text that isn't ASCII, come back the same through vm_q; a value
+    # with a newline in it is bash's, but more than one line, so this reader refuses it.
+    for val in ("/srv/a'b\\c", "/srv/it's\\", "/srv/café–run", "/srv/é'ü"):
+        line = subprocess.run(["/bin/bash", "-c", fn + '\nvm_q RUN_DIR "$1"', "_", val], capture_output=True,
+                              text=True).stdout.rstrip("\n")
+        got = subprocess.run(["/bin/bash", "-c", line + '\nprintf %s "$RUN_DIR"'], capture_output=True, text=True)
+        root, cs, e = comps(local="VM_NAME=mainvm\n" + line + "\n")
+        check(f"vm create's quoting of {val!r} ({line}): /bin/bash gives it back, and so does this reader",
+              got.returncode == 0 and got.stdout == val and cs is not None and cs["mainvm"]["run_dir"] == val,
+              (line, got.stdout, got.stderr[-200:], e, cs and cs["mainvm"]["run_dir"]))
+    line = subprocess.run(["/bin/bash", "-c", fn + '\nvm_q RUN_DIR "$1"', "_", "/srv/a\nb"], capture_output=True,
+                          text=True).stdout.rstrip("\n")
+    root, cs, e = comps(local="VM_NAME=mainvm\n" + line + "\n")
+    check(f"vm create's quoting of a value with a newline in it ({line!r}): two lines, refused (raises), never read",
+          "\n" in line and cs is None and isinstance(e, ValueError), (line, e, cs and cs["mainvm"]["run_dir"]))
+    # Codex reader check: a $NAME followed directly by a character that isn't ASCII refuses: in a UTF-8 locale macOS's
+    # bash 3.2 takes that character's first byte as part of the name, in the C locale it doesn't. ${NAME} then such a
+    # character is read the same by both, and by this reader.
+    for text, what in (('RUN_DIR="/tmp/$LAB_ROOT–runs"\n', "a quoted $LAB_ROOT then an en dash"),
+                       ("RUN_DIR=/tmp/$LAB_ROOT–runs\n", "an unquoted $LAB_ROOT then an en dash"),
+                       ('RUN_DIR="$HOMEé/run"\n', "a quoted $HOME then an é")):
+        root, cs, e = comps(local="VM_NAME=mainvm\n" + text)
+        check(f"config/local.env with {what}: refused (raises), never read", cs is None and isinstance(e, ValueError),
+              (cs and cs.get("mainvm"), e))
+    root, cs, e = comps(local='VM_NAME=mainvm\nRUN_DIR="${LAB_ROOT}–runs"\n')
+    want = root + "–runs"
+    by_bash = [subprocess.run(["/bin/bash", "-c", 'LAB_ROOT="$1"\nRUN_DIR="${LAB_ROOT}–runs"\nprintf %s "$RUN_DIR"', "_",
+                               root], capture_output=True, text=True, env=dict(os.environ, LC_ALL=loc)).stdout
+               for loc in ("en_US.UTF-8", "C")]
+    check('config/local.env RUN_DIR="${LAB_ROOT}–runs": read as the checkout\'s folder then –runs, as /bin/bash reads it '
+          "in a UTF-8 locale and in C", cs is not None and cs["mainvm"]["run_dir"] == want and by_bash == [want, want],
+          (e, cs and cs["mainvm"]["run_dir"], by_bash))
+    # Codex reader check: Unicode in a value is read as written, quoted (an unquoted word is ASCII only: it refuses); and
+    # malformed references in a "..." value or a braced one refuse, at once however long the line.
+    for line, want in (('RUN_DIR="/srv/café–run"', "/srv/café–run"), ("RUN_DIR='/srv/café–run'", "/srv/café–run"),
+                       ('RUN_DIR="$LAB_ROOT/é"', "{root}/é")):
+        root, cs, e = comps(local="VM_NAME=mainvm\n" + line + "\n")
+        exp = want.format(root=root)
+        check(f"config/local.env {line!r}: the run folder is {want}", cs is not None and cs["mainvm"]["run_dir"] == exp,
+              (e, cs and cs["mainvm"]["run_dir"]))
+    for line in ("RUN_DIR=/srv/café", 'RUN_DIR="$"', 'RUN_DIR="/srv/$"', 'RUN_DIR="${LAB_ROOT"', 'RUN_DIR="${}"',
+                 'RUN_DIR="$1/x"', 'RUN_DIR="${1}"', 'RUN_DIR="${LAB_ROOT:-/x}"', 'RUN_DIR="${ LAB_ROOT}"',
+                 'RUN_DIR="$LAB_ROOT', 'RUN_DIR=${LAB_ROOT', "RUN_DIR=${LAB_ROOT}x}", 'RUN_DIR="a\\"b"', "RUN_DIR='a\\'b'"):
+        root, cs, e = comps(local="VM_NAME=mainvm\n" + line + "\n")
+        check(f"config/local.env {line!r}: refused (raises), never read", cs is None and isinstance(e, ValueError),
+              (cs and cs.get("mainvm"), e))
+    for tail, what in (("${", "an unclosed ${"), ("$", "a lone $"), ("${abcdefgh", "an unclosed ${name")):
+        t0 = time.monotonic()
+        root, cs, e = comps(local='VM_NAME=mainvm\nX="' + "$abcdefgh${abcdefgh}" * 40 + tail + '"\n')
+        took = time.monotonic() - t0
+        check(f"a quoted value of 80 references, then {what}: refused at once ({took:.2f} s)",
+              cs is None and isinstance(e, ValueError) and took < 2, (took, e))
     ex = open(os.path.join(LAB, "config", "local.env.example")).read()
     uncommented = "\n".join(l[1:] if l[:1] == "#" and l[1:2].isupper() and "=" in l else l for l in ex.split("\n"))
     root, cs, e = comps(local=uncommented)

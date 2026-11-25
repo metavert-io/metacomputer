@@ -26,11 +26,19 @@ All notable changes to metacomputer are recorded here. The format follows
   newer to update to yet and exits 0 (`--check --json`: `up_to_date`, `past_latest`); a checkout with commits of its
   own after the release is the owner's to update; and going back on main says how (check out the tag, then
   `./install.sh --allow-downgrade`). A detached checkout still goes back to the release with `--allow-downgrade`.
-- **Settings files: three gaps in how they're read and written.** A control character other than a tab (a NUL, where
+- **Settings files: four gaps in how they're read and written.** A control character other than a tab (a NUL, where
   macOS's bash stops reading a file without a word, so the settings after it don't count) now refuses, like any
-  other line that isn't a plain assignment. A line with many `$NAME` references that isn't an assignment is refused
-  at once (it could take minutes, holding the command up). And `vm create` writes a copied value with a `'` in it
-  as bash 3.2 reads it back: it wrote `'it\'\\'\'s'`, so the new file was refused and removed.
+  other line that isn't a plain assignment. So does a `$NAME` followed directly by a character that isn't ASCII
+  (`"$LAB_ROOT–runs"`): in a UTF-8 locale macOS's bash 3.2 takes that character's first byte as part of the name, in
+  the C locale it doesn't (`"${LAB_ROOT}–runs"` reads as before). A line with many `$NAME` references that isn't an
+  assignment is refused at once (it could take minutes, holding the command up). And `vm create` writes a copied
+  value with a `'` in it as bash 3.2 reads it back: it wrote `'it\'\\'\'s'`, so the new file was refused and removed.
+- **Storage lock files that are there but aren't usable are no longer read as none.** A holder record holding JSON
+  `null` was read as no record, so a start, a reservation or a delete went ahead as if nothing held that volume or
+  folder (a list or a string already refused; `null` now does too). A disk's lock file (`NAME.img.lock`) has to name
+  the computer that has the disk: `{}` or an empty host refused nothing, and now refuses (and a start never writes one
+  without a host). A record or lock file larger than 1 MiB refuses, where only its first MiB was read. Each refuses
+  as an unreadable record does, naming the file, with nothing changed; `volume list` still only shows.
 
 ## [0.5.1] - 2026-11-24
 
