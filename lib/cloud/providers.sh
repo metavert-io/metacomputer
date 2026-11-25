@@ -1,15 +1,15 @@
 # metacomputer's providers, as bash reads them: made from providers/<name>/manifest.py by
 # scripts/gen-providers.py (don't edit by hand: its --check fails a copy that isn't current). Sourced by
 # scripts/lib.sh; data and one lookup only, nothing runs.
-MC_PROVIDERS='oci sprites hetzner digitalocean vultr'
-MC_PROVIDER_ENV='OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY'
+MC_PROVIDERS='oci sprites hetzner digitalocean vultr vercel'
+MC_PROVIDER_ENV='OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY VERCEL_TOKEN VERCEL_TEAM_ID VERCEL_PROJECT_ID'
 MC_PROVIDER_COPY_KEYS='OCI_PYTHON'
-MC_PROVIDER_CREATE_OPTIONS='--org --sprite'
-MC_PROVIDER_CREATE_ONLY='--sprite'
+MC_PROVIDER_CREATE_OPTIONS='--org --sprite --sandbox'
+MC_PROVIDER_CREATE_ONLY='--sprite --sandbox'
 MC_PROVIDER_CLOUD_OPTIONS='--org'
 MC_PROVIDER_CLOUD_USAGE=' [--org ORG]'
 MC_PROVIDER_CLOUD_VALUES='--org= '
-MC_TRANSPORT_SETTINGS='SPRITE_ORG SPRITE_NAME SPRITE_CLI'
+MC_TRANSPORT_SETTINGS='SPRITE_ORG SPRITE_NAME SPRITE_CLI VERCEL_SANDBOX'
 mc_pv() { # PROVIDER KEY: that provider's word for KEY (lib/cloud/manifests.py shell_words); status 1: none
   case "$1:$2" in
     oci:label) printf '%s' 'Oracle Cloud' ;;
@@ -66,6 +66,21 @@ mc_pv() { # PROVIDER KEY: that provider's word for KEY (lib/cloud/manifests.py s
     vultr:background_input) printf '%s' 'on' ;;
     vultr:teardown) printf '%s' 'yes' ;;
     vultr:idle_stop_default) printf '%s' 'off' ;;
+    vercel:label) printf '%s' 'Vercel Sandbox' ;;
+    vercel:place) printf '%s' 'vercel' ;;
+    vercel:place_words) printf '%s' 'vercel (Vercel Sandbox)' ;;
+    vercel:label_place) printf '%s' 'Vercel Sandbox (vercel)' ;;
+    vercel:docs) printf '%s' 'docs/vercel.md' ;;
+    vercel:credential_words) printf '%s' 'VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID' ;;
+    vercel:ask_needs) printf '%s' 'VERCEL_TOKEN VERCEL_TEAM_ID VERCEL_PROJECT_ID' ;;
+    vercel:background_input) printf '%s' 'off' ;;
+    vercel:teardown) printf '%s' 'no' ;;
+    vercel:transport) printf '%s' 'vercel' ;;
+    vercel:vm_create_confirm) printf '%s' 'This makes the sandbox at Vercel, then installs the desktop (about 6 minutes).' ;;
+    vercel:instance_word) printf '%s' 'sandbox' ;;
+    vercel:status_baseline) printf '%s' 'a snapshot at Vercel (metacomputer checkpoints)' ;;
+    vercel:status_network) printf '%s' 'Vercel'\''s network policy: EGRESS={egress} (net status reads what'\''s in force), SSH only through Vercel'\''s API   stop: the session'\''s timeout (IDLE_STOP) or metacomputer stop' ;;
+    vercel:status_uinput) printf '%s' '  (none in a Vercel sandbox: foreground input)' ;;
     *) return 1 ;;
   esac
 }
@@ -76,6 +91,8 @@ mc_pv_option() { # OPTION KEY: a provider's own vm create option's needs, defaul
     --org:provider) printf '%s' 'sprites' ;;
     --sprite:needs) printf '%s' 'the Sprite'\''s name' ;;
     --sprite:provider) printf '%s' 'sprites' ;;
+    --sandbox:needs) printf '%s' 'the sandbox'\''s name' ;;
+    --sandbox:provider) printf '%s' 'vercel' ;;
     *) return 1 ;;
   esac
 }

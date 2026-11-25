@@ -50,7 +50,7 @@ one line of printable text...) and written quoted or escaped where it lands (`li
 
 Shared code finds a provider's own behaviour by what it brings, never by its name:
 
-- **lib/remote.py** (`hooks_for`): `provider_kw`, `create`, `abort`, `delete`, `plan`, `cloud`, `egress_check`;
+- **lib/remote.py** (`hooks_for`): `provider_kw`, `create`, `abort`, `wake`, `delete`, `plan`, `cloud`, `egress_check`;
   for its transport `connect_wrapper`, `tunnel`, `probe`; and `COMMANDS` it alone has (`exec`, `checkpoint`,
   `allow`). Adapter attributes say the rest (`SOFT_STOP`, `SEES_GUEST_POWEROFF`, `RESOLVER_EXCEPTION`,
   `CONSOLE_POWEROFF`, `GROUPS_IN_CONSOLE`, `REST_API`, `groups_by_record`, `SHARED_NETWORK_CHANGES`).
