@@ -1613,30 +1613,36 @@ def main():
         for _ in range(events.ADMIN_MAX_ATTEMPTS):
             events.flush_admin(force=True)
 
-        # F7: the relay's per-record check reads events.json only when it changes
+        # F7: the relay's per-record check reads events.json only when it changes. What's counted is every parse on the
+        # call path but the redaction list's own (known_secrets: the values to hide, read again when it's 30 s old,
+        # whatever the cache does), which is made due in both halves here: under load the suite reaches this check at a
+        # different point of those 30 s, and that parse was counted too ((1, 1) or (0, 2)).
         calls_ = [0]
         real_load = events.load_config
 
         def counting():
-            if threading.current_thread() is threading.main_thread():   # the call path, not the sending thread
+            # the call path, not the sending thread; not the redaction list's refresh
+            if threading.current_thread() is threading.main_thread() and sys._getframe(1).f_code.co_name != "known_secrets":
                 calls_[0] += 1
             return real_load()
         events.load_config = counting
         try:
             events.config_for_reading()
             calls_[0] = 0
+            events._known["at"] = 0                 # the redaction list is due: it reads events.json in this half
             for i_ in range(50):
                 events.emit_async("actions", "call", f"record {i_}", data={"seq": i_})
             unchanged = calls_[0]
             sink_add("acts", "--kind", "webhook", "--url", web.url("/acts"), "--families", "actions")
             calls_[0] = 0
+            events._known["at"] = 0                 # ...and in this one
             events.emit_async("actions", "call", "after a change")
             changed = calls_[0]
         finally:
             events.load_config = real_load
             events.flush_async()
-        check("F7 50 action-log records with events.json unchanged: parsed 0 times; once after it changes",
-              unchanged == 0 and changed == 1, (unchanged, changed))
+        check("F7 50 action-log records with events.json unchanged: parsed 0 times; once after it changes (the redaction "
+              "list's own refresh aside, due in both)", unchanged == 0 and changed == 1, (unchanged, changed))
         sink_remove("acts")
 
         # R4: sink generations; replacing waits for a sender

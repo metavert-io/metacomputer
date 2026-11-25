@@ -987,7 +987,7 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (187 checks, about two minutes). It keeps
+`python3 tests/test_events.py` needs no VM (201 checks, about two minutes). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
@@ -1047,7 +1047,8 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
 - the 2026-11-18 review's fixes:
   - an OTLP collector's partial success: the rejected record counted as dropped, with its message as `last_error`, not retried, and shown by `events status` and `sink list`;
   - a server that sends one byte a second: `deliver`, `sink remove`, `flush_admin` and an ordinary emit all end on time;
-  - 50 action-log records with `events.json` unchanged parse it zero times;
+  - 50 action-log records with `events.json` unchanged parse it zero times, and once after it changes (the redaction
+    list's own refresh every 30 s, made due in both halves, isn't the cache's parse);
   - the state lock: a second holder gets `Busy` after its wait, with no file left open; leaving unlocks it.
 
 Sink changes in these tests run on a pseudo-terminal with `--yes`, since they refuse without a terminal.
@@ -2353,7 +2354,7 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_vault_ops.py` (235 checks, about 3 minutes) reuses that stub and
+`python3 tests/test_vault_ops.py` (236 checks, about 3 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
 - **declarations:** every form of every command, as the test build lists them (`_argspecs`), given an unknown
   option, another form's option, a word too many, a request for usage as an option's value (`--site --help`,
