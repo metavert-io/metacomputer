@@ -50,8 +50,9 @@ def claude_status():
 
 
 def user_server(prog):
-    """Claude Code's user-scope MCP server metacomputer, read as install.sh reads it (lib/claude_mcp.py: the entry in
-    Claude Code's configuration, checked against `claude mcp get` from an empty folder; its exact arguments compared):
+    """Claude Code's user-scope MCP server metacomputer, read as install.sh reads it (claude_mcp.py, beside this file:
+    the entry in Claude Code's configuration, checked against `claude mcp get` from an empty folder; its exact arguments
+    compared):
     {"owner", "kind", "words"}. The words are claude_mcp's: metacomputer's own command and arguments, or for anything
     else only its program's name and how many arguments it has, or its transport; never an argument, a variable, a URL
     or the entry (they can carry credentials)."""

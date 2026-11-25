@@ -587,6 +587,30 @@ def packages():
         registry.has(n, "setup.py") and getattr(registry.module(n, "setup"), "AGENT", None) is not None)]
     check("...and its part of `metacomputer agents` (setup.py status and line); an agent whose steps are the "
           "framework's brings its Agent (setup.py AGENT)", not no_status and not no_agent, (no_status, no_agent))
+    moved = [("lib/" + "claude_mcp.py", "Claude Code's MCP entry reader, now coding-agents/claude-code/claude_mcp.py"),
+             ("(?<![-/A-Za-z0-9_.])" + "agents/<", "the agents' folders, coding-agents/<name>/"),
+             ("lib/agents.py " + "codex[-_]entry", "Codex's entry reader, now coding-agents/codex/setup.py codex-entry"),
+             ("[(]lib/agents.py " + "check[)]", "Codex's check, now its setup.py check"),
+             ("lib/agent_setup.py " + "(?:OpenClaw|Hermes|Gemini|Antigravity)", "an agent's Agent, now its setup.py")]
+    tracked = subprocess.run(["git", "ls-files"], cwd=LAB, capture_output=True, text=True).stdout.split()
+    stale_refs = []
+    for rel in tracked:
+        if rel in ("CHANGELOG.md", "tests/test_agents.py") or rel.startswith(("plugin/", "agent-plugin/", ".agents/")):
+            continue                        # what the changelog says moved, this check, the packages kept byte for byte
+        try:
+            with open(os.path.join(LAB, rel), encoding="utf-8") as f:
+                text = f.read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for pat, what in moved:
+            for m in re.finditer(pat, text):
+                stale_refs.append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}: {what}")
+    probe = [bool(re.search(p, s)) for (p, _w), s in zip(moved, ("(lib/" + "claude_mcp.py's rule", "(agents/" + "<name>/x)",
+                                                                  "lib/agents.py " + "codex-entry", "(lib/agents.py " + "check)",
+                                                                  "lib/agent_setup.py " + "Antigravity"))]
+    check("no file points at where an agent's code was before it moved to its folder (lib/claude_mcp.py, agents/<name>/, "
+          "lib/agents.py codex-entry or check, lib/agent_setup.py's agents; the patterns tried on a known hit each)",
+          not stale_refs and all(probe), (stale_refs, probe))
     ran, bad_names, defs = {}, {}, {}
     for n in registry.AGENTS:
         flag = manifests.manifest(n)["flag"]

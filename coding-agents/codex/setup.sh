@@ -224,7 +224,8 @@ ag_codex_step() {
   else
     warn "couldn't write $CODEX_RULES (Codex's checker didn't accept it); approve metacomputer commands when Codex asks instead"
   fi
-  # What metacomputer relies on in this Codex (lib/agents.py check): an update to Codex that changes it shows here.
+  # What metacomputer relies on in this Codex (its setup.py check, which lib/agents.py check runs): an update to Codex
+  # that changes it shows here.
   local chk
   chk="$("$CPY" "$ROOT/lib/agents.py" check --quiet 2>&1 || echo "__check_failed__")"
   case "$chk" in

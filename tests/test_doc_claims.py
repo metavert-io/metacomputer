@@ -3066,7 +3066,7 @@ CLAIMS = [
      and "if os.path.islink(path):\n        return [path]" in function_src("scripts/sync-plugin.py", "links_in")),
     ("docs/codex.md", r"Nothing is uploaded or\s+submitted from here",
      lambda m: not re.search(r"urllib|http\.client|socket|subprocess|requests", raw("scripts/build-openai-plugin.py").split('"""', 2)[2])),
-    # Antigravity CLI (docs/antigravity.md; lib/agent_setup.py Antigravity, lib/owners.py, vault/Util.swift)
+    # Antigravity CLI (docs/antigravity.md; coding-agents/antigravity/setup.py, lib/owners.py, vault/Util.swift)
     ("docs/antigravity.md", r"It changes Antigravity CLI's MCP server `metacomputer` only when\s+there's none, by the rule it uses for the "
                             r"other agents.*?Anything else is never changed or removed",
      lambda m: 'return [prog, "mcp", "add", NAME, link, *mcp_entry.MCP_ARGS]' in function_src("coding-agents/antigravity/setup.py", "Antigravity.add_argv")
@@ -4221,10 +4221,13 @@ FALLBACKS = (re.compile(r"\$\{(?:MCOMP_)?([A-Z][A-Z0-9_]+):-([^}$]+)\}"),
 def code_fallbacks():
     """Where the code reads a security setting with a fallback (`${ACTION_LOG:-off}`, `.get("MCOMP_SSH_AUTH",
     "key")`), the fallback is config/defaults.env's value: a client that runs without the config gets the same
-    protections the docs describe."""
+    protections the docs describe. Read: everything that runs on this Mac (lib/, bin/, scripts/, the installers, the
+    providers' and the agents' folders, the bench harness), not the guests' sides (providers/<name>/guest/,
+    bench/guest/: their defaults are the guest's own)."""
     print("the code's fallbacks for the security settings")
     files = subprocess.run(["git", "ls-files", "lib", "bin", "scripts", "providers", ":(exclude)providers/*/guest/*",
-                            "install.sh", "get.sh"], cwd=LAB, capture_output=True, text=True).stdout.split()
+                            "coding-agents", "bench", ":(exclude)bench/guest/*", "install.sh", "get.sh"],
+                           cwd=LAB, capture_output=True, text=True).stdout.split()
     seen, wrong = {}, []
     for rel in files:
         try:
@@ -4239,8 +4242,14 @@ def code_fallbacks():
                         seen[k] = seen.get(k, 0) + 1
                         if v != D[k]:
                             wrong.append(f"{rel}:{n}: {k} falls back to {v!r}, config/defaults.env says {D[k]!r}")
-    check("every fallback for a security setting in lib/, bin/, scripts/, the providers' folders and the installers is its "
-          "default", not wrong, wrong)
+    check("every fallback for a security setting in lib/, bin/, scripts/, the providers' and the agents' folders, the "
+          "bench harness and the installers is its default", not wrong, wrong)
+    code = [f for f in subprocess.run(["git", "ls-files", "coding-agents", "bench"], cwd=LAB, capture_output=True,
+                                      text=True).stdout.split()
+            if f.endswith((".py", ".sh")) and "/tests/" not in f and not f.startswith("bench/guest/")]
+    check("…the scan reads the code that runs on this Mac in the agents' folders and the bench harness too "
+          "(coding-agents/<name>/: setup.py, setup.sh, cli.sh, sessions.py, bench.py, ...; bench/*.py)",
+          len(code) >= 30 and not [f for f in code if f not in files], [f for f in code if f not in files][:8])
     check("…and the scan found them (at least one for each of the hardening settings)",
           all(seen.get(k) for k in ("ACTION_LOG", "SSH_AUTH", "DRIVER_MODE", "VM_SHELL", "SHELL_LOG", "COORD_GUARD",
                                     "MCP_HUB")), seen)

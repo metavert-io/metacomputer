@@ -1521,16 +1521,17 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
   tables), and the vault reads that name from the tables its build compiles in (test_vault_ops checks the same at run
   time); an agent with steps of its own brings `status` and `line`, a generic one its `AGENT`, and what `metacomputer
   agents` takes from a setup.py follows its manifest and its own functions (a framework function it imports isn't taken;
-  two agents with a check give one `check --json` document); an agent's bash (setup.sh, cli.sh), sourced under a trace,
-  only sets variables and defines functions, its hooks named for its own flag and none clashing with another agent's or
-  with what sources it; what's made from the manifests is current (`scripts/gen-agents.py --check`: docs/agents.md,
-  lib/agentkit/agents.sh, CODEOWNERS); and no shared code (bin/, scripts/, lib/ but lib/agentkit, install.sh, get.sh and
-  bench's harness) names an agent: the lint's pattern is tried on known lines first, and every allowance (a whole file,
-  printed usage, a region, a word, a line) is still needed and says why. An agent's tests stay in tests/ (each is one of
-  release.sh's suites by its name): test_agent_setup for the generic agents' steps, test_agents, test_install and
-  test_plugin for Claude Code's and Codex's, test_learn for the session readers, test_bench_checks and
-  test_bench_workdir for the launchers, test_plugin and test_release for the channels; its recognition cases are in its
-  folder (`coding-agents/<name>/tests/recognition_cases.json`, which test_session_guard and test_vault_ops read with
+  two agents with a check give one `check --json` document); no file points at where an agent's code was before its
+  folder; an agent's bash (setup.sh, cli.sh), sourced under a trace, only sets variables and defines functions, its
+  hooks named for its own flag and none clashing with another agent's or with what sources it; what's made from the
+  manifests is current (`scripts/gen-agents.py --check`: docs/agents.md, lib/agentkit/agents.sh, CODEOWNERS); and no
+  shared code (bin/, scripts/, lib/ but lib/agentkit, install.sh, get.sh and bench's harness) names an agent: the lint's
+  pattern is tried on known lines first, and every allowance (a whole file, printed usage, a region, a word, a line) is
+  still needed and says why. An agent's tests stay in tests/ (each is one of release.sh's suites by its name):
+  test_agent_setup for the generic agents' steps, test_agents, test_install and test_plugin for Claude Code's and
+  Codex's, test_learn for the session readers, test_bench_checks and test_bench_workdir for the launchers, test_plugin
+  and test_release for the channels; its recognition cases are in its folder
+  (`coding-agents/<name>/tests/recognition_cases.json`, which test_session_guard and test_vault_ops read with
   tests/fixtures/agent_argv.json's shared ones), and its doc-claims rows that read only its own files in its
   `claims.tsv`, which `tests/test_doc_claims.py` reads with the rest.
 - `python3 tests/test_agent_setup.py`: install.sh's steps for OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI

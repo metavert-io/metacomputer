@@ -1,7 +1,8 @@
 # Claude Code's part of install.sh (sourced by it; defines functions only, ag_claude_HOOK, and its settings): the plugin
-# (skills) or, before plugins and with --no-plugin, a skill link; and a user-scope MCP server (lib/claude_mcp.py's
-# rule: coding-agents/claude-code/claude_mcp.py); and what --uninstall removes of them. Each runs in install.sh, with
-# its helpers (ok, warn, ask, tildify, old_target, link_command, link_points_here, keep_cmd_for, agent_record).
+# (skills) or, before plugins and with --no-plugin, a skill link; and a user-scope MCP server (read by claude_mcp.py,
+# beside this file, by lib/agentkit/mcp_entry.py's rule); and what --uninstall removes of them. Each runs in
+# install.sh, with its helpers (ok, warn, ask, tildify, old_target, link_command, link_points_here, keep_cmd_for,
+# agent_record).
 MKT=metacomputer; PLUGIN_ID=metacomputer@metacomputer
 PLUGIN=1           # --no-plugin: 0 (a skill link instead of the plugin, and the same server)
 SERVER_ADDED=0     # 1 once this run registered Claude Code's MCP server (a restart, or /mcp, loads its tools)
@@ -512,8 +513,9 @@ ag_claude_only_note() { # how open Claude Code sessions pick up this run's chang
 ag_claude_uninstall_server() { # --uninstall, before anything else is removed
   # Claude Code's user-scope MCP server, read before anything is removed (the command link it runs among them). It is
   # this checkout's when it is ~/.local/bin/metacomputer mcp-lazy while that link is this checkout's, or this checkout's
-  # own launcher ("ours": lib/claude_mcp.py). Anything else stays (said), and so do project and local servers. A lookup
-  # that fails stops the uninstall before it changes anything; a removal that doesn't take ends it with exit status 1.
+  # own launcher ("ours": claude_mcp.py, beside this file). Anything else stays (said), and so do project and local
+  # servers. A lookup that fails stops the uninstall before it changes anything; a removal that doesn't take ends it
+  # with exit status 1.
   # It goes first, while the command it runs is still there: read again right before its removal, it stays when it changed
   # meanwhile. Codex's goes next, the same way. The command links (~/.local/bin/metacomputer, mcomp) stay whenever an
   # entry that stays, Claude Code's or Codex's, owned or not, runs them (or may: changed, or not confirmed gone), so that

@@ -223,8 +223,8 @@ _AGENTS = None
 
 
 def _agents():
-    """{name: Agent} of the agents whose install and uninstall are these steps (agents/<name>/setup.py's AGENT), in the
-    registry's order."""
+    """{name: Agent} of the agents whose install and uninstall are these steps (coding-agents/<name>/setup.py's AGENT),
+    in the registry's order."""
     global _AGENTS
     if _AGENTS is None:
         from agentkit import manifests, registry
