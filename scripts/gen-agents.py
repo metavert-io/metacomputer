@@ -122,7 +122,8 @@ def wanted():
     bad = [f"coding-agents/{n}/manifest.json: {b}" for n in registry.AGENTS for b in manifests.check(n)] + manifests.conflicts()
     if bad:
         raise ValueError("; ".join(bad))
-    return {"lib/agentkit/agents.sh": agents_sh()}
+    return {"docs/agents.md": docs_index(), "lib/agentkit/agents.sh": agents_sh(),
+            CODEOWNERS: splice(read(CODEOWNERS), codeowners_block(), CODEOWNERS)}
 
 
 def read(rel):

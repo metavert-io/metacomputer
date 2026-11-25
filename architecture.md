@@ -100,8 +100,8 @@ and `/var/lib/metacomputer/package-versions.txt` (copied to `logs/` at build).
 
 Claude Code sessions use `metacomputer` → `~/.local/bin/metacomputer mcp-lazy`
 (`bin/metacomputer`, `lib/mcp_lazy.py`), the user-scope MCP server `install.sh`
-registers (`register_server`; it reads and judges the entry already there with
-`lib/claude_mcp.py`, as `metacomputer agents` does), so it exists in every project; its tools are
+registers (`register_server`, in coding-agents/claude-code/setup.sh; it reads and judges the entry already there with
+`coding-agents/claude-code/claude_mcp.py`, as `metacomputer agents` does), so it exists in every project; its tools are
 `mcp__metacomputer__*`. The `metacomputer` plugin (`plugin/`) brings the skills, not
 the server: it declares no MCP server and no hooks, so Anthropic's plugin directory
 has no hook or server script to follow (an older copy declared the server, and its tools

@@ -638,7 +638,7 @@ or without a true/false `enabled`; from the start or only after an update or an
 uninstall) and `plugin marketplace list` (from the start or after a removal). Any run
 whose stderr shows install.sh's ERR-trap message fails. `--real-claude` repeats the
 install and update checks with the real `claude` CLI, and checks that Claude Code and
-`lib/claude_mcp.py` read the same configuration file (an empty legacy `.config.json`,
+`coding-agents/claude-code/claude_mcp.py` read the same configuration file (an empty legacy `.config.json`,
 a folder there, both files populated, a byte-order mark), with a temporary `HOME` and
 `CLAUDE_CONFIG_DIR`; it needs no network.
 - Codex and OpenAI: Codex's marketplace (`.agents/plugins/marketplace.json`, a local source `./plugin`) and manifest
@@ -1513,6 +1513,21 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
   real codex: set up, `--no-codex` remembered across runs, `--codex` again, `--no-claude` keeping Claude Code's old
   skill link, a run with both agents left alone still asking before it moves the command from another checkout, and
   neither agent on PATH.
+  Its agent packages part (`coding-agents/<name>/`, coding-agents/README.md): the registry is an explicit list of the
+  folders in `coding-agents/` (every folder registered, none named `agents/`), each with its manifest, recognition
+  tables, setup steps, page and doc-claims rows; every manifest and recognition table is sound, and a broken manifest
+  is refused; an agent's bash (setup.sh, cli.sh), sourced under a trace, only sets variables and defines functions,
+  its hooks named for its own flag and none clashing with another agent's or with what sources it; what's made from
+  the manifests is current (`scripts/gen-agents.py --check`: docs/agents.md, lib/agentkit/agents.sh, CODEOWNERS); and
+  no shared code (bin/, scripts/, lib/ but lib/agentkit, install.sh, get.sh and bench's harness) names an agent: the
+  lint's pattern is tried on known lines first, and every allowance (a whole file, printed usage, a region, a word, a
+  line) is still needed and says why. An agent's tests stay in tests/ (each is one of release.sh's suites by its
+  name): test_agent_setup for the generic agents' steps, test_agents, test_install and test_plugin for Claude Code's
+  and Codex's, test_learn for the session readers, test_bench_checks and test_bench_workdir for the launchers,
+  test_plugin and test_release for the channels; its recognition cases are in its folder
+  (`coding-agents/<name>/tests/recognition_cases.json`, which test_session_guard and test_vault_ops read with
+  tests/fixtures/agent_argv.json's shared ones), and its doc-claims rows that read only its own files in its
+  `claims.tsv`, which `tests/test_doc_claims.py` reads with the rest.
 - `python3 tests/test_agent_setup.py`: install.sh's steps for OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI
   against stand-in `openclaw`, `hermes`, `gemini` and `agy` commands (each answering the parts of its CLI the step uses,
   as the real one does)
@@ -1554,7 +1569,7 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
   unexpected error in an agent's uninstall step (its lock file a link, its lock folder not
   writable) keeping the command too, said, until a run that works removes it. The
   recognition of their sessions is test_session_guard's (stand-in processes as `ps` shows each agent, a titled Hermes,
-  a path with spaces, the shared cases in tests/fixtures/agent_argv.json, and an interpreter whose arguments can't be
+  a path with spaces, the shared cases in tests/fixtures/agent_argv.json and each agent's own, and an interpreter whose arguments can't be
   read counting as an agent) and test_vault_ops's (Gemini CLI a session; OpenClaw's and Hermes Agent's gateways, a
   titled Hermes and an unreadable interpreter none; the same shared cases through the test build). The shared cases
   include Antigravity CLI's executable (`agy`, `antigravity`, a link of another name, by its realpath), the Antigravity
