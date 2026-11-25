@@ -233,7 +233,10 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   `tests/test_events.py` fails on shared code that does (its SINK_LINT_FILES and SINK_LINT_ALLOW say why each exception
   is there). After changing a manifest or the registry, run `python3 scripts/gen-sinks.py` (docs/sinks.md,
   `metacomputer help`'s line, CODEOWNERS). Tests: `python3 tests/test_events.py` (no VM) and
-  `tests/test_options.py E` (VM).
+  `tests/test_options.py E` (VM). A manifest (a sink's, a provider's, an agent's, a recognition.json) is a
+  contributor's input: every value that reaches generated shell, Swift, a URL, a header, CODEOWNERS or docs gets a
+  whitelist of its own in its framework's check and is written through `lib/gensafe.py` (quoted or escaped for where
+  it lands); a new field that reaches one needs both, and a case in `tests/hostile_manifests.py`.
 - Lessons (`metacomputer learn`, docs/learn.md; `lib/learn*.py`,
   `lib/transcripts.py`, which reads Claude Code's, Codex's, Gemini CLI's and Antigravity CLI's sessions, and `lib/session_dbs.py`, OpenClaw's and
   Hermes Agent's SQLite databases: read into memory from their files with the write-ahead log's commits applied, or opened

@@ -406,7 +406,7 @@ environment. The vault's remote binding (its address, alias and the computer's i
 
 ## Places and providers: `tests/test_cloud_adapters.py`
 
-`python3 tests/test_cloud_adapters.py` (about 390 checks, a second) needs no VM and makes no network call.
+`python3 tests/test_cloud_adapters.py` (about 430 checks, a few seconds) needs no VM and makes no network call.
 - The contract every registered adapter passes (`local-lume`, the in-memory `fake`, and the stand-in with a
   bare manifest and a keeping one): a sound manifest under its registered name; every interface method
   answers, or refuses with a reason (`NotSupported`, or `HandledByCLI` naming a command `bin/metacomputer`
@@ -437,6 +437,12 @@ environment. The vault's remote binding (its address, alias and the computer's i
   `test_remote.py` for the providers on servers (Oracle Cloud, Hetzner Cloud, DigitalOcean, Vultr) and the shared
   remote code; its doc-claims rows that read only its own files are in its `claims.tsv`, which
   `tests/test_doc_claims.py` reads with the rest.
+- Hostile provider manifests (tests/hostile_manifests.py `providers`): a label, place, name, size, region or note
+  with a line break, an escape, a space or a backtick, and a CLI's docs page, words, credential words, place words,
+  owners or option description outside its whitelist are refused by `check_manifest` or `check_cli` and by
+  `scripts/gen-providers.py` (which makes nothing), naming the provider and the field; lib/cloud/providers.sh, handed
+  words with a line break, quotes and shell metacharacters past the check, runs nothing when sourced and `mc_pv` gives
+  each back exactly; docs/providers.md keeps its table and lines; CODEOWNERS refuses an owner with a line break.
 
 ## An agent session's computer: `tests/test_session_guard.py`
 
@@ -987,20 +993,32 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (201 checks, about two minutes). It keeps
+`python3 tests/test_events.py` needs no VM (246 checks, about two minutes). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
 - the sink packages (`sinks/<kind>/`, sinks/README.md): every registered kind is a folder with its manifest, its code
   and its page, and every folder is registered; the manifests are what lib/sinkkit and the vault's build read
   (`lib/sinkkit/vault.py check`); each `sink.py` brings the interface (`check_url`, and `request`, with `accepted` if it
-  reads answers, or `deliver`); each kind's docs are a section of a page that's there; what's made from the manifests
-  is current (`scripts/gen-sinks.py --check`: docs/sinks.md, `metacomputer help`'s line for the event stream,
+  reads answers, or `deliver`); each kind's docs are a page that's there, and the section they name is in it (docs
+  with no section, such as the kind's own README.md, pass too); what's made from the manifests is current (`scripts/gen-sinks.py --check`: docs/sinks.md, `metacomputer help`'s line for the event stream,
   CODEOWNERS); no shared code (bin/, scripts/, lib/ but lib/sinkkit, install.sh, get.sh, bench/, the providers' and
   the agents' folders, tools/) names a kind, the lint's pattern tried on known lines first and every allowance still
   needed and saying why; and the stream answers every case in tests/fixtures/sink_cases.json and each kind's
   `tests/vault_cases.json` as they say (tests/sink_cases.py; test_vault_ops runs the same cases through the vault).
   A kind's other checks stay in this file, by what they test;
+- hostile manifests (tests/hostile_manifests.py `sinks`): every manifest value that reaches a generated file, a URL or
+  a header, tried with what would break out of it, is refused by the check, by `scripts/gen-sinks.py` and by
+  `lib/sinkkit/vault.py swift`, naming the kind and the field: an OTLP path that changes the URL's host
+  (`@attacker.example/v1/logs`, `//host`, `..`, `?`, `#`, `%`, `:port`), help text with a line break or another
+  control or format character, a port over 65535 and other numbers out of their ranges (facility, severities,
+  priorities, OTLP severity numbers), a quote or a backslash in a Swift string's value, a content type that isn't
+  TYPE/SUBTYPE, owners that aren't GitHub @names, an about or a label with a line break; `scripts/build-vault.sh`,
+  run on a copy with stand-ins for swiftc and codesign, stops before compiling for the OTLP path (the copy without it
+  gets to swiftc); and each writer, handed the value past the check, still writes it inert: help with a line break or
+  shell metacharacters stays in its comment (bin/metacomputer gets no line, and the line runs nothing), the vault's
+  Swift holds a quoted value as one literal of exactly that value, CODEOWNERS refuses an owner with a line break, and
+  docs/sinks.md keeps its table and lines with |, HTML, a link, a backtick or a line break in an about;
 - sinks are added, listed, shown and removed; the config is private; header values and ntfy topics are never printed; plain http off the Mac, syslog without TLS and credentials in URLs are refused;
 - four sinks receive the same events in order, in each format: CloudEvents with a valid HMAC signature, OTLP/HTTP JSON, RFC 5424 over TLS with octet counting, ntfy;
 - family and minimum-severity filters, and the opt-in `actions` family;
@@ -1547,6 +1565,15 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
   (`coding-agents/<name>/tests/recognition_cases.json`, which test_session_guard and test_vault_ops read with
   tests/fixtures/agent_argv.json's shared ones), and its doc-claims rows that read only its own files in its
   `claims.tsv`, which `tests/test_doc_claims.py` reads with the rest.
+  Its hostile manifests (tests/hostile_manifests.py `agents`): owners, a label, a short name, tools, a command, a JSON
+  key, a docs page, a release file, a bench word, install options and notes outside their whitelists are refused by the
+  check and by `scripts/gen-agents.py`, naming the agent and the field; a recognition.json kind, table word, shared
+  label, question, subcommand or `within` outside its whitelist is refused by `recognition.py check` and `swift`, and
+  `scripts/build-vault.sh` stops before compiling for one (a copy with stand-ins for swiftc and codesign);
+  lib/agentkit/agents.sh, handed a label and a note with a line break, quotes and shell metacharacters past the check,
+  runs nothing when sourced and `mc_agent` gives each back exactly; docs/agents.md keeps its table (tools with
+  backticks, |, HTML and a link stay in their code span); a label with a quote and backslashes is one Swift literal of
+  exactly that value; CODEOWNERS refuses an owner with a line break.
 - `python3 tests/test_agent_setup.py`: install.sh's steps for OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI
   against stand-in `openclaw`, `hermes`, `gemini` and `agy` commands (each answering the parts of its CLI the step uses,
   as the real one does)

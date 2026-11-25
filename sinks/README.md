@@ -46,6 +46,12 @@ The checks: `python3 tests/test_events.py` (every folder's shape, the manifests,
 kind named in shared code, every case in the folders, and the stream's behaviour end to end against stand-in receivers),
 and `python3 tests/test_vault_ops.py` for the vault's side of the cases.
 
+A manifest's values reach generated shell, the vault's Swift, URLs, headers, CODEOWNERS and the docs, so each is held to
+a whitelist of its own (`lib/sinkkit/manifests.py` check, and `lib/sinkkit/vault.py` check for the format: a path that
+can't change a URL's host, a port from 1 to 65535, one line of printable text...) and written quoted or escaped where
+it lands (`lib/gensafe.py`). `scripts/gen-sinks.py` and `scripts/build-vault.sh` refuse a manifest that fails, naming
+the kind and the field (tests/hostile_manifests.py tries each with what would break out of it).
+
 ## The interface
 
 `lib/events.py` finds a kind's behaviour by what its `sink.py` brings, never by its name, and passes itself as `E`:

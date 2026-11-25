@@ -22,6 +22,18 @@ All notable changes to metacomputer are recorded here. The format follows
   is its folder, one registry line and a line here. The folder is `coding-agents/`, not `agents/`: Gemini CLI loads
   the repository's root as its extension. Nothing a user sees changes: every command, option, message, setting, file
   location and package is as it was, except the `metacomputer learn` fix below.
+- **Each kind of event sink's code lives in its own folder** ([sinks/README.md](sinks/README.md)), for contributors:
+  `sinks/<kind>/` (`webhook`, `otlp`, `syslog`, `ntfy`) holds its manifest (its words and settings, what it carries,
+  its reviewers, and the format the vault's audit sinks send alike), its code (its URL's rules, its format and how it's
+  delivered: was in `lib/events.py`), its page and its cases. `lib/sinkkit/` keeps the framework, with the registry (one
+  line per kind); the delivery loop, backlogs, limits, cleaning and commands stay in `lib/events.py`, which no longer
+  names a kind. The vault's audit sinks read what they share with the event stream (the kinds, the formats' constants,
+  the signature header, the header names) from the same manifests, compiled in by `scripts/build-vault.sh`, and the
+  rules both sides implement are checked against the same cases, with the differences the vault keeps declared.
+  `scripts/gen-sinks.py` writes [docs/sinks.md](docs/sinks.md), `metacomputer help`'s line for the event stream and
+  `.github/CODEOWNERS`, and a test fails on shared code that names a kind. Adding a kind (Discord, Teams, PagerDuty)
+  is its folder, one registry line and a line here. Nothing a user sees changes: every event, wire format, header,
+  retry, setting, message and file is as it was.
 
 ### Fixed
 
@@ -65,6 +77,18 @@ All notable changes to metacomputer are recorded here. The format follows
 - **Docs:** [docs/openclaw.md](docs/openclaw.md) gives OpenClaw 2026.11.x's Node.js requirement (24.16 or a later 24,
   or 26.1 or later); [docs/hermes.md](docs/hermes.md) says Hermes Agent 0.23.x can't be installed from PyPI or with pip,
   and how a benchmark run installed it (the release tag from GitHub and `uv sync --frozen`).
+
+### Security
+
+- **A manifest in a contributor's folder holds values, nothing more** (`sinks/`, `providers/`, `coding-agents/`): every
+  value a manifest puts in a generated file (`metacomputer help`'s line in bin/metacomputer, `lib/cloud/providers.sh`,
+  `lib/agentkit/agents.sh`, the Swift the vault's build compiles in, `.github/CODEOWNERS`, the docs), a URL or a header
+  is checked against a whitelist of its own before anything is made from it, and is written quoted or escaped for
+  where it lands (`lib/gensafe.py`). `scripts/gen-sinks.py`, `gen-providers.py`, `gen-agents.py` and
+  `scripts/build-vault.sh` refuse a manifest that fails, naming its folder and field. Without it, a sink's manifest
+  could have sent the vault's audit records and headers to another host (an OTLP path such as `@host/v1/logs`), added
+  a command to bin/metacomputer (a line break in its help text) or stopped the vault (a syslog port over 65535); no
+  release had the sinks' manifests.
 
 ## [0.5.2] - 2026-11-25
 

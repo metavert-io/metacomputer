@@ -40,6 +40,12 @@ the base of every Ubuntu VM reached over SSH, `fake.py` the tests' stand-in), an
 The checks: `python3 tests/test_cloud_adapters.py` (the contract every adapter passes, the manifests, the generated
 files being current, and no provider named in shared code), then the provider's own tests.
 
+A manifest's values reach generated shell, CODEOWNERS and the docs, so each is held to a whitelist of its own
+(`lib/cloud/capabilities.py` check_manifest and `lib/cloud/manifests.py` check_cli: a lowercase word, a docs page,
+one line of printable text...) and written quoted or escaped where it lands (`lib/gensafe.py`).
+`scripts/gen-providers.py` refuses a manifest that fails, naming the provider and the field
+(tests/hostile_manifests.py tries each with what would break out of it).
+
 ## Hooks
 
 Shared code finds a provider's own behaviour by what it brings, never by its name:
