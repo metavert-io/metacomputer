@@ -295,7 +295,7 @@ AGENT_APPS = tuple(dict(a, bundle=re.compile(a["bundle"]), helper=re.compile(a["
 AGENT_PATH_WORDS = _TABLES["path_words"]
 # python -m: the module's package.
 AGENT_MODULES = _TABLES["modules"]
-# The agents' packages, by identifiers specific to them (never a bare name like `gemini`): found in any argument of an
+# The agents' packages, by identifiers specific to them (never a bare name, the agent's command alone): found in any argument of an
 # interpreter, or in what an argument naming an existing file resolves to, they make it that agent (package_agent).
 AGENT_PACKAGE_WORDS = _TABLES["package_words"]
 # A folder of that name in a path, unless the agent's own helpers' path is below it (they only relay between the
@@ -348,7 +348,7 @@ def name_agent(path):
 
 def app_folder(path, prefixes):
     """Whether a folder on the path is an app's own: a component that is or starts with one of prefixes, case aside
-    (Antigravity.app, antigravity-ide, ~/.antigravity), never the word inside another name (not-antigravity)."""
+    (Name.app, name-ide, ~/.name), never the word inside another name (not-name)."""
     return any(c.lower().startswith(prefixes) for c in (path or "").split("/"))
 
 
@@ -464,11 +464,11 @@ def _script_at(arg, cwd, kind):
 
 def script_agent(argv, cwd=None, kind="node"):
     """The agent an interpreter's exact arguments run, else None, or UNKNOWN_AGENT when it can't be told:
-      - its title, argv[0] (OpenClaw's `openclaw` and `openclaw-gateway`, a titled Hermes Agent's `hermes`);
+      - its title, argv[0] (an agent that names its processes: AGENT_NAMES);
       - an agent's package named by any argument, or by what one naming an existing file resolves to (relative ones
         from the process's own working folder: cwd(), its path or None when it can't be read): AGENT_PACKAGE_WORDS
-        and AGENT_PACKAGE_FOLDERS, specific identifiers, never a bare name (so `node -pe "import('@google/gemini-cli')"`
-        and `--import @google/gemini-cli` are Gemini CLI, and an editor opening a file named gemini isn't);
+        and AGENT_PACKAGE_FOLDERS, specific identifiers, never a bare name (so `node -pe "import('@scope/an-agent')"`
+        and `--import @scope/an-agent` are that agent, and an editor opening a file named after one isn't);
       - the program in its place: a preload (--require/--import: a file or a package, AGENT_PACKAGES), python's -m
         module, or the script, the first argument that isn't an option or an option's value (only options known to take
         one: NODE_VALUE_FLAGS, DENO_VALUE_FLAGS, python's -W, -X; any other option takes none), checked as written and
@@ -544,8 +544,8 @@ def agent_kind(comm, argv=None):
 
 def process_agent(comm, exe, argv, cwd):
     """The agent session a process is, from what it executes: (a) its name (agent_kind) and its executable, the
-    realpath of its text image (exe: None when it can't be read; a native `gemini`, a node or bun single-file build
-    named after an agent); (b) for an interpreter (by either), the program it runs (script_agent: argv() its exact
+    realpath of its text image (exe: None when it can't be read; an agent's native build, a node or bun single-file
+    one named after it); (b) for an interpreter (by either), the program it runs (script_agent: argv() its exact
     arguments, None when they can't be read, which is UNKNOWN_AGENT; cwd() its working folder)."""
     got = agent_kind(comm) or (agent_kind(exe) if exe else None)
     if got:
@@ -710,15 +710,15 @@ def dispatch(shared=True, timeout=DISPATCH_WAIT_S):
         os.close(fd)   # releases the lock
 
 
-def write_claim(bridge_pid, claude_pid, cwd, tool, started, kind=None, sid=None, extra=None):
+def write_claim(bridge_pid, agent_pid, cwd, tool, started, kind=None, sid=None, extra=None):
     os.makedirs(OWNERS_DIR, exist_ok=True)
-    rec = {"bridge_pid": bridge_pid, "claude_pid": claude_pid, "cwd": cwd, "started": started,
+    rec = {"bridge_pid": bridge_pid, "claude_pid": agent_pid, "cwd": cwd, "started": started,
            "last_call": time.time(), "last_tool": tool}
-    if claude_pid and not (extra or {}).get("agent"):
-        rec["agent"] = agent_name(claude_pid) or RECORD_DEFAULT_AGENT
+    if agent_pid and not (extra or {}).get("agent"):
+        rec["agent"] = agent_name(agent_pid) or RECORD_DEFAULT_AGENT
     # Which process the session is: its pid and its start time (claude_start, lib/sessionvm.py proc_start), which the
     # caller passes in extra: taken when the session took the claim (a live ancestor's, the hub's client at its hello),
-    # and kept through every refresh (a lease, the inner Claude's keeper). It's never looked up here: the process that
+    # and kept through every refresh (a lease, `metacomputer claude`'s keeper). It's never looked up here: the process that
     # has the pid now may be another one. A claim without it can't be shown to be any session's (lib/sessionvm.py).
     if kind:
         # "shell": metacomputer sh outside an agent session (kept by its time, see claims()); "lease": the hub holding
@@ -740,12 +740,12 @@ def write_claim(bridge_pid, claude_pid, cwd, tool, started, kind=None, sid=None,
         except OSError:
             pass
         raise
-    if claude_pid:
+    if agent_pid:
         # The agent session holds this computer now: a record of where, so its commands that name no VM stay on it
         # (lib/sessionvm.py, the session guard). Best effort; written once per session and computer.
         try:
             import sessionvm
-            sessionvm.note_claim(claude_pid, bridge_pid, os.path.dirname(OWNERS_DIR), rec.get("claude_start"))
+            sessionvm.note_claim(agent_pid, bridge_pid, os.path.dirname(OWNERS_DIR), rec.get("claude_start"))
         except Exception:
             pass
 
@@ -775,26 +775,26 @@ def sid_of(pid):
 
 def claim_for_shell(tool, who=None):
     """`metacomputer sh` acted. Its process ends with the run, so the claim lives
-    as long as the caller's Claude Code session. Outside Claude Code it's held in
+    as long as the caller's agent session. Outside an agent session it's held in
     the name of the shell that ran it, but that shell is often short-lived (bash -c,
     a script, another agent's tool runner): such a claim lasts the activity window
     (ACTIVE_S, ten minutes) from its last run whether or not that shell is still
     alive, and later runs from the same terminal session (its sid) count as the
-    same controller. Returns who holds it, (holder pid, claude pid, the agent session's
+    same controller. Returns who holds it, (holder pid, agent pid, the agent session's
     start time, taken now while it's this process's ancestor); passing that back (a
     refresh during a run) skips looking at the process table, and keeps that start."""
     if who is None:
         table = ps_table()
-        claude = claude_of(os.getpid(), table)
-        who = (claude or os.getppid(), claude, _session_start(claude) if claude else None)
-    holder, claude = who[0], who[1]
+        agent_pid = claude_of(os.getpid(), table)
+        who = (agent_pid or os.getppid(), agent_pid, _session_start(agent_pid) if agent_pid else None)
+    holder, agent_pid = who[0], who[1]
     started = time.time()
     try:
         started = json.load(open(claim_path(holder))).get("started", started)
     except (OSError, ValueError):
         pass
-    if claude:
-        write_claim(holder, claude, os.getcwd(), tool, started, extra={"claude_start": who[2] if len(who) > 2 else None})
+    if agent_pid:
+        write_claim(holder, agent_pid, os.getcwd(), tool, started, extra={"claude_start": who[2] if len(who) > 2 else None})
     else:
         write_claim(holder, None, os.getcwd(), tool, started, kind="shell", sid=my_sid())
     return who
@@ -820,8 +820,8 @@ def drop_claim(bridge_pid, conn=None):
 
 
 def claims():
-    """Live claims; files of dead bridges are removed. A shell claim made outside Claude
-    Code (kind "shell") is kept for the activity window after its last run even when the
+    """Live claims; files of dead bridges are removed. A shell claim made outside an agent
+    session (kind "shell") is kept for the activity window after its last run even when the
     shell that ran it has exited, and removed after that."""
     out, dead = [], []
     if not os.path.isdir(OWNERS_DIR):
@@ -1128,8 +1128,8 @@ def direct_connections(table):
 
 
 def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, sid=None):
-    """Controllers other than the caller's own Claude Code session. The hub, which asks for its clients,
-    passes what it already knows: the client's ancestors (mine), its Claude Code process, its terminal
+    """Controllers other than the caller's own agent session. The hub, which asks for its clients,
+    passes what it already knows: the client's ancestors (mine), its agent's process (my_claude), its terminal
     session (sid) and a recent list of direct connections, so no process table is read."""
     self_pid = self_pid or os.getpid()
     if mine is None or direct is None:
@@ -1141,11 +1141,11 @@ def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, si
         sid = my_sid() if self_pid == os.getpid() else sid_of(self_pid)
     found = []
     for c in claims():
-        # mine: also a claim held by a shell above the caller (metacomputer sh outside Claude Code)
+        # mine: also a claim held by a shell above the caller (metacomputer sh outside an agent session)
         if c.get("bridge_pid") == self_pid or c.get("bridge_pid") in mine or (my_claude and c.get("claude_pid") == my_claude):
             continue
-        # mine: a shell claim (or an inner Claude started from a shell) from this same terminal session, outside
-        # Claude Code (its shell may be gone)
+        # mine: a shell claim (or `metacomputer claude` started from a shell) from this same terminal session,
+        # outside an agent session (its shell may be gone)
         if (not my_claude and c.get("kind") in ("shell", "inner") and not c.get("claude_pid")
                 and c.get("sid") is not None and c.get("sid") == sid):
             continue
@@ -1301,7 +1301,7 @@ def main(argv):
         return 0
     if cmd == "release":
         n = 0
-        # Under the owners lock, which the inner Claude's keeper (vm_claude.py) holds to check and renew its claim:
+        # Under the owners lock, which `metacomputer claude`'s keeper (vm_claude.py) holds to check and renew its claim:
         # a claim dropped here can't be written back by a renewal already under way, and the keeper then exits.
         try:
             with lock():

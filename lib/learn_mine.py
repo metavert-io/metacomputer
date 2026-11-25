@@ -1,7 +1,7 @@
 """Mining the user's own sessions with the metacomputer tools (`metacomputer learn report`, docs/learn.md).
 
-It finds the Claude Code transcripts that called the metacomputer tools (either prefix), Codex's, Gemini CLI's,
-Antigravity CLI's, OpenClaw's and Hermes Agent's sessions that did (the last two from their SQLite databases, lib/session_dbs.py), plus
+It finds every registered agent's sessions that called the metacomputer tools (either prefix; each agent's reader is its
+folder's sessions.py: files through lib/transcripts.py, SQLite databases through lib/session_dbs.py), plus
 action logs, event logs and benchmark results where present, and reports:
 - failed driver calls by class: malformed arguments, each hub guard's refusal, element not found, a pixel
   action without a screenshot frame, and the other classes the driver's messages name;
@@ -164,8 +164,8 @@ def warning_of(text):
 
 
 def label_for(path, cwd, source, agent=None):
-    """A short label for a session from its folder on this Mac (two path parts), or its bench run/task (an OpenClaw or
-    Hermes Agent session without a folder: the agent's name)."""
+    """A short label for a session from its folder on this Mac (two path parts), or its bench run/task (a database
+    agent's session without a folder: the agent's name)."""
     if source == "bench":
         parts = path.split(os.sep)
         base = "/".join(parts[-3:-1])
@@ -482,7 +482,7 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
                     bad += 1
                 elif hit:
                     out.append((p, source))
-    # the agents that list their session files one by one (an Antigravity CLI conversation's compact transcript)
+    # the agents that list their session files one by one (sessions.py files(): a conversation's compact transcript, say)
     for p in session_files(env) if projects else []:
         try:
             st = os.lstat(p)
@@ -579,8 +579,15 @@ def _probe(path):
         return None
 
 
+def _db_agents_words():
+    """"A's and B's": the agents whose sessions are SQLite databases (their manifests' sessions source), in words."""
+    from agentkit import manifests, registry
+    return " and ".join(manifests.label(n) + "'s" for n in registry.AGENTS
+                        if (manifests.manifest(n).get("sessions") or {}).get("source") == "databases")
+
+
 def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects=True):
-    """Each session mined once (a headless copy wins over Claude Code's own file of the same session),
+    """Each session mined once (a headless copy wins over the agent's own file of the same session),
     filtered by time and project; a transcript is parsed, mined and dropped before the next one is read.
     Returns (mined sessions in time order, stats)."""
     found, scanned, unreadable = candidates(env, cutoff, project, extra_dirs, bench_dirs, projects)
@@ -595,7 +602,7 @@ def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), proje
             continue
         cut += 1 if item.pop("cut") else 0
         items.append(item)
-    # OpenClaw's and Hermes Agent's sessions, from their SQLite databases (lib/session_dbs.py): read, never written or
+    # The database agents' sessions, from their SQLite databases (lib/session_dbs.py): read, never written or
     # locked; what couldn't be read is in the notes, never fatal
     dbs, notes, with_tools = 0, [], len(found)
     if projects:
@@ -603,7 +610,7 @@ def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), proje
             trs, dbs, bad, nb = session_dbs.sessions(env, cutoff)
             unreadable, notes = unreadable + bad, nb.lines()
         except Exception as e:                  # never the report's end: said, by its type only
-            trs, notes = [], [f"OpenClaw's and Hermes Agent's sessions weren't read ({type(e).__name__})"]
+            trs, notes = [], [f"{_db_agents_words()} sessions weren't read ({type(e).__name__})"]
         for tr in trs:
             try:
                 item = _mine_tr(tr, tr.kind, cutoff, project)

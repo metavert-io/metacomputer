@@ -586,7 +586,7 @@ def _names(recs):
 
 
 def holding(recs, agent_name):
-    """"this Codex session's MCP tools act on demo" and the like."""
+    """"this NAME session's MCP tools act on demo" and the like (NAME: the agent's label)."""
     who = f"this {agent_name or 'agent'} session"
     if recs and recs[0]["kind"] == "mcp":
         if all(r["selected"] for r in recs):

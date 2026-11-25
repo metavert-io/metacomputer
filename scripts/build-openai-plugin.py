@@ -5,11 +5,11 @@ as a ZIP to upload (nothing is uploaded or submitted here).
     python3 scripts/build-openai-plugin.py [--version X.Y.Z] [--out FILE.zip]   # build it (default: results/)
     python3 scripts/build-openai-plugin.py --check                              # build in memory, check, write nothing
 
-It is made from the same files as the Claude Code plugin (plugin/, which scripts/sync-plugin.py keeps equal to the
+It is made from the same files as the plugin (plugin/, which scripts/sync-plugin.py keeps equal to the
 repository's own files): the skills metacomputer and learn (plugin/skills/) and Cua Driver's pack
 (plugin/.claude/skills/cua-driver/, its links to ../../../skills/metacomputer/ pointed at ../metacomputer/, as
-agent-plugin/ has them), the icon, the license and the notices. The manifest is Codex's (plugin/.codex-plugin/plugin.json)
-with what the directory adds: a version (the release's: gemini-extension.json's, which scripts/release.sh sets), the
+agent-plugin/ has them), the icon, the license and the notices. The manifest is the OpenAI channel's (an agent's channel.py OPENAI)
+with what the directory adds: a version (the release's: the release_file's, which scripts/release.sh sets), the
 skills folder as one path, the icon under assets/, and "requires_local_executor": true, which makes the plugin
 "Desktop only" (installed from the ChatGPT desktop app, used in threads that run on the Mac). No MCP server, hooks,
 commands, launcher or scripts: the skills run the metacomputer installed on the Mac (~/.local/bin/metacomputer), and say
@@ -74,11 +74,16 @@ def sync_plugin():
     return mod
 
 
+def release_file():
+    """The channel file that carries the release's version (an agent's manifest's "release_file")."""
+    from agentkit import manifests
+    return manifests.release_file()
+
+
 def release_version():
     """The release's version: the one its channel file carries (an agent's manifest's "release_file"), which
     scripts/release.sh sets."""
-    from agentkit import manifests
-    return json.load(open(os.path.join(LAB, manifests.release_file()), encoding="utf-8"))["version"]
+    return json.load(open(os.path.join(LAB, release_file()), encoding="utf-8"))["version"]
 
 
 def no_link(rel):
@@ -285,7 +290,7 @@ def problems(zbytes):
 
 def main(argv):
     ap = strictargs.Parser(description="Package metacomputer's skills for OpenAI's plugin directory.")
-    ap.add_argument("--version", default=None, help="the package's version (default: gemini-extension.json's)")
+    ap.add_argument("--version", default=None, help=f"the package's version (default: {release_file()}'s)")
     ap.add_argument("--out", default=None, help="the ZIP to write (default: results/openai-plugin/metacomputer-VERSION.zip)")
     ap.add_argument("--check", action="store_true", help="build in memory and check it; write nothing")
     a = ap.parse_args(argv)

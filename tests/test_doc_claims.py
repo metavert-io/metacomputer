@@ -3048,7 +3048,8 @@ CLAIMS = [
     ("docs/codex.md", r"a manifest \(`\.codex-plugin/plugin\.json`:.*?\) with the release's version and `\"requires_local_executor\": true`, which "
                       r"makes it \"Desktop only\".*?It\s+carries no MCP server, launcher or script",
      lambda m: 'd["requires_local_executor"] = True' in function_src("scripts/build-openai-plugin.py", "manifest")
-     and 'json.load(open(os.path.join(LAB, manifests.release_file()), encoding="utf-8"))["version"]' in raw("scripts/build-openai-plugin.py")
+     and 'json.load(open(os.path.join(LAB, release_file()), encoding="utf-8"))["version"]' in raw("scripts/build-openai-plugin.py")
+     and "return manifests.release_file()" in function_src("scripts/build-openai-plugin.py", "release_file")
      and '"release_file": "gemini-extension.json"' in raw("coding-agents/gemini/manifest.json")
      and not re.search(r"bin/metacomputer|get\.sh", raw("coding-agents/codex/channel.py").split("OPENAI = ", 1)[1])
      and 'for k in ("mcpServers", "apps", "hooks", "commands"):' in function_src("scripts/build-openai-plugin.py", "problems")),
@@ -3143,8 +3144,9 @@ CLAIMS = [
                       r"and the report\s+goes on",
      lambda m: "except Layout:" in function_src("lib/session_dbs.py", "sessions")
      and "except Unreadable as e:" in function_src("lib/session_dbs.py", "sessions")
-     and "trs, notes = [], [f\"OpenClaw's and Hermes Agent's sessions weren't read ({type(e).__name__})\"]"
-     in function_src("lib/learn_mine.py", "mine_sessions")),
+     and "trs, notes = [], [f\"{_db_agents_words()} sessions weren't read ({type(e).__name__})\"]"
+     in function_src("lib/learn_mine.py", "mine_sessions")
+     and '.get("source") == "databases"' in function_src("lib/learn_mine.py", "_db_agents_words")),
     # Oracle Cloud's security groups: the create's answer, never a lookup by name (providers/oci/adapter.py,
     # lib/remote.py).
     ("SECURITY.md", r"at Oracle Cloud each build makes a group of its own, tagged with the computer and its\s+operation, never one found by its name",
@@ -3752,7 +3754,7 @@ def end_rules():
     return ('if to == "done" and not interactive:' in ce and ce.index('if to == "done" and not interactive:')
             < ce.index("new, changed = end(")
             and 'if to == "cancel" and not interactive and not own_session:' in ce
-            and "own_session = (known and bool(claude) and claude == rec.get(\"claude_pid\")" in ce
+            and "own_session = (known and bool(agent_pid) and agent_pid == rec.get(\"claude_pid\")" in ce
             and 'and isinstance(rec.get("claude_start"), str) and isinstance(start_now, str)' in ce)
 
 

@@ -77,7 +77,7 @@ for mc_d in $MC_AGENTS; do
   if [ -f "$ROOT/coding-agents/$mc_d/setup.sh" ]; then . "$ROOT/coding-agents/$mc_d/setup.sh"; fi
 done
 # Each agent's switches: FLAG (auto, yes for --FLAG, no for --no-FLAG) and ONLY_FLAG (1 for --only-FLAG), by its flag
-# in capitals (CLAUDE, ONLY_CLAUDE); its step's FLAG_TRIED and FLAG_FAILED (agent_record).
+# in capitals; its step's FLAG_TRIED and FLAG_FAILED (agent_record).
 for mc_d in $MC_AGENT_FLAGS; do
   mc_u="$(printf '%s' "$mc_d" | tr '[:lower:]' '[:upper:]')"
   eval "$mc_u=auto; ONLY_$mc_u=0; ${mc_u}_TRIED=0; ${mc_u}_FAILED=0"
@@ -318,7 +318,7 @@ skill_link_ours() { # PATH: 0 when it's a link metacomputer made, one that point
   # agent. Anything else, a broken link or one into another folder of the same name included, isn't.
   [ -L "$1" ] && "$CPY" "$ROOT/lib/agent_setup.py" link-ours "$1" --root "$ROOT" >/dev/null 2>&1 </dev/null
 }
-keep_cmd_for() { # WHOSE (an agent's label, "Codex's"): an MCP server metacomputer that stays runs, or may run, the
+keep_cmd_for() { # WHOSE (an agent's label, with 's): an MCP server metacomputer that stays runs, or may run, the
   # command links, so --uninstall keeps them
   KEEP_CMD=1
   case "$KEEP_WHY" in "") KEEP_WHY="$1" ;; *"$1"*) ;; *) KEEP_WHY="$KEEP_WHY and $1" ;; esac

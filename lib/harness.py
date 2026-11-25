@@ -2,7 +2,7 @@
 
 Each test gets one connection to Cua Driver in the guest through the hub
 (lib/mcomp_sdk.py, kind "test", a driver session of its own), so the hub's
-guards apply to it as to Claude Code: one controller at a time (it claims the
+guards apply to it as to an agent: one controller at a time (it claims the
 computer before it starts), the Chrome guard, bounded mode, the coordinate
 guard. And:
   - a driver-owned recording (`start_recording` with record_video): the MP4

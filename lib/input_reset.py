@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""The driver's leftover virtual input devices, removed before a person takes the mouse (docs/guide.md, "When Claude
-needs you"; architecture.md, "The hub").
+"""The driver's leftover virtual input devices, removed before a person takes the mouse
+(docs/guide.md, "When Claude needs you"; architecture.md, "The hub").
 
 Cua Driver's background input route (path mpx_pointer / mpx_uinput: background pixel clicks, scrolls, typing without
 an accessibility route) adds an XInput2 master pointer/keyboard pair named "CUA v1.…" and keeps it between actions:

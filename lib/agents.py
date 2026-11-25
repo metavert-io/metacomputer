@@ -4,25 +4,18 @@
 (docs/antigravity.md).
 
   metacomputer agents [--json]          each agent: installed (and its version), how it's set up, your choice
-                                        (install.sh --no-claude, --no-codex, ..., remembered for later runs). For
-                                        Claude Code: the skills (the plugin, or a skill link with --no-plugin) and
-                                        the tools (the user-scope MCP server metacomputer, read as install.sh reads
-                                        it, lib/claude_mcp.py: its command and exact arguments checked; the plugin
-                                        declares none, and an older copy of it that still brings its own is
-                                        reported), and this checkout's command that adds them. For OpenClaw,
-                                        Hermes Agent, Gemini CLI and Antigravity CLI: the MCP server metacomputer as
-                                        each keeps it (lib/agent_setup.py, read by the agent's own CLI, or Gemini
-                                        CLI's settings.json and Antigravity CLI's mcp_config.json) and the skill links
-  metacomputer agents check [--json]    what metacomputer relies on in this Mac's Codex, checked without a model and
-                                        without touching your Codex settings (a throwaway CODEX_HOME): its rules
-                                        checker, the sandbox's marker, `codex mcp` and the two settings install.sh
-                                        adds (by Codex's strict config loading), and the format of your session
-                                        files, tool calls included (for `learn`). Only a `codex` from an absolute
-                                        PATH entry, yours or root's and not writable by others, is run
+                                        (install.sh --no-FLAG, remembered for later runs): an agent with steps of
+                                        its own says how it's set up in its folder's setup.py (status, line); a
+                                        generic one, lib/agent_setup.py's status (the MCP server metacomputer as
+                                        it keeps it, read by its own CLI or from its settings, and the skill links)
+  metacomputer agents check [--json]    what metacomputer relies on in an agent, checked without a model and
+                                        without touching its settings: each agent's setup.py check, where it has
+                                        one (its folder's README says what it checks). Only a command from an
+                                        absolute PATH entry, yours or root's and not writable by others, is run
 
-install.sh runs the check after setting Codex up, so an update to Codex that changes one of these is reported
-there, and `metacomputer update` runs install.sh. Exit status of `check`: 0 all passed (or no Codex), 1 a check
-failed. Stdlib only; Python 3.11 or later (tomllib).
+install.sh runs an agent's check after setting it up, so an update to the agent that changes one of these is
+reported there, and `metacomputer update` runs install.sh. Exit status of `check`: 0 all passed (or nothing to
+check), 1 a check failed. Stdlib only; Python 3.11 or later (tomllib).
 """
 import argparse
 import json
@@ -48,8 +41,8 @@ import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't 
 
 
 def trusted(name):
-    """(absolute path, None) of the `claude` or `codex` command to run, or (None, why not). Only absolute PATH entries
-    are searched (a `.` on PATH would let a downloaded folder's own `codex` run here), and the file must be yours or
+    """(absolute path, None) of an agent's command to run, or (None, why not). Only absolute PATH entries
+    are searched (a `.` on PATH would let a downloaded folder's own copy run here), and the file must be yours or
     root's and not writable by other accounts. Everything this runs gets the same PATH."""
     p = shutil.which(name, path=SAFE_PATH)
     if not p:

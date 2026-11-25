@@ -2,7 +2,7 @@
 """Signed action log (optional; ACTION_LOG=on, off by default).
 
 Every connection to Cua Driver in the VM goes through `metacomputer mcp`
-(the hub, which carries Claude Code's bridge, `metacomputer call` and scripts;
+(the hub, which carries the agents' bridge, `metacomputer call` and scripts;
 `web`; the tests). With the log on, that command runs mcp_relay.py, which
 writes one JSON Lines file per connection under logs/actions/YYYY-MM-DD/: a
 start record (who connected, from which project), then every tool call exactly
@@ -260,7 +260,7 @@ class ActionLog:
                     self._sign()
 
     def call(self, call_id, tool, args, client=None):
-        """client: the hub's note on whose call it is (kind, pid, Claude Code pid, project, driver session)."""
+        """client: the hub's note on whose call it is (kind, pid, agent pid, project, driver session)."""
         self.started[call_id] = time.time()
         rec = {"type": "call", "id": call_id, "tool": tool, "args": args if self.keep_text else redact(args)}
         if client:

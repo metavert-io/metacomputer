@@ -3,7 +3,7 @@
 
 The hub looks at what a window read returns (the accessibility tree's rows, the window's title) for the marks the
 common human checks leave: their widgets' accessible names and their pages' fixed wording. When one is there, it
-tells Claude to hand the computer to the user (`metacomputer handoff --why captcha`), sends `needs_you.captcha`,
+tells the agent to hand the computer to the user (`metacomputer handoff --why captcha`), sends `needs_you.captcha`,
 and (BOT_CHECK=on) refuses acting calls aimed at that window until a fresh read of it no longer shows the check.
 A page that only talks about CAPTCHAs (an article, docs) carries none of these marks.
 

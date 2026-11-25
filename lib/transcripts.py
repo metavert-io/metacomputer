@@ -1,14 +1,13 @@
-"""Claude Code transcripts (and the other agents' session files) that used the metacomputer tools: find them, read
-them, and turn them into an ordered list of tool calls with their results and times. An agent whose sessions are files
-brings its format in its folder (coding-agents/<name>/sessions.py: FORMAT, MARKER, roots; Gemini CLI's is there),
-tried by parse() in its FORMAT's order.
+"""The agents' session files that used the metacomputer tools: find them, read them, and turn them into an ordered
+list of tool calls with their results and times. An agent whose sessions are files brings its format in its folder
+(coding-agents/<name>/sessions.py: FORMAT, MARKER, roots or files), tried by parse() in its FORMAT's order.
 
-Two Claude Code formats carry the same messages:
-- a headless session's stream-json output (`claude -p --output-format stream-json`), as kept by
-  tests/skill/run_headless.sh, the showcase runner and the benchmark (gzipped, compacted, with `t`);
-- Claude Code's own session files, $CLAUDE_CONFIG_DIR/projects/<project>/<session>.jsonl (else
-  ~/.claude/projects), including subagent files below a session's folder.
-OpenClaw and Hermes Agent keep theirs in SQLite databases: lib/session_dbs.py reads those into this module's Transcript.
+Two formats carry the same messages, which parse() reads itself (the default agent's: its folder's sessions.py says
+where its files are):
+- a headless session's stream-json output, as kept by tests/skill/run_headless.sh, the showcase runner and the
+  benchmark (gzipped, compacted, with `t`), the format bench turns every agent's events into;
+- the agent's own project session files (kind "project"), including subagent files below a session's folder.
+An agent whose sessions are SQLite databases has them read by lib/session_dbs.py into this module's Transcript.
 
 Everything a tool result says came from the VM or from the hub, and the VM's part (window titles,
 page and document text) is untrusted. This module only parses; callers decide what to keep, and
@@ -32,9 +31,8 @@ import wirelimits  # noqa: E402  (JSON depth and size limits, shared with the hu
 # The metacomputer tools: mcp__metacomputer__* (user-scope or --mcp-config server), or the names an older copy of the
 # plugin gave them (it brought its own server), in sessions recorded with it.
 MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__")
-# A tool_use of a metacomputer tool, as both Claude Code formats write it (compact JSON; a space allowed), a Codex call
-# of the metacomputer server, a Gemini CLI tool call (mcp_metacomputer_<tool>), or Antigravity CLI's call_mcp_tool of the
-# metacomputer server (its ServerName JSON-encoded in the compact transcript, as it was in the full one).
+# A tool_use of a metacomputer tool, as both of those formats write it (compact JSON; a space allowed); each agent's own
+# format brings its MARKER (use_marker).
 STREAM_MARKER = rb'"name":\s?"mcp__(?:plugin_metacomputer_)?metacomputer__[a-z_]'
 _USE_MARKER = []
 
@@ -63,8 +61,8 @@ def formats():
 
 
 class State:
-    """What parse() keeps between events: when the model's input last arrived (last_t), and the stream's and Claude
-    Code's calls by their ids (by_id)."""
+    """What parse() keeps between events: when the model's input last arrived (last_t), and the stream's and the
+    project files' calls by their ids (by_id)."""
 
     def __init__(self):
         self.last_t = None
@@ -261,8 +259,7 @@ class Transcript:
       id, name, tool (the driver tool, or None for other tools), input, ctx (the subagent's
       parent tool_use id, or ""), t_use, t_prev (the latest event before it), and, once its result
       came, error (bool), text (at most TEXT_KEEP characters), images, t_result;
-    plus session_id, cwd, kind ("stream", "project", "codex", "gemini", "antigravity", or lib/session_dbs.py's "openclaw"
-    and "hermes"),
+    plus session_id, cwd, kind ("stream", "project", or one of an agent's own: its manifest's sessions kinds),
     first/last (event times), final (the
     stream's result event) and init (its init event). Results are cut to TEXT_KEEP characters
     (TEXT_KEEP_WINDOWS for list_windows and launch_app)."""

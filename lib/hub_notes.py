@@ -1,8 +1,8 @@
 """The hub's own words in a result, and nothing else in their place (lib/mcp_hub.py; SECURITY.md "Hidden page text").
 
 The hub adds notes to what the driver answers: a refusal's explanation, the Chrome guard's and bounded mode's notes,
-the hidden-text marks. A client sees them in the text part of a result and in its structured part, and Claude Code
-shows the model the structured part instead of the text when a result has one, so each note goes in both: the
+the hidden-text marks. A client sees them in the text part of a result and in its structured part, and an agent may
+show the model the structured part instead of the text when a result has one, so each note goes in both: the
 text block, and a key of the hub's own (`metacomputer_note`, `metacomputer_hidden_text`).
 
 The VM is untrusted and writes the rest of the answer, so on every answer the hub passes on, errors included, before
@@ -259,7 +259,7 @@ def fit(msg, approx_size, max_bytes, max_nodes):
         note = TOO_BIG.format(size)
         if had_sc:      # add() kept its notes under NOTE_KEY, hidden_text its own under HIDDEN_KEY
             new_sc = {NOTE_KEY: (sc[NOTE_KEY] + "\n" + note) if isinstance(sc.get(NOTE_KEY), str) else note}
-        else:           # the notes were in the text part only; the structured part is what Claude Code shows
+        else:           # the notes were in the text part only; the structured part is what such an agent shows
             new_sc = {NOTE_KEY: "\n".join([c["text"] for c in blocks] + [note])}
         if isinstance(sc.get(HIDDEN_KEY), dict):
             new_sc[HIDDEN_KEY] = sc[HIDDEN_KEY]

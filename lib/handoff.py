@@ -2,7 +2,7 @@
 """Handing the virtual computer to the user: `metacomputer handoff` (docs/guide.md, "When Claude needs you").
 
 Some steps are the user's to do: a CAPTCHA or "verify you are human" check, a sign-in they'd rather do
-themselves, a 2FA prompt the vault can't fill. Claude never tries to pass them. It hands the computer over
+themselves, a 2FA prompt the vault can't fill. The agent never tries to pass them. It hands the computer over
 and waits:
 
   handoff.py --why captcha|login|2fa|payment|other --say "what to do" [--timeout 15m] [--json] [--override]
@@ -10,8 +10,8 @@ and waits:
         instructions, and waits until they hand the computer back. While it's open, every acting call waits
         (owners.open_handoff): the hub's clients, `metacomputer sh`, the vault's fills, and the lifecycle
         commands that check for other controllers. Read-only calls still work.
-  handoff.py done [--note TEXT]     the user: finished; Claude carries on (from their own terminal)
-  handoff.py cancel [--note TEXT]   the user, or the session that asked: called off; Claude stops and asks
+  handoff.py done [--note TEXT]     the user: finished; the agent carries on (from their own terminal)
+  handoff.py cancel [--note TEXT]   the user, or the session that asked: called off; the agent stops and asks
   handoff.py wait [--json]          wait again for the open handoff, or report how the last one ended
   handoff.py status [--json]        the open handoff, if any
   handoff.py guard [--hold-fd N] [--user-ok] [--hub-child]
@@ -30,20 +30,20 @@ agent's runs in the driver any more, while the handoff is open (input_reset.at_o
 ignores the live view's keyboard. When it fails, the handoff opens anyway and its message says how to do it by hand.
 bin/metacomputer passes the SSH command for it first: --transport N WORD... (for `handoff wait` too).
 
-With INTERACTIVE_PROMPTS=on (off by default: dialogs that wait for the user), opening one for Claude also shows a
-dialog on the Mac's screen, "Claude needs you: <--say>", with Open live view (runs `metacomputer view --open`) and
+With INTERACTIVE_PROMPTS=on (off by default: dialogs that wait for the user), opening one for an agent also shows a
+dialog on the Mac's screen, "NAME needs you: <--say>" (NAME: the agent's short name), with Open live view (runs `metacomputer view --open`) and
 Later. A detached helper (handoff.py _dialog ID) shows it and takes it down when the handoff ends; the text reaches
 osascript as an argument of a fixed script, never as part of one. Not over SSH, not without the user's screen
 session, and not when the person at this terminal opened the handoff.
 
 With HANDBACK_PANEL=on (the default), a handoff also shows a small floating panel on the Mac's screen, "Hand back to
-Claude" (done) and "Call it off" (cancel), while it's open (handoff.py _panel ID, detached; `view --open` starts it too
+NAME" (done) and "Call it off" (cancel), while it's open (handoff.py _panel ID, detached; `view --open` starts it too
 when one is open): the same rules as the dialog's screen session, and its answer comes only from a click in that
 macOS window (run_panel). Nothing in the VM can reach it, and no metacomputer command answers it.
 
 At a terminal, Enter where `handoff` waits is "done", and c then Enter (or Ctrl-C) is "cancel".
 
-Exit status of the commands that wait: 0 done, 4 cancelled, 124 time limit (the computer is Claude's again),
+Exit status of the commands that wait: 0 done, 4 cancelled, 124 time limit (the computer is the agent's again),
 5 stopped waiting while it stays open (a signal), 3 refused (one is open already, or another controller is
 active), 2 usage, 1 couldn't record it. The record (.run/owners/handoff.state, owners.py) is written only here,
 under the owners lock; each change of state is made once, by whoever makes it, and that process sends its event.
@@ -117,13 +117,12 @@ def agent_word(rec):
 
 
 def at_terminal():
-    """The user's own terminal: standard input is a terminal and no agent session (Claude Code, Codex, OpenClaw, Hermes
-    Agent, Gemini CLI or Antigravity CLI) is above this
-    process (owners.at_user_terminal). Codex can give its commands a pseudo-terminal, so a terminal alone isn't the
-    user: there, pressing Enter or `handoff done` would be the agent saying the user is done."""
+    """The user's own terminal: standard input is a terminal and no agent session (any registered agent's) is above
+    this process (owners.at_user_terminal). An agent can give its commands a pseudo-terminal, so a terminal alone isn't
+    the user: there, pressing Enter or `handoff done` would be the agent saying the user is done."""
     return owners.at_user_terminal((0,))
 # The dialog (INTERACTIVE_PROMPTS=on). argv: mode ("show"; "compose" returns the text instead, for the tests), the
-# --say text, seconds until it gives up, and who asks ("Claude", "Codex", "OpenClaw", "Hermes" or "Gemini"). The text is data: AppleScript never
+# --say text, seconds until it gives up, and who asks (an agent's short name, AGENT_NAMES). The text is data: AppleScript never
 # parses it.
 DIALOG_SCRIPT = '''on run argv
 	set {mode, msg, secs, who} to {item 1 of argv, item 2 of argv, (item 3 of argv) as integer, item 4 of argv}
@@ -315,7 +314,7 @@ def settle():
 
 # --- reporting ------------------------------------------------------------------------------------
 def report(rec, as_json, hid=None):
-    """How a handoff ended, for Claude (and the person who ran it). Returns the exit status."""
+    """How a handoff ended, for the agent (and the person who ran it). Returns the exit status."""
     s = rec.get("status") if rec else "gone"
     if s not in CODES:
         s = "gone"
@@ -475,7 +474,7 @@ def wait_for(hid, interactive, as_json):
 
 # --- commands -------------------------------------------------------------------------------------
 def announce(rec, interactive):
-    """The needs_you notice (as `metacomputer notify` sends it: Claude's words, cleaned, the same limits and
+    """The needs_you notice (as `metacomputer notify` sends it: the agent's words, cleaned, the same limits and
     5-minute repeat rule) and lifecycle.handoff_opened. Best effort. Returns a line on who was told, or None."""
     try:
         import events
@@ -505,7 +504,7 @@ def announce(rec, interactive):
 
 # --- the dialog (INTERACTIVE_PROMPTS=on) ------------------------------------------------------------
 def dialog_text(say):
-    """The --say text as the dialog shows it after "Claude needs you: " (or "Codex needs you: ", and so on): cleaned (one line, no control characters)
+    """The --say text as the dialog shows it after "NAME needs you: " (NAME: the agent's short name): cleaned (one line, no control characters)
     and at most DIALOG_TEXT_MAX characters."""
     t = clean_text(say)
     return t if len(t) <= DIALOG_TEXT_MAX else t[:DIALOG_TEXT_MAX - 1] + "\N{HORIZONTAL ELLIPSIS}"
@@ -882,7 +881,7 @@ def settle_vault(budget):
 def open_and_wait(a, say, timeout, interactive, opened):
     settle()
     table = owners.ps_table()
-    claude = owners.claude_of(os.getpid(), table)
+    agent_pid = owners.claude_of(os.getpid(), table)
     t0 = time.monotonic()
     try:
         # Exclusive: every action still on its way to the VM (a call being sent, a shell run starting, a vault fill
@@ -914,7 +913,7 @@ def open_and_wait(a, say, timeout, interactive, opened):
                 err("a handoff is already open: " + owners.handoff_describe(cur) +
                     ". Wait for it (`metacomputer handoff wait`); don't open another.")
                 return EXIT_REFUSED
-            # Opening one acts for the one-controller rule: Claude doesn't pause another session's work. A person
+            # Opening one acts for the one-controller rule: an agent doesn't pause another session's work. A person
             # at a terminal takes the computer whatever runs (that's what a handoff is for), and so does --override,
             # after the user agreed.
             if not (interactive or a.override):
@@ -932,8 +931,8 @@ def open_and_wait(a, say, timeout, interactive, opened):
             why = a.why if not older or a.why in owners.HANDOFF_WHY_EVERY_VERSION else "other"
             rec = {"v": 1, "id": "h-" + secrets.token_hex(6), "status": "open", "why": why, "say": say,
                    "opened": now, "deadline": now + timeout, "timeout_s": int(timeout), "opener_pid": os.getpid(),
-                   "claude_pid": claude, "agent": owners.agent_of(claude, table) if claude and not older else None,
-                   "claude_start": owners._session_start(claude) if claude else None,
+                   "claude_pid": agent_pid, "agent": owners.agent_of(agent_pid, table) if agent_pid and not older else None,
+                   "claude_start": owners._session_start(agent_pid) if agent_pid else None,
                    "cwd": os.getcwd(), "sid": owners.my_sid(), "interactive": interactive,
                    "ended": None, "ended_from": None, "note": None}
             opened["id"] = rec["id"]             # before the write: a signal during it still finds the record
@@ -991,25 +990,25 @@ def cmd_end(a, to):
         known = owners.ancestry_complete(os.getpid(), table)
     except OSError:
         table, known = {}, False
-    claude = owners.claude_of(os.getpid(), table) if table else None
+    agent_pid = owners.claude_of(os.getpid(), table) if table else None
     # The session that opened it, positively: the process list read all the way up, the same agent session process
     # by its pid, and its start time read now and equal to the one recorded when it opened (a pid reused by another
     # process since doesn't count; a start time missing on either side never counts, so a record written before
     # start times were kept is the user's to end).
-    start_now = owners._session_start(claude) if claude and known else None
-    own_session = (known and bool(claude) and claude == rec.get("claude_pid")
+    start_now = owners._session_start(agent_pid) if agent_pid and known else None
+    own_session = (known and bool(agent_pid) and agent_pid == rec.get("claude_pid")
                    and isinstance(rec.get("claude_start"), str) and isinstance(start_now, str)
                    and start_now == rec["claude_start"])
     if to == "done" and not interactive and not known:
         err("couldn't tell whether this runs inside an agent session (the process list couldn't be read all the way "
             "up), so it can't say the user is done. The user runs `metacomputer handoff done` in their own terminal.")
         return EXIT_REFUSED
-    if to == "done" and claude and not interactive:
+    if to == "done" and agent_pid and not interactive:
         # Any agent session, not only the one that asked: another agent's session (or one started from the session
         # that asked) saying "done" would be an agent saying the user is done.
-        who = ("this " + (rec.get("agent") if rec.get("agent") in owners.AGENTS else "Claude Code")
+        who = ("this " + (rec.get("agent") if rec.get("agent") in owners.AGENTS else owners.RECORD_DEFAULT_AGENT)
                + " session asked for the handoff, so it" if own_session
-               else "an agent session (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI)")
+               else f"an agent session ({_manifests.in_words(_manifests.labels())})")
         err(f"{who} can't say the user is done. The user runs "
             "`metacomputer handoff done` in their own terminal (or presses Enter where `metacomputer handoff` "
             "waits at a terminal). Ask them; if they've changed their mind, `metacomputer handoff cancel` calls it off.")
@@ -1030,7 +1029,7 @@ def cmd_end(a, to):
         # read (it names no session), anything but the user's terminal.
         why = ("couldn't tell whether this runs inside an agent session (the process list couldn't be read all the "
                "way up), so it doesn't call off the handoff" if not known
-               else "this runs in an agent session that didn't open this handoff" if claude
+               else "this runs in an agent session that didn't open this handoff" if agent_pid
                else "this doesn't run at the user's own terminal or in the agent session that opened this handoff")
         err(why + ": only the session that asked for it, or the user (in their own terminal, or with the panel on the "
             "Mac's screen), can call it off. Nothing was changed.")

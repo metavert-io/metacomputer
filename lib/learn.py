@@ -347,8 +347,8 @@ def require_sealed():
 
 
 def is_tty():
-    """The user's own terminal: stdin is a terminal and no agent session (Claude Code or Codex) is above this
-    process (owners.at_user_terminal; Codex can give its commands a pseudo-terminal)."""
+    """The user's own terminal: stdin is a terminal and no agent session is above this process
+    (owners.at_user_terminal; an agent can give its commands a pseudo-terminal)."""
     try:
         import owners
         return owners.at_user_terminal((0,))

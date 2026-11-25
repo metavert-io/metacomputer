@@ -20,7 +20,7 @@ After any install (install.sh's last step, so `metacomputer update`, the install
   - a VM built from older guest files: what a rebuild would add (never rebuilt on its own).
 The installed version is kept in ~/.local/share/metacomputer/installed.json. `metacomputer status` shows an update
 that's available, from a check against the repository's tags at most once a day (UPDATE_CHECK=off turns it off). An
-install whose Claude Code step didn't finish is recorded as such ("incomplete"), and `update` runs install.sh again
+install whose agent step didn't finish is recorded as such ("incomplete"), and `update` runs install.sh again
 even when the checkout is already at the release.
 """
 import argparse
@@ -255,7 +255,7 @@ class Tty:
 
 
 def tty():
-    """The user's terminal to ask on, or None (Claude, scripts, no controlling terminal)."""
+    """The user's terminal to ask on, or None (an agent, scripts, no controlling terminal)."""
     try:
         return Tty()
     except OSError:
@@ -404,7 +404,7 @@ def after_install(restart="ask", quiet=False):
                     f"`{cmd}` (the vault pins the gateway program, which changed; fills say so until you do)")
     new_stamp = {"version": st["version"], "tag": st["tag"], "after": st["after"], "commit": st["commit"],
                  "checkout": LAB, "gateway": now_gw, "installed_at": time.time(), "bind_pending": pending}
-    # install.sh says which agent steps didn't finish (MCOMP_INSTALL_INCOMPLETE=claude): recorded, so the next
+    # install.sh says which agent steps didn't finish (MCOMP_INSTALL_INCOMPLETE=FLAG,...: the agents' flags): recorded, so the next
     # `metacomputer update` runs install.sh again even when the checkout is already at the release
     incomplete = [x for x in (os.environ.get("MCOMP_INSTALL_INCOMPLETE") or "").split(",") if x in AGENT_STEPS]
     if incomplete:

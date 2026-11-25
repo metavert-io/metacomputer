@@ -38,7 +38,7 @@ MAX_WAL = 128 << 20             # a larger log isn't applied (its checksums are 
 MAX_SESSIONS = 2000             # recent sessions read from one database
 MAX_ROW = 8 << 20               # one row's JSON at most (a larger one is skipped, counted)
 MAX_SECONDS = 120.0             # time spent on one database
-MAX_AGENT_DIRS = 200            # OpenClaw agents (and Hermes profiles) looked at per state folder
+MAX_AGENT_DIRS = 200            # an agent's own agents or profiles looked at per state folder
 WAL_MAGIC = (0x377F0682, 0x377F0683)
 
 
@@ -413,7 +413,7 @@ def _args(v):
 
 
 def _when(v):
-    """Seconds for a stored time: OpenClaw's milliseconds, or seconds."""
+    """Seconds for a stored time: milliseconds (as some agents store it), or seconds."""
     if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
         return None
     return v / 1000.0 if v > 1e11 else float(v)
@@ -478,7 +478,7 @@ LABELS = _labels()
 
 
 def sessions(env, cutoff, slim=True):
-    """(every recent session of OpenClaw's and Hermes Agent's as a Transcript, in no order; databases looked at;
+    """(every recent session of the database agents' as a Transcript, in no order; databases looked at;
     databases that couldn't be read; Notes). A database that fails is counted and noted, never fatal."""
     out, looked, bad, notes = [], 0, 0, Notes()
     for kind, (where, read) in READERS.items():

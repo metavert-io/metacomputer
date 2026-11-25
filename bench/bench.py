@@ -380,7 +380,7 @@ def agent_launcher(work):
 
 
 def agent_server(cfg, timeout_key, timeout):
-    """The session's MCP server (command, args, env) as the Claude sessions get it, for another agent's config; it runs
+    """The session's MCP server (command, args, env) as the default agent's sessions get it, for another agent's config; it runs
     with your HOME (metacomputer's state is there), whatever HOME the agent has."""
     srv = json.load(open(cfg))["mcpServers"]["metacomputer"]
     return {"command": srv["command"], "args": ["mcp-lazy"], "env": dict(srv["env"], HOME=os.path.expanduser("~")),

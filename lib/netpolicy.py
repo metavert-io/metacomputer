@@ -3,7 +3,7 @@
 
   net status [--json]                      what the VM can reach now
   net allow NAME... [--for D] [--exact]
-                                           with no list in force: start one (anyone, Claude too), for D
+                                           with no list in force: start one (anyone, the agent too), for D
                                            (default 2h, at most 24h). With one in force: add names or time
                                            (your own terminal only: that widens it)
   net remove NAME...                       take names off the list in force (anyone: that narrows it)
@@ -330,8 +330,8 @@ def until(ts):
 
 
 def at_terminal():
-    """The user's own terminal: stdin and stderr are terminals and no agent session (Claude Code or Codex) is above
-    this process. Codex can give its commands a pseudo-terminal, so a terminal alone isn't the user."""
+    """The user's own terminal: stdin and stderr are terminals and no agent session is above this process. An agent
+    can give its commands a pseudo-terminal, so a terminal alone isn't the user."""
     import owners
     return owners.at_user_terminal((0, 2))
 

@@ -37,7 +37,7 @@ import safedelete  # noqa: E402  (every recursive delete: never a folder a VM us
 DROP = {"MACOS.md", "WINDOWS.md", "EMBEDDING.md"}
 NOTES = "../../../skills/metacomputer/DESKTOP.md"   # relative to DEST
 
-DESCRIPTION = (   # one YAML double-quoted string: strict YAML readers (Hermes Agent's) refuse a plain one with ": " in it
+DESCRIPTION = (   # one YAML double-quoted string: strict YAML readers (some agents') refuse a plain one with ": " in it
     "description: \"Detailed Cua Driver {ver} guidance for operating the virtual computer (the metacomputer project, an Ubuntu "
     "24.04 XFCE VM) through the metacomputer MCP tools (mcp__metacomputer__*, or mcp__plugin_metacomputer_metacomputer__* "
     "from an older copy of the plugin), i.e. Cua Driver running inside the "
@@ -85,7 +85,7 @@ EDITS = [
     (r"^- \[EMBEDDING\.md\]\(EMBEDDING\.md\):.*\n", ""),
     # The frontmatter's OpenClaw block: it asks for a cua-driver command on the host's PATH (and the variables of an
     # embedding host app), and here the driver runs only in the VM, so OpenClaw would never offer the skill on the Mac.
-    # Agent Plugins skills (Hermes Agent) take only plain strings in metadata, too (scripts/sync-plugin.py).
+    # Agent Plugins skills take only plain strings in metadata, too (scripts/sync-plugin.py).
     (r"^  openclaw:\n(?: {4}.*\n)+", ""),
 ]
 

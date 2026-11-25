@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
-"""metacomputer for OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI (docs/openclaw.md, docs/hermes.md, docs/gemini.md,
-docs/antigravity.md): install.sh's step for each, its part of --uninstall, and what `metacomputer agents` reports about
-them.
+"""metacomputer for the coding agents whose steps are generic (lib/agentkit/manifests.py generic(); each one's Agent is
+in its folder, coding-agents/<name>/setup.py, and its page for people is its manifest's docs): install.sh's step for
+each, its part of --uninstall, and what `metacomputer agents` reports about them.
 
   agent_setup.py install NAME --root CHECKOUT --link ~/.local/bin/metacomputer
   agent_setup.py uninstall NAME --root CHECKOUT --link ~/.local/bin/metacomputer
   agent_setup.py status NAME --root CHECKOUT --link ~/.local/bin/metacomputer     (JSON)
 
-NAME is openclaw, hermes, gemini or antigravity. For each agent the step registers metacomputer's MCP server,
-`~/.local/bin/metacomputer mcp-lazy`, in the agent's own configuration, through the agent's own CLI (OpenClaw: `openclaw mcp
-add`; Hermes Agent: `hermes config set`; Gemini CLI: `gemini mcp add -s user`; Antigravity CLI: `agy mcp add`), and links
-the skills metacomputer and cua-driver where the agent reads them (OpenClaw and Gemini CLI: ~/.agents/skills, which Codex
-reads too; Hermes Agent: $HERMES_HOME/skills; Antigravity CLI: ~/.gemini/antigravity-cli/skills). Antigravity CLI's entry
-also gets a tool timeout of 600 s, and its settings.json metacomputer's permission rule when the server is added (taken
-out by --uninstall), written by this step because its CLI has no option for either (Antigravity.settle, added, removed).
+NAME is a generic agent's folder (coding-agents/NAME). For each agent the step registers metacomputer's MCP server,
+`~/.local/bin/metacomputer mcp-lazy`, in the agent's own configuration, through the agent's own CLI (its Agent's
+add_argv, remove_argv and read), and links the skills metacomputer and cua-driver where the agent reads them (its
+Agent's skills_dir: ~/.agents/skills unless it says otherwise). What an agent's CLI has no option for (a tool timeout,
+a permission rule in its settings) its Agent writes itself, in settle, added and removed (its folder's README says
+which).
 
-The MCP server named metacomputer follows the rule Claude Code's and Codex's do (lib/agentkit/mcp_entry.py; their steps
-are in coding-agents/): it is metacomputer's own ("ok") only as a local command that is exactly the checkout's bin/metacomputer or
+The MCP server named metacomputer follows the rule every agent's does (lib/agentkit/mcp_entry.py; an agent with steps
+of its own has them in its folder's setup.sh): it is metacomputer's own ("ok") only as a local command that is exactly the checkout's bin/metacomputer or
 ~/.local/bin/metacomputer, with exactly the argument mcp-lazy. Anything else ("foreign") is never changed or removed: the
 run names it by its program and how many arguments it has, or its transport (never an argument, a variable or a URL),
 says how to remove it yourself, and the step is unfinished. An entry that can't be read ("error") is never taken for a
@@ -25,18 +24,18 @@ installs never interleave on one agent), the entry is read again right before an
 still missing), and read back after it. What's left (docs/commands.md, "The other agents", says the same): these agents'
 CLIs have no compare-and-swap, and the lock binds only metacomputer, so another program (the agent itself, an editor,
 another tool) that writes an entry named metacomputer between that last read and the CLI's own write, a window of one
-CLI call, isn't seen: an add replaces it (Gemini CLI's `mcp add`, Hermes Agent's `config set`, Antigravity CLI's `mcp add`;
-OpenClaw's `mcp add` refuses an existing name instead), and a removal, which these CLIs make by name only, removes it. The read-back after
+CLI call, isn't seen: an add replaces it (or, with a CLI whose add refuses an existing name, fails), and a removal, which these CLIs make by name only, removes it. The read-back after
 an add sees what won; the one after a removal can only confirm the name is gone. A skill link swapped for someone else's between metacomputer's
 check and its unlink is removed the same way.
 
 Skill links are metacomputer's only when they point into this checkout's own skill folders (skills/, .claude/skills/;
 a relative target is read from the link's folder): only those are ever replaced or removed. A skill that can't be linked
-(something else there, or an error), or that OpenClaw doesn't offer, leaves the step unfinished. Hermes Agent's profile is
-resolved once (`hermes config path`) and every command and the skills folder use it. Uninstall keeps
+(something else there, or an error), or that the agent doesn't offer (its Agent's check_skill), leaves the step
+unfinished. An agent with profiles has the one in use resolved once (its Agent's pin) and every command and the skills
+folder use it. Uninstall keeps
 ~/.local/bin/metacomputer and mcomp whenever an agent's configuration can't be inspected in full and may still run them
-(its CLI missing or refused: Gemini CLI's settings.json is read directly, all of it or it counts as maybe; the others'
-files are looked through for the names, and a file that includes others, is past the read, can't be read, or sits
+(its CLI missing or refused: an Agent that reads its settings itself, reads_files, has them read directly, all of it
+or it counts as maybe; the others' files are looked through for the names, and a file that includes others, is past the read, can't be read, or sits
 behind a folder that can't be searched or listed counts as maybe too), and on any unexpected error. With the CLI
 there, the profile it selects is acted on and every other profile and location is looked through the same way
 (_mentioned_elsewhere): metacomputer set up in another one keeps them. The step's output, one line each, for install.sh: "ok TEXT", "warn TEXT", "say TEXT", and for --uninstall
@@ -61,7 +60,7 @@ from agentkit import mcp_entry  # noqa: E402  (words, digest, linked, MCP_ARGS)
 import flockwait     # noqa: E402  (the lock's wait)
 
 NAME = "metacomputer"
-TOOL_TIMEOUT = 600          # seconds: as Codex's (install.sh CODEX_TOOL_TIMEOUT); OpenClaw's default is 60 s, Hermes's 300
+TOOL_TIMEOUT = 600          # seconds: what every agent's entry for metacomputer gets (some CLIs' defaults are 60 s)
 SKILLS = ("metacomputer", "cua-driver")
 
 
@@ -75,10 +74,10 @@ def home(env):
     return env.get("HOME") or os.path.expanduser("~")
 
 
-# --- JSON with comments (Gemini CLI's settings.json) -------------------------------------------------------------
+# --- JSON with comments (an agent's settings file) -------------------------------------------------------------
 def jsonc_loads(text, trailing_commas=False):
-    """JSON with // and /* */ comments, as Gemini CLI reads its settings.json (it refuses trailing commas, and so does
-    this unless trailing_commas: Antigravity CLI reads them); ValueError when it isn't that. Comment marks inside strings
+    """JSON with // and /* */ comments, as an agent may read its settings (one refuses trailing commas, and so does
+    this unless trailing_commas: another reads them); ValueError when it isn't that. Comment marks inside strings
     are kept."""
     out, i, n = [], 0, len(text)
     if text.startswith("\ufeff"):
@@ -162,8 +161,8 @@ class Agent:
     tools = ""              # how the agent names the tools, for the messages
     doc = ""
     note = ""               # said once its MCP server is metacomputer's
-    reads_files = False     # read() works without the agent's CLI (Gemini CLI's settings.json)
-    prefix = ()             # arguments every command gets after the program (Hermes Agent's --profile)
+    reads_files = False     # read() works without the agent's CLI (it reads the agent's settings file itself)
+    prefix = ()             # arguments every command gets after the program (a profile's option, say)
 
     def env(self, env):
         return dict(env)
@@ -366,9 +365,9 @@ def entries(folder, prefix=""):
 
 
 MENTIONS_CAP = 16 << 20
-SETTINGS_CAP = 4 << 20          # Gemini CLI's settings.json, read whole
-# What makes a configuration file pull in others, which an uninstall without the agent's CLI doesn't follow: OpenClaw's
-# `$include` (JSON5), and YAML's `!include` tag.
+SETTINGS_CAP = 4 << 20          # an agent's settings file that read() reads itself, whole
+# What makes a configuration file pull in others, which an uninstall without the agent's CLI doesn't follow: an `$include`
+# key (JSON5), and YAML's `!include` tag.
 INCLUDES = (b"$include", b"!include")
 
 
@@ -513,7 +512,7 @@ def _register(agent, prog, root, link, env, out):
         out("ok", f"MCP server {NAME} already registered (tools: {agent.tools})")
         agent.settle(prog, root, link, env, out)
         return True, True
-    # Missing: read again right before the add (Gemini's and Hermes's adds replace an entry of the same name), then add
+    # Missing: read again right before the add (most of these CLIs' adds replace an entry of the same name), then add
     # it and read it back.
     if classify(agent.read(prog, env), root, link) != "absent":
         out("warn", f"{agent.label}'s MCP server {NAME} changed since it was read, so it was left as it is; run "
@@ -712,7 +711,7 @@ def main(argv):
     import strictargs           # its command line, by metacomputer's rules, before anything is done
     strictargs.expect(argv, ["link-ours PATH --root CHECKOUT", "install|uninstall|status AGENT --root CHECKOUT --link LINK"],
                       prog="agent_setup.py")
-    if argv[:1] == ["link-ours"]:          # install.sh's Codex step: the same ownership rule for its skill links
+    if argv[:1] == ["link-ours"]:          # an agent's own setup.sh steps: the same ownership rule for their skill links
         if len(argv) != 4 or argv[2] != "--root":
             print("usage: agent_setup.py link-ours PATH --root CHECKOUT", file=sys.stderr)
             return 2
