@@ -1096,28 +1096,9 @@ def service_version():
 
 FAMILY_LABEL = {"needs_you": "needs you", "task": "task", "security": "security", "lifecycle": "lifecycle",
                 "actions": "action"}
-NTFY_TAGS = {"needs_you": "raising_hand", "task": "white_check_mark", "security": "shield", "lifecycle": "computer",
-             "actions": "memo"}
-
-
-NTFY_PROVENANCE = {"script": "[sent from the command line] ", "spool": "[from another program] ",
-                   "claude": "[from Claude] "}
-
-
-def ntfy_title(ev):
-    return f"{ev['vm']} - {FAMILY_LABEL[ev['family']]}: {ev['type'].replace('_', ' ')}"
-
-
-def ntfy_payload(url, ev):
-    u = urlsplit(url)
-    base, _, topic = u.path.rstrip("/").rpartition("/")
-    prio = 5 if ev["family"] == "needs_you" else {"info": 3, "warn": 4, "error": 4}[ev["severity"]]
-    tags = [NTFY_TAGS[ev["family"]]] + (["warning"] if ev["severity"] == "warn" else
-                                        ["rotating_light"] if ev["severity"] == "error" else [])
-    msg = ev["message"] + (f" -> {ev['action']}" if ev.get("action") else "")
-    msg = NTFY_PROVENANCE.get(ev.get("origin"), "") + msg     # say where it came from when anything could have sent it
-    endpoint = f"{u.scheme}://{u.netloc}{base}/" + (f"?{u.query}" if u.query else "")   # keeps ?auth=
-    return endpoint, {"topic": topic, "title": ntfy_title(ev), "message": msg, "priority": prio, "tags": tags}
+# How a message for a person (a phone's) says where an event came from, when anything could have sent it.
+PROVENANCE = {"script": "[sent from the command line] ", "spool": "[from another program] ",
+              "claude": "[from Claude] "}
 
 
 # --- delivery ---------------------------------------------------------------------------------
@@ -1218,16 +1199,11 @@ def _deliver(sink, batch, timeout, track):
         return False, f"the URL isn't allowed: {e}", False, 0
     extra = {k: v for k, v in sink.get("headers") or []}
     mod = sinkkit.registry.hooks(kind)
+    if mod is None:
+        return False, f"unknown kind {kind}", False, 0
     if hasattr(mod, "deliver"):                 # a transport of its own (sinks/<kind>/sink.py)
         return mod.deliver(sys.modules[__name__], sink, batch, timeout, track)
-    if hasattr(mod, "request"):                 # an HTTP POST (sinks/<kind>/sink.py)
-        target, body, headers = mod.request(sys.modules[__name__], sink, batch, extra)
-    elif kind == "ntfy":
-        target, payload = ntfy_payload(url, batch[0])
-        body = dumps(payload).encode()
-        headers = {**extra, "Content-Type": "application/json", "User-Agent": USER_AGENT}
-    else:
-        return False, f"unknown kind {kind}", False, 0
+    target, body, headers = mod.request(sys.modules[__name__], sink, batch, extra)     # an HTTP POST
     status, err, answer = http_post(target, body, headers, sink.get("ca_pem"), timeout, track)
     if err:
         return False, err, False, 0
@@ -2436,12 +2412,10 @@ def check_url(kind, url):
     if u.port == 0:
         raise EventsError("port 0 isn't a port")
     mod = sinkkit.registry.hooks(kind)
-    if hasattr(mod, "check_url"):           # the kind's own rules (sinks/<kind>/sink.py)
-        mod.check_url(sys.modules[__name__], u)
-        return
-    require_https(u)
-    if kind == "ntfy" and not u.path.strip("/"):
-        raise EventsError("an ntfy URL names the topic: https://ntfy.sh/YOUR-TOPIC")
+    if mod is None:
+        require_https(u)                    # what any other kind always got (events.json may say anything)
+    else:
+        mod.check_url(sys.modules[__name__], u)     # the kind's own rules (sinks/<kind>/sink.py)
 
 
 def require_https(u):
