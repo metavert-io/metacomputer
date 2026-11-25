@@ -31,7 +31,7 @@ NO_VM_SUITES=(test_actionlog test_recording test_vm_shell test_vm_claude test_ss
   test_plugin test_learn test_storage test_install test_events test_doc_claims test_release test_handoff
   test_hidden_text test_multi_vm test_vault_codes test_guest_profiles test_netpolicy test_botcheck
   test_traces test_page_guest test_update test_agents test_cloud_adapters test_session_guard test_remote test_sprites
-  test_agent_setup test_vault_payments test_help test_acting)
+  test_agent_setup test_vault_payments test_help test_acting test_vercel)
 REMOTE=origin
 MAIN=main
 CANONICAL_SLUG="metavert-io/metacomputer"   # get.sh's own repository: its dry run needs no --repo for it

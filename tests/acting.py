@@ -133,6 +133,11 @@ PROGRAMS = {
     "lib/placement.py": NONE,
     "lib/procinfo.py": NONE,                               # reads the Mac's process table
     "lib/proxywrap.py": THROUGH,                            # the caller's command (a provider's tunnel)
+    # A Vercel sandbox's broker: started by lib/remote.py's create, wake and checkpoint hooks (each waits), it carries
+    # the connections of commands that wait on their own, and keeps the session going only while one is open.
+    "providers/vercel/broker.py": THROUGH,
+    "providers/vercel/tunnel.py": {"relay": THROUGH,        # ssh's connection (its commands wait on their own)
+                                   "check": NONE},          # the sandbox's identity, asked of the broker
     # save starts the guest's recorder stream: it checks a --hold-fd it's handed is a hold, else looks for itself
     "lib/recording.py": {"sidecar": NONE, "finalize": NONE, "moments": NONE, "probe": NONE, "unsynced": NONE,
                          "save": ACTS, "capture": THROUGH},      # capture: the caller's command, a read of the guest
@@ -174,7 +179,9 @@ for _p in ("provisioning/guest/finalize.sh", "provisioning/guest/provision.sh", 
            G + "input-reset", G + "secret-fill", G + "session-init", G + "session-run", G + "storage-helper",
            "provisioning/guest/rootfs/usr/local/sbin/metacomputer-admin", R + "guest-firewall", R + "idle-stop",
            R + "remote-uninstall", S + "hide-sprite-api", S + "in-session", S + "services", S + "svc-desktop",
-           S + "svc-session", S + "svc-sshd", S + "svc-xvfb", S + "xvfb-inner"):
+           S + "svc-session", S + "svc-sshd", S + "svc-xvfb", S + "xvfb-inner", "providers/vercel/guest/bootstrap.sh",
+           "providers/vercel/guest/rootfs/opt/metacomputer/vercel/boot",
+           "providers/vercel/guest/rootfs/opt/metacomputer/vercel/relay"):
     PROGRAMS[_p] = GUEST
 # Programs whose first words are a group's: the subcommand is the first two (`volume sync`).
 GROUPS = {"lib/storage.py": ("volume", "refdisk")}

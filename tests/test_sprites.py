@@ -261,8 +261,8 @@ def manifest():
     check("...no background input (no /dev/uinput): declared, and the feature map says so",
           m["input"]["background"] is False and "uinput" in m["input"]["note"]
           and "Fly Sprites" in (caps.missing(m, "background_input") or ""))
-    check("...every other provider has it", all(c.manifest["input"]["background"] for n, c in cloud.ADAPTERS.items()
-                                                 if n != "sprites"))
+    check("...every other provider has it but Vercel Sandbox (no uinput there either)",
+          all(c.manifest["input"]["background"] for n, c in cloud.ADAPTERS.items() if n not in ("sprites", "vercel")))
     lib = open(os.path.join(LAB, "scripts", "lib.sh")).read()
     off = {n for n, c in cloud.ADAPTERS.items() if not c.manifest["input"]["background"]}
     fn = re.search(r"^mc_background_input\(\) \{.*\}$", lib, re.M).group(0)
@@ -270,7 +270,7 @@ def manifest():
     said = {n: subprocess.run(["/bin/bash", "-c", f'. "{pv}"; {fn}\nPROVIDER="$1"; mc_background_input', "_", n],
                               capture_output=True, text=True, timeout=30).stdout for n in cloud.ADAPTERS}
     check("scripts/lib.sh tells the hub which providers lack it (MCOMP_BACKGROUND_INPUT), as their manifests say "
-          "(lib/cloud/providers.sh, made from them)", {n for n, v in said.items() if v == "off"} == off == {"sprites"}
+          "(lib/cloud/providers.sh, made from them)", {n for n, v in said.items() if v == "off"} == off == {"sprites", "vercel"}
           and all(v in ("on", "off") for v in said.values()), said)
     rt = sprites.Sprites().rates()
     check("rates: awake a few cents an hour driven now and then, asleep its disk only", 0 < rt["awake_per_hour"] < 0.1

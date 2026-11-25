@@ -2877,6 +2877,8 @@ DELETE_EXCEPTIONS = [
     ("scripts/remote-build.sh", "gssh admin 'sudo rm -rf /opt/metacomputer-payload && sudo install -d", "guest"),
     # ...and a Fly Sprite's bootstrap folder, a temporary one in the Sprite, removed there by the command Fly's exec runs
     ("providers/sprites/build.sh", 'bash "$d/bootstrap.sh" "$d"; rc=$?; rm -rf "$d"; exit $rc', "guest"),
+    # ...and a Vercel sandbox's, removed there by the command Vercel's API runs
+    ("providers/vercel/build.sh", 'bash "$d/bootstrap.sh" "$d"; rc=$?; rm -rf "$d"; exit $rc', "guest"),
     ("install.sh", "rm -r $SSH_DIR; and last", "text"),
     ("install.sh", "is installed too: rm -rf ~/.local/share/lume-secure", "text"),
     ("install.sh", 'echo "    rm -rf ~/.local/share/lume-secure', "text"),

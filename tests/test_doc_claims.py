@@ -2207,10 +2207,22 @@ CLAIMS = [
          "provisioning/remote/bootstrap.sh") and '"disable_root: true"' in raw("lib/cloud/guest.py")),
     ("SECURITY.md", r"The REST calls to those three go only to their API\s+addresses, over HTTPS, and never follow a redirect",
      lambda m: "HOSTS = manifests.api_hosts()" in raw("lib/provider_http.py")
-     and set(__import__("provider_http").HOSTS) == {"api.hetzner.cloud", "api.digitalocean.com", "api.vultr.com"}
+     and set(__import__("provider_http").HOSTS) == {"api.hetzner.cloud", "api.digitalocean.com", "api.vultr.com",
+                                                    "api.vercel.com"}
      and 'if not url.startswith("https://") or host not in HOSTS:' in raw("lib/provider_http.py")
      and "return None             # the 3xx comes back as an HTTPError" in raw("lib/provider_http.py")
      and "_OPENER = urllib.request.build_opener(_NoRedirect)" in raw("lib/provider_http.py")),
+    ("SECURITY.md", r"Its REST calls go only to Vercel's API address, over HTTPS, and never follow a redirect, the\s+broker's kept-alive and streamed ones too",
+     lambda m: '"api_host": "api.vercel.com"' in raw("providers/vercel/manifest.py")
+     and "api.vercel.com" in __import__("provider_http").HOSTS
+     and 'if not url.startswith("https://") or host not in HOSTS:' in raw("lib/provider_http.py").split("def _target(", 1)[1].split("class Session:", 1)[0]
+     and "host, path = _target(url)" in raw("lib/provider_http.py").split("class Session:", 1)[1].split("def stream(", 1)[0]
+     and "host, path = _target(url)" in raw("lib/provider_http.py").split("def stream(", 1)[1]
+     # http.client never follows a redirect: the kept-alive and streamed calls are made with it, not urllib
+     and raw("lib/provider_http.py").split("class Session:", 1)[1].count("http.client.HTTPSConnection(host,") == 2
+     and "urllib" not in raw("lib/provider_http.py").split("class Session:", 1)[1]
+     and "import provider_http" in raw("providers/vercel/broker.py") and "provider_http.Session()" in raw("providers/vercel/broker.py")
+     and "http=provider_http.send, stream=provider_http.stream" in raw("providers/vercel/remote.py")),
     ("docs/remote.md", r"take `OCI_\*`, `HCLOUD_TOKEN`, `DIGITALOCEAN_TOKEN` and `VULTR_API_KEY` out of the environment",
      lambda m: all(all(k in line for k in ("OCI_API_KEY_PEM", "HCLOUD_TOKEN", "DIGITALOCEAN_TOKEN", "VULTR_API_KEY"))
                    for line in (next(ln for ln in raw(f).splitlines() if 'do export -n "$mc_k"; done' in ln)

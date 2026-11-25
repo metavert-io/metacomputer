@@ -356,6 +356,14 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   the manifest's `outside_egress`. No background input there (no uinput): the hub sends keys and typing (aimed at an
   element too) and pixel clicks in the foreground. Tests:
   `python3 tests/test_sprites.py` (a stand-in `sprite`; no VM, no network).
+  Vercel Sandbox (docs/vercel.md; `PLACE=vercel`, `providers/vercel/`) is reached through the `vercel` transport:
+  `providers/vercel/tunnel.py` asks the computer's broker (`providers/vercel/broker.py`, started by `lib/remote.py`'s
+  hooks with the credentials on its standard input: the only other process that ever holds them; never ssh, the hub or
+  the vault), which runs the guest's relay through Vercel's command API. A stop keeps the disk, not the programs: the
+  boot script (`/opt/metacomputer/vercel/boot`, run through the API at every start) blocks Vercel's agent port (23456)
+  for every account but root before anything else, then starts sshd and the desktop. Every operation checks the
+  sandbox's creation time and tags first; `vm delete` deletes every snapshot of it (Vercel keeps them otherwise).
+  Tests: `python3 tests/test_vercel.py` (a stand-in for Vercel's API; no VM, no network).
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every
   settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file
@@ -491,7 +499,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, `python3 tests/test_vault_payments.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup`, `test_vault_payments`, `test_help`, `test_acting` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup`, `test_vault_payments`, `test_help`, `test_acting`, `test_vercel` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and

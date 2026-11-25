@@ -415,7 +415,9 @@ view's tunnel, the vault's fills and tokens) uses one transport (`lib/cloud/tran
 (`transport.register`, run as ssh's ProxyCommand through `lib/proxywrap.py`, which leaves ssh's process group and ends
 the tunnel when ssh goes, so it never keeps a computer awake and billing). Fly Sprites register `sprite proxy -W :22`
 ([docs/sprites.md](sprites.md)); the vault's binding pins that program and runs it through itself (`mcomp-vault
-_tunnel`).
+_tunnel`). Vercel Sandbox registers `providers/vercel/tunnel.py`, which asks the computer's broker (the one program on
+your Mac besides `lib/remote.py` that holds the token) to carry the connection through Vercel's API
+([docs/vercel.md](vercel.md)).
 
 ## Settings (`config/vms/NAME.env`)
 

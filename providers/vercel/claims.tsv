@@ -1,0 +1,29 @@
+# This provider's promises in the docs, pinned to its own files (tests/test_doc_claims.py reads every registered
+# provider's). One condition a line, tab-separated: the document, a phrase it must contain (a regular expression,
+# matched with the document's whitespace folded), a file in this folder, and text that file contains (a leading !:
+# must not contain; \n and \t as escapes). Lines with the same document and phrase are one promise: all must hold.
+# Promises whose check reads shared code too stay in tests/test_doc_claims.py.
+SECURITY.md	refused by an nftables rule by uid \(`tcp dport 23456 meta skuid != 0 reject with tcp reset`\)	guest/rootfs/opt/metacomputer/vercel/boot	tcp dport $PORT meta skuid != 0 counter reject with tcp reset
+SECURITY.md	refused by an nftables rule by uid \(`tcp dport 23456 meta skuid != 0 reject with tcp reset`\)	guest/rootfs/opt/metacomputer/vercel/boot	PORT=23456
+SECURITY.md	from it the computer's \*\*broker\*\* \(`providers/vercel/broker\.py`\) on its standard input: never its arguments, its environment	remote.py	p.stdin.write(json.dumps(cfg).encode())
+SECURITY.md	from it the computer's \*\*broker\*\* \(`providers/vercel/broker\.py`\) on its standard input: never its arguments, its environment	remote.py	env=R.child_env({"PYTHONDONTWRITEBYTECODE": "1"})
+SECURITY.md	from it the computer's \*\*broker\*\* \(`providers/vercel/broker\.py`\) on its standard input: never its arguments, its environment	broker.py	raw = sys.stdin.buffer.read(65536)
+SECURITY.md	a peer of another account is refused\)	broker.py	if uid is not None and uid != os.getuid():
+SECURITY.md	a peer of another account is refused\)	broker.py	os.umask(0o177)
+docs/vercel.md	Its snapshots never\s+expire by themselves \(`snapshotExpiration` 0\)	api.py	"persistent": True, "snapshotExpiration": 0
+SECURITY.md	the running session's policy is changed, which Vercel also keeps for the next ones, and read back	api.py	/network-policy"
+SECURITY.md	the running session's policy is changed, which Vercel also keeps for the next ones, and read back	adapter.py	self.api.set_policy(sandbox, policy, session=s.get("id") if s.get("status") == "running" else None)
+SECURITY.md	The broker never starts a stopped computer	broker.py	if s.get("status") != "running":
+SECURITY.md	The broker never starts a stopped computer	broker.py	!resume
+SECURITY.md	`EGRESS=internet` \(every name and address but private, shared, link-local\s+and reserved IPv4 ranges, refused outright	adapter.py	return {"allow": ["*"], "subnets": {"deny": list(DENY)}}
+SECURITY.md	`EGRESS=internet` \(every name and address but private, shared, link-local\s+and reserved IPv4 ranges, refused outright	manifest.py	outside_egress={"enforced": True, "private_ranges": True, "metadata": True, "off": True}
+SECURITY.md	The table is replaced in one nft transaction \(declared, deleted and\s+made again in one script, which nft applies whole or not at all\)	guest/rootfs/opt/metacomputer/vercel/boot	nft -f - <<NFT || say
+SECURITY.md	The table is replaced in one nft transaction \(declared, deleted and\s+made again in one script, which nft applies whole or not at all\)	guest/rootfs/opt/metacomputer/vercel/boot	table inet metacomputer_vercel\ndelete table inet metacomputer_vercel\ntable inet metacomputer_vercel {
+SECURITY.md	The table is replaced in one nft transaction \(declared, deleted and\s+made again in one script, which nft applies whole or not at all\)	guest/rootfs/opt/metacomputer/vercel/boot	!nft delete table inet metacomputer_vercel 2>/dev/null
+SECURITY.md	if no\s+rule can be put in force, every process of every account but root's and Vercel's own is ended, sshd too, and the\s+boot stops	guest/rootfs/opt/metacomputer/vercel/boot	for p in $(ps -eo pid=,uid= | awk -v keep="$keep" '$2 != 0 && $2 != keep { print $1 }'); do
+SECURITY.md	if no\s+rule can be put in force, every process of every account but root's and Vercel's own is ended, sshd too, and the\s+boot stops	guest/rootfs/opt/metacomputer/vercel/boot	pkill -KILL -x sshd
+docs/vercel.md	replaced in one\s+transaction so it never lapses	guest/rootfs/opt/metacomputer/vercel/boot	table inet metacomputer_vercel\ndelete table inet metacomputer_vercel\ntable inet metacomputer_vercel {
+SECURITY.md	`vm delete` journals each one in the computer's record \(its checkpoints, and those\s+listed for it\) before anything is deleted	remote.py	R.write_state(rd, dict(cur, snapshots_to_delete=sorted(set(cur.get("snapshots_to_delete") or []) | set(ids))))
+SECURITY.md	`vm delete` journals each one in the computer's record \(its checkpoints, and those\s+listed for it\) before anything is deleted	adapter.py	journal(ids)                # in the record before anything is deleted
+SECURITY.md	and says nothing was made only\s+after looking again over Vercel's visibility delay \(two minutes of consecutive empty lookups	remote.py	VISIBILITY_WINDOW_S = 120
+SECURITY.md	and says nothing was made only\s+after looking again over Vercel's visibility delay \(two minutes of consecutive empty lookups	remote.py	if now - first_empty >= VISIBILITY_WINDOW_S:

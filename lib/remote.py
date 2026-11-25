@@ -754,6 +754,11 @@ def cmd_wake(s, args):
     rd = run_dir(s)
     st = read_state(rd)
     a = adapter_for(s, st)
+    h = hooks_for(a.name, "wake")
+    if h is not None:
+        # A provider whose start is more than its API's (a session started, then what the computer needs started in
+        # it, then the provider's own transport): its hook, which checks the record first as below.
+        return h.wake(sys.modules[__name__], s, a, rd, st)
     check_recorded(s, st, a)
     up = None
     if stop_start(a) and a.status(s["VM_NAME"]).get("provider_state") == "RUNNING":

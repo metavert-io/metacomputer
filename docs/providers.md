@@ -11,6 +11,7 @@ Where metacomputer can make a computer besides this Mac and your own server (doc
 | Hetzner Cloud | `hetzner` | `stop-start` | disk | no | `guest-firewall` | private ranges refused, can be turned off | `full` | yes | `HCLOUD_TOKEN` | [docs/remote.md](remote.md) | [providers/hetzner/](../providers/hetzner/) |
 | DigitalOcean | `digitalocean` | `stop-start` | disk | no | `guest-firewall` | private ranges refused, can be turned off | `full` | yes | `DIGITALOCEAN_TOKEN` | [docs/remote.md](remote.md) | [providers/digitalocean/](../providers/digitalocean/) |
 | Vultr | `vultr` | `stop-start` | disk | no | `guest-firewall` | none (only its own firewall) | `full` | yes | `VULTR_API_KEY` | [docs/remote.md](remote.md) | [providers/vultr/](../providers/vultr/) |
+| Vercel Sandbox | `vercel` | `stop-start` | disk | yes | `network-policy` | private ranges refused, metadata refused, can be turned off | `storage` | no (foreground) | `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID` | [docs/vercel.md](vercel.md) | [providers/vercel/](../providers/vercel/) |
 
 What each bills while stopped (`Stopped bills`): `storage` its disk only, `full` everything, as if it ran. `Sleep`: `stop-start` (metacomputer stops and starts it through the provider), `auto-sleep` (it sleeps by itself when nothing is connected).
 
@@ -48,3 +49,10 @@ What each bills while stopped (`Stopped bills`): `storage` its disk only, `full`
 - Input: background input (the driver's virtual devices) works there.
 - Sizes: `vc2-2c-4gb`, `vc2-4c-8gb`.
 - Regions: `ewr`, `ord`, `dfw`, `sea`, `lax`, `atl`, `ams`, `lhr`.
+
+## Vercel Sandbox
+
+- Billing: stopped: its snapshot's storage only; running: the CPU time it uses and all of its memory (a session ends at its timeout, IDLE_STOP after it was last used, or at the plan's cap).
+- Input: no /dev/uinput in a Vercel sandbox: keys, typing and pixel clicks go in the foreground; actions on an element through accessibility.
+- Sizes: `2x4`, `4x8`, `8x16`.
+- Regions: `iad1`, `arn1`, `bom1`, `cdg1`, `cle1`, `cpt1`, `dub1`, `fra1`, `gru1`, `hkg1`, `hnd1`, `icn1`, `kix1`, `lhr1`, `pdx1`, `sfo1`, `sin1`, `syd1`, `yul1`.

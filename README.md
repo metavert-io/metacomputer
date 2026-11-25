@@ -792,6 +792,14 @@ policy outside it and checkpoints for `reset` ([docs/sprites.md](docs/sprites.md
 metacomputer vm create work --on sprites --org YOUR-ORG                   # after sprite login, in your own terminal
 ```
 
+Or a Vercel sandbox, whose disk is snapshotted at every stop (programs don't survive one), with Vercel's network
+policy outside it, snapshots for `reset`, and a session cap of 45 minutes on Hobby, 24 hours on Pro
+([docs/vercel.md](docs/vercel.md)):
+
+```bash
+metacomputer vm create cloudbox --on vercel                                # with VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID
+```
+
 ## Troubleshooting
 
 | Symptom | What to do |
