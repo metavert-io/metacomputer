@@ -1289,6 +1289,13 @@ def run(td, procs):
     check("the audit log records the requester and the approval scope", recs[-2].get("approval") == "each:session"
           and recs[-1].get("approval") == "grant:session" and recs[-1].get("requester", {}).get("project") == proj1
           and recs[-1].get("requester", {}).get("claude_pid") == p.pid, recs[-2:])
+    import owners as mcowners   # lib/owners.py: how claims, handoffs and the vault's records are read
+    named = re.search(r"Asked by (.+?) in ", asked)
+    check("the vault leaves the records' default agent out of a record (this Claude Code session's), and lib/owners.py "
+          "reads a record without one as the agent the vault's prompt named: one default for both (lib/agentkit's "
+          "registry DEFAULT, compiled into the vault)", named and "agent" not in recs[-1].get("requester", {})
+          and recs[-1].get("requester", {}).get("claude_pid") and mcowners._agent(recs[-1]["requester"]) == named.group(1),
+          (named and named.group(1), recs[-1:]))
     p, outs = as_claude(proj1, ["fill", "web-each", "--vm", "opsvm", "--field", "password"])
     u.expect(f"(pid {p.pid})")
     u.expect("Type web-each to allow")

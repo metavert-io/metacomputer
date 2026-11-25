@@ -33,7 +33,14 @@ All notable changes to metacomputer are recorded here. The format follows
   `.github/CODEOWNERS`) and the hooks each folder brings, and a test fails on a line that names one. Adding an agent
   is its folder, one registry line and a line here. The folder is `coding-agents/`, not `agents/`: Gemini CLI loads
   the repository's root as its extension. Nothing a user sees changes: every command, option, message, setting, file
-  location and package is as it was.
+  location and package is as it was, except the one fix below.
+
+### Fixed
+
+- **`metacomputer learn`**: when reading one agent's sessions fails with an error the reader doesn't expect, the other
+  agents' sessions are still read, and the report's note names the agent whose weren't (`note: OpenClaw: its sessions
+  weren't read (TypeError)`). Before, such an error in OpenClaw's or Hermes Agent's reader left both agents' sessions
+  out of the report, and one while another agent's session files were listed ended the report.
 
 ### Fixed
 

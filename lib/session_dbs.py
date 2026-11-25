@@ -445,71 +445,90 @@ class Notes:
         d[words] = d.get(words, 0) + n
 
     def lines(self):
-        return [f"{LABELS.get(a, a)}: {w}" + (f" ({n})" if n > 1 else "")
+        names = labels()
+        return [f"{names.get(a, a)}: {w}" + (f" ({n})" if n > 1 else "")
                 for a, d in sorted(self.by.items()) for w, n in d.items()]
 
 
-def _readers():
-    """{kind: (where its databases are, how to read one)} of every agent that keeps its sessions in databases
-    (coding-agents/<name>/sessions.py: KIND, databases, read), in the registry's order."""
-    from agentkit import manifests, registry
-    out = {}
-    for n in registry.AGENTS:
-        ses = manifests.manifest(n).get("sessions")
-        if ses and ses["source"] == "databases":
-            mod = registry.module(n, "sessions")
-            out[mod.KIND] = (mod.databases, mod.read)
-    return out
+_READERS = []
+_LABELS = []
 
 
-def _labels():
-    """{kind: label} for the notes (an agent's name, by its sessions' kind)."""
-    from agentkit import manifests, registry
-    out = {}
-    for n in registry.AGENTS:
-        ses = manifests.manifest(n).get("sessions")
-        for k in (ses or {}).get("kinds") or ():
-            out[k] = manifests.label(n)
-    return out
+def readers():
+    """([(agent, its KIND, where its databases are, how to read one)], {agent: why}): every agent that keeps its
+    sessions in databases (coding-agents/<name>/sessions.py: KIND, databases, read), in the registry's order, and those
+    whose sessions.py couldn't be loaded. Loaded once, on first use: never while this module is imported, since each of
+    those modules imports this one (so they load in any order, before it or after)."""
+    if not _READERS:
+        from agentkit import manifests, registry
+        names = [n for n in registry.AGENTS if (manifests.manifest(n).get("sessions") or {}).get("source") == "databases"]
+        mods, failed = registry.loaded(names, "sessions")
+        out = []
+        for n, mod in mods:
+            try:
+                out.append((n, mod.KIND, mod.databases, mod.read))
+            except AttributeError as e:             # a module without what this reads: its sessions can't be read
+                failed[n] = type(e).__name__
+        _READERS.append((out, failed))
+    return _READERS[0]
 
 
-READERS = _readers()
-LABELS = _labels()
+def labels():
+    """{kind or agent: label} for the notes (an agent's name, by its sessions' kinds and by its folder's name)."""
+    if not _LABELS:
+        from agentkit import manifests, registry
+        out = {}
+        for n in registry.AGENTS:
+            out[n] = manifests.label(n)
+            for k in (manifests.manifest(n).get("sessions") or {}).get("kinds") or ():
+                out[k] = manifests.label(n)
+        _LABELS.append(out)
+    return _LABELS[0]
 
 
 def sessions(env, cutoff, slim=True):
     """(every recent session of the database agents' as a Transcript, in no order; databases looked at;
-    databases that couldn't be read; Notes). A database that fails is counted and noted, never fatal."""
+    databases that couldn't be read; Notes). A database that fails is counted and noted, never fatal; an agent whose
+    reader can't be loaded or fails in a way none of these expect is noted by its name, and the others' are read."""
     out, looked, bad, notes = [], 0, 0, Notes()
-    for kind, (where, read) in READERS.items():
-        for path in where(env):
-            looked += 1
-            deadline = time.monotonic() + MAX_SECONDS
-            try:
-                con, note = open_db(path, deadline)
-            except Unreadable as e:
-                bad += 1
-                notes.add(kind, f"a session database couldn't be read ({e})")
-                continue
-            if note:
-                notes.add(kind, note)
-            try:
-                for tr in read(con, path, cutoff, notes, deadline, slim):
-                    out.append(tr)
-            except Layout:
-                bad += 1
-                notes.add(kind, "a session database has a layout this version of metacomputer doesn't read")
-            except sqlite3.OperationalError as e:
-                if _interrupted(e):                   # its deadline passed inside a query (_guard's progress handler)
-                    notes.add(kind, SLOW)
-                else:
+    agents, failed = readers()
+    for name, why in failed.items():
+        notes.add(name, f"its sessions weren't read ({why})")
+    for name, kind, where, read in agents:
+        mine = []
+        try:
+            for path in where(env):
+                looked += 1
+                deadline = time.monotonic() + MAX_SECONDS
+                try:
+                    con, note = open_db(path, deadline)
+                except Unreadable as e:
+                    bad += 1
+                    notes.add(kind, f"a session database couldn't be read ({e})")
+                    continue
+                if note:
+                    notes.add(kind, note)
+                try:
+                    for tr in read(con, path, cutoff, notes, deadline, slim):
+                        mine.append(tr)
+                except Layout:
+                    bad += 1
+                    notes.add(kind, "a session database has a layout this version of metacomputer doesn't read")
+                except sqlite3.OperationalError as e:
+                    if _interrupted(e):                   # its deadline passed inside a query (_guard's progress handler)
+                        notes.add(kind, SLOW)
+                    else:
+                        bad += 1
+                        notes.add(kind, "a session database couldn't be read (it may have changed while it was read; "
+                                        "try again)")
+                except (sqlite3.Error, MemoryError, ValueError):
                     bad += 1
                     notes.add(kind, "a session database couldn't be read (it may have changed while it was read; "
                                     "try again)")
-            except (sqlite3.Error, MemoryError, ValueError):
-                bad += 1
-                notes.add(kind, "a session database couldn't be read (it may have changed while it was read; try "
-                                "again)")
-            finally:
-                con.close()
+                finally:
+                    con.close()
+        except Exception as e:                  # its reader's own failure: none of its sessions, said by its type only
+            notes.add(name, f"its sessions weren't read ({type(e).__name__})")
+            continue
+        out += mine
     return out, looked, bad, notes

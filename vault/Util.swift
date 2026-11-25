@@ -1082,7 +1082,7 @@ struct Requester {
     var record: [String: Any] {
         var d: [String: Any] = ["client_pid": Int(clientPID), "client": clientExe]
         if let p = claudePID { d["claude_pid"] = Int(p) }
-        if let a = agent, a != "Claude Code" { d["agent"] = a }
+        if let a = agent, a != recordDefaultAgent { d["agent"] = a }    // a record without one is the default's
         if let pr = project { d["project"] = pr }
         if let c = claimedClaudePID {
             var b: [String: Any] = ["claude_pid": Int(c), "verified": false]
@@ -1097,7 +1097,7 @@ struct Requester {
     var describe: String {
         let claim = claimedClaudePID.map { ", for an agent session in \(tildePath(claimedProject ?? "?")) (pid \($0)) as it says (unverified)" } ?? ""
         if let p = claudePID {
-            return clean("\(agent ?? "Claude Code") in \(tildePath(project ?? "?")) (pid \(p))" + claim, max: 300)
+            return clean("\(agent ?? recordDefaultAgent) in \(tildePath(project ?? "?")) (pid \(p))" + claim, max: 300)
         }
         if let a = agent, let s = sharedAgentKinds.values.first(where: { $0.label == a }) {
             return clean("\(clientExe) (pid \(clientPID)) under \(s.under), whose conversations share one process"

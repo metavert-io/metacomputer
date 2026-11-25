@@ -151,8 +151,8 @@ def totals(rows):
 
 
 def _agents():
-    """{--agent word: its folder} of the agents bench runs (coding-agents/<name>/manifest.json "bench"), the default (the
-    registry's first) first."""
+    """{--agent word: its folder} of the agents bench runs (coding-agents/<name>/manifest.json "bench"), in the
+    registry's order."""
     if LIB not in sys.path:
         sys.path.insert(0, LIB)
     from agentkit import manifests, registry
@@ -165,7 +165,12 @@ def _launcher(agent):
 
 
 def default_agent():
-    return next(iter(_agents()))
+    """The --agent word of a run that names none: the registry's DEFAULT agent's (old runs are its; never a place in
+    the registry's list)."""
+    if LIB not in sys.path:
+        sys.path.insert(0, LIB)
+    from agentkit import manifests, registry
+    return manifests.manifest(registry.DEFAULT)["bench"]["switch"]
 
 
 def agent_word(meta):

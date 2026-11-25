@@ -1516,16 +1516,21 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
   Its agent packages part (`coding-agents/<name>/`, coding-agents/README.md): the registry is an explicit list of the
   folders in `coding-agents/` (every folder registered, none named `agents/`), each with its manifest, recognition
   tables, setup steps, page and doc-claims rows; every manifest and recognition table is sound, and a broken manifest
-  is refused; an agent's bash (setup.sh, cli.sh), sourced under a trace, only sets variables and defines functions,
-  its hooks named for its own flag and none clashing with another agent's or with what sources it; what's made from
-  the manifests is current (`scripts/gen-agents.py --check`: docs/agents.md, lib/agentkit/agents.sh, CODEOWNERS); and
-  no shared code (bin/, scripts/, lib/ but lib/agentkit, install.sh, get.sh and bench's harness) names an agent: the
-  lint's pattern is tried on known lines first, and every allowance (a whole file, printed usage, a region, a word, a
-  line) is still needed and says why. An agent's tests stay in tests/ (each is one of release.sh's suites by its
-  name): test_agent_setup for the generic agents' steps, test_agents, test_install and test_plugin for Claude Code's
-  and Codex's, test_learn for the session readers, test_bench_checks and test_bench_workdir for the launchers,
-  test_plugin and test_release for the channels; its recognition cases are in its folder
-  (`coding-agents/<name>/tests/recognition_cases.json`, which test_session_guard and test_vault_ops read with
+  (or an app folder that isn't lowercase) is refused; a record without an agent field is Claude Code's whatever the
+  registry's order (the list reversed, in a fresh interpreter: owners, handoffs, bench, its reports and the vault's
+  tables), and the vault reads that name from the tables its build compiles in (test_vault_ops checks the same at run
+  time); an agent with steps of its own brings `status` and `line`, a generic one its `AGENT`, and what `metacomputer
+  agents` takes from a setup.py follows its manifest and its own functions (a framework function it imports isn't taken;
+  two agents with a check give one `check --json` document); an agent's bash (setup.sh, cli.sh), sourced under a trace,
+  only sets variables and defines functions, its hooks named for its own flag and none clashing with another agent's or
+  with what sources it; what's made from the manifests is current (`scripts/gen-agents.py --check`: docs/agents.md,
+  lib/agentkit/agents.sh, CODEOWNERS); and no shared code (bin/, scripts/, lib/ but lib/agentkit, install.sh, get.sh and
+  bench's harness) names an agent: the lint's pattern is tried on known lines first, and every allowance (a whole file,
+  printed usage, a region, a word, a line) is still needed and says why. An agent's tests stay in tests/ (each is one of
+  release.sh's suites by its name): test_agent_setup for the generic agents' steps, test_agents, test_install and
+  test_plugin for Claude Code's and Codex's, test_learn for the session readers, test_bench_checks and
+  test_bench_workdir for the launchers, test_plugin and test_release for the channels; its recognition cases are in its
+  folder (`coding-agents/<name>/tests/recognition_cases.json`, which test_session_guard and test_vault_ops read with
   tests/fixtures/agent_argv.json's shared ones), and its doc-claims rows that read only its own files in its
   `claims.tsv`, which `tests/test_doc_claims.py` reads with the rest.
 - `python3 tests/test_agent_setup.py`: install.sh's steps for OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI
@@ -1610,7 +1615,7 @@ VM's, as they did with fixed numbers (1, 59994, ...). For the same reason `test_
 
 ## Lessons from sessions: `tests/test_learn.py`
 
-`python3 tests/test_learn.py` (174 checks, about 50 s) needs no VM and no network.
+`python3 tests/test_learn.py` (182 checks, about 50 s) needs no VM and no network.
 Everything lives in a temporary folder (`CLAUDE_CONFIG_DIR`, `MCOMP_LESSONS_DIR`, logs,
 events, benchmark results); it checks at the end that the real store
 (`~/.local/share/metacomputer/lessons`) was never touched. Synthetic sessions, in
@@ -1635,7 +1640,11 @@ results, window titles, app names, typed text, errors and the model's own text.
   use), a view of 40 million made-up rows (interrupted at the deadline, inside the query), more sessions than the cap
   (no more leave the query), a linked agent folder or profile below the agent's own folder (refused; that folder
   itself linked is read), a folder or the database owned by another account (a stand-in `fstat`; refused), and a
-  database swapped for a link just before the in-place read (refused; the other database isn't read).
+  database swapped for a link just before the in-place read (refused; the other database isn't read). One agent's
+  reader failing (a copy of coding-agents/ with OpenClaw's or Codex's sessions.py changed: an import that fails, or an
+  error while it lists or reads its sessions) leaves the others' sessions read, with a note naming that agent; the
+  readers load in any order (Hermes Agent's and OpenClaw's before lib/session_dbs.py); and a database agent's session
+  without a folder is labelled with the agent's name whatever its reader's KIND.
 - Injection: nothing injected reaches the report, a proposal or its evidence, the
   store, `learn list`, the hub's instructions, or the summary and prompt that
   `--draft-with-claude` sends (to a stand-in `claude`); a hostile draft is dropped.

@@ -482,6 +482,58 @@ def bash_source(path):
         [ln.split()[-1] for ln in r.stdout.splitlines() if ln.startswith("declare -f")]
 
 
+# The defaults that name an agent for a record that names none, read with the registry's order reversed (argv LAB).
+REORDERED_DRIVER = r'''
+import json, os, sys
+lab = sys.argv[1]
+sys.path[:0] = [os.path.join(lab, "lib"), os.path.join(lab, "bench")]
+from agentkit import registry
+registry.AGENTS = tuple(reversed(registry.AGENTS))
+import owners, handoff, report, bench
+from agentkit import recognition
+print(json.dumps({"owners": [owners.RECORD_DEFAULT_AGENT, owners._agent({})], "handoff": handoff.DEFAULT_SHORT,
+                  "bench": [bench.DEFAULT_AGENT, bench.DEFAULTS["agent"], bench.DEFAULTS["model"]],
+                  "report": [report.default_agent(), report.agent_name({})],
+                  "swift": [ln for ln in recognition.swift().splitlines() if "recordDefaultAgent" in ln]}))
+'''
+
+
+def records_default_checks():
+    """Claims, handoffs, the vault's records and bench's runs without an agent field are Claude Code's (they're older
+    than the other agents' support): named in the registry (DEFAULT), never by a position in its list, which only orders
+    listings; and the vault's build takes the same name from the same place."""
+    sys.path.insert(0, os.path.join(LAB, "bench"))
+    import owners
+    import bench
+    t = tempfile.mkdtemp(prefix="mcomp-agents-order-")
+    try:
+        driver = os.path.join(t, "reordered.py")
+        with open(driver, "w") as f:
+            f.write(REORDERED_DRIVER)
+        r = subprocess.run([sys.executable, driver, LAB], capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL, env=dict(os.environ, HOME=t))
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
+    try:
+        got = json.loads(r.stdout)
+    except ValueError:
+        got = {"error": r.stderr.strip().splitlines()[-1:]}
+    want = {"owners": ["Claude Code", "Claude Code"], "handoff": "Claude",
+            "bench": ["claude", "claude", bench.DEFAULTS["model"]], "report": ["claude", "Claude Code"],
+            "swift": ['let recordDefaultAgent = "Claude Code"']}
+    check("a record without an agent (a claim, a handoff, the vault's records, a bench run) is Claude Code's whatever "
+          "the registry's order: with the list reversed, owners, handoffs, bench, its reports and the vault's tables "
+          "all still say so", got == want, got)
+    swift = recognition.swift()
+    util = open(os.path.join(LAB, "vault", "Util.swift")).read()
+    code = "\n".join(ln.split("//")[0] for ln in util.splitlines())
+    check("...and the vault has it from the same place as lib/owners.py: the tables its build compiles in name "
+          "owners.RECORD_DEFAULT_AGENT, and vault/Util.swift's records read that, with no name of its own",
+          f'let recordDefaultAgent = "{owners.RECORD_DEFAULT_AGENT}"' in swift.splitlines()
+          and code.count("recordDefaultAgent") >= 2 and f'"{owners.RECORD_DEFAULT_AGENT}"' not in code,
+          [ln for ln in util.splitlines() if "recordDefaultAgent" in ln or f'"{owners.RECORD_DEFAULT_AGENT}"' in ln])
+
+
 def packages():
     print("\nagent packages (coding-agents/<name>/)")
     root = os.path.join(LAB, "coding-agents")
@@ -515,9 +567,26 @@ def packages():
           "@names, a page outside docs/, install steps it doesn't know)", all(tried) and len(tried) == 6, tried)
     rec = recognition.check()
     check("each agent's recognition tables are sound and its own (lib/agentkit/recognition.py check)", not rec, rec)
+    app = next(n for n in registry.AGENTS if real(n, "recognition").get("apps"))
+    try:
+        broken = dict(real(app, "recognition"))
+        broken["apps"] = [dict(broken["apps"][0], folders=["MyApp"])]
+        registry.data = lambda n, part: broken if (n, part) == (app, "recognition") else real(n, part)
+        caps = recognition.check()
+    finally:
+        registry.data = real
+    check("...an app's folder that isn't lowercase is refused (lib/owners.py and the vault lowercase each folder of a "
+          "path before they compare it, so it would never match)", any("lowercase" in b for b in caps), caps)
+    records_default_checks()
     with_hooks = [n for n in registry.AGENTS if manifests.manifest(n)["install"]["steps"] == "hooks"]
     no_sh = [n for n in with_hooks if not registry.has(n, "setup.sh")]
     check("an agent whose install steps are its own brings them (setup.sh)", not no_sh, no_sh)
+    no_status = [n for n in with_hooks if not (registry.has(n, "setup.py") and all(
+        callable(getattr(registry.module(n, "setup"), f, None)) for f in ("status", "line")))]
+    no_agent = [n for n in registry.AGENTS if n not in with_hooks and not (
+        registry.has(n, "setup.py") and getattr(registry.module(n, "setup"), "AGENT", None) is not None)]
+    check("...and its part of `metacomputer agents` (setup.py status and line); an agent whose steps are the "
+          "framework's brings its Agent (setup.py AGENT)", not no_status and not no_agent, (no_status, no_agent))
     ran, bad_names, defs = {}, {}, {}
     for n in registry.AGENTS:
         flag = manifests.manifest(n)["flag"]
@@ -611,6 +680,59 @@ def packages():
     check("...each one says why", all(isinstance(w, str) and len(w) >= 15 for w in reasons))
 
 
+# Runs `metacomputer agents` (lib/agents.py main) in a fresh interpreter with Gemini CLI's setup.py changed as an agent's
+# folder might change it: argv LAB, how ("imported-status": it imports the framework's status, as a
+# `from agent_setup import ... status` would; "second-check": it brings an `agents check` of its own), and the
+# command's arguments.
+HOOKS_DRIVER = r'''
+import os, sys
+lab, how = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(lab, "lib"))
+from agentkit import registry
+import agent_setup
+g = registry.module("gemini", "setup")
+if how == "imported-status":
+    g.status = agent_setup.status
+elif how == "second-check":
+    exec("import json\ndef check(as_json, quiet):\n    print(json.dumps({'gemini': None}) if as_json else 'nothing')\n"
+         "    return 0\n", g.__dict__)
+import agents
+sys.exit(agents.main(sys.argv[3:]))
+'''
+
+
+def hooks_cases(t, env):
+    """What `metacomputer agents` takes from an agent's setup.py is decided by its manifest and by what the file defines
+    itself, never by a name it happens to import; and `agents check --json` prints one JSON document whatever number of
+    agents bring a check."""
+    driver = os.path.join(t, "hooks_driver.py")
+    with open(driver, "w") as f:
+        f.write(HOOKS_DRIVER)
+
+    def drive(how, *args):
+        return subprocess.run([sys.executable, driver, LAB, how, *args], capture_output=True, text=True, env=env,
+                              timeout=120, stdin=subprocess.DEVNULL)
+    r = drive("imported-status", "--json")
+    try:
+        st = json.loads(r.stdout)
+    except ValueError:
+        st = {}
+    check("an agent whose steps are the framework's is reported by the framework's status even when its setup.py "
+          "imports a function named status (its manifest's install steps decide, not the names in the file)",
+          r.returncode == 0 and (st.get("gemini") or {}).get("installed") is False, (r.returncode, r.stderr[-300:]))
+    r = drive("second-check", "check", "--json")
+    try:
+        doc = json.loads(r.stdout)
+    except ValueError:
+        doc = None
+    check("two agents with a check of their own: `agents check --json` prints one JSON document, each agent's under "
+          "its JSON key", r.returncode == 0 and doc == {"codex": {"codex": None}, "gemini": {"gemini": None}},
+          (r.returncode, r.stdout[-300:], r.stderr[-300:]))
+    r = drive("none", "check", "--json")
+    check("...and with one (today's: Codex's), its document as it was", r.returncode == 0
+          and json.loads(r.stdout or "null") == {"codex": None}, r.stdout)
+
+
 def main():
     t = tempfile.mkdtemp(prefix="mcomp-agents-")
     try:
@@ -678,6 +800,7 @@ def main():
                            stdin=subprocess.DEVNULL, cwd=fake2, env=dict(base, PATH=".:/usr/bin:/bin"))
         check("a codex found only through a relative PATH entry (a downloaded folder's own) isn't run",
               r.returncode == 0 and json.loads(r.stdout).get("codex") is None, r.stdout)
+        hooks_cases(t, dict(base, PATH="/usr/bin:/bin"))
         print("session files (for learn)")
         sessions_cases(t, base)
         codex = shutil.which("codex")

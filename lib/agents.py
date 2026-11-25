@@ -5,19 +5,24 @@
 
   metacomputer agents [--json]          each agent: installed (and its version), how it's set up, your choice
                                         (install.sh --no-FLAG, remembered for later runs): an agent with steps of
-                                        its own says how it's set up in its folder's setup.py (status, line); a
-                                        generic one, lib/agent_setup.py's status (the MCP server metacomputer as
-                                        it keeps it, read by its own CLI or from its settings, and the skill links)
+                                        its own (its manifest's install steps) says how it's set up in its folder's
+                                        setup.py (status, line); a generic one, lib/agent_setup.py's status (the
+                                        MCP server metacomputer as it keeps it, read by its own CLI or from its
+                                        settings, and the skill links)
   metacomputer agents check [--json]    what metacomputer relies on in an agent, checked without a model and
-                                        without touching its settings: each agent's setup.py check, where it has
-                                        one (its folder's README says what it checks). Only a command from an
-                                        absolute PATH entry, yours or root's and not writable by others, is run
+                                        without touching its settings: each agent's setup.py check, where it
+                                        defines one (its folder's README says what it checks; with --json, one
+                                        agent's document as it prints it, several under their JSON keys). Only a
+                                        command from an absolute PATH entry, yours or root's and not writable by
+                                        others, is run
 
 install.sh runs an agent's check after setting it up, so an update to the agent that changes one of these is
 reported there, and `metacomputer update` runs install.sh. Exit status of `check`: 0 all passed (or nothing to
 check), 1 a check failed. Stdlib only; Python 3.11 or later (tomllib).
 """
 import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -97,6 +102,31 @@ def hooks():
     return [(n, registry.module(n, "setup")) for n in registry.AGENTS if registry.has(n, "setup.py")]
 
 
+def own(mod, name):
+    """mod's function `name` when its file defines it (not one it imported from the framework), else None."""
+    f = getattr(mod, name, None)
+    return f if callable(f) and getattr(f, "__module__", None) == mod.__name__ else None
+
+
+def check_all(checks, as_json, quiet):
+    """Each agent's check [(name, its function)]: its exit status, the highest. With as_json, one JSON document: one
+    agent's as it prints it, several under their JSON keys (each one's printed document)."""
+    if not (as_json and len(checks) > 1):
+        return max([0] + [f(as_json, quiet) for _n, f in checks])
+    from agentkit import manifests
+    rc, docs = 0, {}
+    for n, f in checks:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = max(rc, f(True, quiet))
+        try:
+            docs[manifests.manifest(n)["json_key"]] = json.loads(buf.getvalue())
+        except ValueError:
+            rc, docs[manifests.manifest(n)["json_key"]] = 1, {"error": "its check didn't print a JSON document"}
+    print(json.dumps(docs, indent=2))
+    return rc
+
+
 def main(argv):
     ap = strictargs.Parser(prog="metacomputer agents", description=__doc__.split("\n\n")[0])
     ap.add_argument("what", nargs="?", default="status", choices=("status", "check"))
@@ -104,21 +134,17 @@ def main(argv):
     ap.add_argument("--quiet", action="store_true", help="check: print only what failed")
     a = ap.parse_args(argv)
     if a.what == "check":                  # what metacomputer relies on in each agent that has a check of its own
-        rc = 0
-        for _n, h in hooks():
-            if hasattr(h, "check"):
-                rc = max(rc, h.check(a.json, a.quiet))
-        return rc
+        return check_all([(n, own(h, "check")) for n, h in hooks() if own(h, "check")], a.json, a.quiet)
     import agent_setup
     from agentkit import manifests, registry
-    own = dict(hooks())
+    setups = dict(hooks())
     generic = agent_setup.AGENTS                # {flag: Agent}: the agents whose steps are lib/agent_setup.py's
     st, rows = {}, []
     for n in registry.AGENTS:
         m = manifests.manifest(n)
-        if hasattr(own.get(n), "status"):       # an agent with a part of its own here (its setup.py status, line)
-            st[m["json_key"]] = own[n].status()
-            rows.append((m["label"], m["json_key"], lambda s, h=own[n]: h.line(s)))
+        if m["install"]["steps"] == "hooks":    # an agent with steps of its own: its part here (setup.py status, line)
+            st[m["json_key"]] = setups[n].status()
+            rows.append((m["label"], m["json_key"], lambda s, h=setups[n]: h.line(s)))
         else:
             ag = generic[m["flag"]]
             st[m["json_key"]] = agent_setup.status(ag, LAB, os.path.expanduser("~/.local/bin/metacomputer"),

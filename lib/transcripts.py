@@ -35,6 +35,7 @@ MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__"
 # format brings its MARKER (use_marker).
 STREAM_MARKER = rb'"name":\s?"mcp__(?:plugin_metacomputer_)?metacomputer__[a-z_]'
 _USE_MARKER = []
+_FILE_AGENTS = []
 
 
 def use_marker():
@@ -45,12 +46,27 @@ def use_marker():
     return _USE_MARKER[0]
 
 
+def _loaded():
+    """(the readers, {name: why}) of the registered agents whose sessions are transcript files, loaded once on first
+    use (never at import: their sessions.py import this module): one that can't be loaded is left out, with why."""
+    if not _FILE_AGENTS:
+        from agentkit import manifests, registry
+        _FILE_AGENTS.append(registry.loaded(
+            [n for n in registry.AGENTS if (manifests.manifest(n).get("sessions") or {}).get("source") == "files"
+             and registry.has(n, "sessions.py")], "sessions"))
+    return _FILE_AGENTS[0]
+
+
 def _file_agents():
     """[(name, its sessions.py)] of the registered agents whose sessions are transcript files, in the registry's
-    order."""
-    from agentkit import manifests, registry
-    return [(n, registry.module(n, "sessions")) for n in registry.AGENTS
-            if (manifests.manifest(n).get("sessions") or {}).get("source") == "files" and registry.has(n, "sessions.py")]
+    order; one whose sessions.py can't be loaded isn't among them (unread_agents)."""
+    return _loaded()[0]
+
+
+def unread_agents():
+    """{name: why} of the agents whose sessions are files and whose sessions.py couldn't be loaded: their sessions
+    aren't read (learn notes it), and the others' are."""
+    return dict(_loaded()[1])
 
 
 def formats():

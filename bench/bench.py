@@ -82,11 +82,12 @@ import safedelete  # noqa: E402  (the throwaway HOME of a session goes through i
 from agentkit import manifests as _manifests, registry as _registry  # noqa: E402  (the agents' folders)
 
 # The agents a session can run, by their --agent word (coding-agents/<name>/manifest.json "bench"), in the registry's order:
-# each one's launcher is its folder's bench.py (its hooks, called with this module as B). The first is the default.
+# each one's launcher is its folder's bench.py (its hooks, called with this module as B). The default, for a run that
+# says none and an old run.json without one, is the registry's DEFAULT agent (by name, never its place in the list).
 BENCH_AGENTS = {m["bench"]["switch"]: n for n, m in ((n, _manifests.manifest(n)) for n in _registry.AGENTS)
                 if m.get("bench")}
 AGENTS = tuple(sorted(BENCH_AGENTS))
-DEFAULT_AGENT = next(iter(BENCH_AGENTS))
+DEFAULT_AGENT = _manifests.manifest(_registry.DEFAULT)["bench"]["switch"]
 B = sys.modules[__name__]
 
 

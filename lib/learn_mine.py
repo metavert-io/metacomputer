@@ -171,7 +171,7 @@ def label_for(path, cwd, source, agent=None):
         base = "/".join(parts[-3:-1])
     else:
         c = (cwd or "").rstrip("/").split("/")
-        base = "/".join(x for x in c[-2:] if x) or (source if source in session_dbs.READERS
+        base = "/".join(x for x in c[-2:] if x) or (source if source in _db_agents()
                                                     else os.path.basename(os.path.dirname(path)))
     base = LABEL_SAFE.sub("_", base)[-48:] or "session"
     return base + (" (subagent)" if agent else "")
@@ -452,14 +452,16 @@ def _under(path, root):
     return p == r or p.startswith(r.rstrip("/") + "/")
 
 
-def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects=True):
+def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects=True, failed=None):
     """([(path, source)], scanned, unreadable): every transcript file modified since `cutoff` that called a
     metacomputer tool. Files that don't are opened only to look for that marker; nothing else is read from them.
-    A file that can't be read (corrupt gzip, ...) is counted, and the others go on."""
+    A file that can't be read (corrupt gzip, ...) is counted, and the others go on. An agent whose reader can't list its
+    files goes in failed {name: why}, and the others' are read."""
+    failed = {} if failed is None else failed
     out, scanned, bad = [], 0, 0
     roots = []
     if projects:
-        roots += [(r, "project") for r in session_roots(env)]           # each agent's folders of session files
+        roots += [(r, "project") for r in session_roots(env, failed)]   # each agent's folders of session files
     roots += [(os.path.abspath(os.path.expanduser(d)), "stream") for d in extra_dirs]
     for root, source in roots:
         if not os.path.isdir(root):
@@ -483,7 +485,7 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
                 elif hit:
                     out.append((p, source))
     # the agents that list their session files one by one (sessions.py files(): a conversation's compact transcript, say)
-    for p in session_files(env) if projects else []:
+    for p in session_files(env, failed) if projects else []:
         try:
             st = os.lstat(p)
         except OSError:
@@ -527,24 +529,30 @@ def _readers():
     return dict(transcripts._file_agents()), registry.AGENTS
 
 
-def session_roots(env):
-    """The folders of the agents' session files (each one's sessions.py roots), in the registry's order."""
+def _listed(env, what, failed):
+    """What each agent's sessions.py `what` (roots or files) lists, in the registry's order; one that fails is left out
+    and goes in failed {name: why}, and the others' are listed."""
     mods, order = _readers()
     out = []
     for n in order:
-        if n in mods and hasattr(mods[n], "roots"):
-            out += mods[n].roots(env)
+        if n in mods and n not in failed and hasattr(mods[n], what):
+            try:
+                out += list(getattr(mods[n], what)(env))
+            except Exception as e:
+                failed[n] = type(e).__name__
     return out
 
 
-def session_files(env):
-    """The session files the agents list one by one (each one's sessions.py files), in the registry's order."""
-    mods, order = _readers()
-    out = []
-    for n in order:
-        if n in mods and hasattr(mods[n], "files"):
-            out += mods[n].files(env)
-    return out
+def session_roots(env, failed=None):
+    """The folders of the agents' session files (each one's sessions.py roots), in the registry's order. An agent whose
+    roots fails goes in failed {name: why}."""
+    return _listed(env, "roots", {} if failed is None else failed)
+
+
+def session_files(env, failed=None):
+    """The session files the agents list one by one (each one's sessions.py files), in the registry's order. An agent
+    whose files fails goes in failed {name: why}."""
+    return _listed(env, "files", {} if failed is None else failed)
 
 
 def session_sources():
@@ -579,18 +587,25 @@ def _probe(path):
         return None
 
 
-def _db_agents_words():
-    """"A's and B's": the agents whose sessions are SQLite databases (their manifests' sessions source), in words."""
+def _db_agents():
+    """The agents (their folders' names) whose sessions are SQLite databases (their manifests' sessions source), in the
+    registry's order."""
     from agentkit import manifests, registry
-    return " and ".join(manifests.label(n) + "'s" for n in registry.AGENTS
-                        if (manifests.manifest(n).get("sessions") or {}).get("source") == "databases")
+    return [n for n in registry.AGENTS if (manifests.manifest(n).get("sessions") or {}).get("source") == "databases"]
+
+
+def _db_agents_words():
+    """"A's and B's": the agents whose sessions are SQLite databases, in words."""
+    from agentkit import manifests
+    return " and ".join(manifests.label(n) + "'s" for n in _db_agents())
 
 
 def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects=True):
     """Each session mined once (a headless copy wins over the agent's own file of the same session),
     filtered by time and project; a transcript is parsed, mined and dropped before the next one is read.
     Returns (mined sessions in time order, stats)."""
-    found, scanned, unreadable = candidates(env, cutoff, project, extra_dirs, bench_dirs, projects)
+    failed = transcripts.unread_agents()        # agents whose readers couldn't be loaded, then those that failed
+    found, scanned, unreadable = candidates(env, cutoff, project, extra_dirs, bench_dirs, projects, failed)
     items, cut = [], 0
     for path, source in found:
         try:
@@ -606,11 +621,13 @@ def mine_sessions(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), proje
     # locked; what couldn't be read is in the notes, never fatal
     dbs, notes, with_tools = 0, [], len(found)
     if projects:
+        from agentkit import manifests
+        notes = [f"{manifests.label(n)}: its sessions weren't read ({why})" for n, why in failed.items()]
         try:
             trs, dbs, bad, nb = session_dbs.sessions(env, cutoff)
-            unreadable, notes = unreadable + bad, nb.lines()
+            unreadable, notes = unreadable + bad, notes + nb.lines()
         except Exception as e:                  # never the report's end: said, by its type only
-            trs, notes = [], [f"{_db_agents_words()} sessions weren't read ({type(e).__name__})"]
+            trs, notes = [], notes + [f"{_db_agents_words()} sessions weren't read ({type(e).__name__})"]
         for tr in trs:
             try:
                 item = _mine_tr(tr, tr.kind, cutoff, project)

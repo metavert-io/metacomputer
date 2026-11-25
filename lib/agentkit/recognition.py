@@ -16,7 +16,7 @@ A recognition.json is an object (check() says what's wrong with one):
                      it runs ("gemini", "openclaw-gateway")
     apps             [{"kind", "bundle", "helper", "folders"}]: an app's executables by their path: one the regular
                      expression bundle finds in, or one whose file name helper matches in a folder of the app's own (a
-                     path component that is or starts with one of folders, case aside)
+                     path component that is or starts with one of folders, case aside: folders are written lowercase)
     path_words       {WORD: KIND}: a word in the path of the script an interpreter runs ("hermes_cli")
     modules          {MODULE: KIND}: python -m MODULE (its package)
     package_words    {IDENTIFIER: KIND}: an identifier specific to the agent's package, in any argument of an
@@ -32,7 +32,8 @@ A recognition.json is an object (check() says what's wrong with one):
                      the first (within: only the first N of those); label names it in the vault's records, and the
                      question says "under UNDER, whose conversations share one process"
 When two agents' words both match (a nonsensical process), the longest word is tried first (the most specific), then
-the registry's order.
+the registry's order. A record without an agent field (a claim, a handoff, the vault's records) is the registry's DEFAULT
+agent's (record_default: its label), for lib/owners.py and the vault alike.
 
     python3 lib/agentkit/recognition.py swift     the tables as Swift (scripts/build-vault.sh)
     python3 lib/agentkit/recognition.py check     exit 1 and say what's wrong with the agents' recognition.json files
@@ -86,6 +87,12 @@ def tables():
     return t
 
 
+def record_default():
+    """The kind a record without an "agent" field names (a claim, a handoff, the vault's records): the registry's
+    DEFAULT agent's label, one of its kinds. lib/owners.py reads it, and swift() writes it for the vault."""
+    return manifests.label(registry.DEFAULT)
+
+
 def check():
     """What's wrong with the agents' recognition.json files: [str] (empty: nothing)."""
     bad, kinds, words = [], {}, {}
@@ -126,6 +133,9 @@ def check():
                 ok = False
             if not ok:
                 bad.append(f"{n}: an app isn't {{kind, bundle, helper, folders}} of its own with regular expressions")
+            elif not all(x == x.lower() for x in a["folders"]):
+                bad.append(f"{n}: an app's folders aren't lowercase (each folder of a path is lowercased before it's "
+                           f"compared with them)")
         for kind, s in (r.get("shared") or {}).items():
             if kind not in own or not isinstance(s, dict) or set(s) - SHARED_KEYS or not s.get("label") \
                     or not s.get("under") or not isinstance(s.get("within", None), (int, type(None))):
@@ -188,6 +198,7 @@ def swift():
         f"let agentPackages: [String: String] = {_dict(t['packages'])}",
         "let sharedAgentKinds: [String: SharedAgentKind] = [" + ("\n" + ",\n".join(shared) + "]" if shared else ":]"),
         f"let agentSessionLabels = {_s(manifests.in_words(labels))}",
+        f"let recordDefaultAgent = {_s(record_default())}",
     ]
     return "\n".join(lines) + "\n"
 

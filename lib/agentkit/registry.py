@@ -26,6 +26,11 @@ AGENTS = (
     "gemini",
     "antigravity",
 )
+# The agent a record that names none is: claims, handoffs, the vault's records and bench's runs are older than the other
+# agents' support, so one without an agent field is this one's (and bench runs it unless told otherwise). Named here,
+# never by its place in AGENTS, whose order only orders listings: lib/owners.py, lib/handoff.py, bench and the vault's
+# build (lib/agentkit/recognition.py) read it.
+DEFAULT = "claude-code"
 
 ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "coding-agents")
 PACKAGE = "mcomp_agents"
@@ -108,3 +113,17 @@ def hooks(name, part):
 def each(part):
     """[(name, module)] of every registered agent that brings coding-agents/<name>/<part>.py, in the registry's order."""
     return [(n, module(n, part)) for n in AGENTS if has(n, part + ".py")]
+
+
+def loaded(names, part):
+    """([(name, module)], {name: why}): coding-agents/<name>/<part>.py of each of names, in that order. One that can't be
+    loaded (a syntax error, a failed import, an exception at its top level) is left out, with why (its exception's
+    type), so a program that reads every agent's part (learn, each agent's sessions) goes on with the others and says
+    which it couldn't read."""
+    out, failed = [], {}
+    for n in names:
+        try:
+            out.append((n, module(n, part)))
+        except Exception as e:
+            failed[n] = type(e).__name__
+    return out, failed

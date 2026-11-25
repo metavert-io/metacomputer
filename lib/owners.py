@@ -281,8 +281,8 @@ def executable_agent(comm):
 UNKNOWN_AGENT = "unidentified agent"
 AGENTS = _TABLES["kinds"] + (UNKNOWN_AGENT,)
 # The agent a record without an "agent" field names (claims, handoffs and the vault's records are older than the other
-# agents' support): the registry's first.
-RECORD_DEFAULT_AGENT = AGENTS[0]
+# agents' support): the registry's DEFAULT, by name (never a place in its list), as the vault's build reads it too.
+RECORD_DEFAULT_AGENT = _recognition.record_default()
 # An interpreter's process (ps comm= is its program, often by its full path): the agent is told by what it runs.
 _INTERPRETER = re.compile(r"(node|nodejs|bun|deno|python[0-9.]*|Python)")
 # The agents' programs, by file name: a native executable, the name a process gives itself (a title), or the script an

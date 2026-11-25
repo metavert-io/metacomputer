@@ -3144,9 +3144,10 @@ CLAIMS = [
                       r"and the report\s+goes on",
      lambda m: "except Layout:" in function_src("lib/session_dbs.py", "sessions")
      and "except Unreadable as e:" in function_src("lib/session_dbs.py", "sessions")
-     and "trs, notes = [], [f\"{_db_agents_words()} sessions weren't read ({type(e).__name__})\"]"
+     and "notes.add(name, f\"its sessions weren't read ({type(e).__name__})\")" in function_src("lib/session_dbs.py", "sessions")
+     and "trs, notes = [], notes + [f\"{_db_agents_words()} sessions weren't read ({type(e).__name__})\"]"
      in function_src("lib/learn_mine.py", "mine_sessions")
-     and '.get("source") == "databases"' in function_src("lib/learn_mine.py", "_db_agents_words")),
+     and '.get("source") == "databases"' in function_src("lib/learn_mine.py", "_db_agents")),
     # Oracle Cloud's security groups: the create's answer, never a lookup by name (providers/oci/adapter.py,
     # lib/remote.py).
     ("SECURITY.md", r"at Oracle Cloud each build makes a group of its own, tagged with the computer and its\s+operation, never one found by its name",
