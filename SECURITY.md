@@ -3421,7 +3421,7 @@ both:
 | Kind | Sends | URL |
 | --- | --- | --- |
 | `webhook` | one POST per event, a CloudEvents 1.0 JSON in structured mode (`Content-Type: application/cloudevents+json; charset=utf-8`): `id` the event's UUID, `source` `metacomputer/<host>`, `subject` the VM, `type` `io.metavert.metacomputer.vault.<op>`, `time`, `data` the event, and `mcompevent` its `event` name when it has one. Signed: `X-Metacomputer-Signature: sha256=<HMAC of the body>` | `https://...` |
-| `otlp` | OTLP/HTTP JSON logs to `<url>/v1/logs` (added to the URL's path, before any query, unless the path ends with it), up to 50 records a request, 64-bit integers as strings. Each record's body is the event's line; attributes `metacomputer.family` (`vault`), `.type` (the op), `.vm`, `.id`, `.seq`, `.project`, `.secret`, `.field`, `.origin`, `.outcome`, `.hash`, `.prev`, `.requester.pid`, `.event`, `.request_id`, `.username_hint` and its own `metacomputer.signature`; severity 9 INFO, 13 WARN, 17 ERROR; resource `service.name=metacomputer-vault`, `service.version`, `host.name`; scope `metacomputer.vault`. The request is signed like a webhook's | `https://collector:4318` |
+| `otlp` | OTLP/HTTP JSON logs to `<url>/v1/logs` (added to the URL's path, every trailing `/` dropped first, before any query, unless the path ends with it), up to 50 records a request, 64-bit integers as strings. Each record's body is the event's line; attributes `metacomputer.family` (`vault`), `.type` (the op), `.vm`, `.id`, `.seq`, `.project`, `.secret`, `.field`, `.origin`, `.outcome`, `.hash`, `.prev`, `.requester.pid`, `.event`, `.request_id`, `.username_hint` and its own `metacomputer.signature`; severity 9 INFO, 13 WARN, 17 ERROR; resource `service.name=metacomputer-vault`, `service.version`, `host.name`; scope `metacomputer.vault`. The request is signed like a webhook's | `https://collector:4318` |
 | `syslog` | RFC 5424 over TLS, octet-counted (RFC 5425), up to 100 messages a connection: facility user, severity 6 info, 4 warn, 3 error; APP-NAME `metacomputer-vault`, PROCID `-`, MSGID the op; structured data `[metacomputer@32473 seq family vm id hash prev sig]` (32473 is the enterprise number for documentation, RFC 5612); MSG the event's line, no byte-order mark | `syslog+tls://host:6514` |
 | `ntfy` | ntfy's JSON publishing to the server's root, with the URL's query if it has one (ntfy's `?auth=` access token; `list` masks it like the topic): `topic` (the URL's last part), `title` `<vm> - vault: <op>`, `message` one line such as `#42 fill name=x-login field=password vm=metacomputer -> ok https://x.com [Claude in ~/Projects/foo]`, `priority` 4 for refusals and errors, 3 otherwise, `tags`. No signature | `https://ntfy.sh/<topic>` |
 
@@ -3446,7 +3446,8 @@ metacomputer secrets audit-sink add hec --kind webhook --url https://splunk.exam
   trust or only the CA in `--ca FILE` (its PEM is kept in the sink's settings), with the
   host name always checked. Redirects aren't followed and no proxy is used. A sink an
   earlier version added with a port outside 1-65535 (which reached another port, or for
-  syslog stopped the process sending to it) is never sent to: `audit-sink list`, `test`
+  syslog stopped the process sending to it; one past 2^63 went to the default port) is
+  never sent to: `audit-sink list`, `test`
   and the unlock terminal say so and to remove it and add it again. One added with a
   `#fragment` (never sent) or a syslog path or query (never used) goes on as before.
 - **Delivery.** The unlock process sends each sink its events in order, at least once
@@ -3463,8 +3464,9 @@ metacomputer secrets audit-sink add hec --kind webhook --url https://splunk.exam
   empty backlog or an earlier acknowledgement of the same seq proves nothing, and the
   acknowledgements of a use are dropped for every sink once it's decided. Only sinks
   that acknowledge each record can be required: a webhook (a 2xx answer) or OTLP (a 2xx
-  answer whose partial success rejects nothing; one whose count of rejected records isn't
-  a whole number is a failure). Syslog over TLS confirms only that
+  answer whose partial success rejects nothing; one that can't be read, such as a body
+  that isn't JSON or a count of rejected records that isn't a whole number, is a failure,
+  while an empty body is OTLP's empty response, a full success). Syslog over TLS confirms only that
   bytes left this Mac, and ntfy keeps no record, so `--required` is refused for both.
   Delivery works in bounded rounds (a few seconds at a time between requests, 20
   seconds for a use's own record), so a slow or flooded sink can't hold the unlock

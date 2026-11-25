@@ -5,6 +5,7 @@ lib/events.py calls it, passing itself as E: check_url(E, u) for a sink's URL, r
 one POST carries, accepted(E, answer, batch) for what a 2xx answer says (a collector may accept a request and refuse some
 of its records: OTLP's partial success). Stdlib only."""
 import json
+import math
 import os
 import time
 from urllib.parse import urlsplit
@@ -55,24 +56,45 @@ def otlp_count(raw):
         return 0
     if isinstance(raw, int) and not isinstance(raw, bool):
         n = raw
-    elif isinstance(raw, str) and raw.isascii() and raw.isdigit():
+    elif isinstance(raw, str) and raw.isascii() and raw.isdigit() and len(raw) <= 19:
         n = int(raw)
     else:
         return None
     return n if 0 <= n < 2 ** 63 else None
 
 
+def _no_constant(name):
+    raise ValueError(f"{name} isn't JSON")
+
+
+def _finite(text):
+    f = float(text)
+    if math.isinf(f):
+        raise ValueError("a number too large for JSON's doubles")
+    return f
+
+
 def otlp_rejected(E, body, sent):
     """(records the collector rejected, its message) from an OTLP/HTTP JSON answer: a 2xx with
-    partialSuccess.rejectedLogRecords > 0 stored only part of the batch. OTLP says not to retry those. The count is None
-    when the answer's isn't a non-negative integer: such an answer is an error reply, never an acceptance."""
+    partialSuccess.rejectedLogRecords > 0 stored only part of the batch. OTLP says not to retry those. A body that's
+    empty (or only whitespace: the empty response, as protobuf encodes it), an object without a partialSuccess, or one
+    whose partialSuccess is null is a full success. The count is None when the answer can't be read: a body that isn't
+    JSON (NaN, Infinity, a number too large for a double or an integer too long to convert aren't), isn't an object,
+    or has a partialSuccess that isn't an object, or a count that isn't a non-negative integer. Such an answer is an
+    error reply, never an acceptance."""
+    if not (body or b"").strip(b" \t\r\n"):
+        return 0, ""
     try:
-        d = json.loads(body or b"{}")
-    except ValueError:
+        d = json.loads(body, parse_constant=_no_constant, parse_float=_finite)
+    except (ValueError, RecursionError):
+        return None, ""
+    if not isinstance(d, dict):
+        return None, ""
+    ps = d["partialSuccess"] if "partialSuccess" in d else d.get("partial_success")
+    if ps is None:
         return 0, ""
-    ps = (d.get("partialSuccess") or d.get("partial_success")) if isinstance(d, dict) else None
     if not isinstance(ps, dict):
-        return 0, ""
+        return None, ""
     n = otlp_count(ps.get("rejectedLogRecords", ps.get("rejected_log_records", 0)))
     msg = ps.get("errorMessage") or ps.get("error_message") or ""
     return (None if n is None else min(n, sent)), E.clean_str(msg, 160) if isinstance(msg, str) else ""
@@ -99,8 +121,8 @@ def accepted(E, answer, batch):
     delivered (an error reply: retried)."""
     n, msg = otlp_rejected(E, answer, len(batch))
     if n is None:
-        return (False, "the collector's answer can't be read: its partial success's count of rejected records isn't a "
-                "whole number" + (f" ({msg})" if msg else ""), False, 0)
+        return (False, "the collector's answer can't be read (not OTLP's JSON, or its partial success's count of rejected "
+                "records isn't a whole number)" + (f": {msg}" if msg else ""), False, 0)
     if n:
         return (True, f"the collector rejected {n} of {len(batch)} event(s) (OTLP partial success"
                 + (f": {msg}" if msg else "") + "); not retried", False, n)

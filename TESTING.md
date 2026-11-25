@@ -993,7 +993,7 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (249 checks, about two minutes). It keeps
+`python3 tests/test_events.py` needs no VM (250 checks, about two minutes). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
@@ -1064,7 +1064,7 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
   - an encoded secret key name (`pa%73sword`) and an encoded `token=` after a query;
   - `events-state/redact.json` from an earlier build deleted, and noted.
 - the 2026-11-18 review's fixes:
-  - an OTLP collector's partial success: the rejected record counted as dropped, with its message as `last_error`, not retried, and shown by `events status` and `sink list`; an answer whose count isn't a whole number (`true`, `2.7`, `-1`, `"x"`, `"+3"`, `false`) is an error reply: nothing delivered or dropped, sent again, all six taken once the answer is good;
+  - an OTLP collector's partial success: the rejected record counted as dropped, with its message as `last_error`, not retried, and shown by `events status` and `sink list`; an answer whose count isn't a whole number (`true`, `2.7`, `-1`, `"x"`, `"+3"`, `false`) is an error reply: nothing delivered or dropped, sent again, all six taken once the answer is good; so is an answer that can't be read (a count of 5,000 digits or `1e999`, a body that isn't JSON or isn't an object), while an empty body, only whitespace or a null `partialSuccess` is a full success;
   - a server that sends one byte a second: `deliver`, `sink remove`, `flush_admin` and an ordinary emit all end on time;
   - 50 action-log records with `events.json` unchanged parse it zero times, and once after it changes (the redaction
     list's own refresh, every 30 s and when `events.json` changes, made due in both halves, isn't the cache's parse);
@@ -2382,7 +2382,7 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_vault_ops.py` (257 checks, about 3 minutes) reuses that stub and
+`python3 tests/test_vault_ops.py` (262 checks, about 3 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
 - **declarations:** every form of every command, as the test build lists them (`_argspecs`), given an unknown
   option, another form's option, a word too many, a request for usage as an option's value (`--site --help`,
@@ -2440,15 +2440,18 @@ pseudo-terminal for the rest of the vault:
   audit log that can't be written refuses uses while a sink is required; syslog can't
   be `--required`, and a required OTLP sink whose answer rejects records (partial
   success), or whose count of rejected records isn't a whole number (`"x"`, `-1`, `false`,
-  `0.5`, `true`, `2.7`), refuses the use; a `--ca` syslog sink still checks the host name;
+  `0.5`, `true`, `2.7`), or whose answer can't be read (a count of `1e999` or of 5,000
+  digits, a body that isn't JSON or isn't an object), refuses the use, while an empty
+  body, only whitespace or a null `partialSuccess` lets it go ahead; a `--ca` syslog sink still checks the host name;
   removing one leaves the others; URLs the event stream refuses are refused when a sink is
-  added (a `#fragment`, a port outside 1-65535, a syslog URL's path or query), and plain
+  added (a `#fragment`, a port outside 1-65535 or past 2^63, a syslog URL's path or query), and plain
   http to `[::1]` is taken and delivered to; an OTLP sink's query goes after `/v1/logs`
   and an ntfy sink's `?auth=` is kept, neither shown by add, test, list, the unlock
   terminal, the audit log or the saved state; sinks an earlier vault saved with such URLs
   (a test build takes them unchecked with `MCOMP_VAULT_TEST_EARLIER_SINK_URL=1`): one with
-  a port outside 1-65535 is never sent to (65536 + N reached port N, and a syslog one's
-  stopped the process) and `test`, `list` and the unlock terminal, which keeps running,
+  a port outside 1-65535 is never sent to (65536 + N reached port N, a syslog one's
+  stopped the process, and one past 2^63 went to the default port: a receiver on 6514
+  gets nothing now) and `test`, `list` and the unlock terminal, which keeps running,
   say how to fix it, while a `#fragment` or a syslog path and query still deliver; and the rules the audit sinks implement as the event stream's sinks do (header names, each
   kind's URLs, `/v1/logs`, the severities, the time, a partial success's count, syslog's escaping and MSGID, ntfy's
   endpoint, the signature) answer every case in tests/fixtures/sink_cases.json and the kinds' `tests/vault_cases.json`

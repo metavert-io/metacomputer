@@ -128,7 +128,8 @@ authorityKeyIdentifier = keyid
 class Receiver(http.server.BaseHTTPRequestHandler):
     """Webhook, OTLP and ntfy endpoints: records each POST; paths in server.down answer 503, paths in
     server.slow wait 4 s first, paths in server.partial answer 200 with an OTLP partial success, paths in
-    server.counts (path: JSON text) answer 200 with a partial success whose rejectedLogRecords is that text."""
+    server.counts (path: JSON text) answer 200 with a partial success whose rejectedLogRecords is that text, paths in
+    server.bodies (path: bytes) answer 200 with those bytes."""
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
@@ -147,6 +148,7 @@ class Receiver(http.server.BaseHTTPRequestHandler):
         count = next((c for p, c in self.server.counts.items() if self.path.startswith(p)), None)
         if count is not None:
             answer = ('{"partialSuccess": {"rejectedLogRecords": ' + count + '}}').encode()
+        answer = next((b for p, b in self.server.bodies.items() if self.path.startswith(p)), answer)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(answer)))
@@ -230,7 +232,7 @@ class ThreadingHTTPServer6(http.server.ThreadingHTTPServer):
 
 def http_server(handler, host="127.0.0.1"):
     srv = (ThreadingHTTPServer6 if ":" in host else http.server.ThreadingHTTPServer)((host, 0), handler)
-    srv.got, srv.down, srv.slow, srv.partial, srv.counts = [], set(), set(), set(), {}
+    srv.got, srv.down, srv.slow, srv.partial, srv.counts, srv.bodies = [], set(), set(), set(), {}, {}
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -238,12 +240,12 @@ def http_server(handler, host="127.0.0.1"):
 class SyslogTLS:
     """An RFC 5425 receiver: TLS, octet-counted frames; one message per frame."""
 
-    def __init__(self, cert, key):
+    def __init__(self, cert, key, port=0):
         self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.ctx.load_cert_chain(cert, key)
         self.sock = socket.socket()
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", 0))
+        self.sock.bind(("127.0.0.1", port))
         self.sock.listen(8)
         self.port = self.sock.getsockname()[1]
         self.got, self.handshake_failures = [], 0
@@ -1223,6 +1225,31 @@ def run(td, procs):
     check("...nor is a count of true or 2.7 read as 1 or 2 records rejected: the answer can't be read",
           all(odd[c][:2] == (2, 0) and "can't be read" in odd[c][2] and "rejected 1" not in odd[c][2]
               and "rejected 2" not in odd[c][2] for c in ("true", "2.7")), odd)
+    # ...nor is an answer that can't be read at all (it counted as accepting everything): a count Foundation can't
+    # parse (1e999, 5,000 digits: the whole reply was refused), a body that isn't JSON or isn't an object
+    unread = {}
+    for what, count, body in (("1e999", "1e999", None), ("5,000 digits", "9" * 5000, None), ("not JSON", None, b"not json"),
+                              ("[1]", None, b"[1]")):
+        if count is not None:
+            rx.counts["/oddotlp"] = count
+        else:
+            rx.bodies["/oddotlp"] = body
+        n = len(calls())
+        r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+        unread[what] = (r.returncode, len(calls()) - n, js(r.stdout).get("reason", ""))
+        rx.counts.pop("/oddotlp", None)
+        rx.bodies.pop("/oddotlp", None)
+    check("...nor an answer that can't be read (a count of 1e999 or of 5,000 digits, a body that isn't JSON or isn't an "
+          "object): each use is refused before anything reaches the VM",
+          all(v[:2] == (2, 0) and "can't be read" in v[2] for v in unread.values()), unread)
+    fine = {}
+    for what, body in (("an empty body", b""), ("whitespace", b" \r\n"), ("a null partialSuccess", b'{"partialSuccess": null}')):
+        rx.bodies["/oddotlp"] = body
+        r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
+        fine[what] = (r.returncode, js(r.stdout).get("reason", ""))
+    rx.bodies.pop("/oddotlp")
+    check("...while an empty body (OTLP's empty response), only whitespace or a null partialSuccess is a full success: "
+          "each use goes ahead", all(v[0] == 0 for v in fine.values()), fine)
     r = client("fill", "web-login", "--vm", "opsvm", "--field", "password")
     check("...and once it answers as OTLP says, uses go ahead again", r.returncode == 0, r.stdout)
     tty([BIN, "audit-sink", "remove", "otlpodd"], [("Vault passphrase", current + "\n")])
@@ -1270,7 +1297,8 @@ def run(td, procs):
     for kind, url in (("webhook", f"http://127.0.0.1:{hp}/x#frag"), ("otlp", "https://h.example:0/"),
                       ("webhook", "https://h.example:99999/x"), ("ntfy", "https://h.example:65536/t"),
                       ("syslog", "syslog+tls://h.example:6514/path"), ("syslog", "syslog+tls://h.example:6514?q=1"),
-                      ("syslog", "syslog+tls://h.example:6514#f")):
+                      ("syslog", "syslog+tls://h.example:6514#f"), ("syslog", "syslog+tls://h.example:9223372036854775808"),
+                      ("webhook", "https://h.example:9223372036854775808/x")):
         r = client("audit-sink", "add", "x", "--kind", kind, "--url", url)
         check(f"audit-sink add refuses {kind} {url}, as the event stream does", r.returncode == 64 and "--url:" in r.stderr, r.stderr)
     v6 = {k: client("audit-sink", "add", "x", "--kind", k, "--url", u)
@@ -2102,9 +2130,19 @@ def run(td, procs):
                  ("zeroport", "webhook", "http://127.0.0.1:0/zeroport", []),
                  ("fraghook", "webhook", f"http://127.0.0.1:{hp}/fraghook#frag", []),
                  ("fragotlp", "otlp", f"http://127.0.0.1:{hp}/fragotlp#frag", [])]
+    # A port past Int64: Foundation reads no port at all, so it went to the kind's default (syslog's 6514, a receiver of
+    # the test's own when that port is free; a webhook's 80)
+    old_sinks += [("hugehook", "webhook", "http://127.0.0.1:9223372036854775808/hugehook", [])]
+    sl6514 = None
     if certs:
         old_sinks += [("wrapsys", "syslog", f"syslog+tls://127.0.0.1:{sl.port + 65536}", ["--ca", ca]),
-                      ("pathsys", "syslog", f"syslog+tls://127.0.0.1:{sl.port}/path?q=1", ["--ca", ca])]
+                      ("pathsys", "syslog", f"syslog+tls://127.0.0.1:{sl.port}/path?q=1", ["--ca", ca]),
+                      ("hugesys", "syslog", "syslog+tls://127.0.0.1:9223372036854775808", ["--ca", ca])]
+        try:
+            sl6514 = SyslogTLS(srv_cert, srv_key, port=6514)
+        except OSError:
+            print("(port 6514 is taken: the huge-port syslog sink's check doesn't see where it would have gone)")
+    huge = ["hugehook"] + (["hugesys"] if certs else [])
     added = {}
     for name, kind, url, more in old_sinks:
         added[name] = tty([BIN, "audit-sink", "add", name, "--kind", kind, "--url", url, *more],
@@ -2128,19 +2166,26 @@ def run(td, procs):
     if certs:
         check("a saved syslog sink with a path and a query still delivers to its host and port", tested["pathsys"][0] == 0
               and len(sl.got) > n_sys, (tested["pathsys"][1][-300:], len(sl.got) - n_sys))
+    check("a saved sink whose port is past Int64 (Foundation reads none) is never sent to, not to the default port either "
+          "(syslog's 6514 got its events), and says why and how to fix it",
+          all(added.get(n_) == 0 and tested[n_][0] == 4 and "isn't one from 1 to 65535" in tested[n_][1] and fix(n_) for n_ in huge)
+          and not (sl6514 and sl6514.got) and not any(p_.startswith("/hugehook") for p_ in got_paths),
+          ({n_: (tested[n_][0], tested[n_][1][-200:]) for n_ in huge}, len(sl6514.got) if sl6514 else None))
     r = client("audit-sink", "list")
     check("audit-sink list (locked) shows each such sink's reason with the fix", r.returncode == 0
           and all(any(n_ in l and "audit-sink remove " + n_ in l for l in r.stdout.splitlines())
-                  for n_ in ["wrapport", "zeroport"] + (["wrapsys"] if certs else [])), r.stdout)
+                  for n_ in ["wrapport", "zeroport"] + (["wrapsys"] if certs else []) + huge), r.stdout)
     u2 = start_unlock(["--for", "5m", *allow], T, passphrase=PASS)
     told = wait_for(lambda: all(f"audit sink {n_}: can't deliver" in u2.text() and f"audit-sink remove {n_}" in u2.text()
-                                for n_ in ["wrapport", "zeroport"] + (["wrapsys"] if certs else [])), 20)
+                                for n_ in ["wrapport", "zeroport"] + (["wrapsys"] if certs else []) + huge), 20)
     st = client("status")
     check("an unlock with such sinks saved keeps running, and its terminal says which can't be sent to and how to fix them",
           told and "vault:    unlocked until" in st.stdout,
           ([l for l in st.stdout.splitlines() if l.startswith("vault:")], u2.text()[-300:]))
     client("lock")
     u2.wait(20)
+    if sl6514:
+        sl6514.sock.close()
     fills = [c for c in calls() if c.get("user") == "mcfill"]
     pin = next((a for a in fills[-1]["argv"] if a.startswith("KnownHostsCommand=")), "") if fills else ""
     sshd = local_sshd(td)

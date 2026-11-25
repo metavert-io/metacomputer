@@ -9,6 +9,7 @@
   {"fn": "url_ok", "in": {"s": "https://ntfy.sh/topic?auth=abc"}, "out": true},
   {"fn": "url_ok", "in": {"s": "https://ntfy.sh/topic#f"}, "out": false},
   {"fn": "url_ok", "in": {"s": "https://ntfy.sh:0/topic"}, "out": false},
+  {"fn": "url_ok", "in": {"s": "https://ntfy.sh:9223372036854775808/topic"}, "out": false},
   {"fn": "ntfy_severity", "in": {"s": "info"}, "out": [3, []]},
   {"fn": "ntfy_severity", "in": {"s": "warn"}, "out": [4, ["warning"]]},
   {"fn": "ntfy_severity", "in": {"s": "error"}, "out": [4, ["rotating_light"]]},

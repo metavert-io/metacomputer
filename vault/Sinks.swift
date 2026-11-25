@@ -80,7 +80,7 @@ func checkSinkURL(_ kind: String, _ url: String) -> String? {
     guard clean(url, max: 2048) == url, let u = URLComponents(string: url), let host = u.host, !host.isEmpty,
           u.user == nil, u.password == nil else { return "not a plain URL" }
     if let f = u.fragment, !f.isEmpty { return "the URL can't have a #fragment" }
-    if let why = sinkPortProblem(u) { return why }
+    if let why = sinkPortProblem(url) { return why }
     let loopback = ["127.0.0.1", "localhost", "[::1]", "::1"].contains(host)
     switch kind {
     case "syslog":
@@ -95,18 +95,39 @@ func checkSinkURL(_ kind: String, _ url: String) -> String? {
     return nil
 }
 
-/// nil when the URL names no port or one from 1 to 65535. An earlier vault took any number, and the system's networking
-/// wraps a bigger one (70000 reaches port 4464), so a sink saved with one is never sent to (savedSinkProblem).
-func sinkPortProblem(_ u: URLComponents) -> String? {
-    guard let p = u.port, !(1...65535).contains(p) else { return nil }
-    return "port \(p) isn't one from 1 to 65535"
+/// nil when the URL names no port or one from 1 to 65535. Read from the URL's text (urlPortText), not URLComponents'
+/// port, which is nil for a number past Int64 (delivery would then use the default port). An earlier vault took any
+/// number, and the system's networking wraps a bigger one (70000 reaches port 4464), so a sink saved with one is never
+/// sent to (savedSinkProblem).
+func sinkPortProblem(_ url: String) -> String? {
+    guard let p = urlPortText(url) else { return nil }
+    let digits = p.utf8.allSatisfy { $0 >= 0x30 && $0 <= 0x39 }
+    if digits, let n = Int(p), (1...65535).contains(n) { return nil }
+    return "port " + (digits && p.count <= 24 ? p : "in the URL") + " isn't one from 1 to 65535"
+}
+
+/// The port a URL's text names, read as Python's urlsplit reads it (the event stream's): the authority runs from
+/// "://" to the first /, ? or #; after any user@, the port follows the host's first ":" (or the "]:" of an IPv6
+/// address). nil when there's no port, or nothing after the ":".
+func urlPortText(_ s: String) -> String? {
+    guard let sep = s.range(of: "://") else { return nil }
+    let rest = s[sep.upperBound...]
+    let authority = rest[..<(rest.firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? rest.endIndex)]
+    var hostinfo = authority[(authority.lastIndex(of: "@").map { authority.index(after: $0) } ?? authority.startIndex)...]
+    if let open = hostinfo.firstIndex(of: "[") {
+        guard let close = hostinfo[open...].firstIndex(of: "]") else { return nil }
+        hostinfo = hostinfo[hostinfo.index(after: close)...]
+    }
+    guard let colon = hostinfo.firstIndex(of: ":") else { return nil }
+    let port = hostinfo[hostinfo.index(after: colon)...]
+    return port.isEmpty ? nil : String(port)
 }
 
 /// nil when a saved sink can be sent to as it is. One an earlier vault saved with a URL that's refused now: a port
 /// outside 1-65535 isn't sent to at all (it would reach another port, or stop the process), and says how to fix it;
 /// a #fragment (never sent) and a syslog URL's path or query (never used) still go where they did.
 func savedSinkProblem(_ name: String, _ sink: AuditSink) -> String? {
-    guard let u = URLComponents(string: sink.url), let why = sinkPortProblem(u) else { return nil }
+    guard let why = sinkPortProblem(sink.url) else { return nil }
     return "its URL isn't one the vault takes any more (\(why)), so nothing is sent to it: remove it "
         + "(`metacomputer secrets audit-sink remove \(name)`) and add it again with the right port"
 }
@@ -188,22 +209,29 @@ func httpPostAnswer(_ url: URL, headers: [(String, String)], body: Data, timeout
 }
 
 /// An OTLP export answer that accepted only part of the batch (partialSuccess with rejected
-/// records) is a failure: those records weren't stored. So is one whose count of rejected records
-/// isn't a count. nil when every record was accepted.
+/// records) is a failure: those records weren't stored. So is one that can't be read. nil when
+/// every record was accepted.
 func otlpRejection(_ body: Data?) -> String? {
     guard let (n, msg) = otlpRejected(body) else {
-        return "the collector's answer can't be read: its partial success's count of rejected records isn't a whole number"
+        return "the collector's answer can't be read (not OTLP's JSON, or its partial success's count of rejected records isn't a whole number)"
     }
     guard n > 0 else { return nil }
     return "the collector rejected \(n) record(s)" + (msg.isEmpty ? "" : ": \(msg)")
 }
 
 /// How many records an OTLP export answer says were rejected (partialSuccess.rejectedLogRecords, an int64: in JSON a
-/// number or a string of digits; absent or null is 0), with its message; nil when the count isn't a non-negative
-/// integer (true, 2.7, -1, "x"), which is an error reply, never an acceptance.
+/// number or a string of digits; absent or null is 0), with its message, as the event stream reads it. A body that's
+/// empty or only whitespace (the empty response, as protobuf encodes it), an object without a partialSuccess, or one
+/// whose partialSuccess is null is a full success. nil when the answer can't be read: a body that isn't JSON (as
+/// Foundation reads it: 1e999 or an integer too long to hold isn't), isn't an object, or has a partialSuccess that isn't
+/// an object, or a count that isn't a non-negative integer (true, 2.7, -1, "x"). That's an error reply, never an
+/// acceptance.
 func otlpRejected(_ body: Data?) -> (Int64, String)? {
-    guard let b = body, !b.isEmpty, let o = try? JSONSerialization.jsonObject(with: b) as? [String: Any],
-          let ps = (o["partialSuccess"] ?? o["partial_success"]) as? [String: Any] else { return (0, "") }
+    guard let b = body, b.contains(where: { $0 != 0x20 && $0 != 0x09 && $0 != 0x0A && $0 != 0x0D }) else { return (0, "") }
+    guard let o = (try? JSONSerialization.jsonObject(with: b)) as? [String: Any] else { return nil }
+    let p = o["partialSuccess"] ?? o["partial_success"]
+    if p == nil || p is NSNull { return (0, "") }
+    guard let ps = p as? [String: Any] else { return nil }
     let msg = clean((ps["errorMessage"] ?? ps["error_message"]) as? String ?? "", max: 160)
     let r = ps["rejectedLogRecords"] ?? ps["rejected_log_records"]
     if r == nil || r is NSNull { return (0, msg) }

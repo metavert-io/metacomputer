@@ -468,9 +468,12 @@ every sink whose filters it passes.
   `errorMessage` becomes the sink's `last_error`, and they aren't retried
   (OTLP says a client mustn't). `sink list` shows the count, and `events
   status` names the sink for a day. A sink-change announcement refused this
-  way is given up and logged. An answer whose count isn't a whole number
-  (`true`, `2.7`, `-1`, `"x"`) is an error reply: nothing is counted as
-  delivered or dropped, and the batch is sent again with backoff.
+  way is given up and logged. An answer that can't be read (a count that
+  isn't a whole number, such as `true`, `2.7`, `-1`, `"x"` or `1e999`, a body
+  that isn't JSON or isn't an object) is an error reply: nothing is counted as
+  delivered or dropped, and the batch is sent again with backoff. An empty
+  body (OTLP's empty response), or one without a `partialSuccess`, is a full
+  success.
 - **A wall-clock deadline per attempt.** Socket timeouts apply to each read,
   so a receiver that sends a byte a second could otherwise hold a connection
   open for as long as it liked. Each attempt runs with a deadline (3 s, or what

@@ -1581,8 +1581,8 @@ def main():
                 recs_ = [r_ for rl in body.get("resourceLogs", []) for sl in rl.get("scopeLogs", []) for r_ in sl.get("logRecords", [])]
                 part["got"].append(len(recs_))
                 count = part["raw"] if "raw" in part else str(part["reject"])
-                ans = json.dumps({"partialSuccess": {"rejectedLogRecords": count,
-                                                     "errorMessage": "attribute too long \x1b[31m(red)"}}).encode()
+                ans = part["body"] if "body" in part else json.dumps({"partialSuccess": {
+                    "rejectedLogRecords": count, "errorMessage": "attribute too long \x1b[31m(red)"}}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(ans)))
@@ -1633,6 +1633,35 @@ def main():
               "is an error reply: not delivered, nothing dropped, sent again; then a good answer takes all six",
               all(asked and dd == 0 and dr == 0 and same and "can't be read" in (err or "") for _, asked, dd, dr, same, err in odd)
               and s1["delivered"] - s0["delivered"] == 6 and s1["dropped"] == s0["dropped"], (odd, s0, s1))
+        # ...and so is an answer that can't be read at all (it counted as everything delivered): a count too long to
+        # convert (5,000 digits) or too large for a double (1e999), a body that isn't JSON or isn't an object. An empty
+        # body (OTLP's empty response, as protobuf encodes it), only whitespace or a null partialSuccess is a full success.
+        refill()
+
+        def answer_with(body):
+            part["body"] = body
+            s0, n0 = stat_of("partial"), len(part["got"])
+            events.emit("task", "finished", "an answer of " + repr(body[:40]))
+            events.flush_sink("partial", events.load_config()["sinks"]["partial"], force=True)
+            s1 = stat_of("partial")
+            return (len(part["got"]) > n0, s1["delivered"] - s0["delivered"], s1["dropped"] - s0["dropped"],
+                    s1["sent_seq"] == s0["sent_seq"], s1["last_error"])
+        unread = {b[:30]: answer_with(b) for b in (b'{"partialSuccess": {"rejectedLogRecords": ' + b"9" * 5000 + b"}}",
+                                                   b'{"partialSuccess": {"rejectedLogRecords": 1e999}}', b"not json", b"[1]")}
+        part["body"] = b"{}"
+        s0 = stat_of("partial")
+        events.flush_sink("partial", events.load_config()["sinks"]["partial"], force=True)
+        s1 = stat_of("partial")
+        fine = {b: answer_with(b) for b in (b"", b" \r\n", b'{"partialSuccess": null}')}
+        part.pop("body")
+        check("F17 an answer that can't be read (a count of 5,000 digits or 1e999, a body that isn't JSON or isn't an "
+              "object) is an error reply: not delivered, nothing dropped, sent again; an empty body, whitespace or a null "
+              "partialSuccess is a full success",
+              all(asked and dd == 0 and dr == 0 and same and "can't be read" in (err or "")
+                  for asked, dd, dr, same, err in unread.values())
+              and s1["delivered"] - s0["delivered"] == 4 and s1["dropped"] == s0["dropped"]
+              and all(asked and dd == 1 and dr == 0 and not same for asked, dd, dr, same, _ in fine.values()),
+              (unread, s0["delivered"], s1["delivered"], fine))
         sink_remove("partial")
         psrv.shutdown()
         psrv.server_close()

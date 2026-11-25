@@ -11,6 +11,8 @@
   {"fn": "url_ok", "in": {"s": "syslog+tls://h.example:6514#f"}, "out": false},
   {"fn": "url_ok", "in": {"s": "syslog+tls://h.example:0"}, "out": false},
   {"fn": "url_ok", "in": {"s": "syslog+tls://h.example:99999"}, "out": false},
+  {"fn": "url_ok", "in": {"s": "syslog+tls://h.example:9223372036854775808"}, "out": false},
+  {"fn": "url_ok", "in": {"s": "syslog+tls://[::1]:9223372036854775808"}, "out": false},
   {"fn": "url_ok", "in": {"s": "syslog+tls://[::1]:6514"}, "out": true},
   {"fn": "url_ok", "in": {"s": "syslog+tls://:6514"}, "out": false},
   {"fn": "url_ok", "in": {"s": "syslog+tls://user:pw@h.example"}, "out": false},
