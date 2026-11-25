@@ -3956,6 +3956,10 @@ def remote_helpers():
     r = subprocess.run([PY, rp, "probe", "--vm", "box", "--host", "192.0.2.1", "--timeout", "1"], capture_output=True,
                        text=True, timeout=30)
     check("probe: an address nothing answers on is unreachable, within the timeout", r.stdout.strip() == "unreachable", r)
+    r = subprocess.run([PY, rp, "probe", "--vm", "box", "--host", "192.0.2.1", "--timeout", "1", "--setting", "NOPE=1"],
+                       capture_output=True, text=True, timeout=30)
+    check("probe: settings it refuses (a transport setting no provider has) read as unknown, as an adapter's error "
+          "does (review of item 5, C3)", r.returncode == 0 and r.stdout.strip() == "unknown", r)
     sys.path.insert(0, os.path.join(LAB, "lib"))
     import remote as remote_mod
     orig = remote_mod.transport.check_host

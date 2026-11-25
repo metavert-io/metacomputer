@@ -581,6 +581,27 @@ def packages():
           bool(_cli_problems({"owners": ("@x",), "nope": 1})) and bool(_cli_problems({"owners": ("@x",), "credentials": ("bad name",)}))
           and bool(_cli_problems({"owners": ("@x",), "create_options": (("--size", "a size", "", False),)}))
           and not _cli_problems({"owners": ("@x",)}))
+    check("...an idle stop default that isn't minutes (1-999) or off is refused, so it can't break vm create later "
+          "(review of item 5, C4)", bool(_cli_problems({"owners": ("@x",), "idle_stop_default": "never"}))
+          and bool(_cli_problems({"owners": ("@x",), "idle_stop_default": 0}))
+          and not _cli_problems({"owners": ("@x",), "idle_stop_default": "off"})
+          and not _cli_problems({"owners": ("@x",), "idle_stop_default": 30}))
+    check("no two providers declare one option differently (manifests.option_conflicts)", not mf.option_conflicts(),
+          mf.option_conflicts())
+    orig_cli, (p0, p1) = mf.cli, reg.PROVIDERS[:2]
+    mf.cli = lambda n: dict(orig_cli(n), cloud_options=((("--org", "A_ORG"),) if n == p0 else (("--org", "B_ORG"),)
+                                                       if n == p1 else orig_cli(n)["cloud_options"]))
+    try:
+        conflicts, listed = mf.option_conflicts(), mf.cloud_options()
+    finally:
+        mf.cli = orig_cli
+    check("...two that do are named, and the option is listed once (the command line would take it twice: review "
+          "of item 5, C1)", len(conflicts) == 1 and "--org" in conflicts[0] and [o[0] for o in listed].count("--org") == 1,
+          (conflicts, listed))
+    rbs = open(os.path.join(LAB, "scripts", "remote-build.sh")).read()
+    check("remote-build.sh copies a provider's guest parts into its target's folder (their contents: a folder that's "
+          "there already gets them beside its own, never a guest/ inside it; review of item 5, C2)",
+          'mkdir -p "$pv_dest" && cp -R "$LAB_ROOT/providers/$PROVIDER/guest/." "$pv_dest/"' in rbs)
     settings_bad = [n for n in reg.PROVIDERS
                     if any(ln.strip() and not ln.startswith("#")
                            for ln in open(os.path.join(LAB, "providers", n, "settings.env")).read().splitlines())]

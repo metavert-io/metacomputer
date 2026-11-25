@@ -99,6 +99,8 @@ def check_cli(name):
     for o in c["cloud_options"]:
         if not (len(o) == 2 and opt.fullmatch(str(o[0])) and env.fullmatch(str(o[1]))):
             bad.append(f"CLI cloud_options: (OPTION, ENVIRONMENT VARIABLE), not {o!r}")
+    if c["idle_stop_default"] is not None and not re.fullmatch(r"off|[1-9][0-9]{0,2}", str(c["idle_stop_default"])):
+        bad.append("CLI idle_stop_default: minutes (1-999), or off")
     if not isinstance(c["teardown"], bool):
         bad.append("CLI teardown: True or False")
     if c["api_host"] is not None and not re.fullmatch(r"[a-z0-9.-]{3,253}", str(c["api_host"])):
@@ -150,7 +152,30 @@ def create_options():
 
 
 def cloud_options():
-    return _union("cloud_options")
+    """Every provider's own cloud options (OPTION, ENVIRONMENT VARIABLE), in the registry's order: an option two
+    providers declare is listed once, as the first declares it (option_conflicts() names any they declare
+    differently), so the command line never takes one twice."""
+    out, seen = [], set()
+    for name in registry.PROVIDERS:
+        for o in cli(name)["cloud_options"]:
+            if o[0] not in seen:
+                seen.add(o[0])
+                out.append(o)
+    return tuple(out)
+
+
+def option_conflicts():
+    """The options two providers declare differently (their create_options or cloud_options), as a list of strings
+    (empty: none). Only the first one's would be used, so the lint refuses them."""
+    bad = []
+    for key in ("create_options", "cloud_options"):
+        first = {}
+        for name in registry.PROVIDERS:
+            for o in cli(name)[key]:
+                if o[0] in first and first[o[0]][1] != o:
+                    bad.append(f"{key}: {o[0]} is {first[o[0]][1]!r} in {first[o[0]][0]} but {o!r} in {name}")
+                first.setdefault(o[0], (name, o))
+    return bad
 
 
 def api_hosts():

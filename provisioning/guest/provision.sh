@@ -10,9 +10,9 @@
 # payload over SSH and runs this, then reboots it) changes only what such a VM needs: a display in memory (Xorg's
 # dummy driver), its own firewall instead of the Mac's gateway (provisioning/remote/), the live view on 127.0.0.1,
 # arm64 or amd64, and no storage modules. Run again, it changes nothing that's already right.
-# MCOMP_TARGET=sprite (a Fly Sprite, docs/sprites.md: provisioning/sprite/bootstrap.sh made the accounts and sshd,
+# MCOMP_TARGET=sprite (a Fly Sprite, docs/sprites.md: providers/sprites/guest/bootstrap.sh made the accounts and sshd,
 # through Fly's own channel) differs again: no systemd, cloud-init, display manager or kernel modules, so the display
-# is Xvfb and the desktop runs as Sprites services (provisioning/sprite/rootfs/opt/metacomputer/sprite/), Ubuntu
+# is Xvfb and the desktop runs as Sprites services (providers/sprites/guest/rootfs/opt/metacomputer/sprite/), Ubuntu
 # 26.04 on amd64, no full upgrade of Fly's image, no guest firewall (Fly's network policy is the boundary, outside the
 # VM), browsers' own DNS-over-HTTPS locked off (it would bypass that policy's names), and the setup doesn't reboot.
 # metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):

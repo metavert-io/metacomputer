@@ -1197,7 +1197,7 @@ def cmd_probe(args):
     import socket
     try:
         ep = target_endpoint(args)
-    except AdapterError:
+    except (AdapterError, Refused):     # a refusal (its settings) can't be told either
         print("unknown")
         return 0
     if ep["proxy"] is not None:

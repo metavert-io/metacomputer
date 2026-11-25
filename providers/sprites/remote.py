@@ -7,7 +7,7 @@ locks; nothing here is run on its own.
     create(R, s, a, rd, st, op)           the computer's Sprite, journaled like any launch
     abort(R, s, a, rd, st, op, keep)      a failed build's clean-up
     delete(R, s, a, rd, st, args)         vm delete's part at Fly
-    plan(R, s, a)                         the build's plan (lib/remote.py cmd_plan)
+    plan(R, s, a, common)                 the build's plan (lib/remote.py cmd_plan; common: the lines every plan has)
     cloud(R, args)                        cloud status|doctor|setup|teardown sprites
     egress_check(R, s, a, st, args)       before net egress changes the policy: widening only at your own terminal
     transport hooks (the `sprite` transport): connect_wrapper, tunnel, probe

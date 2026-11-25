@@ -336,8 +336,12 @@ mkdir -p "$P/payload/remote"
 cp -R "$LAB_ROOT/provisioning/guest/." "$P/payload/"
 cp -R "$LAB_ROOT/provisioning/remote/rootfs" "$P/payload/remote/"
 cp "$LAB_ROOT/provisioning/remote/bootstrap.sh" "$P/payload/remote/"
-# A provider's own guest parts (providers/NAME/guest), under its target's name in the payload.
-[ "$KIND" != provider ] || [ ! -d "$LAB_ROOT/providers/$PROVIDER/guest" ] || cp -R "$LAB_ROOT/providers/$PROVIDER/guest" "$P/payload/$(plan_or target remote)"
+# A provider's own guest parts (providers/NAME/guest), under its target's name in the payload: their contents, into
+# that folder (one that's there already, like remote/, gets them beside its own; never a guest/ inside it).
+if [ "$KIND" = provider ] && [ -d "$LAB_ROOT/providers/$PROVIDER/guest" ]; then
+  pv_dest="$P/payload/$(plan_or target remote)"
+  mkdir -p "$pv_dest" && cp -R "$LAB_ROOT/providers/$PROVIDER/guest/." "$pv_dest/"
+fi
 cp "$CACHE_DIR/cua-driver-$CUA_DRIVER_VERSION/$CUA_DRIVER_TARBALL" "$P/payload/"
 echo "$CUA_DRIVER_SHA256  $P/payload/$CUA_DRIVER_TARBALL" | shasum -a 256 -c - >/dev/null || die "the driver in the payload isn't the pinned one"
 cp "$CACHE_DIR/mozilla/pinned-key.asc" "$P/payload/mozilla-repo-signing-key.gpg"
