@@ -89,7 +89,7 @@ PROGRAMS = {
     "coding-agents/codex/setup.py": P("py", [["codex-entry", "--root", "r", "--link", "l"]], synth=True),
     "lib/botcheck.py": P("py", [[]], stdin="{}", by="person"),
     "lib/browser_tools.py": P("py", [["read", "https://example.com"], ["page", "open", "https://example.com"]], synth=True),
-    "lib/claude_mcp.py": P("py", [["user-get", "n", "--root", "r", "--link", "l"], ["user-recheck", "n"]], synth=True),
+    "coding-agents/claude-code/claude_mcp.py": P("py", [["user-get", "n", "--root", "r", "--link", "l"], ["user-recheck", "n"]], synth=True),
     "lib/defaultvm.py": P("py", [["read", "f"], ["read"]], synth=True),
     "lib/driver_profiles.py": P("py", [["render"], ["launch-path", "p"]], synth=True),
     "lib/each.py": P("py", [["main,other", "--", "status"], ["--timeout", "5", "main", "--", "reset", "--yes"]], synth=True),

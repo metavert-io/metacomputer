@@ -129,12 +129,6 @@ def mcp_tool(name):
     return None
 
 
-def claude_projects_dir(env=None):
-    env = os.environ if env is None else env
-    base = env.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
-    return os.path.join(base, "projects")
-
-
 def open_regular(path):
     """A binary reader for a regular file (no link, FIFO or device), gunzipped for .gz; raises OSError."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)

@@ -18,5 +18,12 @@
   },
   "bench": {
     "switch": "claude"
+  },
+  "sessions": {
+    "source": "files",
+    "key": "claude_code_sessions",
+    "kinds": [
+      "project"
+    ]
   }
 }

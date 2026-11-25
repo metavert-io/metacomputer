@@ -46,16 +46,6 @@ def listing():
     return json.load(open(os.path.join(LAB, "plugin", ".claude-plugin", "plugin.json"), encoding="utf-8"))
 
 
-# The channels not in their agents' folders yet: (COPIES, WRITTEN, LINK_TOPS), by agent.
-LEGACY = {
-    "claude-code": ([("skills/metacomputer", "plugin/skills/metacomputer", None),
-                     (".claude/skills/cua-driver", "plugin/.claude/skills/cua-driver", None),
-                     ("get.sh", "plugin/get.sh", None),
-                     ("LICENSE", "plugin/LICENSE", None),
-                     ("THIRD_PARTY_NOTICES.md", "plugin/THIRD_PARTY_NOTICES.md", None)], [], ("plugin",)),
-}
-
-
 def channels():
     """[(COPIES, WRITTEN, LINK_TOPS)] of every registered agent's distribution files (coding-agents/<name>/channel.py,
     whose writers are called with S: LAB, listing, relink), in the registry's order: COPIES (source in the repository, copy, how the copy's
@@ -68,8 +58,6 @@ def channels():
         if registry.has(n, "channel.py"):
             ch = registry.module(n, "channel")
             out.append((list(ch.COPIES), [(p, (lambda m: lambda: m(S))(m)) for p, m in ch.WRITTEN], tuple(ch.LINK_TOPS)))
-        elif n in LEGACY:
-            out.append(LEGACY[n])
     return out
 
 

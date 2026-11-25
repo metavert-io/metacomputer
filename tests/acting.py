@@ -103,7 +103,7 @@ PROGRAMS = {
     # the hub, metacomputer sh, ssh, task, get, and its cleanup under owners.acting()
     "lib/browser_tools.py": {k: THROUGH for k in ("compare", "responsive", "a11y", "open-untrusted", "gpu", "debug",
                                                   "read", "page")},
-    "lib/claude_mcp.py": NONE,
+    "coding-agents/claude-code/claude_mcp.py": NONE,
     "lib/defaultvm.py": NONE,
     "lib/driver_profiles.py": NONE,
     "lib/each.py": THROUGH,                                 # metacomputer --vm NAME COMMAND, each holding its own

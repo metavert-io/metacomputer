@@ -1206,13 +1206,13 @@ def test_scopes():
 
 def old_layout_checkout(t):
     """A checkout as v0.4.4 had it for Claude Code: its plugin declares the MCP server (plugin.json's mcpServers).
-    Only what install.sh's Claude Code step reads: install.sh, lib/claude_mcp.py, the command, the skill and the plugin."""
+    Only what install.sh's Claude Code step reads: install.sh, the agents' folders (Claude Code's claude_mcp.py), the
+    command, the skill and the plugin."""
     co = os.path.join(t, "checkout")
     os.makedirs(co)
     shutil.copy2(os.path.join(LAB, "install.sh"), co)
     write(os.path.join(co, "bin", "metacomputer"), "#!/bin/sh\nexit 0\n", 0o755)
     os.makedirs(os.path.join(co, "lib"))
-    shutil.copy2(os.path.join(LAB, "lib", "claude_mcp.py"), os.path.join(co, "lib"))
     shutil.copy2(os.path.join(LAB, "lib", "strictargs.py"), os.path.join(co, "lib"))       # the rules of its command lines
     os.makedirs(os.path.join(co, "scripts"), exist_ok=True)
     shutil.copy2(os.path.join(LAB, "scripts", "strictargs.sh"), os.path.join(co, "scripts"))
@@ -1744,10 +1744,11 @@ def test_owned_replace_lookup_fails():
 
 
 def test_claude_mcp_unit():
-    """lib/claude_mcp.py on its own: the configuration file Claude Code picks (R4), a byte-order mark (R5), the read
+    """coding-agents/claude-code/claude_mcp.py on its own: the configuration file Claude Code picks (R4), a byte-order mark (R5), the read
     right before a removal (R3) and the words for a server that isn't metacomputer's (R2)."""
     sys.path.insert(0, os.path.join(LAB, "lib"))
-    import claude_mcp
+    from agentkit import registry as agent_registry
+    claude_mcp = agent_registry.module("claude-code", "claude_mcp")
     t = tempfile.mkdtemp(prefix="mcomp-cmcp-")
     try:
         def fresh(name):
@@ -1833,7 +1834,8 @@ def test_config_choice_real():
     `.config.json` and `.claude.json`, the file claude_mcp reads is the one Claude Code uses (`claude mcp get` shows that
     file's server), and a byte-order mark doesn't stop either of them."""
     sys.path.insert(0, os.path.join(LAB, "lib"))
-    import claude_mcp
+    from agentkit import registry as agent_registry
+    claude_mcp = agent_registry.module("claude-code", "claude_mcp")
     entry = lambda c: {"type": "stdio", "command": c, "args": ["probe"], "env": {}}
     for why, legacy, modern, want in (
             ("an empty legacy file beside a populated .claude.json", "", entry("/bin/echo"), "/bin/echo"),

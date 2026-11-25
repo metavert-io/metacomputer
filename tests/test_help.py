@@ -278,7 +278,9 @@ PERSON_RUNS = {"install.sh", "get.sh", "lib/mcp_client.py"}      # besides every
 
 def direct_targets():
     out = ["install.sh", "get.sh"]
-    for d in ("scripts", "lib", "lib/cloud"):
+    agents = sorted(f"coding-agents/{n}" for n in os.listdir(os.path.join(LAB, "coding-agents"))
+                    if os.path.isdir(os.path.join(LAB, "coding-agents", n)))
+    for d in ("scripts", "lib", "lib/cloud", "lib/agentkit", *agents):
         for f in sorted(os.listdir(os.path.join(LAB, d))):
             rel = f"{d}/{f}"
             if rel in SOURCED or not f.endswith((".sh", ".py")):

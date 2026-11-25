@@ -2,8 +2,8 @@
 """Claude Code's user-scope MCP servers, read exactly, and what one is to a metacomputer checkout. Used by install.sh
 (its Claude Code step and --uninstall) and `metacomputer agents`.
 
-    python3 lib/claude_mcp.py user-get NAME --root CHECKOUT --link ~/.local/bin/metacomputer
-    python3 lib/claude_mcp.py user-recheck NAME < DIGEST
+    python3 coding-agents/claude-code/claude_mcp.py user-get NAME --root CHECKOUT --link ~/.local/bin/metacomputer
+    python3 coding-agents/claude-code/claude_mcp.py user-recheck NAME < DIGEST
 
 user-get prints one line of five fields split by \\x1f: OWNER, KIND, WORDS, DIGEST, LINKED.
   OWNER  what the user-scope server NAME is to CHECKOUT (owner() below): ok, ours, checkout, foreign, absent or error
@@ -41,7 +41,7 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
 # The rule every agent's entry is read by: its arguments, the paths earlier versions registered, the words for messages.
 from agentkit.mcp_entry import (LEGACY_NAMES, MCP_ARGS, PLAIN, US, digest, linked, program_name,  # noqa: E402,F401
                                 words)
@@ -247,7 +247,6 @@ def recheck(name, want, env=None):
 
 
 def main(argv):
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import strictargs           # its command line, by metacomputer's rules, before anything is done
     strictargs.expect(argv, ["user-get NAME --root CHECKOUT --link LINK", "user-recheck NAME"], prog="claude_mcp.py",
                       usage=__doc__.split("\n\n")[1])

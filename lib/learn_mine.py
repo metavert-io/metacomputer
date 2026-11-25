@@ -522,9 +522,9 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
 
 
 # The agents whose readers aren't in their folders yet: their session folders and files (transcripts.py's).
-_LEGACY_ROOTS = {"claude-code": lambda env: [transcripts.claude_projects_dir(env)]}
+_LEGACY_ROOTS = {}
 _LEGACY_FILES = {}
-_LEGACY_KINDS = {"project": "claude-code"}
+_LEGACY_KINDS = {}
 
 
 def _readers():
