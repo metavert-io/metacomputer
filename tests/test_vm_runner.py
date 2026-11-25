@@ -272,7 +272,8 @@ def lifecycle_cases(td):
           "#!/bin/sh\n"
           "case \"$1\" in\n"
           "  ls) echo '[{\"name\": \"life-vm\"}, {\"name\": \"life-vm-baseline\"}, {\"name\": \"life-vm-ckpt-c1\"}]' ;;\n"
-          "  get) printf '[{\"name\": \"%s\", \"status\": \"%s\"}]\\n' \"$2\" \"$FAKE_STATUS\" ;;\n"
+          "  get) case \"$2\" in life-vm) st=\"$FAKE_STATUS\" ;; *) st=\"${FAKE_SRC_STATUS-$FAKE_STATUS}\" ;; esac\n"
+          "       printf '[{\"name\": \"%s\", \"status\": \"%s\"}]\\n' \"$2\" \"$st\" ;;\n"
           "  run) echo '  --no-share-clipboard --no-share-audio --no-share-rosetta --no-host-sharing' ;;\n"
           f"  clone|delete|stop) echo \"LUME $*\" >> '{calls}' ;;\n"
           "  *) exit 1 ;;\n"
@@ -290,7 +291,7 @@ def lifecycle_cases(td):
         "do_checkpoint", "do_baseline", "do_stop", "do_start"))
     vm = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", "run", "life-vm", "--display", "none"])
 
-    def run(body, status, pid):
+    def run(body, status, pid, **extra):
         pidf = os.path.join(run_dir, "lume.pid")
         if pid is None:
             if os.path.exists(pidf):
@@ -301,7 +302,7 @@ def lifecycle_cases(td):
             os.remove(calls)
         script = "\n".join(["set -Eeuo pipefail", f'. "{LIB}"', LIFECYCLE_STUBS, 'CKPT_PREFIX="$VM_NAME-ckpt-"',
                             "OVERRIDE=0; ASSUME_YES=0; DISCARD_UNSYNCED=0", funcs, body])
-        r = subprocess.run(["/bin/bash", "-c", script], env=dict(env, FAKE_STATUS=status), capture_output=True,
+        r = subprocess.run(["/bin/bash", "-c", script], env=dict(env, FAKE_STATUS=status, **extra), capture_output=True,
                            text=True, timeout=120, stdin=subprocess.DEVNULL)
         done = open(calls).read().split("\n") if os.path.exists(calls) else []
         return r, [d for d in done if d]
@@ -342,6 +343,18 @@ def lifecycle_cases(td):
         check("...a stopped one's checkpoint is taken", "LUME clone life-vm life-vm-ckpt-c2" in done, (done, r.stderr[-300:]))
         r, done = run("do_stop", "stopped", None)
         check("...and stopping a stopped one lets its gateway go", "GATEWAY-STOP" in done, (done, r.stderr[-300:]))
+        # Codex's check of aeb1488: a state the runner doesn't give (its query failed: no answer, or one it doesn't
+        # know) is no better than unknown, for the VM replaced and for the VM it's copied from.
+        for status in ("", "provisioning"):
+            r, done = run("restore_from life-vm-baseline baseline reset", status, None)
+            changed = [d for d in done if d.startswith(changes)]
+            check(f"restore_from with the VM runner's answer {status!r} (a failed query): refused before anything is "
+                  "changed", r.returncode != 0 and "can't tell whether the virtual computer life-vm is running" in r.stderr
+                  and not changed, (r.returncode, changed, r.stderr[-300:]))
+        r, done = run("restore_from life-vm-baseline baseline reset", "stopped", None, FAKE_SRC_STATUS="")
+        changed = [d for d in done if d.startswith(changes)]
+        check("restore_from a source whose state the runner doesn't give: refused before the VM is deleted or rolled back",
+              r.returncode != 0 and "life-vm-baseline" in r.stderr and not changed, (r.returncode, changed, r.stderr[-300:]))
     finally:
         vm.kill()
         vm.wait()

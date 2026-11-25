@@ -1528,6 +1528,8 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
   expect_guard
   # A VM whose state can't be told may be running: never taken for stopped (not synced, deleted while it runs).
   if vm_exists "$VM_NAME"; then vm_known_or_die "$VM_NAME" "replacing it with $label"; fi
+  # ...and the VM it's copied from: a copy of one that may be running isn't a copy of anything settled.
+  vm_known_or_die "$src" "copying $src to $VM_NAME"
   if [ -s "$RUN_DIR/manual-recording" ]; then
     # A reset often follows a run that went wrong; the recording of it is saved before the VM goes, whether or
     # not the VM is still running (a streamed one is on this Mac either way).

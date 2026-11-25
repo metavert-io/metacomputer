@@ -876,6 +876,9 @@ def test_cli_counting():
         ("bash -l ./setup.sh", ({}, 0, 1)),
         ("metacomputer who; sudo -u me metacomputer sh ls", ({}, 1, 0)),           # sudo: not parsed, the regex has it
         ("metacomputer status; xargs -n1 metacomputer call < calls.txt", ({"status": 1}, 0, 0)),
+        # Codex's check of aeb1488: a comment or quoted text naming a command isn't one.
+        ("metacomputer who # example: metacomputer sh ls", ({"who": 1}, 0, 0)),
+        ('echo "next: metacomputer sh ls"; metacomputer who', ({"who": 1}, 0, 0)),
     ]
     got = [(c, kinds(c)) for c, _ in shells]
     bad = [(c[:60], g, want) for (c, g), (_, want) in zip(got, shells) if g != want]

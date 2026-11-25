@@ -302,12 +302,51 @@ def command_subcommands(cmd):
     know, a shell's option it can't read), it never drops what the regex would have counted."""
     from collections import Counter
     subs = cli_subcommands(cmd)
-    extra = Counter(CLI_RE.findall(cmd)) - Counter(subs)
-    for s in CLI_RE.findall(cmd):
+    # The regex reads only what the shell would run: never a comment, and never quoted text, which is either an
+    # argument (an echo, an explanation) or a script the parse already read (sh -c "...").
+    bare = _unquoted_code(cmd)
+    extra = Counter(CLI_RE.findall(bare)) - Counter(subs)
+    for s in CLI_RE.findall(bare):
         if extra[s] > 0:
             subs.append(s)
             extra[s] -= 1
     return subs
+
+
+def _unquoted_code(cmd):
+    """CMD with every quoted string's contents and every comment (a # that starts a word, to the end of its line)
+    blanked, as the shell reads them; a backslash escapes the next character outside single quotes."""
+    out, i, n, q = [], 0, len(cmd), None
+    while i < n:
+        c = cmd[i]
+        if q == "'":
+            if c == "'":
+                q = None
+            out.append(" ")
+        elif q == '"':
+            if c == "\\" and i + 1 < n:
+                out.append("  ")
+                i += 2
+                continue
+            if c == '"':
+                q = None
+            out.append(" ")
+        elif c == "\\" and i + 1 < n:
+            out.append(cmd[i:i + 2])
+            i += 2
+            continue
+        elif c in "'\"":
+            q = c
+            out.append(" ")
+        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|()"):
+            j = cmd.find("\n", i)
+            out.append(" " * ((n if j < 0 else j) - i))
+            i = n if j < 0 else j
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def result_text(res):

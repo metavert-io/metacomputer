@@ -720,7 +720,14 @@ vm_settled_status() {
 # is never taken for stopped (deleted, copied, replaced, or its gateway and storage let go). WHAT says what was about
 # to happen ("replacing it with the baseline"), DONE what had been done (by default: nothing).
 vm_known_or_die() {
-  [ "$(vm_settled_status "$1")" != unknown ] && return 0
+  local st; st="$(vm_settled_status "$1")"
+  case "$st" in running|stopped) return 0 ;; esac
+  if [ "$st" != unknown ]; then
+    # No answer, or one it doesn't know: only a VM the runner's list says isn't there goes ahead (its caller says so);
+    # a list that can't be had or read can't tell that either (vm_lookup, never vm_exists, whose error looks absent).
+    [ "$(vm_lookup "$1" || true)" = absent ] && return 0
+    die "can't tell whether the virtual computer $1 is running: the VM runner's answer about it was ${st:+\"$st\"}${st:-none}. Not $2 while it may be running: check the runner (metacomputer status), then run this again. ${3:-Nothing was changed}"
+  fi
   die "$(vm_unknown_says "$1"). Not $2 while it may be running: stop it where the VM runner can see it (metacomputer stop outside the sandbox), or check the runner, then run this again. ${3:-Nothing was changed}"
 }
 vm_mac() { lume_field "$1" macAddress; }
