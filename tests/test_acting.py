@@ -958,6 +958,31 @@ def strict_reader_checks(td):
         root, cs, e = comps(local="VM_NAME=mainvm\n" + text)
         check(f"config/local.env with {what}: refused (raises), never read", cs is None and isinstance(e, ValueError),
               (cs and cs.get("mainvm"), e))
+    # Check r6: a control character (a NUL, where bash 3.2 stops reading the file without a word) refuses; a line with
+    # many $name references that doesn't match says so at once (no exponential backtracking); and the quoting `vm
+    # create` writes for a copied value with a quote in it (vm_q) is bash, 3.2 included, that gives the value back,
+    # read the same here.
+    for text, what in (("# \x00\nRUN_DIR=/tmp/elsewhere\n", "a NUL in a comment, then a setting bash never reads"),
+                       ('RUN_DIR="/srv/a\x01b"\n', "a control character in a value"),
+                       ("RUN_DIR=/srv/run\x7f\n", "a DEL in a value")):
+        root, cs, e = comps(local="VM_NAME=mainvm\n" + text)
+        check(f"config/local.env with {what}: refused (raises), never read", cs is None and isinstance(e, ValueError),
+              (cs and cs.get("mainvm"), e))
+    t0 = time.monotonic()
+    root, cs, e = comps(local="VM_NAME=mainvm\nX=" + "$abcdefgh" * 9 + "!\n")   # ~27 s before the fix
+    took = time.monotonic() - t0
+    check(f"a line of 9 $name references that isn't an assignment: refused at once ({took:.2f} s)",
+          cs is None and isinstance(e, ValueError) and took < 2, (took, e))
+    fn = subprocess.run(["sed", "-n", "/^vm_q()/,/^}/p", os.path.join(LAB, "scripts", "vm-commands.sh")],
+                        capture_output=True, text=True).stdout
+    for val in ("/srv/Jon's run", "/srv/a'b'c", "/srv/''"):
+        line = subprocess.run(["/bin/bash", "-c", fn + '\nvm_q RUN_DIR "$1"', "_", val], capture_output=True,
+                              text=True).stdout.rstrip("\n")
+        got = subprocess.run(["/bin/bash", "-c", line + '\nprintf %s "$RUN_DIR"'], capture_output=True, text=True)
+        root, cs, e = comps(local="VM_NAME=mainvm\n" + line + "\n")
+        check(f"vm create's quoting of {val!r} ({line}): /bin/bash gives it back, and so does this reader",
+              got.returncode == 0 and got.stdout == val and cs is not None and cs["mainvm"]["run_dir"] == val,
+              (line, got.stdout, got.stderr[-200:], e, cs and cs["mainvm"]["run_dir"]))
     ex = open(os.path.join(LAB, "config", "local.env.example")).read()
     uncommented = "\n".join(l[1:] if l[:1] == "#" and l[1:2].isupper() and "=" in l else l for l in ex.split("\n"))
     root, cs, e = comps(local=uncommented)

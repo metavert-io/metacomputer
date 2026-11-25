@@ -26,6 +26,11 @@ All notable changes to metacomputer are recorded here. The format follows
   newer to update to yet and exits 0 (`--check --json`: `up_to_date`, `past_latest`); a checkout with commits of its
   own after the release is the owner's to update; and going back on main says how (check out the tag, then
   `./install.sh --allow-downgrade`). A detached checkout still goes back to the release with `--allow-downgrade`.
+- **Settings files: three gaps in how they're read and written.** A control character other than a tab (a NUL, where
+  macOS's bash stops reading a file without a word, so the settings after it don't count) now refuses, like any
+  other line that isn't a plain assignment. A line with many `$NAME` references that isn't an assignment is refused
+  at once (it could take minutes, holding the command up). And `vm create` writes a copied value with a `'` in it
+  as bash 3.2 reads it back: it wrote `'it\'\\'\'s'`, so the new file was refused and removed.
 
 ## [0.5.1] - 2026-11-24
 
