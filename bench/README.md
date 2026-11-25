@@ -16,7 +16,8 @@ desktop interfaces this way.
 For each task:
 - **pass** (every check met) and a **partial score** from 0 to 1 (the checks
   are weighted);
-- **cost** in USD, **turns**, **minutes**, and input and output **tokens**;
+- **cost** in USD, **turns**, **minutes**, and input and output **tokens** (input counts the prompt tokens read
+  from and written to the provider's cache too, for every agent that reports them);
 - **the tool-call mix:**
   - screenshots: images returned by any tool;
   - tree reads: `get_window_state`, `verify_state`, `get_browser_state`;
@@ -28,7 +29,8 @@ For each task:
     - page (Chrome's `browser_*` tools);
   - `run_steps` batches;
   - shell use (`metacomputer ssh` or `metacomputer sh` from Bash);
-  - other `metacomputer` commands;
+  - other `metacomputer` commands, wherever the shell line runs them: after `cd ... &&` or `env ...`, in a
+    pipeline, under `sh -c`, by a quoted path or a variable holding it (`M=.../metacomputer; $M call ...`);
 - **refused and rejected calls:**
   - calls the bridge or driver refused;
   - Bash calls the permissions denied;
@@ -176,9 +178,12 @@ Every session gets the same harness, so only the switches differ:
   timeout (the task's `timeout_s`; the process group is stopped when it runs out).
 
 The skill text names the installed launcher (`~/.local/bin/metacomputer`).
-The copy given to the session names this checkout's `bin/metacomputer`
-instead, so a branch is tested with its own CLI. `metacomputer` and `mcomp`
-on the session's PATH point there too.
+The copy given to the session names a launcher in the work folder instead,
+which runs this checkout's `bin/metacomputer`, so a branch is tested with its
+own CLI. `metacomputer` and `mcomp` on the session's PATH and the MCP server
+are that launcher too, for every agent, and it's the only metacomputer
+command the session's approvals allow (the checkout's `bin/metacomputer` by
+its own path isn't one).
 
 ### Isolated sessions
 
@@ -221,6 +226,13 @@ or fails:
   SSH keys and vault are there): the server's entry says so, and the
   session's `metacomputer` and `mcomp` commands are launchers in the work
   folder that do the same, first on its PATH; the skill copy names the first.
+- **The `--pass-env` variables are the agent's only.** metacomputer's own
+  commands that the benchmark runs (`reset` and `start`, whose VM runner,
+  gateway and hub keep running afterwards, and the rest) get your
+  environment without them, and the session's launchers (its `metacomputer`
+  and `mcomp` commands and its MCP server, whichever the agent, Claude Code
+  and Codex included) drop them, so no process of metacomputer's holds your
+  key. The agent itself still gets them.
 
 A throwaway HOME is not a sandbox: a command an agent may run still runs as
 you. That's why what each agent may do without asking is kept to

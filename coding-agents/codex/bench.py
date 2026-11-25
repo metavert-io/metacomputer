@@ -16,8 +16,10 @@ def model(sw, default):
 
 def prepare(B, work, shim):
     """Codex reads the project's rules once the folder is trusted (the session's -c says so): metacomputer's, for the
-    commands as the skill and the shim name them, so they run outside its sandbox as an install sets up."""
-    names = ["metacomputer", "mcomp", B.CLI, os.path.join(shim, "metacomputer"), os.path.join(shim, "mcomp")]
+    commands as the skill and the shim name them (the work folder's launchers, which run the checkout's without the
+    --pass-env variables), so they run outside its sandbox as an install sets up."""
+    names = ["metacomputer", "mcomp", *B.agent_launchers(work), os.path.join(shim, "metacomputer"),
+             os.path.join(shim, "mcomp")]
     rules = open(os.path.join(B.LAB, "config", "codex", "metacomputer.rules.in")).read()
     os.makedirs(os.path.join(work, ".codex", "rules"))
     open(os.path.join(work, ".codex", "rules", "metacomputer.rules"), "w").write(

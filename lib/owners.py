@@ -63,6 +63,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import flockwait  # noqa: E402
+import procinfo  # noqa: E402  (ps, or the kernel where ps can't start)
 from agentkit import manifests as _manifests  # noqa: E402  (the agents' words)
 from agentkit import recognition as _recognition  # noqa: E402  (every agent's recognition.json, merged)
 
@@ -97,120 +98,38 @@ def cli():
 
 
 def ps_table(strict=False):
-    """{pid: (ppid, comm)} for every process (a ProcTable: an interpreter's arguments on request). strict: OSError when ps fails or lists nothing, instead of a table
-    that would look like one without agents."""
-    r = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True)
-    out = r.stdout
-    if strict and (r.returncode != 0 or not out.strip()):
-        raise OSError(f"ps failed (exit {r.returncode})")
-    table = ProcTable(live=True)
-    for line in out.splitlines():
+    """{pid: (ppid, comm)} for every process (a ProcTable: an interpreter's arguments on request), as `/bin/ps -axo
+    pid=,ppid=,comm=` lists them; where ps can't start (macOS's sandbox runs no setuid program), the same from the
+    kernel (lib/procinfo.py), with the processes whose name the kernel can't give exactly as ps would listed as inexact
+    (agent_of counts them as UNKNOWN_AGENT). strict: OSError when ps fails or lists nothing, instead of a table that
+    would look like one without agents. A table that lists a pid twice can't be told (one of its rows isn't that
+    process's: a name that carried a row of its own): OSError, strict or not, as when ps can't be read, never the
+    later row (or the first) taken for the process. Rows are ps's lines: split at newlines only (a name may hold
+    any other character)."""
+    out, rc, inexact = procinfo.table()
+    if strict and (rc != 0 or not out.strip()):
+        raise OSError(f"ps failed (exit {rc})")
+    table = ProcTable(live=True, inexact=inexact)
+    for line in out.split("\n"):
         parts = line.split(None, 2)
         if len(parts) >= 2:
-            table[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+            pid = int(parts[0])
+            if pid in table:
+                raise OSError(f"the process table lists pid {pid} twice: it can't be told which row is that process's")
+            table[pid] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
     return table
 
 
 def full_command(pid):
-    return subprocess.run(["/bin/ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    """A process's command line as `/bin/ps -ww -o command=` prints it ("" for no such process, or when it can't be
+    told: where ps can't start, another account's process or arguments beyond ASCII; lib/procinfo.py)."""
+    return (procinfo.field(pid, "command") or "").strip()
 
 
-_CTL_KERN, _KERN_PROCARGS2 = 1, 49            # sysctl(3): a process's exact arguments, as the kernel keeps them
-
-
-def proc_argv(pid):
-    """A process's arguments, exactly (argv, one string each: spaces inside an argument stay inside it), or None when
-    they can't be read (no such process, another account's, a zombie). macOS: sysctl KERN_PROCARGS2, which holds what
-    the process left there, so a program that renamed itself (node's process.title, setproctitle) shows its new name as
-    argv[0]; Linux: /proc/PID/cmdline."""
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return None
-    if pid <= 0:
-        return None
-    if sys.platform == "darwin":
-        try:
-            import ctypes
-            import ctypes.util
-            import struct
-            libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-            mib = (ctypes.c_int * 3)(_CTL_KERN, _KERN_PROCARGS2, pid)
-            size = ctypes.c_size_t(0)
-            if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or size.value < 8:
-                return None
-            buf = ctypes.create_string_buffer(size.value)
-            if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0 or size.value < 8:
-                return None
-            raw = buf.raw[:size.value]
-            argc = struct.unpack_from("<i", raw, 0)[0]
-        except (OSError, AttributeError, ValueError, struct.error):
-            return None
-        i = raw.find(b"\0", 4)                    # the executable's path, then padding
-        if i < 0 or argc <= 0:
-            return None
-        while i < len(raw) and raw[i] == 0:
-            i += 1
-        out = []
-        while len(out) < argc and i < len(raw):
-            j = raw.find(b"\0", i)
-            j = len(raw) if j < 0 else j
-            out.append(raw[i:j].decode("utf-8", "replace"))
-            i = j + 1
-        return out or None
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            parts = f.read().split(b"\0")
-    except OSError:
-        return None
-    if parts and parts[-1] == b"":
-        parts.pop()
-    return [x.decode("utf-8", "replace") for x in parts] or None
-
-
-def _libproc():
-    import ctypes
-    return ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-
-
-def proc_exe(pid):
-    """The realpath of a process's executable (its text image: macOS proc_pidpath, Linux /proc/PID/exe), or None."""
-    try:
-        pid = int(pid)
-        if pid <= 0:
-            return None
-        if sys.platform == "darwin":
-            import ctypes
-            buf = ctypes.create_string_buffer(4096)
-            n = _libproc().proc_pidpath(pid, buf, 4096)
-            return buf.value.decode("utf-8", "replace") if n > 0 else None
-        return os.readlink(f"/proc/{pid}/exe")
-    except (OSError, ValueError, AttributeError, TypeError):
-        return None
-
-
-_PROC_PIDVNODEPATHINFO, _VNODE_INFO_SIZE, _MAXPATHLEN = 9, 152, 1024    # <sys/proc_info.h>
-
-
-def proc_cwd(pid):
-    """A process's working folder (macOS proc_pidinfo PROC_PIDVNODEPATHINFO, Linux /proc/PID/cwd), or None when it
-    can't be read (another account's process, no such process)."""
-    try:
-        pid = int(pid)
-        if pid <= 0:
-            return None
-        if sys.platform == "darwin":
-            import ctypes
-            size = 2 * (_VNODE_INFO_SIZE + _MAXPATHLEN)        # struct proc_vnodepathinfo: pvi_cdir, pvi_rdir
-            buf = ctypes.create_string_buffer(size)
-            n = _libproc().proc_pidinfo(pid, _PROC_PIDVNODEPATHINFO, ctypes.c_uint64(0), buf, size)
-            if n != size:
-                return None
-            path = buf.raw[_VNODE_INFO_SIZE:_VNODE_INFO_SIZE + _MAXPATHLEN].split(b"\0", 1)[0]
-            return path.decode("utf-8", "replace") or None
-        return os.readlink(f"/proc/{pid}/cwd")
-    except (OSError, ValueError, AttributeError, TypeError):
-        return None
+# A process's exact arguments, executable and working folder: lib/procinfo.py reads them from the kernel.
+proc_argv = procinfo.argv
+proc_exe = procinfo.exe
+proc_cwd = procinfo.cwd
 
 
 class ProcTable(dict):
@@ -220,14 +139,16 @@ class ProcTable(dict):
     what isn't known yet from the
     process itself (ps_table's tables; None when it can't be read); a table made of known parts (the tests') never does:
     argvs, exes and cwds map a pid to what's known, None for what couldn't be read (an argv not given is [], an exe or
-    cwd not given None)."""
+    cwd not given None). inexact: the pids whose name (comm) the table can't give as ps would (a table read from the
+    kernel where ps can't start: lib/procinfo.py): agent_of counts each as UNKNOWN_AGENT."""
 
-    def __init__(self, *args, argvs=None, exes=None, cwds=None, live=False, **kw):
+    def __init__(self, *args, argvs=None, exes=None, cwds=None, live=False, inexact=(), **kw):
         super().__init__(*args, **kw)
         self.argvs = dict(argvs or {})
         self.exes = dict(exes or {})
         self.cwds = dict(cwds or {})
         self.live = live
+        self.inexact = frozenset(inexact)
 
     def _get(self, cache, pid, read, missing):
         if pid not in cache:
@@ -568,6 +489,8 @@ def agent_of(pid, table):
     comm = table[pid][1]
     if not isinstance(table, ProcTable):
         return agent_kind(comm)
+    if pid in table.inexact:
+        return UNKNOWN_AGENT                    # its name as ps has it can't be told: it may be an agent (fail closed)
     return process_agent(comm, table.exe(pid), lambda: table.argv(pid), lambda: table.cwd(pid))
 
 
@@ -589,11 +512,14 @@ def agent_name(pid):
         return None
     if pid not in _AGENT_NAMES:
         try:
-            comm = subprocess.run(["/bin/ps", "-o", "comm=", "-p", str(int(pid))], capture_output=True, text=True,
-                                  timeout=5).stdout.strip()
+            comm = procinfo.field(int(pid), "comm", timeout=5)
         except (OSError, ValueError, subprocess.SubprocessError):
             return None
-        _AGENT_NAMES[pid] = process_agent(comm, proc_exe(pid), lambda: proc_argv(pid), lambda: proc_cwd(pid))
+        if comm is None:                        # ps can't start, and the kernel can't give its name as ps would
+            _AGENT_NAMES[pid] = UNKNOWN_AGENT
+        else:
+            _AGENT_NAMES[pid] = process_agent(comm.strip(), proc_exe(pid), lambda: proc_argv(pid),
+                                              lambda: proc_cwd(pid))
     return _AGENT_NAMES[pid]
 
 

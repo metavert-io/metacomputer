@@ -129,6 +129,8 @@ PROGRAMS = {
                               ["internal-caller", "--user"]], synth=True),
     "lib/page_guest.py": P("py", [["read", "{}"], ["page-close", "{}"]]),
     "lib/placement.py": P("py", [["resolve", "--vm", "v"], ["name-ok", "n"], ["places"]], synth=True),
+    # scripts/lib.sh proc_field and proc_commands, where ps can't start
+    "lib/procinfo.py": P("py", [["command", "1"], ["comm", "1"], ["pgid", "1"], ["lstart", "1"], ["commands"]], synth=True),
     "lib/proxywrap.py": P("py", [["--", "/usr/bin/true"], ["--id", "sprite-1", "--check", "1", "/usr/bin/true", "--", "/usr/bin/true", "-x"]]),
     "lib/recording.py": P("py", [["probe", "f.mkv"], ["capture", "--max-bytes", "10", "--timeout", "5", "--", "ssh", "-T", "h"],
                                  # record_stream_start (bin/metacomputer): the stream's Mac half, keeping the lock

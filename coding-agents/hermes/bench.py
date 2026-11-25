@@ -2,7 +2,9 @@
 import json
 import os
 import re
+import signal
 import subprocess
+import time
 
 SKILL_HOME = ".agents"          # the skill goes in the work folder's .agents/skills/
 ISOLATED = True                 # each session in a throwaway HOME (isolate)
@@ -16,6 +18,18 @@ HERMES_SETTINGS = (("tools.tool_search.enabled", "off"), ("approvals.mode", "man
                    ("approvals.single_query_mode", "deny"), ("gateway.unmanaged_idle_exit_seconds", "60"))
 # Hermes Agent's administrator-managed scope: its .env and config.yaml apply to every Hermes run on the Mac.
 HERMES_MANAGED = "/etc/hermes"
+GATEWAY_STOP_S = 10             # a gateway left running gets SIGTERM (its own shutdown), then SIGKILL after this long
+RELEASE_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")      # Hermes's release tags (its version reader's v[0-9]*)
+# Hermes's gateway, as Hermes starts one for a home (hermes_cli/gateway_runtime_start.py spawn_unmanaged_gateway):
+# [sys.executable, "-m", "hermes_cli.main", (--profile NAME), "gateway", "run", --quiet, ...]. A Python interpreter, by its
+# executable (the kernel's, its text image) and by its first argument; CPython's options that may come before -m (the
+# ones without a value, alone or clustered, and -W/-X with theirs).
+PYTHON = re.compile(r"python(\d+(\.\d+)*t?)?|Python")
+PY_FLAGS = frozenset("bBdEiIOPqRsSuvx")
+PY_VALUE_OPTS = ("-W", "-X")
+GATEWAY_MODULE = "hermes_cli.main"
+PROFILE_OPTS = ("--profile", "-p")
+SHA = re.compile(r"[0-9a-f]{40}")
 
 
 def model(sw, default):
@@ -100,15 +114,175 @@ def refuse_hermes_outside_files(prog, env, cwd):
 
 def end(B, prog, home):
     """After an isolated session, however it ended: Hermes's gateway for the session's home stopped (a -q session starts
-    one, which would otherwise stay up until it has been idle a minute)."""
-    if os.path.isdir(os.path.join(home, ".hermes")):
+    one, which would otherwise stay up until it has been idle a minute, and write into the home bench deletes next).
+    Hermes's own `gateway stop` first; it finds its gateway with ps, which can't start where Hermes runs in macOS's
+    sandbox (no setuid program can), so then whatever gateway of this home is still there is stopped here
+    (stop_gateways)."""
+    hh = os.path.join(home, ".hermes")
+    if os.path.isdir(hh):
         env = {k: os.environ[k] for k in ("PATH", "LANG", "TMPDIR") if k in os.environ}
-        env.update(HOME=home, HERMES_HOME=os.path.join(home, ".hermes"))
+        env.update(HOME=home, HERMES_HOME=hh)
         try:
             subprocess.run([prog, "gateway", "stop"], capture_output=True, text=True, env=env, timeout=120,
                            stdin=subprocess.DEVNULL, cwd=home)
         except (OSError, subprocess.SubprocessError):
             pass
+        stop_gateways(B, hh)
+
+
+def is_gateway(args, exe):
+    """Whether a process is Hermes's gateway as Hermes starts one: its executable (exe: the realpath of its text image)
+    and its first argument a Python interpreter; then that interpreter's options and nothing else up to `-m
+    hermes_cli.main` (the module it runs); then, after Hermes's profile selector (--profile NAME, -p NAME, --profile=NAME),
+    `gateway run` in exactly those places. A word "hermes", "gateway" or "run" anywhere else (a script's arguments, -c
+    code, another Hermes command's) never makes one."""
+    if not exe or not args or not PYTHON.fullmatch(os.path.basename(exe)) or not PYTHON.fullmatch(os.path.basename(args[0])):
+        return False
+    i = 1
+    while i < len(args) and args[i] != "-m":
+        w = args[i]
+        if w in PY_VALUE_OPTS:
+            i += 2
+        elif w.startswith(PY_VALUE_OPTS) or (len(w) > 1 and w[0] == "-" and set(w[1:]) <= PY_FLAGS):
+            i += 1
+        else:
+            return False                # a script, -c code, or anything else before -m: not the module Hermes runs
+    if args[i + 1:i + 2] != [GATEWAY_MODULE]:
+        return False
+    rest = args[i + 2:]
+    if rest[:1] and rest[0] in PROFILE_OPTS:
+        rest = rest[2:]
+    elif rest[:1] and rest[0].startswith(tuple(o + "=" for o in PROFILE_OPTS)):
+        rest = rest[1:]
+    return rest[:2] == ["gateway", "run"]
+
+
+def same_process(B, pid, start):
+    """Whether pid is still the process that started at start (read fresh from the kernel, kern.proc.pid): False when
+    it ended, is a zombie, its pid is another process's now, or that can't be told."""
+    try:
+        p = B.procinfo.kernel_proc(pid)
+    except Exception:
+        return False
+    return p is not None and not p.zombie and p.start == start
+
+
+def gateways(B, hh):
+    """This session's Hermes gateways still running, [(pid, start)]: this account's processes that run Hermes's gateway
+    (is_gateway: by their executable, the module and the arguments' places) with this session's Hermes home as
+    HERMES_HOME in their environment (how Hermes starts one for a home). Read from the kernel (lib/procinfo.py), never
+    ps: executable, arguments and environment exactly, whatever can or can't run; each read again after them to be the
+    process they were read from (its pid and start time), or left out."""
+    want = os.path.realpath(hh)
+    found = []
+    for p in B.procinfo.kernel_procs() or []:
+        if p.pid <= 1 or p.uid != os.getuid() or p.zombie:
+            continue
+        args = B.procinfo.argv(p.pid)
+        if not args or not is_gateway(args, B.procinfo.exe(p.pid)):
+            continue
+        home = (B.procinfo.environ(p.pid) or {}).get("HERMES_HOME") or ""
+        if home and os.path.realpath(home.rstrip("/") or "/") == want and same_process(B, p.pid, p.start):
+            found.append((p.pid, p.start))
+    return found
+
+
+def signal_if_same(B, pid, start, sig):
+    """sig to pid only while it is still the process found (same_process, read fresh right before): never one that
+    took its pid meanwhile, nor when that can't be told."""
+    if not same_process(B, pid, start):
+        return False
+    try:
+        os.kill(pid, sig)
+        return True
+    except OSError:
+        return False
+
+
+def stop_gateways(B, hh):
+    """Stop this session's gateways (gateways): SIGTERM, its own shutdown; after GATEWAY_STOP_S, SIGKILL to each still
+    there, found again. Before every signal, the first SIGTERM too, it is checked to be the same process (its pid and
+    start time, read fresh: signal_if_same)."""
+    found = gateways(B, hh)
+    for pid, start in found:
+        signal_if_same(B, pid, start, signal.SIGTERM)
+    end = time.monotonic() + GATEWAY_STOP_S
+    while found and time.monotonic() < end and any(same_process(B, *g) for g in found):
+        time.sleep(0.2)
+    left = [g for g in found if same_process(B, *g)]
+    if left:
+        again = set(gateways(B, hh))
+        for pid, start in left:
+            if (pid, start) in again:
+                signal_if_same(B, pid, start, signal.SIGKILL)
+
+
+def version(B, line, out):
+    """run.json's version of Hermes (bench's agent_version): its own first line, unless that says vunknown. Hermes reads
+    its version with git (a checkout's release tag), which can't run everywhere (macOS's sandbox): then the tag is read
+    from its checkout's own files (checkout_version, the install directory `hermes --version` names). Without one
+    either, it stays unknown (bench drops the v)."""
+    if not re.search(r"(?<![A-Za-z0-9])vunknown\b", line):
+        return line
+    m = re.search(r"^Install directory: (/.+?)\s*$", out, re.M)
+    got = checkout_version(m[1]) if m else None
+    return line.replace("vunknown", got, 1) if got else line
+
+
+def _read(path, limit=1 << 20):
+    try:
+        with open(path, "rb") as f:
+            return f.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def checkout_version(root):
+    """A git checkout's release, read from its files without git: the commit its HEAD names, and the release tag
+    (vX.Y.Z) on exactly that commit: "vX.Y.Z" (the highest, when several), else "git.SHORT" (as Hermes names a checkout
+    with no release tag), or None when the files don't say (no checkout, a HEAD that can't be followed)."""
+    dot = os.path.join(root, ".git")
+    if os.path.isfile(dot):                             # a worktree: "gitdir: PATH"
+        m = re.match(r"gitdir: (.+)", (_read(dot, 4096) or "").strip())
+        gitdir = os.path.join(root, m[1]) if m else None
+    else:
+        gitdir = dot if os.path.isdir(dot) else None
+    if not gitdir:
+        return None
+    common = (_read(os.path.join(gitdir, "commondir"), 4096) or "").strip()
+    common = os.path.join(gitdir, common) if common else gitdir
+    packed = {}
+    peeled_of, last = {}, None
+    for ln in (_read(os.path.join(common, "packed-refs")) or "").splitlines():
+        if ln.startswith("^") and last and SHA.fullmatch(ln[1:].strip()):
+            peeled_of[last] = ln[1:].strip()
+        elif not ln.startswith("#") and " " in ln:
+            sha, ref = ln.split(" ", 1)
+            if SHA.fullmatch(sha):
+                packed[ref.strip()] = sha
+                last = ref.strip()
+
+    def ref_sha(ref):
+        if not re.fullmatch(r"refs/[A-Za-z0-9._/-]+", ref) or ".." in ref:
+            return None
+        loose = (_read(os.path.join(common, ref), 4096) or "").strip()
+        return loose if SHA.fullmatch(loose) else packed.get(ref)
+    head = (_read(os.path.join(gitdir, "HEAD"), 4096) or "").strip()
+    commit = ref_sha(head[5:].strip()) if head.startswith("ref: ") else (head if SHA.fullmatch(head) else None)
+    if not commit:
+        return None
+    tags = []
+    tdir = os.path.join(common, "refs", "tags")
+    loose = set(os.listdir(tdir)) if os.path.isdir(tdir) else set()
+    for ref, sha in packed.items():                     # a loose tag of that name is newer than its packed line
+        if ref.startswith("refs/tags/") and ref[10:] not in loose and peeled_of.get(ref, sha) == commit:
+            tags.append(ref[len("refs/tags/"):])
+    for name in sorted(loose):
+        if (_read(os.path.join(tdir, name), 4096) or "").strip() == commit:     # a tag object can't be followed here
+            tags.append(name)
+    releases = sorted({t for t in tags if RELEASE_TAG.fullmatch(t)},
+                      key=lambda t: tuple(int(x) for x in RELEASE_TAG.fullmatch(t).groups()))
+    return releases[-1] if releases else "git." + commit[:7]
 
 
 def events(B, ev, state):

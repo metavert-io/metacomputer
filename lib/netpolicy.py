@@ -313,7 +313,8 @@ def stop_timer(p):
         return
     if pid > 1:
         try:
-            out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+            import procinfo     # ps, or the kernel where ps can't start (a sandbox)
+            out = procinfo.field(pid, "command", ps="ps") or ""
             if "netpolicy.py _expire" in out:
                 os.kill(pid, 15)
         except OSError:

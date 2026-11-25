@@ -686,8 +686,50 @@ if v is None or v == "":
     sys.exit(1)
 print(v)' "$1" "$2"
 }
-vm_status() { lume_field "$1" status; }
+# NAME's status as the runner gives it, but "unknown" for a "stopped" it can't have seen: the runner (Lume) tells a
+# running VM by the process holding its run lock (lsof) and a signal 0 to it, and says "stopped" when it can't look
+# (macOS's sandbox can refuse both), while this VM's own run process, the `LUME run NAME` vm_start left in
+# RUN_DIR/lume.pid, still runs. A VM that is stopped has no such process: still "stopped".
+vm_status() {
+  local s; s="$(lume_field "$1" status)"
+  if [ "$s" = stopped ] && [ "$1" = "${VM_NAME:-}" ] && vm_run_pid "$1" >/dev/null; then s=unknown; fi
+  printf '%s\n' "$s"
+}
+vm_run_pid() { # NAME -> the pid of this VM's own run process (RUN_DIR/lume.pid) while it is that VM's `run NAME`
+  local p=""
+  if [ -s "${RUN_DIR:-}/lume.pid" ]; then p="$(head -1 "$RUN_DIR/lume.pid" 2>/dev/null | tr -cd '0-9')" || p=""; fi
+  [ -n "$p" ] || return 1
+  case " $(proc_field command "$p") " in *" run $1 "*) printf '%s\n' "$p"; return 0 ;; esac
+  return 1
+}
 vm_running() { [ "$(vm_status "$1")" = "running" ]; }
+# What a command that needs the VM says when the runner's "stopped" can't be believed (vm_status "unknown").
+vm_unknown_says() {
+  printf '%s' "can't tell whether the virtual computer is running: the VM runner says it is stopped, but its run process (pid $(vm_run_pid "$1" || echo '?')) is still there; the runner can't see it from here (macOS's sandbox keeps it from looking at other processes): check with \`metacomputer status\` outside the sandbox"
+}
+# NAME's status for a command about to start, stop, delete, copy or replace it: vm_status, with a run process that is
+# finishing (a stop just now) given 10 s (MCOMP_VM_SETTLE_S) to go; "unknown" while it's still there after that.
+vm_settled_status() {
+  local st i=0 n=20
+  [[ "${MCOMP_VM_SETTLE_S:-}" =~ ^[0-9]{1,3}$ ]] && n=$(( MCOMP_VM_SETTLE_S * 2 ))
+  st="$(vm_status "$1")"
+  while [ "$st" = unknown ] && [ $i -lt $n ]; do sleep 0.5; i=$((i+1)); st="$(vm_status "$1")"; done
+  printf '%s\n' "$st"
+}
+# NAME WHAT [DONE]: refuse (die) while NAME's state can't be told (vm_settled_status "unknown"): it may be running, so it
+# is never taken for stopped (deleted, copied, replaced, or its gateway and storage let go). WHAT says what was about
+# to happen ("replacing it with the baseline"), DONE what had been done (by default: nothing).
+vm_known_or_die() {
+  local st; st="$(vm_settled_status "$1")"
+  case "$st" in running|stopped) return 0 ;; esac
+  if [ "$st" != unknown ]; then
+    # No answer, or one it doesn't know: only a VM the runner's list says isn't there goes ahead (its caller says so);
+    # a list that can't be had or read can't tell that either (vm_lookup, never vm_exists, whose error looks absent).
+    [ "$(vm_lookup "$1" || true)" = absent ] && return 0
+    die "can't tell whether the virtual computer $1 is running: the VM runner's answer about it was ${st:+\"$st\"}${st:-none}. Not $2 while it may be running: check the runner (metacomputer status), then run this again. ${3:-Nothing was changed}"
+  fi
+  die "$(vm_unknown_says "$1"). Not $2 while it may be running: stop it where the VM runner can see it (metacomputer stop outside the sandbox), or check the runner, then run this again. ${3:-Nothing was changed}"
+}
 vm_mac() { lume_field "$1" macAddress; }
 
 # --- a computer reached over SSH (MC_REMOTE=1: lib/remote.py, lib/cloud/) -------------------------------------
@@ -958,6 +1000,30 @@ kq.control(None, 1)                            # until that pid exits
 os._exit(0)' "$1" "$$" 2>/dev/null)" || return 1
   [ "$ok" = held ]
 }
+# A process's FIELD (command, comm, pgid or lstart) as `ps -o FIELD= -p PID` prints it, or nothing (no such process, or
+# a ps that fails). /bin/ps is setuid, and macOS's sandbox runs no setuid program: where ps can't start (exit 126, or
+# 127 without one), lib/procinfo.py reads the same from the kernel, and prints nothing when it can't tell exactly (as a
+# ps that fails). Safe under set -e / pipefail.
+proc_field() { # FIELD PID
+  local out rc=0
+  out="$(ps -ww -o "$1=" -p "$2" 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+    out="$("$PY" -I -B "$LAB_ROOT/lib/procinfo.py" "$1" "$2" 2>/dev/null)" || out=""
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  return 0
+}
+# Every process's command line, as `ps -axww -o command=` prints them; where ps can't start, those lib/procinfo.py can
+# give exactly (this account's).
+proc_commands() {
+  local out rc=0
+  out="$(ps -axww -o command= 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+    out="$("$PY" -I -B "$LAB_ROOT/lib/procinfo.py" commands 2>/dev/null)" || out=""
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  return 0
+}
 daemonize() { # [--keep-fd N] LOGFILE CMD ARGS...: in its own session, with no descriptors but 0-2 (so it never keeps
   # a lock), or with N too: a lock it is meant to keep (record_stream_start: the dispatch lock, until its stream is up)
   local keep=-1 log
@@ -984,7 +1050,7 @@ netgw_pid() {
   local p=""
   if [ -s "$RUN_DIR/netgw.pid" ]; then p="$(head -1 "$RUN_DIR/netgw.pid" 2>/dev/null | tr -cd '0-9')" || p=""; fi
   [ -n "$p" ] || return 0
-  case "$(ps -o command= -p "$p" 2>/dev/null || true)" in *" -config $RUN_DIR/gw.json"*) printf '%s\n' "$p" ;; esac
+  case "$(proc_field command "$p")" in *" -config $RUN_DIR/gw.json"*) printf '%s\n' "$p" ;; esac
   return 0
 }
 netgw_alive() { local p; p="$(netgw_pid)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
@@ -1070,8 +1136,10 @@ host_sharing_args() {
 
 STORAGE_RUN_ARGS=()   # extra `lume run` arguments for this VM's storage (bin/metacomputer storage_prepare)
 vm_start() { # NAME [seed.iso]
-  local name="$1" seed="${2:-}" mac
-  vm_running "$name" && { ok "$name already running"; return 0; }
+  local name="$1" seed="${2:-}" mac st
+  st="$(vm_settled_status "$name")"     # a run process that is finishing (a stop just now) gets 10 s to go
+  [ "$st" = running ] && { ok "$name already running"; return 0; }
+  [ "$st" != unknown ] || die "$(vm_unknown_says "$name"); not starting it again"
   mac="$(vm_mac "$name")"; [ -n "$mac" ] || die "cannot read $name's MAC address from lume"
   netgw_start "$mac"
   local args="run $name --display none --vnc disabled --network gateway:$SOCK_DIR/net.sock"

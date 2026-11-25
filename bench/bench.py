@@ -79,6 +79,7 @@ import metrics  # noqa: E402
 import report  # noqa: E402
 sys.path.insert(0, os.path.join(LAB, "lib"))
 import safedelete  # noqa: E402  (the throwaway HOME of a session goes through it)
+import procinfo  # noqa: E402  (the processes an agent's session leaves: its launcher's end)
 from agentkit import manifests as _manifests, registry as _registry  # noqa: E402  (the agents' folders)
 
 # The agents a session can run, by their --agent word (coding-agents/<name>/manifest.json "bench"), in the registry's order:
@@ -125,9 +126,26 @@ def log(msg):
 
 
 # --- the VM, through this checkout's CLI ------------------------------------------------------
+# The variables named with --pass-env (a model key, say) are for the agent sessions only. metacomputer's own commands
+# that bench runs get bench's environment without them: reset and start, whose VM runner, gateway and hub keep running
+# after them, and every other (stop, status, who, put, ssh, the settings it reads); so do the metacomputer commands of
+# every agent's session, its MCP server's included, through the launchers in its work folder (prepare_workdir).
+SESSION_ONLY = set()
+
+
+def sessions_only(sw):
+    """Note the variables this run hands its sessions only (--pass-env), before any metacomputer command runs."""
+    SESSION_ONLY.update(pass_env_names(sw))
+
+
+def own_env():
+    """The environment for metacomputer's own commands: bench's, without the variables meant for the sessions only."""
+    return {k: v for k, v in os.environ.items() if k not in SESSION_ONLY}
+
+
 def mc(*args, input=None, timeout=300):
     try:
-        r = subprocess.run([CLI, *args], input=input, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([CLI, *args], input=input, capture_output=True, text=True, timeout=timeout, env=own_env())
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", f"timed out after {timeout} s: metacomputer {' '.join(args[:2])}"
@@ -140,7 +158,7 @@ def guest(script, timeout=300):
 def vm_config():
     out = subprocess.run(["bash", "-c", '. "$1/scripts/lib.sh" >/dev/null 2>&1; '
                           'printf "%s\\n" "$VM_NAME" "$BASELINE_NAME" "$SSH_PORT" "$VM_DISPLAY"', "_", LAB],
-                         capture_output=True, text=True).stdout.split("\n")
+                         capture_output=True, text=True, env=own_env()).stdout.split("\n")
     return {"vm": out[0], "baseline": out[1], "ssh_port": out[2], "display": out[3]}
 
 
@@ -335,14 +353,21 @@ def prepare_workdir(run_id, sw):
         sys.exit(f"refusing the work folder {work}: not a private folder of yours")
     skill_dst = os.path.join(work, _hooks_or_default(sw.get("agent")).SKILL_HOME, "skills", "metacomputer")
     shutil.copytree(sw["skill"], skill_dst)
-    # The skill names the installed launcher; point the copy at the checkout under test.
+    # The skill names the installed launcher; point the copy at the session's own (agent-bin, below), which runs the
+    # checkout under test.
     for p in glob.glob(os.path.join(skill_dst, "**", "*.md"), recursive=True):
         s = open(p).read()
-        open(p, "w").write(s.replace("~/.local/bin/metacomputer", CLI))
+        open(p, "w").write(s.replace("~/.local/bin/metacomputer", agent_launcher(work)))
+    # metacomputer's commands for the session, whichever agent it is: launchers in the work folder (agent-bin) that run
+    # this checkout's with your HOME and without the variables named with --pass-env (the agent's, a model key: never
+    # metacomputer's, nor a hub's or gateway's such a command may start). Its MCP server is the first, and the shim
+    # folder (first on PATH where the session keeps your HOME) holds links to them.
+    os.makedirs(os.path.join(work, "agent-bin"), 0o700)
+    write_launchers(work, sw)
     shim = os.path.join(work, "bin")
     os.mkdir(shim, 0o700)
-    for n in ("metacomputer", "mcomp"):
-        os.symlink(CLI, os.path.join(shim, n))
+    for launcher in agent_launchers(work):
+        os.symlink(launcher, os.path.join(shim, os.path.basename(launcher)))
     cfg = os.path.join(work, "mcp.json")
     env = {"MCOMP_CONFIG": os.environ["MCOMP_CONFIG"], "MCOMP_COORD_GUARD": sw["coord_guard"]}
     if os.environ.get("MCOMP_EXPECT_VM"):
@@ -350,26 +375,27 @@ def prepare_workdir(run_id, sw):
     if sw.get("hub"):
         env["MCOMP_MCP_HUB"] = sw.get("hub")
     env.update(lessons_env(sw))
-    json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": CLI, "args": ["mcp-lazy"], "env": env}}},
-              open(cfg, "w"))
+    json.dump({"mcpServers": {"metacomputer": {"type": "stdio", "command": agent_launcher(work), "args": ["mcp-lazy"],
+                                               "env": env}}}, open(cfg, "w"))
     h = hooks(sw["agent"]) if sw.get("agent") in BENCH_AGENTS else None
     if h is not None and hasattr(h, "prepare"):
         h.prepare(B, work, shim)            # what the agent's session reads in the work folder (its launcher's)
-    if h is not None and h.ISOLATED:
-        # An isolated session's HOME is a throwaway one; metacomputer, the system under test, keeps yours (its settings,
-        # SSH keys and vault are there): its commands for those sessions (metacomputer, mcomp) are launchers that run
-        # this checkout's with your HOME, first on the session's PATH; the skill names the first, and they are the only
-        # commands the sessions' approvals allow.
-        os.makedirs(os.path.join(work, "agent-bin"), 0o700)
-        for launcher in agent_launchers(work):
-            with open(launcher, "w") as f:
-                f.write(f"#!/bin/sh\nHOME={shlex.quote(os.path.expanduser('~'))}; export HOME\n"
-                        f"exec {shlex.quote(CLI)} \"$@\"\n")
-            os.chmod(launcher, 0o700)
-        for p in glob.glob(os.path.join(skill_dst, "**", "*.md"), recursive=True):
-            t = open(p).read()
-            open(p, "w").write(t.replace(CLI, agent_launcher(work)))
+    # An isolated session's HOME is a throwaway one; metacomputer, the system under test, keeps yours (its settings, SSH
+    # keys and vault are there): its launchers go first on that session's PATH, and they are the only commands its
+    # approvals allow. A session that keeps your HOME (its launcher isn't ISOLATED) has the shim folder first instead.
     return work, cfg, shim
+
+
+def write_launchers(work, sw):
+    """The session's metacomputer commands (agent_launchers): each runs this checkout's CLI with your HOME, without the
+    variables named with --pass-env, whatever the agent's own environment holds."""
+    drop = [n for n in pass_env_names(sw) if ENV_NAME.fullmatch(n)]
+    for launcher in agent_launchers(work):
+        with open(launcher, "w") as f:
+            f.write(f"#!/bin/sh\nHOME={shlex.quote(os.path.expanduser('~'))}; export HOME\n"
+                    + (f"unset {' '.join(drop)}\n" if drop else "")
+                    + f"exec {shlex.quote(CLI)} \"$@\"\n")
+        os.chmod(launcher, 0o700)
 
 
 def agent_launchers(work):
@@ -589,6 +615,22 @@ def _session(t, sw, work, cfg, shim, tdir, prog, home):
 
 
 # --- a run --------------------------------------------------------------------------------------
+def agent_version(agent, prog):
+    """What the agent says its version is (the first line of `PROG --version`), as run.json records it: its launcher's
+    version() where it has one (what it can read when the agent can't tell, say), and an unknown version said as
+    "unknown", never "vunknown"."""
+    try:
+        out = subprocess.run([prog, "--version"], capture_output=True, text=True, timeout=300,
+                             stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    line = (out.strip().splitlines() or [""])[0]
+    h = hooks(agent) if agent in BENCH_AGENTS else None
+    if h is not None and hasattr(h, "version"):
+        line = h.version(B, line, out)
+    return re.sub(r"(?<![A-Za-z0-9])v(unknown)\b", r"\1", line)
+
+
 def git_info():
     def g(*a):
         return subprocess.run(["git", "-C", LAB, *a], capture_output=True, text=True).stdout.strip()
@@ -702,7 +744,7 @@ def write_meta(rdir, meta):
 
 def main_vm():
     """The VM this checkout's own settings name (config/local.env, without MCOMP_CONFIG)."""
-    env = {k: v for k, v in os.environ.items() if k != "MCOMP_CONFIG"}
+    env = {k: v for k, v in own_env().items() if k != "MCOMP_CONFIG"}
     return subprocess.run(["bash", "-c", '. "$1/scripts/lib.sh" >/dev/null 2>&1; printf %s "$VM_NAME"', "_", LAB],
                           env=env, capture_output=True, text=True).stdout.strip()
 
@@ -752,8 +794,11 @@ def require_config(allow_main):
 
 
 def cmd_run(a):
+    # Before any of metacomputer's commands (the settings require_config reads too): they never get those variables.
+    sessions_only({"pass_env": a.pass_env or os.environ.get("BENCH_PASS_ENV", "")})
     vc = require_config(a.allow_main_vm)
     sw = switches_from(a)
+    sessions_only(sw)
     tasks = load_tasks(a.tasks)
     h = hooks(sw["agent"])
     if hasattr(h, "refuse"):               # before any VM is reset: refused now rather than at the first session
@@ -762,8 +807,7 @@ def cmd_run(a):
     rdir = os.path.join(RESULTS, run_id)
     os.makedirs(rdir, exist_ok=True)
     tokens = tokens_only(sw["agent"])         # an agent that reports tokens: no dollars to count
-    agent_v = (subprocess.run([trusted_prog(None, prog_of(sw["agent"])), "--version"],
-                              capture_output=True, text=True).stdout.strip().splitlines() or [""])[0]
+    agent_v = agent_version(sw["agent"], trusted_prog(None, prog_of(sw["agent"])))
     meta = {"run_id": run_id, "started": datetime.datetime.now().isoformat(timespec="seconds"),
             "metacomputer": git_info(), "vm": vc["vm"], "baseline": vc["baseline"], "agent_version": agent_v,
             **({h.VERSION_KEY: agent_v} if getattr(h, "VERSION_KEY", None) else {}),

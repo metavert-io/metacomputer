@@ -129,6 +129,7 @@ PROGRAMS = {
     "lib/owners.py": NONE,
     "lib/page_guest.py": GUEST,
     "lib/placement.py": NONE,
+    "lib/procinfo.py": NONE,                               # reads the Mac's process table
     "lib/proxywrap.py": THROUGH,                            # the caller's command (a provider's tunnel)
     # save starts the guest's recorder stream: it checks a --hold-fd it's handed is a hold, else looks for itself
     "lib/recording.py": {"sidecar": NONE, "finalize": NONE, "moments": NONE, "probe": NONE, "unsynced": NONE,

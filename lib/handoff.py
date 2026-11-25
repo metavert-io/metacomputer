@@ -817,6 +817,10 @@ def cmd_open(a):
     if timeout is None or not MIN_TIMEOUT_S <= timeout <= owners.HANDOFF_MAX_S:
         err(f"--timeout takes {MIN_TIMEOUT_S} s to {owners.HANDOFF_MAX_S // 3600} h (15m, 900, 1h)")
         return EXIT_USAGE
+    if os.environ.get("MCOMP_VM_STATE", "running") == "unknown":       # bin/metacomputer vm_state_word
+        err("can't tell whether the virtual computer is running (the VM runner says it is stopped, but its run process "
+            "is still there), so nothing is handed over: check `metacomputer status`")
+        return EXIT_ERROR
     if os.environ.get("MCOMP_VM_STATE", "running") != "running":
         err("the virtual computer is off, so there's nothing to hand over: `metacomputer start` first")
         return EXIT_ERROR

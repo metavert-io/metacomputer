@@ -726,7 +726,15 @@ guest_import() { # DEST [--quiet]
     "$PY" "$LAB_ROOT/lib/guest_import.py" "$@"
 }
 
-need_running() { vm_running "$VM_NAME" || die "the virtual computer is off (metacomputer start)"; }
+need_running() {
+  local st; st="$(vm_status "$VM_NAME")"
+  [ "$st" = running ] && return 0
+  [ "$st" != unknown ] || die "$(vm_unknown_says "$VM_NAME")"
+  die "the virtual computer is off (metacomputer start)"
+}
+vm_state_word() { # running, unknown (vm_status) or off: for the Python commands that need the VM (MCOMP_VM_STATE)
+  case "$(vm_status "$VM_NAME")" in running) echo running ;; unknown) echo unknown ;; *) echo off ;; esac
+}
 
 # --- a computer reached over SSH (scripts/lib.sh MC_REMOTE; lib/remote.py; docs/remote.md) -------------------
 remote_made() { [ "${PROVIDER:-ubuntu-vm}" != ubuntu-vm ]; }    # a provider makes (and starts, stops) it
@@ -895,7 +903,7 @@ vault_disconnect() { # the vault's connections to this computer (its API proxy's
 view_tunnel_close() { # the live view's tunnel to a computer elsewhere, if this Mac's ssh holds it open
   local p
   for p in $(lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN -t 2>/dev/null); do
-    [ "$(ps -o comm= -p "$p" 2>/dev/null)" = ssh ] && kill "$p" 2>/dev/null || true
+    [ "$(proc_field comm "$p")" = ssh ] && kill "$p" 2>/dev/null || true
   done
 }
 view_tunnel() { # a computer elsewhere: an SSH tunnel from 127.0.0.1:VNC_PORT here to its live view (x11vnc on its own
@@ -940,6 +948,8 @@ do_start() { # [--no-volumes]
   # holds already.
   handoff_hold_unless_user
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: metacomputer build"
+  # A VM whose state can't be told (vm_status "unknown") may be running: not started again, its storage not prepared.
+  vm_known_or_die "$VM_NAME" "starting it"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then
     warn "VM running without its gateway; restarting it cleanly"; vm_stop "$VM_NAME" --force; storage_release --quiet
@@ -1014,7 +1024,7 @@ storage_attach() { # the VM's answers are read with a size cap and a deadline (l
 # 5 min a cheap health probe (metacomputer _health). start starts it, stop stops it.
 events_watcher_pid() {
   local p; p="$(cat "$RUN_DIR/events-watcher.pid" 2>/dev/null)"
-  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && ps -o command= -p "$p" 2>/dev/null | grep -q 'events.py watch' && echo "$p"
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && proc_field command "$p" | grep -q 'events.py watch' && echo "$p"
   return 0
 }
 events_watcher_start() {
@@ -1031,7 +1041,7 @@ events_watcher_stop() {
   if [ -n "$p" ]; then
     # The watcher leads its own process group (daemonize), so signal the group: a health probe it
     # started (metacomputer _health and its ssh) stops with it.
-    target="$p"; [ "$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')" = "$p" ] && target="-$p"
+    target="$p"; [ "$(proc_field pgid "$p" | tr -d ' ')" = "$p" ] && target="-$p"
     kill -TERM -- "$target" 2>/dev/null
     while kill -0 "$p" 2>/dev/null && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
     kill -0 "$p" 2>/dev/null && kill -9 -- "$target" 2>/dev/null
@@ -1099,8 +1109,8 @@ mcp_probe() { ( export_options; "$PY" "$LAB_ROOT/lib/mcomp_sdk.py" probe ); }   
 # --- the hub (lib/mcp_hub.py): one process per VM holds the connection to the driver -----
 hub_stop() { ( export_options; "$PY" "$LAB_ROOT/lib/mcp_hub.py" stop --quiet ) || true; }
 do_runinfo() { # for lib/update.py: this VM's processes and the programs they run, as JSON (no secrets, no VM contact)
-  local state=off gw="" watcher=""
-  vm_running "$VM_NAME" 2>/dev/null && state=running
+  local state gw="" watcher=""
+  state="$(vm_state_word 2>/dev/null)" || state=off      # running, unknown (it can't be told) or off
   gw="$(netgw_pid)"; [ -n "$gw" ] && ! kill -0 "$gw" 2>/dev/null && gw=""
   watcher="$(events_watcher_pid)"
   local exists=1; vm_exists "$VM_NAME" || exists=0
@@ -1131,6 +1141,8 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   local force=""; for a in ${REST[@]+"${REST[@]}"}; do [ "$a" = --force ] && force=--force; done
   expect_guard   # a caller that confirmed which VM (metacomputer update) named it: never another
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
+  # Not running isn't stopped when its state can't be told: its gateway, hub and storage are never let go then.
+  vm_known_or_die "$VM_NAME" "stopping it (or letting its gateway and storage go)"
   if vm_running "$VM_NAME"; then
     owners_check
     handoff_hold_unless_override
@@ -1167,6 +1179,7 @@ do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as conf
     [ "$apply" = 1 ] && { handoff_hold_unless_user; sync_guest_options all; }   # it changes the guest's settings
     vm_ssh="$(guest_option ssh-auth)"; vm_drv="$(guest_option driver-policy)"
   elif [ "$apply" = 1 ]; then
+    [ "$(vm_status "$VM_NAME")" != unknown ] || die "$(vm_unknown_says "$VM_NAME")"
     die "the virtual computer is off; start it (start applies these settings too)"
   fi
   local req="" req_err=""
@@ -1513,6 +1526,10 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
   local src="$1" label="$2" evtype="${3:-restored}"
   vm_lock_or_die "restoring $VM_NAME"   # held already by its callers (vm_change_lock: the identity rule checked)
   expect_guard
+  # A VM whose state can't be told may be running: never taken for stopped (not synced, deleted while it runs).
+  if vm_exists "$VM_NAME"; then vm_known_or_die "$VM_NAME" "replacing it with $label"; fi
+  # ...and the VM it's copied from: a copy of one that may be running isn't a copy of anything settled.
+  vm_known_or_die "$src" "copying $src to $VM_NAME"
   if [ -s "$RUN_DIR/manual-recording" ]; then
     # A reset often follows a run that went wrong; the recording of it is saved before the VM goes, whether or
     # not the VM is still running (a streamed one is on this Mac either way).
@@ -1526,6 +1543,10 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
     storage_release --quiet
   elif vm_exists "$VM_NAME"; then
     warn "the VM is stopped, so recordings still inside it (~/metacomputer-runs) aren't copied before it's replaced"
+  fi
+  # Again, now that it's stopped: a run process still there 10 s after its stop is no stopped VM.
+  if vm_exists "$VM_NAME"; then
+    vm_known_or_die "$VM_NAME" "replacing it with $label" "Nothing was deleted, replaced or rolled back"
   fi
   if [ -n "${RESTORE_VOLUMES:-}" ]; then
     storage_py checkpoint restore "$RESTORE_VOLUMES" || die "the volumes couldn't be rolled back; the VM wasn't replaced"
@@ -1544,6 +1565,7 @@ do_reset() {
   vm_change_lock "metacomputer reset"
   expect_guard
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
+  if vm_exists "$VM_NAME"; then vm_known_or_die "$VM_NAME" "replacing it with a fresh copy of $BASELINE_NAME"; fi
   owners_check
   confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept$(unsynced_note))"
   handoff_hold_unless_override
@@ -1575,6 +1597,7 @@ do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
   # Its checkpoints change (one replaced, one made): not while the user has the computer, held until it's saved.
   handoff_hold_unless_override
+  vm_known_or_die "$VM_NAME" "taking a checkpoint of it"
   vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'metacomputer stop' first"
   if vm_exists "$CKPT_PREFIX$name"; then
     [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"
@@ -1606,6 +1629,7 @@ do_restore() { # NAME [--yes] [--override]
   local name="${REST[0]:-}"; ckpt_name "$name"
   vm_change_lock "metacomputer restore $name"
   vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
+  if vm_exists "$VM_NAME"; then vm_known_or_die "$VM_NAME" "replacing it with checkpoint '$name'"; fi
   owners_check
   local vols; vols="$(storage_py checkpoint list "$name" 2>/dev/null)"
   confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded${vols:+, and volumes $vols go back to the checkpoint too} (host recordings and results are kept$(unsynced_note))"
@@ -1616,12 +1640,15 @@ do_restore() { # NAME [--yes] [--override]
 do_baseline() {
   parse_flags "$@"
   vm_change_lock "metacomputer baseline"
+  vm_known_or_die "$VM_NAME" "copying it to the baseline"
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   handoff_hold_unless_override
   local was_running=0; vm_running "$VM_NAME" && was_running=1
   # The baseline mustn't carry recordings, so they're copied and then deleted in the VM: only once the copy is whole.
   [ $was_running = 1 ] && { sync_or_stop baseline; events_watcher_stop; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; storage_release --quiet; }
+  # Again, now that it's stopped (or after the question): a run process still there is no stopped VM.
+  vm_known_or_die "$VM_NAME" "copying it to the baseline" "The baseline wasn't replaced"
   local keep="$BASELINE_NAME-prev"
   if vm_exists "$BASELINE_NAME"; then
     if vm_exists "$keep"; then runner_delete "$keep" >/dev/null || die "$keep wasn't deleted (above); the baseline wasn't replaced"; fi
@@ -2082,7 +2109,7 @@ do_desktop_restart() { # [--override]: log the desktop session out and back in (
 
 do_sh() { # bash in the VM as the desktop user, over the ops connection (lib/vm_shell.py, docs/shell.md)
   export_options
-  local state=off; vm_running "$VM_NAME" && state=running
+  local state; state="$(vm_state_word)"
   ssh_base ops
   MCOMP_VM_STATE="$state" exec "$PY" "$LAB_ROOT/lib/vm_shell.py" --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
 }
@@ -2091,7 +2118,7 @@ do_sh() { # bash in the VM as the desktop user, over the ops connection (lib/vm_
 # the token comes from `metacomputer secrets token` (this file, run again as MCOMP_SELF) through a pipe.
 do_claude() {
   export_options
-  local state=off; vm_running "$VM_NAME" && state=running
+  local state; state="$(vm_state_word)"
   ssh_base ops
   MCOMP_VM_STATE="$state" MCOMP_SELF="$SELF" exec "$PY" "$LAB_ROOT/lib/vm_claude.py" \
     --transport $(( ${#SSH_ARGS[@]} + 2 )) ssh -T "${SSH_ARGS[@]}" "$@"
@@ -2189,7 +2216,7 @@ task_sync_stop() { # NAME: ask the task's copier to end (it finishes a copy it's
   [[ "$pid" =~ ^[0-9]+$ ]] || return 0
   while kill -0 "$pid" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
   # Still there after 30 s, and still the copier (not a process that reused its number): its whole group goes.
-  if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -q "_task-sync $1\$"; then
+  if kill -0 "$pid" 2>/dev/null && proc_field command "$pid" | grep -q "_task-sync $1\$"; then
     kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
   fi
   [ -s "$RUN_DIR/task-sync.$1.log" ] || rm -f "$RUN_DIR/task-sync.$1.log"
@@ -3099,7 +3126,7 @@ case "$cmd" in
   notify)     export_options; exec "$PY" "$LAB_ROOT/lib/events.py" notify "$@" ;;
   handoff)    export_options
               case "${1:-}" in done|cancel|status|guard|-h|--help) exec "$PY" "$LAB_ROOT/lib/handoff.py" "$@" ;; esac
-              MCOMP_VM_STATE="$(vm_running "$VM_NAME" && echo running || echo off)"; export MCOMP_VM_STATE
+              MCOMP_VM_STATE="$(vm_state_word)"; export MCOMP_VM_STATE
               # Opening one removes the driver's leftover input devices over this SSH command (lib/input_reset.py),
               # and waiting for one (open's own wait, or `handoff wait`) makes that reset when opening left it pending;
               # when it can't be set up (SSH_AUTH=cert without its CA), the handoff opens anyway: --transport 0.
@@ -3174,7 +3201,11 @@ case "$cmd" in
               if [ "${MCOMP_DIRECT_BRIDGE:-}" != 1 ] && [ "${MCOMP_MCP_HUB:-${MCP_HUB:-on}}" = on ]; then
                 export_options; exec "$PY" "$LAB_ROOT/lib/mcp_lazy.py"
               fi
-              vm_running "$VM_NAME" || { echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1; }
+              case "$(vm_state_word)" in
+                running) ;;
+                unknown) echo "metacomputer: VM '$VM_NAME': $(vm_unknown_says "$VM_NAME")" >&2; exit 1 ;;
+                *) echo "metacomputer: VM '$VM_NAME' is not running (metacomputer start)" >&2; exit 1 ;;
+              esac
               req="$(driver_request)" || exit $?     # 4: its manifest isn't in the guest yet, and the user has it
               ssh_base mcp
               if [ "$ACTION_LOG" = on ]; then

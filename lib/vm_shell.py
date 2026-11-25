@@ -77,6 +77,9 @@ REMOTE_SHOWN = 400      # how much of the VM's diagnostics a terminal shows
 
 # This command's exit codes when the script's own can't be given.
 EXIT_USAGE, EXIT_TIMEOUT, EXIT_REFUSED, EXIT_FAILED, EXIT_INTERRUPTED = 2, 124, 125, 255, 130
+# The VM runner said "stopped" while the VM's own run process runs (scripts/lib.sh vm_status: "unknown").
+VM_UNKNOWN = ("can't tell whether the virtual computer is running: the VM runner says it is stopped, "
+              "but its run process is still there (metacomputer status)")
 
 USAGE = """usage: metacomputer sh -c 'COMMANDS' | --file SCRIPT | -   [options] [-- ARGS...]
 
@@ -883,6 +886,8 @@ def run_guarded(o, transport, script, tool=TOOL, log_args=None, header_extra=Non
         return refuse("the driver is in bounded mode (DRIVER_MODE=bounded), which turns the shell channel off unless "
                       "VM_SHELL=on: the shell isn't limited by the driver's manifest. That's the user's setting; "
                       "ask them if you need it, and don't use `metacomputer ssh` to get around it.")
+    if os.environ.get("MCOMP_VM_STATE", "running") == "unknown":       # bin/metacomputer vm_state_word
+        return {**base, "status": "error", "kind": "vm_unknown", "message": VM_UNKNOWN}, EXIT_FAILED
     if os.environ.get("MCOMP_VM_STATE", "running") != "running":
         return {**base, "status": "error", "kind": "vm_off",
                 "message": "the virtual computer is off (metacomputer start)"}, EXIT_FAILED

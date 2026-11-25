@@ -53,7 +53,8 @@ the same for stderr), `duration_s`, `cwd`, `read_only`, `desktop` (whether the
 desktop's environment was loaded), `held_open` (a program the script left
 running still had its output), `max_output`, `logged` (the action-log file,
 if any), `message`, and when they apply `kind` (`timeout`, `protocol`,
-`connection`, `guest`, `log`, `interrupted`, `vm_off`), `notes`, `warnings`
+`connection`, `guest`, `log`, `interrupted`, `vm_off`, `vm_unknown`: the VM runner says stopped while the VM's
+own run process still runs), `notes`, `warnings`
 and `remote` (the VM's own diagnostics).
 
 On a terminal, control characters in the output (but newline and tab), C1

@@ -776,8 +776,8 @@ def proc_start(pid):
         return ""
     if pid <= 0:
         return ""
-    r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
-    return r.stdout.strip() if r.returncode == 0 else ""
+    import procinfo             # ps, or where ps can't start the kernel's time in ps's words ("" when it can't say)
+    return (procinfo.field(pid, "lstart", ps="ps") or "").strip()
 
 
 def lock_key(kind, path):
@@ -4578,8 +4578,8 @@ def cmd_kill_vm(a):
     if not pid:
         return 0
     try:
-        cmdline = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
-                                 timeout=10).stdout.strip()
+        import procinfo         # ps, or the kernel where ps can't start (a sandbox)
+        cmdline = (procinfo.field(pid, "command", ps="ps", timeout=10) or "").strip()
     except (OSError, subprocess.SubprocessError):
         cmdline = ""
     if f" run {vm_name()} " not in f" {cmdline} ":
@@ -4650,8 +4650,8 @@ def watcher_alive():
         pid = int(open(watcher_pid_path()).read().strip())
     except (OSError, ValueError):
         return 0
-    r = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
-    return pid if "storage.py watch" in r.stdout else 0
+    import procinfo             # ps, or the kernel where ps can't start (a sandbox)
+    return pid if "storage.py watch" in (procinfo.field(pid, "command", ps="ps") or "") else 0
 
 
 def watcher_start():

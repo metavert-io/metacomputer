@@ -8,10 +8,19 @@ started.
 
 It checks that the work folder is a fresh private folder (0700, yours, a new name each
 time, not the old shared /tmp/mcomp-bench/<run>/work), that the shim folder holds only
-the two links to this checkout's launcher, and that the session runs the `claude` found
+the two links to the session's launchers (which run this checkout's), and that the session runs the `claude` found
 on PATH before the shim folder went in front: one planted in the shim folder, in the old
 shared path or in a relative PATH entry is never run, and one other accounts can write
 is refused.
+
+And what the item 10 benchmark run found: metacomputer's own commands that bench runs (reset, start and the daemons they
+leave) and a session's metacomputer commands (its launchers on PATH, the one its skill names, its MCP server: every
+agent's, Claude Code's and Codex's too) never get the --pass-env variables, while the agent does; OpenClaw's cached
+prompt tokens are counted;
+Hermes's gateway is stopped without ps, told by its executable, module and arguments' places (never a same-home process
+that only names them), and only while it is the same process; a metacomputer command after `cd ... &&`, `env ...`, in
+a variable or under `bash -lc` counts as one (and whatever the plain pattern counted still counts); and Hermes's version
+is read without git, or said as unknown.
 """
 import json
 import os
@@ -121,7 +130,8 @@ if a[:1] == ["-p"]:                 # a named profile (what the benchmark used b
 if a == ["--version"]:
     inst = os.path.join(d, "hermes-install")
     named = os.path.join(d, "hermes-install-says")
-    print("Hermes Agent v0.23.3 (2026.9.24)")
+    first = os.path.join(d, "hermes-version-says")      # what Hermes says where git can't run: vunknown
+    print(open(first).read().strip() if os.path.isfile(first) else "Hermes Agent v0.23.3 (2026.9.24)")
     print(open(named).read() if os.path.isfile(named) else f"Install directory: {inst}")
     sys.exit(0)
 if w[:2] == ["profile", "create"]:
@@ -133,7 +143,13 @@ os.makedirs(hh, exist_ok=True)
 if w[:2] == ["config", "set"]:
     open(os.path.join(hh, "set.jsonl"), "a").write(json.dumps(w[2:]) + "\\n"); sys.exit(0)
 if w[:2] == ["gateway", "stop"]:
-    log(snap()); sys.exit(0)
+    log(snap()); sys.exit(0)       # stops nothing: Hermes's own stop finds its gateway with ps (none in a sandbox)
+# Its gateway for this home, as Hermes starts one: `python -m hermes_cli.main gateway run`, detached, HERMES_HOME set.
+import subprocess
+gw = subprocess.Popen([sys.executable, "-m", "hermes_cli.main", "gateway", "run", "--quiet"],
+                      env=dict(os.environ, HERMES_HOME=hh, PYTHONPATH=os.path.join(d, "gwpkg")), start_new_session=True,
+                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+open(os.path.join(d, "hermes-gateways.txt"), "a").write(f"{gw.pid}\\n")
 sleep = os.path.join(d, "hermes-sleep")
 time.sleep(float(open(sleep).read()) if os.path.isfile(sleep) else 0)     # concurrent sessions overlap here
 rec = snap()
@@ -154,7 +170,8 @@ OPENCLAW_STUB = STUB_HEAD + """
 log(snap())
 if a == ["--version"]: print("OpenClaw 2026.11.7 (e31bbf0)"); sys.exit(0)
 if a[:3] == ["approvals", "allowlist", "add"]: sys.exit(0)
-print(json.dumps({"ok": True, "status": "ok", "final": "Done.", "usage": {"input": 700, "output": 30}, "assistantTurns": 3,
+print(json.dumps({"ok": True, "status": "ok", "final": "Done.", "usage": {"input": 700, "output": 30, "cacheRead": 50000,
+                                                                         "cacheWrite": 1200}, "assistantTurns": 3,
                   "toolSummary": {"calls": 4, "tools": {"metacomputer__click": 4}}, "model": "m", "sessionId": "o-1"}, indent=2))
 """
 
@@ -196,6 +213,15 @@ def other_agents(td):
     import threading
     stubs = os.path.join(td, "agents-bin")
     os.makedirs(stubs)
+    pkg = os.path.join(td, "gwpkg", "hermes_cli")         # what the stand-in gateway runs: it waits
+    os.makedirs(pkg)
+    open(os.path.join(pkg, "__init__.py"), "w").close()
+    open(os.path.join(pkg, "main.py"), "w").write("import time\ntime.sleep(120)\n")
+    # Another home's gateway (another Hermes session's, or yours): never this session's to stop.
+    decoy = subprocess.Popen([sys.executable, "-m", "hermes_cli.main", "gateway", "run", "--quiet"],
+                             env=dict(os.environ, HERMES_HOME=os.path.join(td, "someone-elses-home", ".hermes"),
+                                      PYTHONPATH=os.path.join(td, "gwpkg")), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for name, src in (("gemini", GEMINI_STUB), ("hermes", HERMES_STUB), ("openclaw", OPENCLAW_STUB)):
         with open(os.path.join(stubs, name), "w") as f:
             f.write(f"#!{sys.executable}\nSTUB_DIR = {td!r}\n" + src)
@@ -264,7 +290,7 @@ def other_agents(td):
               {k: rec.get("env", {}).get(k) for k in ("HOME", "BENCH_TEST_CANARY", "GEMINI_CLI_HOME", "BENCH_TEST_MODEL_KEY")})
         check("gemini: that HOME's settings: the server (the checkout's launcher, the run's environment with your HOME, "
               "trusted, 10 minutes), folder trust and telemetry off, no other server",
-              list(settings.get("mcpServers", {})) == ["metacomputer"] and server.get("command") == bench.CLI
+              list(settings.get("mcpServers", {})) == ["metacomputer"] and server.get("command") == launcher
               and server.get("env", {}).get("MCOMP_CONFIG") == os.environ["MCOMP_CONFIG"]
               and server.get("env", {}).get("HOME") == real_home and server.get("trust") is True
               and server.get("timeout") == 600000 and settings["security"]["folderTrust"]["enabled"] is False
@@ -309,7 +335,8 @@ def other_agents(td):
               and "-p" not in a and not any(r["argv"][:2] == ["profile", "create"] for r in recs), (hh, a))
         check("hermes: that home holds this run's server (its environment with your HOME, 600 s), tool search off, "
               "approvals asked for and a -q session's dangerous commands refused, and the skill under test linked in",
-              server.get("command") == bench.CLI and server.get("env", {}).get("MCOMP_CONFIG") == os.environ["MCOMP_CONFIG"]
+              server.get("command") == bench.agent_launcher(work)
+              and server.get("env", {}).get("MCOMP_CONFIG") == os.environ["MCOMP_CONFIG"]
               and server.get("env", {}).get("HOME") == real_home and server.get("timeout") == 600
               and all(s in sets for s in (["tools.tool_search.enabled", "off"], ["approvals.mode", "manual"],
                                           ["approvals.single_query_mode", "deny"]))
@@ -322,6 +349,10 @@ def other_agents(td):
         check("hermes: afterwards the session home's gateway is stopped and the throwaway HOME is gone",
               stops and stops[-1]["env"].get("HERMES_HOME") == hh and hh and not os.path.exists(rec["env"]["HOME"]),
               (len(stops), hh))
+        gws = gateway_pids(td)
+        check("hermes: the gateway the session started for its home is stopped afterwards, though Hermes's own stop "
+              "(which looks with ps) left it running", gws and not any(running(g) for g in gws), gws)
+        check("...and another home's gateway is left alone", running(decoy.pid))
         uses = [c for e in events if e.get("type") == "assistant" for c in e["message"]["content"] if c.get("type") == "tool_use"]
         res = [c for e in events if e.get("type") == "user" for c in e["message"]["content"] if c.get("type") == "tool_result"]
         fin = [e for e in events if e.get("type") == "result"]
@@ -395,6 +426,10 @@ def other_agents(td):
               and not any(os.path.exists(v[0] or "/nonexistent") for v in seen.values()), seen)
         for w, _, _, _ in runs:
             shutil.rmtree(w, ignore_errors=True)
+        gws = gateway_pids(td)
+        check("hermes: every session's gateway is stopped, the two at once included; the other home's still runs",
+              len(gws) >= 3 and not any(running(g) for g in gws) and running(decoy.pid), (gws, running(decoy.pid)))
+        hermes_version_checks(td, stubs)
         # OpenClaw
         sw = dict(base, agent="openclaw", model="openclaw-default")
         work, cfg, shim = bench.prepare_workdir("o", sw)
@@ -418,7 +453,7 @@ def other_agents(td):
               and env.get("OPENCLAW_CONFIG_PATH") == os.path.join(state, "openclaw.json"), env.get("HOME"))
         check("openclaw: that config: this run's server (its environment with your HOME, 600 s), no other; the minimal "
               "tool profile plus metacomputer's tools, exec, reading the work folder and the skill tools; tool search off",
-              list(conf.get("mcp", {}).get("servers", {})) == ["metacomputer"] and srv.get("command") == bench.CLI
+              list(conf.get("mcp", {}).get("servers", {})) == ["metacomputer"] and srv.get("command") == launchers[0]
               and srv.get("env", {}).get("MCOMP_CONFIG") == os.environ["MCOMP_CONFIG"]
               and srv.get("env", {}).get("HOME") == real_home and srv.get("requestTimeoutMs") == 600000
               and tools.get("profile") == "minimal" and tools.get("alsoAllow") == bench.hooks("openclaw").OPENCLAW_TOOLS
@@ -436,6 +471,11 @@ def other_agents(td):
         check("openclaw: its one envelope (over several lines) read as init and the result: tokens, no cost, its tool "
               "summary", fin and fin[0]["usage"]["input_tokens"] == 700 and fin[0]["total_cost_usd"] is None
               and fin[0]["tool_summary_calls"] == 4 and not fin[0]["is_error"], (events, fin))
+        m = bench.metrics.analyze(events)
+        check("openclaw: the prompt tokens it read from and wrote to the cache are counted too (input tokens: input + "
+              "cacheRead + cacheWrite)", fin and fin[0]["usage"].get("cache_read_input_tokens") == 50000
+              and fin[0]["usage"].get("cache_creation_input_tokens") == 1200 and m["input_tokens"] == 51900,
+              (fin and fin[0]["usage"], m["input_tokens"]))
         check("openclaw: the throwaway HOME is gone after the session", env.get("HOME") and not os.path.exists(env["HOME"]))
         shutil.rmtree(work, ignore_errors=True)
         check("no throwaway HOME is left behind by any session", leftover_homes() == before_homes,
@@ -446,10 +486,412 @@ def other_agents(td):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        decoy.kill()
+        decoy.wait()
+        for g in gateway_pids(td):
+            try:
+                os.kill(g, 9)
+            except OSError:
+                pass
+
+
+
+def gateway_pids(td):
+    p = os.path.join(td, "hermes-gateways.txt")
+    return [int(x) for x in open(p).read().split()] if os.path.isfile(p) else []
+
+
+def running(pid, wait=3.0):
+    """Whether pid is a live process (not a zombie) after up to WAIT seconds for it to go."""
+    import time
+    end = time.monotonic() + wait
+    while True:
+        st = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        if not st or st.startswith("Z"):
+            return False
+        if time.monotonic() >= end:
+            return True
+        time.sleep(0.1)
+
+
+def hermes_version_checks(td, stubs):
+    """run.json's Hermes version: Hermes reads it with git, and says vunknown where git can't run (a sandbox). Then the
+    release tag on its checkout's HEAD, read from the checkout's files; else the commit; else "unknown", with no v."""
+    prog = os.path.join(stubs, "hermes")
+    says = os.path.join(td, "hermes-version-says")
+    inst = os.path.join(td, "hermes-install")
+    git = os.path.join(inst, ".git")
+    sha, tag_obj, other = "caafe5389ae585ef77387a962aee05b1bcf17029", "2861fe3744f8134b782659438961a4f69ab5d495", "1" * 40
+    version = getattr(bench, "agent_version", None)
+    got = {}
+    try:
+        got["with git"] = version("hermes", prog) if version else None
+        open(says, "w").write("Hermes Agent vunknown (2026.9.24)")
+        os.makedirs(os.path.join(git, "refs", "tags"))
+        open(os.path.join(git, "HEAD"), "w").write(sha + "\n")
+        open(os.path.join(git, "packed-refs"), "w").write(
+            f"# pack-refs with: peeled fully-peeled sorted \n{tag_obj} refs/tags/v0.23.3\n^{sha}\n"
+            f"{other} refs/tags/v0.24.0\n")
+        open(os.path.join(git, "refs", "tags", "rc.1-v0.23.3"), "w").write(sha + "\n")
+        got["tag"] = version("hermes", prog) if version else None
+        open(os.path.join(git, "HEAD"), "w").write(other[:-1] + "2\n")
+        got["no tag"] = version("hermes", prog) if version else None
+        shutil.rmtree(git)
+        got["no checkout"] = version("hermes", prog) if version else None
+    finally:
+        for f in (says,):
+            if os.path.exists(f):
+                os.remove(f)
+        shutil.rmtree(git, ignore_errors=True)
+    check("hermes: run.json's version is Hermes's own line where it can tell (git ran)",
+          got.get("with git") == "Hermes Agent v0.23.3 (2026.9.24)", got)
+    check("...where it says vunknown (git couldn't run): the release tag on its checkout's HEAD, read without git "
+          "(an annotated tag, peeled; not another commit's tag, nor a pre-release)",
+          got.get("tag") == "Hermes Agent v0.23.3 (2026.9.24)", got)
+    check("...a checkout with no release tag on HEAD: its commit, as Hermes names one (git.SHORT)",
+          got.get("no tag") == "Hermes Agent git.1111111 (2026.9.24)", got)
+    check("...and no checkout to read: unknown, never vunknown", got.get("no checkout") == "Hermes Agent unknown (2026.9.24)",
+          got)
+
+
+def test_own_commands_env():
+    """metacomputer's own commands that bench runs (reset, start: the VM runner, the gateway and the hub keep running
+    after them) and a session's launchers get no --pass-env variable: a stand-in CLI that leaves a daemon behind, as
+    start does, and a child; each writes down its environment, and the daemon's is read again from the kernel while it
+    runs."""
+    import time
+    import uuid
+    td = tempfile.mkdtemp(prefix="mcomp-bench-env-")
+    key = "fake-model-key-" + uuid.uuid4().hex
+    fake = os.path.join(td, "fake-metacomputer")
+    dumps = os.path.join(td, "dumps")
+    os.makedirs(dumps)
+    with open(fake, "w") as f:
+        f.write(f"#!{sys.executable}\n" + f"import json, os, subprocess, sys\nd = {dumps!r}\n" + r"""
+tag = (sys.argv[1:] or ["none"])[0]
+json.dump(dict(os.environ), open(os.path.join(d, f"cli-{tag}-{os.getpid()}.json"), "w"))
+subprocess.run(["/bin/sh", "-c", 'env > "$0"', os.path.join(d, f"child-{tag}-{os.getpid()}.env")])
+if os.fork() == 0:                      # a daemon, as start leaves one: its own session, still running afterwards
+    os.setsid()
+    if os.fork() == 0:
+        n = os.open(os.devnull, os.O_RDWR)  # no descriptor of the command's (scripts/lib.sh daemonize)
+        for fd in (0, 1, 2):
+            os.dup2(n, fd)
+        json.dump(dict(os.environ), open(os.path.join(d, f"daemon-{tag}-{os.getpid()}.json"), "w"))
+        # (an interpreter, not one of Apple's programs: the kernel shows no other process Apple's programs' environment)
+        os.execv(sys.executable, [sys.executable, "-c", "import time; time.sleep(30)"])
+    os._exit(0)
+""")
+    os.chmod(fake, 0o755)
+    saved_cli, saved_key, saved_cfg = bench.CLI, os.environ.get("BENCH_TEST_MODEL_KEY"), os.environ.get("MCOMP_CONFIG")
+    os.environ["BENCH_TEST_MODEL_KEY"] = key
+    os.environ.setdefault("MCOMP_CONFIG", os.path.join(td, "test.env"))
+    bench.CLI = fake
+    sw = {"skill": os.path.join(LAB, "skills", "metacomputer"), "coord_guard": "off", "shell": "allow", "budget": "1",
+          "effort": "", "lessons": "off", "pass_env": "BENCH_TEST_MODEL_KEY", "agent": "hermes", "model": "hermes-default"}
+    daemons, work = [], None
+    try:
+        if hasattr(bench, "sessions_only"):
+            bench.sessions_only(sw)         # as bench run does, before any of metacomputer's commands
+        bench.mc("reset", "--yes")
+        bench.mc("start")
+        work, _, _ = bench.prepare_workdir("env", sw)
+        subprocess.run([os.path.join(work, "agent-bin", "metacomputer"), "session"], env=dict(os.environ),
+                       capture_output=True, timeout=60)
+        end = time.monotonic() + 10
+        while time.monotonic() < end and len([f for f in os.listdir(dumps) if f.startswith("daemon-")]) < 3:
+            time.sleep(0.1)
+        seen, files = {}, sorted(os.listdir(dumps))
+        for f in files:
+            text = open(os.path.join(dumps, f)).read()
+            seen[f] = key in text or "BENCH_TEST_MODEL_KEY" in text
+            if f.startswith("daemon-"):
+                daemons.append(int(f.rsplit("-", 1)[1].split(".")[0]))
+        live = {}
+        try:
+            sys.path.insert(0, os.path.join(LAB, "lib"))
+            import procinfo
+            for pid in daemons:
+                end = time.monotonic() + 10         # once it has started its program (the daemon's own, waiting)
+                while time.monotonic() < end and (procinfo.argv(pid) or [""])[-1] != "import time; time.sleep(30)":
+                    time.sleep(0.1)
+                e = procinfo.environ(pid)
+                live[pid] = bool(e) and "BENCH_TEST_MODEL_KEY" not in e and key not in e.values()
+        except ImportError:
+            live = {"no lib/procinfo.py": False}
+        tags = {f.split("-")[1] for f in files}
+        check("reset and start, as bench runs them, and a session's metacomputer launcher: neither the command, a child "
+              "of it, nor the daemon it leaves running has a --pass-env variable (a fake key)",
+              {"reset", "start", "session"} <= tags and len(files) == 9 and not any(seen.values()), seen)
+        check("...nor has the daemon now, as the kernel has its environment", len(live) == 3 and all(live.values()), live)
+        check("...while the session itself still gets it (only metacomputer's commands go without)",
+              bench.session_env(sw, td).get("BENCH_TEST_MODEL_KEY") == key)
+    finally:
+        bench.CLI = saved_cli
+        getattr(bench, "SESSION_ONLY", set()).clear()
+        for k, v in (("BENCH_TEST_MODEL_KEY", saved_key), ("MCOMP_CONFIG", saved_cfg)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        for pid in daemons:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        if work:
+            shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_session_launchers_env():
+    """Every agent's session, Claude Code's and Codex's (which keep your environment) included: its metacomputer commands
+    (metacomputer and mcomp on its PATH, the launcher its skill copy names) and its MCP server, as the agent starts them
+    with the --pass-env variable (a fake key) in its environment, get no such variable; the agent itself still does."""
+    import glob
+    import re
+    import uuid
+    td = tempfile.mkdtemp(prefix="mcomp-bench-launch-")
+    key = "fake-model-key-" + uuid.uuid4().hex
+    dumps = os.path.join(td, "dumps")
+    os.makedirs(dumps)
+    fake = os.path.join(td, "fake-metacomputer")
+    with open(fake, "w") as f:
+        f.write(f"#!{sys.executable}\nimport json, os, sys\nd = {dumps!r}\n"
+                "tag = (sys.argv[1:] or ['none'])[0]\n"
+                "json.dump({'has': 'BENCH_TEST_MODEL_KEY' in os.environ or any(" + repr(key) + " in v for v in "
+                "os.environ.values()), 'home': os.environ.get('HOME')}, open(os.path.join(d, tag + '.json'), 'w'))\n")
+    os.chmod(fake, 0o755)
+    agent_prog = os.path.join(td, "fake-agent")
+    with open(agent_prog, "w") as f:
+        f.write(f"#!{sys.executable}\nimport json, os, subprocess, sys\nd = {dumps!r}\na = sys.argv[1:]\n" + r"""
+json.dump({"key": os.environ.get("BENCH_TEST_MODEL_KEY")}, open(os.path.join(d, "agent-env.json"), "w"))
+subprocess.run(["/bin/sh", "-c", "metacomputer agent-shell"])            # its shell tool: PATH as the session has it
+srv = None
+if "--mcp-config" in a:                                                   # Claude Code: its --mcp-config file
+    srv = json.load(open(a[a.index("--mcp-config") + 1]))["mcpServers"]["metacomputer"]["command"]
+for x in a:                                                               # Codex: its -c override
+    if x.startswith("mcp_servers.metacomputer.command="):
+        srv = json.loads(x.split("=", 1)[1])
+if srv:
+    subprocess.run([srv, "agent-mcp"])                                    # its MCP server, with the agent's environment
+print(json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 0, "num_turns": 1}), flush=True)
+""")
+    os.chmod(agent_prog, 0o755)
+    saved = (bench.CLI, os.environ.get("BENCH_TEST_MODEL_KEY"), os.environ.get("MCOMP_CONFIG"), os.environ.get("CODEX_HOME"))
+    os.environ["BENCH_TEST_MODEL_KEY"] = key
+    os.environ.setdefault("MCOMP_CONFIG", os.path.join(td, "test.env"))
+    os.environ["CODEX_HOME"] = os.path.join(td, "codex-home")         # never your own Codex settings
+    bench.CLI = fake
+    try:
+        for agent in sorted(bench.BENCH_AGENTS):
+            h = bench.hooks(agent)
+            sw = {"skill": os.path.join(LAB, "skills", "metacomputer"), "coord_guard": "off", "shell": "allow",
+                  "budget": "1", "effort": "", "lessons": "off", "pass_env": "BENCH_TEST_MODEL_KEY", "agent": agent,
+                  "model": f"{agent}-default"}
+            for x in os.listdir(dumps):
+                os.remove(os.path.join(dumps, x))
+            work, cfg, shim = bench.prepare_workdir("k" + agent[:3], sw)
+            try:
+                first = os.path.dirname(bench.agent_launcher(work)) if h.ISOLATED else shim     # first on its PATH
+                env = dict(os.environ, PATH=first + os.pathsep + os.environ["PATH"])
+                text = "".join(open(os.path.join(top, n)).read() for top, _, names in os.walk(work) for n in names
+                               if n == "SKILL.md")
+                named = sorted(set(re.findall(r"(/[^\s`'\"]*/agent-bin/metacomputer)\b", text)))
+                runs = [("path-metacomputer", ["/bin/sh", "-c", "metacomputer path-metacomputer"]),
+                        ("path-mcomp", ["/bin/sh", "-c", "mcomp path-mcomp"])]
+                runs += [(f"skill-{i}", [n, f"skill-{i}"]) for i, n in enumerate(named)]
+                servers = [json.load(open(cfg))["mcpServers"]["metacomputer"]["command"]]
+                if h.ISOLATED:
+                    servers.append(bench.agent_server(cfg, "timeout", 600)["command"])     # the agent's own config's
+                runs += [(f"mcp-{i}", [c, f"mcp-{i}"]) for i, c in enumerate(servers)]
+                for _, argv in runs:
+                    subprocess.run(argv, env=env, capture_output=True, timeout=60)
+                if not h.ISOLATED:
+                    # A session itself, with a stand-in agent: what it receives, and what it starts.
+                    tdir = os.path.join(td, f"{agent}-task")
+                    os.makedirs(tdir, exist_ok=True)
+                    bench.run_session({"prompt": "x", "timeout_s": 60, "max_turns": 5}, sw, work, cfg, shim, tdir,
+                                      prog=agent_prog)
+                    runs += [("agent-shell", None), ("agent-mcp", None)]
+                    got = json.load(open(os.path.join(dumps, "agent-env.json"))) if os.path.exists(
+                        os.path.join(dumps, "agent-env.json")) else {}
+                    check(f"{agent}: the agent's own session still gets the --pass-env variable (only metacomputer's "
+                          "commands go without)", got.get("key") == key, got)
+                seen = {}
+                for tag, _ in runs:
+                    pth = os.path.join(dumps, tag + ".json")
+                    seen[tag] = json.load(open(pth)) if os.path.exists(pth) else None
+                check(f"{agent}: its metacomputer commands (metacomputer and mcomp on its PATH, the launcher its skill "
+                      "names, its MCP server) get no --pass-env variable (a fake key), and keep your HOME",
+                      named and all(v is not None and not v["has"] and v["home"] == os.path.expanduser("~")
+                                    for v in seen.values()), (named, seen))
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+    finally:
+        bench.CLI = saved[0]
+        for k, v in zip(("BENCH_TEST_MODEL_KEY", "MCOMP_CONFIG", "CODEX_HOME"), saved[1:]):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_hermes_gateway_identity():
+    """Hermes's gateways for a session's home are told by their executable (a Python interpreter), `-m hermes_cli.main`
+    and `gateway run` in their places, and that HERMES_HOME: a process of the same home whose arguments only name hermes,
+    gateway and run (a script's, -c code's, another Hermes command's, another program's) is never signalled. And each
+    signal, the first SIGTERM too, goes only to the same process (pid and start time, read fresh): never one that took
+    the pid meanwhile, nor when that can't be told."""
+    import time
+    import types
+    hh_mod = bench.hooks("hermes")
+    td = tempfile.mkdtemp(prefix="mcomp-bench-gwid-")
+    hh = os.path.join(td, "home", ".hermes")
+    os.makedirs(hh)
+    pkg = os.path.join(td, "pkg", "hermes_cli")
+    os.makedirs(pkg)
+    open(os.path.join(pkg, "__init__.py"), "w").close()
+    open(os.path.join(pkg, "main.py"), "w").write("import time\ntime.sleep(120)\n")
+    report = os.path.join(td, "report.py")
+    open(report, "w").write("import time\ntime.sleep(120)\n")
+    env = dict(os.environ, HERMES_HOME=hh, PYTHONPATH=os.path.join(td, "pkg"))
+    spawn = lambda argv: subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,  # noqa: E731
+                                          stderr=subprocess.DEVNULL, start_new_session=True)
+    py = sys.executable
+    decoys = {
+        "a script with hermes gateway run as its arguments (Codex's)": [py, report, "hermes", "gateway", "run"],
+        "-c code, then -m hermes_cli.main gateway run as its arguments": [py, "-c", "import time; time.sleep(120)", "-m",
+                                                                          "hermes_cli.main", "gateway", "run"],
+        "Hermes's own module, another command (chat ... gateway run)": [py, "-m", "hermes_cli.main", "chat", "-q",
+                                                                         "gateway", "run"],
+        "another program (sh) naming hermes_cli.main gateway run": ["/bin/sh", "-c", "sleep 120", "-m",
+                                                                    "hermes_cli.main", "gateway", "run"],
+    }
+    procs = {k: spawn(v) for k, v in decoys.items()}
+    gw = spawn([py, "-m", "hermes_cli.main", "--profile", "default", "gateway", "run", "--quiet", "--idle-exit"])
+    gw2 = spawn([py, "-u", "-m", "hermes_cli.main", "gateway", "run", "--quiet"])
+    try:
+        time.sleep(1.0)
+        hh_mod.stop_gateways(bench, hh)
+        check("hermes: its gateways of the session's home are stopped (`-m hermes_cli.main [--profile NAME] gateway "
+              "run`, a Python interpreter's)", not running(gw.pid) and not running(gw2.pid), (gw.pid, gw2.pid))
+        alive = {k: running(p.pid, wait=0.5) for k, p in procs.items()}
+        check("hermes: a process of the same home that only names hermes, gateway and run in its arguments is never "
+              "signalled", all(alive.values()), alive)
+    finally:
+        for p in (*procs.values(), gw, gw2):
+            try:
+                os.killpg(p.pid, 9)
+            except OSError:
+                pass
+            p.wait()
+
+    # PID reuse: the gateway found ended, and its pid is another process's when the signal would go. Each case has a
+    # process of its own standing in for that other process: a signal reaches it if one is sent.
+    import procinfo as real_pi
+    found_start = (1000, 0)
+    argv_ = [py, "-m", "hermes_cli.main", "gateway", "run", "--quiet"]
+
+    def fake(pid, now):
+        return types.SimpleNamespace(
+            kernel_procs=lambda: [real_pi.Proc((pid, 1, pid, os.getuid(), False, b"Python", found_start))],
+            argv=lambda p: argv_, exe=lambda p: py, environ=lambda p: {"HERMES_HOME": hh}, kernel_proc=now)
+
+    def broken(pid):
+        raise OSError("can't read")
+    reused = lambda pid: real_pi.Proc((pid, 1, pid, os.getuid(), False, b"Python", (2000, 0)))  # noqa: E731
+    same = lambda pid: real_pi.Proc((pid, 1, pid, os.getuid(), False, b"Python", found_start))  # noqa: E731
+    stop_s = hh_mod.GATEWAY_STOP_S
+    hh_mod.GATEWAY_STOP_S = 1                    # (a stand-in that never reports the process gone: its wait is short)
+    try:
+        for label, now, want_alive in (("another process has its pid now (a later start time)", reused, True),
+                                       ("it can't be told (no answer for the pid)", lambda pid: None, True),
+                                       ("it can't be told (the read fails)", broken, True),
+                                       ("...and the same process (pid and start time as found)", same, False)):
+            other = subprocess.Popen([py, "-c", "import time; time.sleep(120)"], start_new_session=True)
+            try:
+                try:
+                    hh_mod.stop_gateways(types.SimpleNamespace(procinfo=fake(other.pid, now)), hh)
+                except Exception:
+                    pass
+                alive = running(other.pid, wait=0.5)
+            finally:
+                try:
+                    other.kill()
+                except OSError:
+                    pass
+                other.wait()
+            if want_alive:
+                check(f"hermes: no signal, not even the first SIGTERM, when {label}", alive, label)
+            else:
+                check(f"hermes: {label} is stopped", not alive, label)
+    finally:
+        hh_mod.GATEWAY_STOP_S = stop_s
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_cli_counting():
+    """bench's metrics count a metacomputer command as one wherever a shell runs it: after cd ... &&, env, or a variable
+    holding its path (Hermes's sessions: M=.../metacomputer; $M call ...), quoted, past its --vm option, in a pipeline,
+    sh -c; the rest is other Bash."""
+    def kinds(cmd):
+        m = bench.metrics.analyze([
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "c1", "name": "Bash",
+                                                            "input": {"command": cmd}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "c1", "content": "ok"}]}}])
+        return m["cli_calls"], m["shell_calls"], m["bash_other"]
+    w = "/private/tmp/x/mcomp-bench-r-ab12"
+    cases = [
+        (f"M={w}/agent-bin/metacomputer; $M call run_steps '{{\"pid\": 1}}'", ({"call": 1}, 0, 0)),
+        (f"M={w}/agent-bin/metacomputer; printf '%s' '{{}}' | $M call run_steps -", ({"call": 1}, 0, 0)),
+        (f"M={w}/agent-bin/metacomputer; $M sh --read-only -c 'ls ~'", ({}, 1, 0)),
+        (f"M={w}/agent-bin/metacomputer\n\"${{M}}\" call run_steps - <<'JSON'\n{{\"steps\": [\"mcomp shot\"]}}\nJSON",
+         ({"call": 1}, 0, 0)),
+        (f"cd \"{w}\" && \"{w}/agent-bin/metacomputer\" call list_windows '{{}}'", ({"call": 1}, 0, 0)),
+        (f"cd {w} && env -i HOME=/h ./agent-bin/metacomputer --vm test who", ({"who": 1}, 0, 0)),
+        (f"cd {w} && agent-bin/metacomputer call get_window_state '{{}}'", ({"call": 1}, 0, 0)),
+        ("timeout 60 mcomp --vm=test status --json", ({"status": 1}, 0, 0)),
+        ("bash -c 'cd /w && metacomputer shot'", ({"shot": 1}, 0, 0)),
+        ("ls -la; cat notes.txt", ({}, 0, 1)),
+        ("grep -r metacomputer .", ({}, 0, 1)),
+    ]
+    got = [(c, kinds(c)) for c, _ in cases]
+    bad = [(c[:60], g, want) for (c, g), (_, want) in zip(got, cases) if g != want]
+    check(f"metrics: a metacomputer command after cd ... &&, env, or in a variable is a CLI call; the rest other Bash "
+          f"({len(cases)} commands)", not bad, bad)
+    # sh, bash and zsh read -c in a cluster of short options too (-lc, -ic, -ec), past their other options; and where
+    # the parse is partial, what the plain regex counted (before the parse) still counts.
+    shells = [
+        ('metacomputer who; bash -lc "metacomputer sh -c true"', ({}, 1, 0)),     # Codex's: the shell use counts
+        ('bash -lc "metacomputer call list_windows {}"', ({"call": 1}, 0, 0)),
+        ("zsh -ic 'cd /w && mcomp sh ls'", ({}, 1, 0)),
+        ("sh -ec 'metacomputer who'", ({"who": 1}, 0, 0)),
+        ("bash -xec 'metacomputer ssh x'", ({}, 1, 0)),
+        ('bash -eo pipefail -c "metacomputer status --json | head"', ({"status": 1}, 0, 0)),
+        ("bash --norc -lc 'metacomputer shot'", ({"shot": 1}, 0, 0)),
+        ("zsh -o errexit -fc 'metacomputer sh -c true'", ({}, 1, 0)),
+        ("bash -c -e 'metacomputer who' zero", ({"who": 1}, 0, 0)),
+        ("bash -l ./setup.sh", ({}, 0, 1)),
+        ("metacomputer who; sudo -u me metacomputer sh ls", ({}, 1, 0)),           # sudo: not parsed, the regex has it
+        ("metacomputer status; xargs -n1 metacomputer call < calls.txt", ({"status": 1}, 0, 0)),
+        # Codex's check of aeb1488: a comment or quoted text naming a command isn't one.
+        ("metacomputer who # example: metacomputer sh ls", ({"who": 1}, 0, 0)),
+        ('echo "next: metacomputer sh ls"; metacomputer who', ({"who": 1}, 0, 0)),
+    ]
+    got = [(c, kinds(c)) for c, _ in shells]
+    bad = [(c[:60], g, want) for (c, g), (_, want) in zip(got, shells) if g != want]
+    check(f"metrics: sh/bash/zsh -lc, -ic, -ec and any cluster with c (past -o NAME, --norc...) run what follows; where "
+          f"the parse is partial, nothing the regex counted is lost ({len(shells)} commands)", not bad, bad)
 
 
 def main():
     test_codex_trust_undo()
+    test_own_commands_env()
+    test_session_launchers_env()
+    test_hermes_gateway_identity()
+    test_cli_counting()
     td = tempfile.mkdtemp(prefix="mcomp-bench-test-")
     run_id = "test-" + os.path.basename(td)
     shared = os.path.join("/tmp", "mcomp-bench", run_id)
@@ -479,9 +921,10 @@ def run(td, run_id, shared):
               and stat.S_IMODE(st.st_mode) == 0o700 and st.st_uid == os.getuid(), oct(st.st_mode))
         check("...not the old shared path, and a new name for each run", not work.startswith("/tmp/mcomp-bench")
               and work != work2 and os.path.realpath(shim).startswith(os.path.realpath(work)), (work, work2))
-        check("...the shim folder holds only the links to this checkout's launcher",
+        check("...the shim folder holds only the links to the session's launchers (which run this checkout's)",
               sorted(os.listdir(shim)) == ["mcomp", "metacomputer"]
-              and all(os.readlink(os.path.join(shim, n)) == bench.CLI for n in ("mcomp", "metacomputer")))
+              and all(os.readlink(os.path.join(shim, n)) == os.path.join(work, "agent-bin", n) for n in ("mcomp", "metacomputer"))
+              and all(bench.CLI in open(os.path.join(work, "agent-bin", n)).read() for n in ("mcomp", "metacomputer")))
         check("...with the skill under test and the MCP config", os.path.isfile(os.path.join(work, ".claude", "skills",
                                                                                                "metacomputer", "SKILL.md"))
               and os.path.isfile(cfg))

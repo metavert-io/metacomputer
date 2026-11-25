@@ -21,7 +21,7 @@ All notable changes to metacomputer are recorded here. The format follows
   `.github/CODEOWNERS`) and the hooks each folder brings, and a test fails on a line that names one. Adding an agent
   is its folder, one registry line and a line here. The folder is `coding-agents/`, not `agents/`: Gemini CLI loads
   the repository's root as its extension. Nothing a user sees changes: every command, option, message, setting, file
-  location and package is as it was, except the one fix below.
+  location and package is as it was, except the `metacomputer learn` fix below.
 
 ### Fixed
 
@@ -29,6 +29,42 @@ All notable changes to metacomputer are recorded here. The format follows
   agents' sessions are still read, and the report's note names the agent whose weren't (`note: OpenClaw: its sessions
   weren't read (TypeError)`). Before, such an error in OpenClaw's or Hermes Agent's reader left both agents' sessions
   out of the report, and one while another agent's session files were listed ended the report.
+- **Inside macOS's sandbox** (an agent session run under `sandbox-exec`): `/bin/ps` is setuid, and the sandbox runs no
+  setuid program, so everything that asked it failed there: `metacomputer sh` and every session claim ("Operation not
+  permitted: '/bin/ps'"), the gateway check in `status` (READY ✗), and the checks on the event watcher, the storage
+  watcher, the network allowlist's timer and the hub. Where ps can't start, metacomputer now reads the same facts
+  from the kernel (`lib/procinfo.py`: the processes, their parents, start times, names and command lines, as ps prints
+  them); ps is still asked first everywhere else. A process whose name the kernel can't give exactly as ps would
+  (another account's, or one beyond ASCII) counts as an unidentified agent session, as when ps can't be read. Every
+  field is escaped as ps escapes it (such a process's own short name too, whatever bytes it holds), so a name with a
+  newline can't add a row, and a process table that lists a pid twice is refused as can't tell.
+- **"The virtual computer is off" when the VM runner couldn't look:** the runner reports a VM as stopped when it can't
+  find or signal the VM's process (as in a sandbox). While this VM's own run process is still there, metacomputer now
+  says it can't tell (`status` shows `unknown`) instead of off, and `start` doesn't start it a second time. Nor is it
+  taken for stopped by what deletes, copies or replaces it, or lets its gateway and storage go: `reset`, `restore`,
+  `checkpoint`, `baseline`, `stop`, `build --replace` and `vm delete` (`--force` too) refuse, saying it can't tell,
+  before anything is changed. A VM that is stopped is reported as before.
+- **bench: the `--pass-env` variables (a model key) stay the sessions':** `reset` and `start`, run by bench, got bench's
+  whole environment, so the VM runner, the network gateway and the hub they leave running kept the key after the run.
+  metacomputer's own commands that bench runs now go without those variables, and so do every session's
+  `metacomputer` and `mcomp` commands and its MCP server, whichever the agent (Claude Code's and Codex's, which keep
+  your environment, included): launchers in the work folder that drop them, the only metacomputer commands the
+  session's approvals allow. The agent itself still gets them.
+- **bench, OpenClaw:** input tokens include the cached prompt tokens OpenClaw reports apart (`cacheRead`,
+  `cacheWrite`); they were left out, which understated input by orders of magnitude.
+- **bench, Hermes Agent:** the gateway a session starts is stopped even where Hermes's own `gateway stop` can't find
+  it (it looks with `ps`), so it no longer outlives the session and writes into the home bench has deleted. It's told by
+  its executable, `-m hermes_cli.main` and `gateway run` in their places and the session's `HERMES_HOME`, and checked
+  to be the same process (pid and start time) before each signal. Where
+  Hermes can't run git, run.json's version is the release tag of its checkout's HEAD (read from the checkout's
+  files), or `unknown`, not "vunknown".
+- **bench's metrics:** a `metacomputer` command run through a variable holding its path (`M=.../metacomputer; $M call
+  ...`, as Hermes Agent's sessions do), by a quoted path, after `--vm` or `env -i`, or under `sh`, `bash` or `zsh`
+  with `-c` among other short options (`bash -lc`, `zsh -ic`) counts as a CLI call, not as other Bash (most of Hermes
+  Agent's calls were counted as other Bash); whatever the earlier pattern counted still counts.
+- **Docs:** [docs/openclaw.md](docs/openclaw.md) gives OpenClaw 2026.11.x's Node.js requirement (24.16 or a later 24,
+  or 26.1 or later); [docs/hermes.md](docs/hermes.md) says Hermes Agent 0.23.x can't be installed from PyPI or with pip,
+  and how a benchmark run installed it (the release tag from GitHub and `uv sync --frozen`).
 
 ## [0.5.2] - 2026-11-25
 

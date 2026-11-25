@@ -629,6 +629,8 @@ def precheck(transport, o):
     if not allowed:
         raise Failed(EXIT_REFUSED, f"metacomputer claude works through the shell channel, which is off here ({why}). "
                      "That's the user's setting; ask them if they want it on.")
+    if os.environ.get("MCOMP_VM_STATE", "running") == "unknown":       # bin/metacomputer vm_state_word
+        raise Failed(EXIT_FAILED, vm_shell.VM_UNKNOWN)
     if os.environ.get("MCOMP_VM_STATE", "running") != "running":
         raise Failed(EXIT_FAILED, "the virtual computer is off (metacomputer start)")
     # The user has the computer (metacomputer handoff): refused whatever --override says, before a token is asked for.

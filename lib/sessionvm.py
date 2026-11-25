@@ -329,39 +329,12 @@ def _prune(names):
 
 
 # --- processes ----------------------------------------------------------------------------------------------------
-_CTL_KERN, _KERN_PROC, _KERN_PROC_PID = 1, 14, 1
-
-
 def proc_start(pid):
     """When a process started, as the kernel has it ("SECONDS.MICROSECONDS": macOS's kern.proc.pid, Linux's
-    /proc/PID/stat), or None when there's no such process. With the pid, it names one process even after the pid is
-    reused: a record keeps both for its session and for what holds the computer."""
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return None
-    if pid <= 0:
-        return None
-    if sys.platform == "darwin":
-        try:
-            import ctypes
-            import ctypes.util
-            import struct
-            libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-            mib = (ctypes.c_int * 4)(_CTL_KERN, _KERN_PROC, _KERN_PROC_PID, pid)
-            buf = ctypes.create_string_buffer(1024)              # struct kinfo_proc: 648 bytes
-            size = ctypes.c_size_t(len(buf))
-            if libc.sysctl(mib, 4, buf, ctypes.byref(size), None, 0) != 0 or size.value < 16:
-                return None                                      # no such process
-            sec, usec = struct.unpack_from("<qi", buf.raw, 0)    # kp_proc.p_starttime, a struct timeval, comes first
-            return f"{sec}.{usec:06d}"
-        except (OSError, AttributeError, ValueError):
-            return None
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            return "jiffies." + f.read().rsplit(")", 1)[1].split()[19]
-    except (OSError, IndexError):
-        return None
+    /proc/PID/stat; lib/procinfo.py start), or None when there's no such process. With the pid, it names one process
+    even after the pid is reused: a record keeps both for its session and for what holds the computer."""
+    import procinfo
+    return procinfo.start(pid)
 
 
 # --- computers ----------------------------------------------------------------------------------------------------

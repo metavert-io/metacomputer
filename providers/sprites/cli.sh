@@ -99,7 +99,7 @@ pv_sprites_net_list() { # allow NAME... [--exact] | remove NAME... | clear: Fly'
 pv_sprites_tunnels_left() { # how many of this Mac's tunnels to this Sprite are still running, after up to 6 s
   local i n=0 pat="-o ${SPRITE_ORG:-} -s ${SPRITE_NAME:-$VM_NAME} proxy -W :22"
   for i in $(seq 1 24); do
-    n="$(ps -axo command= 2>/dev/null | grep -F -- "$pat" | grep -cvE '^(ssh|grep) ' || true)"
+    n="$(proc_commands | grep -F -- "$pat" | grep -cvE '^(ssh|grep) ' || true)"
     [ "${n:-0}" -gt 0 ] || { echo ""; return 0; }
     sleep 0.25
   done
