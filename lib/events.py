@@ -124,7 +124,6 @@ SIGNATURE_HEADER = sinkkit.SIGNATURE_HEADER
 SD_ID = "metacomputer@32473"     # 32473: the documentation enterprise number (RFC 5612)
 SYSLOG_FACILITY = 1              # user-level
 SYSLOG_SEV = {"info": 6, "warn": 4, "error": 3}
-OTLP_SEV = {"info": (9, "INFO"), "warn": (13, "WARN"), "error": (17, "ERROR")}
 USER_AGENT = "metacomputer-events/1"
 
 
@@ -1098,34 +1097,6 @@ def service_version():
     return _version["v"]
 
 
-def _attr(key, value):
-    if isinstance(value, bool):
-        return {"key": key, "value": {"boolValue": value}}
-    if isinstance(value, int):
-        return {"key": key, "value": {"intValue": str(value)}}      # int64 as a string (protobuf JSON)
-    return {"key": key, "value": {"stringValue": str(value)}}
-
-
-def otlp_body(events):
-    host = events[0]["host"] if events else host_name()
-    observed = str(time.time_ns())
-    recs = []
-    for ev in events:
-        num, text = OTLP_SEV[ev["severity"]]
-        attrs = [_attr("metacomputer.family", ev["family"]), _attr("metacomputer.type", ev["type"]),
-                 _attr("metacomputer.vm", ev["vm"]), _attr("metacomputer.seq", int(ev["seq"])),
-                 _attr("metacomputer.origin", ev.get("origin") or "cli")]
-        if ev.get("project"):
-            attrs.append(_attr("metacomputer.project", ev["project"]))
-        recs.append({"timeUnixNano": str(iso_to_ns(ev["time"])), "observedTimeUnixNano": observed,
-                     "severityNumber": num, "severityText": text, "body": {"stringValue": dumps(ev)},
-                     "attributes": attrs})
-    return {"resourceLogs": [{
-        "resource": {"attributes": [_attr("service.name", "metacomputer"), _attr("service.version", service_version()),
-                                    _attr("host.name", host)]},
-        "scopeLogs": [{"scope": {"name": "metacomputer.events", "version": "1"}, "logRecords": recs}]}]}
-
-
 def _sd_value(v):
     return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("]", "\\]")
 
@@ -1228,33 +1199,6 @@ def http_post(url, body, headers, ca_pem, timeout, track=None):
             conn.close()
 
 
-def otlp_rejected(body, sent):
-    """(records the collector rejected, its message) from an OTLP/HTTP JSON answer: a 2xx with
-    partialSuccess.rejectedLogRecords > 0 stored only part of the batch. OTLP says not to retry those."""
-    try:
-        d = json.loads(body or b"{}")
-    except ValueError:
-        return 0, ""
-    ps = (d.get("partialSuccess") or d.get("partial_success")) if isinstance(d, dict) else None
-    if not isinstance(ps, dict):
-        return 0, ""
-    raw = ps.get("rejectedLogRecords", ps.get("rejected_log_records", 0))   # an int64: a number or a string in JSON
-    try:
-        n = int(raw) if isinstance(raw, (int, str)) and not isinstance(raw, bool) else 0
-    except ValueError:
-        n = 0
-    msg = ps.get("errorMessage") or ps.get("error_message") or ""
-    return max(0, min(n, sent)), clean_str(msg, 160) if isinstance(msg, str) else ""
-
-
-def otlp_url(url):
-    """URL + /v1/logs, before any query string, unless it already ends with /v1/logs."""
-    u = urlsplit(url)
-    path = u.path.rstrip("/")
-    path = path if path.endswith("/v1/logs") else path + "/v1/logs"
-    return f"{u.scheme}://{u.netloc}{path}" + (f"?{u.query}" if u.query else "")
-
-
 def deliver(sink, batch, timeout):
     """Send events to one sink within `timeout` seconds of wall-clock time. Returns (ok, error, permanent,
     rejected): permanent = this batch will never be accepted; rejected = how many of its events an OTLP
@@ -1323,10 +1267,6 @@ def _deliver(sink, batch, timeout, track):
             return False, short_error(e), False, 0
     if hasattr(mod, "request"):                 # an HTTP POST (sinks/<kind>/sink.py)
         target, body, headers = mod.request(sys.modules[__name__], sink, batch, extra)
-    elif kind == "otlp":
-        body = dumps(otlp_body(batch)).encode()
-        headers = {**extra, "Content-Type": "application/json", "User-Agent": USER_AGENT}
-        target = otlp_url(url)
     elif kind == "ntfy":
         target, payload = ntfy_payload(url, batch[0])
         body = dumps(payload).encode()
@@ -1341,11 +1281,6 @@ def _deliver(sink, batch, timeout, track):
             took = mod.accepted(sys.modules[__name__], answer, batch)
             if took:
                 return took
-        elif kind == "otlp":
-            n, msg = otlp_rejected(answer, len(batch))
-            if n:
-                return (True, f"the collector rejected {n} of {len(batch)} event(s) (OTLP partial success"
-                        + (f": {msg}" if msg else "") + "); not retried", False, n)
         return True, None, False, 0
     return False, f"HTTP {status}", status in (400, 413, 415, 422), 0
 

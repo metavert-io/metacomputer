@@ -1216,8 +1216,9 @@ def main():
         events.emit("needs_you", "other", "auth check")
         check("nit: an ntfy ?auth= query is kept", any(p_ == "/?auth=tok123456" for p_, _, _ in ntfy.reqs), ntfy.reqs[-1][0])
         sink_remove("ntfyauth")
-        check("nit: otlp_url puts /v1/logs before a query", events.otlp_url("https://h.example/x?y=1")
-              == "https://h.example/x/v1/logs?y=1" and events.otlp_url("http://127.0.0.1:4318/v1/logs/")
+        otlp_url = events.sinkkit.registry.module("otlp").otlp_url      # sinks/otlp/sink.py
+        check("nit: otlp_url puts /v1/logs before a query", otlp_url("https://h.example/x?y=1")
+              == "https://h.example/x/v1/logs?y=1" and otlp_url("http://127.0.0.1:4318/v1/logs/")
               == "http://127.0.0.1:4318/v1/logs")
         refill()
         orx = HTTPRx()
