@@ -219,24 +219,29 @@ fi
 # (a fetch that failed, an index caught mid-publish), its candidate is Ubuntu's firefox, a snap installer whose snapd
 # the no-snap pin refuses, and the install below fails with a page of unrelated dependency errors (found live on a
 # Sprite, 2026-11-24). So: is the candidate Mozilla's? If not, fetch the lists once more, then say plainly what's wrong.
+# apt-cache runs in the C locale: its words are read here (a server set to German says "Installationskandidat:", and
+# every build would fail).
 firefox_from_mozilla() {
-  apt-cache policy firefox 2>/dev/null | awk '
+  LC_ALL=C apt-cache policy firefox 2>/dev/null | awk '
     /^  Candidate:/ { c = $2 }
     /^ (\*\*\*|   ) [^ ]/ { v = ($1 == "***") ? $2 : $1; inv = (c != "" && v == c) }
     inv && /packages\.mozilla\.org/ { ok = 1 }
     END { exit !ok }'
 }
-if ! firefox_from_mozilla; then
+ensure_firefox_from_mozilla() { # run as a plain command (set -e then applies): 0, or the plain message and 1
+  firefox_from_mozilla && return 0
   step "apt: no Firefox from Mozilla's repository in the package lists; fetching them again"
   sleep 5
-  "${APT[@]}" update
-  if ! firefox_from_mozilla; then
-    echo "Mozilla's repository (packages.mozilla.org) gave apt no Firefox after two tries; Ubuntu's own firefox is only a"
-    echo "snap installer, which this VM doesn't take. Nothing was installed yet: try the build again in a few minutes."
-    apt-cache policy firefox 2>&1 | head -12 || true
-    false
-  fi
-fi
+  # A failed fetch (exit 100: a mirror down, a hash mismatch) mustn't end the setup here, under set -e, before the
+  # check below and its message: what it did fetch may be enough.
+  "${APT[@]}" update || echo "(fetching the package lists again failed: exit $?)"
+  firefox_from_mozilla && return 0
+  echo "Mozilla's repository (packages.mozilla.org) gave apt no Firefox after two tries; Ubuntu's own firefox is only a"
+  echo "snap installer, which this VM doesn't take. Nothing was installed yet: try the build again in a few minutes."
+  apt-cache policy firefox 2>&1 | head -12 || true
+  return 1
+}
+ensure_firefox_from_mozilla
 
 step "apt: desktop, accessibility, apps, recording"
 PKGS=(

@@ -43,7 +43,8 @@ All notable changes to metacomputer are recorded here. The format follows
   comes from Mozilla's repository; when apt had no usable index from it, its candidate was Ubuntu's firefox, a snap
   installer this VM refuses, and the install failed (found on a Fly Sprite: one build in three). The setup now checks
   that Firefox's candidate is Mozilla's after fetching the lists, fetches them once more if it isn't, and otherwise
-  stops before installing anything, saying what's wrong and to try again.
+  stops before installing anything, saying what's wrong and to try again (also when that second fetch fails; and
+  apt is read in the C locale, so a server set to another language passes the check too).
 
 ## [0.5.1] - 2026-11-24
 
