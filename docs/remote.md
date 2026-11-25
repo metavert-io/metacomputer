@@ -175,7 +175,7 @@ metacomputer vm create x86a --on digitalocean [--size s-2vcpu-4gb] [--region nyc
 metacomputer vm create x86b --on vultr [--size vc2-2c-4gb] [--region ewr]
 ```
 
-Three thin drivers on one base (`lib/cloud/vps.py`; `hetzner.py`, `digitalocean.py`, `vultr.py`), each through the
+Three thin drivers on one base (`lib/cloud/vps.py`; `providers/hetzner/`, `digitalocean/`, `vultr/`), each through the
 provider's REST API (Python's standard library; no SDK to install). **Everything a stopped server costs is still
 billed at all three**: only deleting it stops the charges ([costs](#what-a-stopped-computer-costs)).
 

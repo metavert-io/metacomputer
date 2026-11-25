@@ -8,8 +8,8 @@ Any other computer is reached by SSH to an endpoint, opened in the way its setti
     ssh       straight to SSH_HOST:SSH_HOST_PORT: an Ubuntu VM with an address of its own (your own server, one
               a provider made). No program runs on this Mac besides ssh.
 
-A provider whose computers have no address of their own (Fly Sprites: `sprite proxy -W :22`) adds its opener with
-register(): it returns the program, as an argument list, that carries one SSH connection on its standard input and
+A provider whose computers have no address of their own (its own tunnel program, its manifest's transport) adds its
+opener with register(): it returns the program, as an argument list, that carries one SSH connection on its standard input and
 output; ssh runs it as its ProxyCommand through lib/proxywrap.py, which ends it (SIGTERM) when ssh goes, so a
 tunnel never outlives its connection and keeps the computer awake and billing.
 
@@ -73,7 +73,7 @@ def _ssh(settings, state):
     return {"host": check_host(host), "port": check_port(settings.get("SSH_HOST_PORT") or 22), "proxy": None}
 
 
-# TRANSPORT -> opener(settings, state) -> {"host", "port", "proxy"}. The Sprites adapter registers "sprite" here.
+# TRANSPORT -> opener(settings, state) -> {"host", "port", "proxy"}. A provider's adapter registers its own here.
 OPENERS = {"ssh": _ssh}
 
 

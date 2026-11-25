@@ -3,13 +3,14 @@
 
     python3 tests/test_sprites.py
 
-- The `sprite` transport (lib/cloud/sprites.py opener): ssh through `sprite proxy -W :22` as the ProxyCommand, run
-  through lib/proxywrap.py, the host key pinned under mcomp-NAME; bad organizations, Sprite names and CLI paths refused.
+- The `sprite` transport (providers/sprites/adapter.py opener): ssh through `sprite proxy -W :22` as the
+  ProxyCommand, run through lib/proxywrap.py, the host key pinned under mcomp-NAME; bad organizations, Sprite names
+  and CLI paths refused.
 - The network policy: EGRESS=internet allows every name, off denies every name, an allowlist lists names (each with its
   subdomains unless exact); addresses and anything that isn't a DNS name refused (Fly takes anything); what's read
   back is classified (none: nothing enforced).
-- The adapter through the facade of Fly's command (lib/spritecli.py) and a stand-in for it: create (refused when a
-  Sprite of that name exists), wake, sleep, status, delete (never another Sprite of the same name), checkpoints by
+- The adapter through the facade of Fly's command (providers/sprites/cli.py) and a stand-in for it: create (refused
+  when a Sprite of that name exists), wake, sleep, status, delete (never another Sprite of the same name), checkpoints by
   name (create, list, restore, delete), the policy set and read back; the command runs with HOME, PATH and LANG only,
   and `sprite exec` never forwards ports back to the Mac.
 - lib/remote.py: a launch journaled before the Sprite is made; a lost launch (its answer never came) found by name
@@ -38,10 +39,13 @@ sys.path.insert(0, TESTS)
 import cloud  # noqa: E402
 import mcp_hub  # noqa: E402
 import remote  # noqa: E402
-import spritecli  # noqa: E402
 from cloud import capabilities as caps  # noqa: E402
-from cloud import sprites, transport  # noqa: E402
+from cloud import transport  # noqa: E402
 from cloud.adapter import AdapterError  # noqa: E402
+
+sprites = cloud.registry.module("sprites")
+spritecli = cloud.registry.module("sprites", "cli")
+hooks = cloud.registry.module("sprites", "remote")   # its part of lib/remote.py
 
 FAILS = []
 PY = os.environ.get("MCOMP_TEST_PY") or shutil.which("python3") or sys.executable
@@ -261,8 +265,13 @@ def manifest():
                                                  if n != "sprites"))
     lib = open(os.path.join(LAB, "scripts", "lib.sh")).read()
     off = {n for n, c in cloud.ADAPTERS.items() if not c.manifest["input"]["background"]}
-    check("scripts/lib.sh tells the hub which providers lack it (MCOMP_BACKGROUND_INPUT), as their manifests say",
-          all(f"{n}) printf off" in lib for n in off) and off == {"sprites"}, off)
+    fn = re.search(r"^mc_background_input\(\) \{.*\}$", lib, re.M).group(0)
+    pv = os.path.join(LAB, "lib", "cloud", "providers.sh")
+    said = {n: subprocess.run(["/bin/bash", "-c", f'. "{pv}"; {fn}\nPROVIDER="$1"; mc_background_input', "_", n],
+                              capture_output=True, text=True, timeout=30).stdout for n in cloud.ADAPTERS}
+    check("scripts/lib.sh tells the hub which providers lack it (MCOMP_BACKGROUND_INPUT), as their manifests say "
+          "(lib/cloud/providers.sh, made from them)", {n for n, v in said.items() if v == "off"} == off == {"sprites"}
+          and all(v in ("on", "off") for v in said.values()), said)
     rt = sprites.Sprites().rates()
     check("rates: awake a few cents an hour driven now and then, asleep its disk only", 0 < rt["awake_per_hour"] < 0.1
           and 0 < rt["asleep_per_hour"] < 0.001 and "8 CPUs" in rt["note"], rt)
@@ -403,12 +412,12 @@ def journal(td):
                                    cli=spritecli.SpriteCLI(cli_path))
         # The answer to the create is lost: the Sprite exists, the record says only `launching`.
         set_state(home, lose_create=True)
-        why = raises(remote.create_sprite, comp, adapter_now(), rd, remote.read_state(rd), "a" * 32, kind=Exception)
+        why = raises(hooks.create, remote, comp, adapter_now(), rd, remote.read_state(rd), "a" * 32, kind=Exception)
         st = remote.read_state(rd)
         check("a launch is journaled before the Sprite is made (its answer lost: launching, no instance)",
               why is not None and st.get("launching") == "a" * 32 and not st.get("instance") and "box" in standin_state(home)["sprites"], st)
         set_state(home, lose_create=False)
-        r = remote.create_sprite(comp, adapter_now(), rd, remote.read_state(rd), "b" * 32)
+        r = hooks.create(remote, comp, adapter_now(), rd, remote.read_state(rd), "b" * 32)
         st = remote.read_state(rd)
         log = [c for c in standin_log(home) if "DELETE" in c["argv"]]
         check("the next try finds the lost launch by its operation's label, deletes it, then makes its own",
@@ -423,14 +432,14 @@ def journal(td):
         sp["box"]["info"]["labels"] = ["metacomputer", "mcop-" + "f" * 32]  # another build's (or none)
         set_state(home, sprites=sp)
         remote.write_state(rd, {"launching": "c" * 32, "launch_t": 1800000000.0, "provider": "sprites"})
-        why = raises(remote.lost_sprite, adapter_now(), comp, remote.read_state(rd), kind=AdapterError)
+        why = raises(hooks.lost_sprite, adapter_now(), comp, remote.read_state(rd), kind=AdapterError)
         check("a Sprite of that name without this operation's label isn't a lost launch: said, left alone",
               why and "left alone" in why, why)
-        why = raises(remote.create_sprite, comp, adapter_now(), rd, remote.read_state(rd), "c" * 32, kind=AdapterError)
-        remote.abort_sprite(comp, adapter_now(), rd, dict(remote.read_state(rd), launching="c" * 32), "c" * 32, keep=False) \
+        why = raises(hooks.create, remote, comp, adapter_now(), rd, remote.read_state(rd), "c" * 32, kind=AdapterError)
+        hooks.abort(remote, comp, adapter_now(), rd, dict(remote.read_state(rd), launching="c" * 32), "c" * 32, keep=False) \
             if False else None
         try:
-            remote.abort_sprite(comp, adapter_now(), rd, remote.read_state(rd), "c" * 32, keep=False)
+            hooks.abort(remote, comp, adapter_now(), rd, remote.read_state(rd), "c" * 32, keep=False)
         except AdapterError:
             pass
         st = remote.read_state(rd)
@@ -442,17 +451,17 @@ def journal(td):
             if labels is not None:
                 sp["box"]["info"]["labels"] = labels
             set_state(home, sprites=sp)
-            why = raises(remote.lost_sprite, adapter_now(), comp, remote.read_state(rd), kind=AdapterError)
+            why = raises(hooks.lost_sprite, adapter_now(), comp, remote.read_state(rd), kind=AdapterError)
             check(f"...nor one with no labels at all ({labels!r})", why and "left alone" in why, why)
         # abort: deletes what this operation made (its label), keeps on --keep
         sp["box"]["info"]["labels"] = ["metacomputer", "mcop-" + "d" * 32]
         set_state(home, sprites=sp)
         remote.write_state(rd, {"launching": "d" * 32, "launch_t": 1800000000.0, "provider": "sprites"})
-        remote.abort_sprite(comp, adapter_now(), rd, remote.read_state(rd), "d" * 32, keep=True)
+        hooks.abort(remote, comp, adapter_now(), rd, remote.read_state(rd), "d" * 32, keep=True)
         check("abort --keep: a lost launch of this operation (its label) recorded as its own, and kept",
               remote.read_state(rd).get("instance") == sp["box"]["info"]["id"] and remote.read_state(rd).get("kept")
               and "box" in standin_state(home)["sprites"])
-        remote.abort_sprite(comp, adapter_now(), rd, remote.read_state(rd), "d" * 32, keep=False)
+        hooks.abort(remote, comp, adapter_now(), rd, remote.read_state(rd), "d" * 32, keep=False)
         check("abort: the Sprite this operation made is deleted, the record says so",
               "box" not in standin_state(home)["sprites"] and not remote.read_state(rd).get("instance")
               and remote.read_state(rd).get("aborted"))
@@ -497,7 +506,7 @@ def hub_guard():
 
 def guest():
     print("\nthe guest's services")
-    d = os.path.join(LAB, "provisioning", "sprite", "rootfs", "opt", "metacomputer", "sprite")
+    d = os.path.join(LAB, "providers", "sprites", "guest", "rootfs", "opt", "metacomputer", "sprite")
     hide = open(os.path.join(d, "hide-sprite-api")).read()
     check("hide-sprite-api: an empty tmpfs over /.sprite, then the program", "mount -t tmpfs" in hide
           and "/.sprite" in hide and hide.rstrip().endswith('exec "$@"'))
@@ -537,7 +546,7 @@ def guest():
     svcs = open(os.path.join(d, "services")).read()
     check("services: session first, sshd and xvfb in it, desktop after xvfb",
           "mk session svc-session; mk sshd svc-sshd session" in svcs and "mk xvfb svc-xvfb session; mk desktop svc-desktop xvfb" in svcs)
-    conf = open(os.path.join(LAB, "provisioning", "sprite", "rootfs", "etc", "ssh", "sshd_config.d",
+    conf = open(os.path.join(LAB, "providers", "sprites", "guest", "rootfs", "etc", "ssh", "sshd_config.d",
                              "05-metacomputer-sprite.conf")).read()
     check("sshd listens on the Sprite's loopback, by number", "ListenAddress 127.0.0.1" in conf and "ListenAddress ::1" in conf
           and "localhost" not in conf.replace('"localhost"', "").split("ListenAddress")[1])
@@ -548,7 +557,7 @@ def guest():
     si = open(os.path.join(LAB, "provisioning", "guest", "rootfs", "opt", "metacomputer", "bin", "session-init")).read()
     check("the live view on loopback only: x11vnc's IPv6 listener off too (it opened [::]:5900 despite -noipv6)",
           'LISTEN=127.0.0.1 V6="-rfbportv6 -1"' in si and '-listen "$LISTEN" -noipv6 $V6' in si)
-    boot = open(os.path.join(LAB, "provisioning", "sprite", "bootstrap.sh")).read()
+    boot = open(os.path.join(LAB, "providers", "sprites", "guest", "bootstrap.sh")).read()
     check("bootstrap.sh: the session and sshd as Sprites services, sshd checked to be in the session, its host key last",
           "services sshd" in boot and "tini" in boot and "sshd isn't in the session's namespaces" in boot
           and boot.rstrip().splitlines()[-1].startswith('echo "HOSTKEY'))
@@ -744,15 +753,15 @@ def cli(td):
                       and "handoff is being opened" in r.stderr and not fly_changes(n_), (r.stderr, fly_changes(n_)))
         finally:
             os.close(lk)
-        src_ = open(os.path.join(LAB, "bin", "metacomputer")).read()
-        body_ = src_[src_.index("do_snap_sprite() {"):src_.index("\n}\n", src_.index("do_snap_sprite() {"))]
+        src_ = open(os.path.join(LAB, "providers", "sprites", "cli.sh")).read()
+        body_ = src_[src_.index("pv_sprites_snapshot() {"):src_.index("\n}\n", src_.index("pv_sprites_snapshot() {"))]
         unguarded = []
         for m_ in re.finditer(r'remote_py checkpoint --vm "\$VM_NAME" (create|delete|restore)\b', body_):
             branch = re.split(r";;|return 0", body_[:m_.start()])[-1]        # since the previous branch or step ended
             if not ("owners_check" in branch and "handoff_hold_unless_override" in branch
                     and branch.rindex("handoff_hold_unless_override") > branch.rindex("owners_check")):
                 unguarded.append(body_[m_.start():m_.end() + 20])
-        check("every checkpoint change at Fly in bin/metacomputer (create, replace, delete, baseline, restore, reset) comes "
+        check("every checkpoint change at Fly in its snapshot hook (create, replace, delete, baseline, restore, reset) comes "
               "after the ownership check and then the dispatch lock, in its own branch", not unguarded, unguarded)
         r = b.run("--vm", "sp1", "checkpoint", "--delete", "ck1", "--yes", env=env)
         check("checkpoint --delete: gone at Fly", r.returncode == 0 and "ck1" not in b.run("--vm", "sp1", "checkpoints", env=env).stdout,

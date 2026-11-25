@@ -745,7 +745,7 @@ def default_name_checks(td):
 
 
 def cloud_setup_checks(td):
-    """A provider whose setup and creates rewrite a network its other computers share (lib/cloud/oci.py:
+    """A provider whose setup and creates rewrite a network its other computers share (providers/oci/adapter.py:
     SHARED_NETWORK_CHANGES) waits for every computer of this checkout's there (P2-6); one whose setup only reads
     doesn't."""
     print("\na provider's shared network: its setup and creates wait for every computer there")

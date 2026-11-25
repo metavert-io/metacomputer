@@ -5,7 +5,7 @@ input and output, and end it, and everything it started, when ssh goes.
     proxywrap.py [--id ID --check N CHECK-PROGRAM [CHECK-ARGS...]] -- PROGRAM [ARGS...]
 
 A tunnel program can outlive the ssh that started it: ssh sends its ProxyCommand SIGHUP on exit, and a program that
-ignores SIGHUP (Fly's `sprite proxy -W` can) is left running with its connection open, which keeps a cloud computer
+ignores SIGHUP (one provider's tunnel program can) is left running with its connection open, which keeps a cloud computer
 awake and billing. So the program runs in a process group of its own, which this process owns: when ssh goes (this
 process gets SIGHUP, SIGTERM or SIGINT, or its parent is gone, checked every half second) or the program itself
 exits, the whole group gets SIGTERM, then SIGKILL after a grace period, and this process waits until the group is
@@ -17,13 +17,14 @@ exited while this process was starting can't leave one behind. It checks the par
 and from then on every half second. It leaves the process group (and session) ssh started it in right after: whoever ends ssh's connection
 may SIGKILL that whole group at once (the hub does, after a grace period), and a SIGKILL would end this process before
 it could end the tunnel, which isn't in that group. Out of it, this process outlives ssh by the half second it takes
-to notice, then ends the tunnel (found live: `hub stop` left `sprite proxy` running, and the Sprite awake).
+to notice, then ends the tunnel (found live: `hub stop` left a provider's tunnel running, and its computer awake).
 
 With --id, the provider is asked first, on every connection: the N words after --check are a program and its
 arguments whose answer (JSON, at most a megabyte, within 30 s; run with HOME, PATH and LANG only and nothing on its
 standard input) must name the computer by the provider's own id for it, the one recorded when it was made ("id", or
-"data"."id"). Any other answer, or none, and the tunnel never starts (lib/remote.py target gives these for a Fly
-Sprite: one deleted and made again under its name is another computer, whatever arguments a caller kept).
+"data"."id"). Any other answer, or none, and the tunnel never starts (lib/remote.py target gives these for a
+computer behind a provider's tunnel, from its transport's hook: one deleted and made again under its name is another
+computer, whatever arguments a caller kept).
 
 `ssh -f` doesn't fit: it forks after signing in and the process that started this one exits, so the tunnel would end
 at once. A caller that wants ssh in the background runs it there itself (bin/metacomputer view_tunnel)."""

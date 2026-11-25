@@ -42,7 +42,7 @@ The build (`metacomputer --vm work build`, about 5 minutes):
 2. **Its network policy**, every name allowed while it's set up (the packages it downloads), then `EGRESS` at the end,
    read back. metacomputer always sets one: Fly enforces nothing for a Sprite without one.
 3. **The first step through Fly's own channel** (`sprite exec`, before metacomputer's own SSH exists):
-   `provisioning/sprite/bootstrap.sh` makes the accounts `cua` (the desktop, no sudo) and `cuaadmin` (maintenance),
+   `providers/sprites/guest/bootstrap.sh` makes the accounts `cua` (the desktop, no sudo) and `cuaadmin` (maintenance),
    each reached only with keys made on your Mac for this computer, and starts sshd as a Sprites service on the Sprite's
    loopback. Its host key comes back over that authenticated channel and is pinned here as `mcomp-work`: never learned
    from a first connection.

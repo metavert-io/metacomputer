@@ -33,7 +33,7 @@ OUTSIDE = {"vault/ (mcomp-vault)": "compiled Swift, run from an installed copy; 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 LAB = os.path.dirname(TESTS)
 G, R, S = ("provisioning/guest/rootfs/opt/metacomputer/bin/", "provisioning/remote/rootfs/opt/metacomputer/bin/",
-           "provisioning/sprite/rootfs/opt/metacomputer/sprite/")
+           "providers/sprites/guest/rootfs/opt/metacomputer/sprite/")
 BOX = "{BOX}"
 CO = "{CO}"
 
@@ -69,6 +69,7 @@ PROGRAMS = {
     "scripts/remote-build.sh": P("bash", [[], ["--keep-on-failure"]]),
     "scripts/safe-rmtree.sh": P("bash", [[BOX + "/victim"], ["--quiet", BOX + "/victim", BOX + "/victim2"]]),
     "scripts/sync-plugin.py": P("py", [[], ["--check"]], synth=True),
+    "scripts/gen-providers.py": P("py", [[], ["--check"]], synth=True, by="person"),
     "scripts/build-openai-plugin.py": P("py", [["--check"], ["--version", "1.2.3", "--out", "x.zip"]], synth=True),
     "scripts/vendor-driver-skill.py": P("py", [["src"]], synth=True, by="person"),
     "scripts/verify-audit.py": P("py", [["f.jsonl"], ["--key", "k", "--expect-start", "1", "f.jsonl"]], synth=True),
@@ -178,7 +179,7 @@ PROGRAMS = {
     "provisioning/guest/finalize.sh": P("guard", [["cuaadmin", "cua"], ["cuaadmin"]]),
     "provisioning/guest/provision.sh": P("guard", [["/opt/metacomputer-payload"]]),
     "provisioning/remote/bootstrap.sh": P("guard", [["/run/metacomputer-bootstrap", "", "22"], ["/tmp/d", "owner", "2222"]]),
-    "provisioning/sprite/bootstrap.sh": P("guard", [["/tmp/d"]]),
+    "providers/sprites/guest/bootstrap.sh": P("guard", [["/tmp/d"]]),
     G + "desktop-record": P("guard", [["start", "n", "20", "standard", "off"], ["stream", "n", "20", "high", "auto"], ["stop"],
                                       ["status"]]),
     G + "driver-mcp": P("guard", [[]]),
@@ -250,8 +251,8 @@ def guard_of(rel):
 def caller_lines(rel):
     """The lines of the repository that run REL (by its file name), outside REL itself and comments."""
     base = os.path.basename(rel)
-    out = subprocess.run(["git", "-C", LAB, "grep", "-n", "-F", base, "--", "bin", "scripts", "lib", "provisioning", "vault",
-                          "install.sh", "get.sh", "plugin/bin", "agent-plugin/bin", "tests/run_tests.py", "bench",
+    out = subprocess.run(["git", "-C", LAB, "grep", "-n", "-F", base, "--", "bin", "scripts", "lib", "provisioning",
+                          "providers", "vault", "install.sh", "get.sh", "plugin/bin", "agent-plugin/bin", "tests/run_tests.py", "bench",
                           "gemini-extension.json"], capture_output=True, text=True).stdout.splitlines()
     return [ln for ln in out if not ln.startswith(rel + ":") and not re.match(r"^[^:]+:\d+:\s*#", ln)]
 

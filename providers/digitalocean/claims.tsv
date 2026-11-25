@@ -1,0 +1,5 @@
+# This provider's promises in the docs, pinned to its own files (tests/test_doc_claims.py reads every registered
+# provider's). One condition a line, tab-separated: the document, a phrase it must contain (a regular expression,
+# matched with the document's whitespace folded), a file in this folder, and text that file contains (a leading !:
+# must not contain; \n and \t as escapes). Lines with the same document and phrase are one promise: all must hold.
+# Promises whose check reads shared code too stay in tests/test_doc_claims.py.

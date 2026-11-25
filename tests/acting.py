@@ -45,7 +45,7 @@ ACTS, LIFECYCLE, SHARED, RESET, USER, PER_CALL, THROUGH, ONGOING, GUEST, NONE, S
     "acts", "lifecycle", "shared", "reset", "user", "per-call", "through", "ongoing", "guest", "none", "sourced")
 LABELS = (ACTS, LIFECYCLE, SHARED, RESET, USER, PER_CALL, THROUGH, ONGOING, GUEST, NONE, SOURCED)
 G, R, S = ("provisioning/guest/rootfs/opt/metacomputer/bin/", "provisioning/remote/rootfs/opt/metacomputer/bin/",
-           "provisioning/sprite/rootfs/opt/metacomputer/sprite/")
+           "providers/sprites/guest/rootfs/opt/metacomputer/sprite/")
 
 
 def has(*words):
@@ -81,6 +81,7 @@ PROGRAMS = {
     "scripts/remote-build.sh": ACTS,                        # script_handoff_hold, for the whole build
     "scripts/safe-rmtree.sh": NONE,                         # this Mac's folders (never a VM's)
     "scripts/sync-plugin.py": NONE,
+    "scripts/gen-providers.py": NONE,                      # files of this checkout, made from the manifests
     "scripts/build-openai-plugin.py": NONE,
     "scripts/vendor-driver-skill.py": NONE,
     "scripts/verify-audit.py": NONE,
@@ -163,7 +164,7 @@ PROGRAMS = {
     "tools/qcow2raw": NONE,                                 # a disk image file on the Mac, while a build holds it
 }
 for _p in ("provisioning/guest/finalize.sh", "provisioning/guest/provision.sh", "provisioning/remote/bootstrap.sh",
-           "provisioning/sprite/bootstrap.sh", G + "desktop-record", G + "driver-mcp", G + "guest-status",
+           "providers/sprites/guest/bootstrap.sh", G + "desktop-record", G + "driver-mcp", G + "guest-status",
            G + "input-reset", G + "secret-fill", G + "session-init", G + "session-run", G + "storage-helper",
            "provisioning/guest/rootfs/usr/local/sbin/metacomputer-admin", R + "guest-firewall", R + "idle-stop",
            R + "remote-uninstall", S + "hide-sprite-api", S + "in-session", S + "services", S + "svc-desktop",

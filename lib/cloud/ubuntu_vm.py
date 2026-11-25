@@ -9,8 +9,8 @@ out, the internet with the cloud's metadata services, link-local and private ran
 nothing (EGRESS=off). The live view is x11vnc on the computer's loopback, reached through an SSH tunnel. The Mac
 stays the controller: the hub, the vault, recordings and every guard run here.
 
-Providers that make the VM (OCI: lib/cloud/oci.py) add a thin driver for create, start, stop and delete on top of
-RemoteVM; your own server has none: you make it, keep it on, and delete it."""
+Providers that make the VM (providers/<name>/adapter.py) add a thin driver for create, start, stop and delete on top
+of RemoteVM; your own server has none: you make it, keep it on, and delete it."""
 import ipaddress
 
 from .adapter import Adapter, AdapterError, HandledByCLI, NotSupported, check_name

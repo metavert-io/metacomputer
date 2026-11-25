@@ -26,27 +26,15 @@ Billed by the hour up to the monthly price; a stopped instance is billed in full
 charges."""
 import re
 
-from .adapter import AdapterError, NotSupported
-from .vps import API, OP, Capacity, ProviderError, VPS, fw_name, fw_owner, manifest
+from cloud.adapter import AdapterError, NotSupported
+from cloud.vps import API, OP, Capacity, ProviderError, VPS, fw_name, fw_owner
 
-ENV_KEY = "VULTR_API_KEY"
-# size -> (architecture, vCPUs, memory GB, disk GB, USD an hour): Vultr's list prices, read from its API on
-# 2026-11-23; billed by the hour up to the monthly price (vc2-2c-4gb $20, vc2-4c-8gb $40).
-SIZES = {
-    "vc2-2c-4gb": ("x86_64", 2, 4, 80, 0.027),
-    "vc2-4c-8gb": ("x86_64", 4, 8, 160, 0.055),
-}
-REGIONS = ("ewr", "ord", "dfw", "sea", "lax", "atl", "ams", "lhr")
+from .manifest import ENV_KEY, MANIFEST, REGIONS, SIZES  # noqa: F401  (its manifest: providers/vultr/manifest.py)
+
 OS_NAME = "Ubuntu 24.04 LTS x64"
 INSTANCE = re.compile(r"mc-([0-9a-f]{32})-([A-Za-z0-9][A-Za-z0-9._-]{0,63})")
 UNAUTHORIZED_IP = re.compile(r"Unauthorized IP address:?\s*([0-9a-fA-F:.]{2,45})")
 
-MANIFEST = manifest(
-    "vultr", "Vultr", SIZES, REGIONS,
-    # Vultr's firewall groups filter only what comes in (SSH, here): nothing outside the computer holds its egress.
-    {"enforced": False, "private_ranges": False, "metadata": False, "off": False},
-    "billed by the hour up to the monthly price; a stopped instance is billed in full: only deleting it "
-    "(metacomputer vm delete) stops the charges, and the idle stop saves nothing")
 RULES = (("v4", "0.0.0.0", 0), ("v6", "::", 0))      # SSH in, from anywhere (key only)
 
 
@@ -297,3 +285,6 @@ class Vultr(VPS):
     def look_for(name, op):
         return (f"Vultr's console (instances labelled mc-{op}-{name}), or: curl -H \"Authorization: Bearer "
                 f"$VULTR_API_KEY\" 'https://api.vultr.com/v2/instances?label=mc-{op}-{name}'")
+
+
+ADAPTER = Vultr

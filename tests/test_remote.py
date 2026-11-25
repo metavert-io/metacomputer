@@ -40,8 +40,10 @@ LAB = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(LAB, "lib"))
 sys.path.insert(0, TESTS)
 import cloud  # noqa: E402
-from cloud import guest, oci, transport  # noqa: E402
+from cloud import guest, transport  # noqa: E402
 from cloud.adapter import AdapterError, NotSupported  # noqa: E402
+
+oci = cloud.registry.module("oci")
 
 FAILS = []
 PY = os.environ.get("MCOMP_TEST_PY") or shutil.which("python3") or sys.executable
@@ -667,7 +669,7 @@ class FakeOCI:
         return True
 
 def oci_driver():
-    print("\nthe OCI driver (lib/cloud/oci.py), on a stand-in API")
+    print("\nthe OCI driver (providers/oci/adapter.py), on a stand-in API")
     api = FakeOCI(full={"AD-1"})
     a = oci.OCI(api=api, env={})
     OP1 = "a1" * 16
@@ -1392,7 +1394,7 @@ def vps_drivers():
             check(f"{label}: rates {size}: a number, the list price's date and the billing truth said",
                   rr["awake_per_hour"] > 0 and "2026-11-23" in rr["note"] and "only deleting it" in rr["note"], rr)
     # Hetzner: its own details.
-    from cloud import hetzner, vultr
+    hetzner, vultr = cloud.registry.module("hetzner"), cloud.registry.module("vultr")
     rs = hetzner.rules("internet")
     check("Hetzner Cloud: at most 100 addresses in one rule (its limit, found live), the 103 public blocks in two rules "
           "per protocol, read back as one", all(len(x.get("destination_ips") or []) <= 100 for x in rs)
@@ -1697,7 +1699,7 @@ def audit_fixes():
 
         def part_f3():
             # F3: DigitalOcean's DNS to the resolver's exact addresses only, checked against the Droplet's VPC.
-            from cloud import digitalocean as dom
+            dom = cloud.registry.module("digitalocean")
             h, api, st0 = box("digitalocean")
             remote_mod.cmd_create(st0, args(op="b8" * 16))
             j = remote_mod.read_state(st0["RUN_DIR"])
@@ -2197,7 +2199,7 @@ PROVIDER=hetzner VM_NAME=box RUN_DIR=/nonexistent-run MC_SETTINGS_LABEL=x EGRESS
                 check("(re-check 3, P2) the clean-up's warnings (what a build made, and the network vm delete couldn't "
                       "delete) never show a credential this program was given", "wasn't all deleted" in warned
                       and "network wasn't" in warned and SECRET not in warned and warned.count("[redacted]") >= 2, warned)
-                import spritecli
+                spritecli = cloud.registry.module("sprites", "cli")
                 cli = spritecli.SpriteCLI("/usr/bin/false")
                 fly = "FlyV1 fm2_" + "lJPECAAAAAAAAbcdefghij0123456789ABCDEF" * 3
                 cli.run = lambda *a, **k: (1, b"", f"Error: unauthorized for token {fly}\n".encode())
@@ -2777,9 +2779,9 @@ def abort_scoped():
 
 # --- Oracle Cloud's security groups, through the real SDK facade on an in-memory Oracle -------------------------------
 class OracleStandIn:
-    """Oracle's own clients (VirtualNetworkClient, ComputeClient, IdentityClient), in memory, under lib/cloud/oci.py's
-    real SDK facade: groups and instances by OCID with freeform tags, rules per group, VNICs with their groups. Every
-    change to a group's rules is recorded (rule_changes), and every group deleted (deleted)."""
+    """Oracle's own clients (VirtualNetworkClient, ComputeClient, IdentityClient), in memory, under
+    providers/oci/adapter.py's real SDK facade: groups and instances by OCID with freeform tags, rules per group, VNICs
+    with their groups. Every change to a group's rules is recorded (rule_changes), and every group deleted (deleted)."""
 
     class ServiceError(Exception):
         def __init__(self, status, code="", message=""):
@@ -3954,6 +3956,10 @@ def remote_helpers():
     r = subprocess.run([PY, rp, "probe", "--vm", "box", "--host", "192.0.2.1", "--timeout", "1"], capture_output=True,
                        text=True, timeout=30)
     check("probe: an address nothing answers on is unreachable, within the timeout", r.stdout.strip() == "unreachable", r)
+    r = subprocess.run([PY, rp, "probe", "--vm", "box", "--host", "192.0.2.1", "--timeout", "1", "--setting", "NOPE=1"],
+                       capture_output=True, text=True, timeout=30)
+    check("probe: settings it refuses (a transport setting no provider has) read as unknown, as an adapter's error "
+          "does (review of item 5, C3)", r.returncode == 0 and r.stdout.strip() == "unknown", r)
     sys.path.insert(0, os.path.join(LAB, "lib"))
     import remote as remote_mod
     orig = remote_mod.transport.check_host

@@ -4,14 +4,16 @@ provider made). bin/metacomputer and scripts/remote-build.sh call this for what 
 computer's record; everything that talks to the computer itself goes through scripts/lib.sh's ssh_base, whose
 remote half asks `target` here (lib/cloud/transport.py) once per command.
 
-    remote.py target --vm NAME --run-dir DIR --role ROLE --user USER --transport T --host H --port P
-        the ssh options and destination for that computer, NUL-separated (scripts/lib.sh ssh_base)
+    remote.py target --vm NAME --run-dir DIR --role ROLE --user USER --transport T --host H --port P [--setting K=V]...
+        the ssh options and destination for that computer, NUL-separated (scripts/lib.sh ssh_base); --setting: the
+        settings a provider's transport reads (its manifest's transport_settings)
     remote.py create --vm NAME                 a provider's computer: its instance (and the provider's network);
                                                a launch whose record was lost (by its operation tag) is deleted
     remote.py egress --vm NAME --set internet|off   the provider's outside rules for EGRESS (where it has them)
     remote.py resolvers --vm NAME --first-boot --set ADDRESS... | --pinned   the provider's DNS resolver, let through
-                                               its firewall where it's on the private network (DigitalOcean): read
-                                               once at the first boot, checked and pinned; never read again
+                                               its firewall where it's on the private network (its adapter's
+                                               RESOLVER_EXCEPTION): read once at the first boot, checked and pinned;
+                                               never read again
     remote.py identity --vm NAME --write|--remove   the computer's identity (its instance, or this setup of your own
                                                server, and its host key), beside its keys: the vault's binding must
                                                match it
@@ -22,21 +24,26 @@ remote half asks `target` here (lib/cloud/transport.py) once per command.
     remote.py status --vm NAME [--json]        the provider's view of it (and the address, when it runs)
     remote.py state --vm NAME                  one word: awake, stopped, starting, stopping, absent, unknown
     remote.py rates --vm NAME [--json]         what it costs awake and asleep
-    remote.py cloud status|doctor|setup|teardown PROVIDER [--json] [--org ORG] [--forget OP]
-        what metacomputer has made at a provider (tagged), checks, the provider's network, and removing it
-    remote.py exec --vm NAME [--stdin] -- ARGV...   Fly Sprites: a command in the Sprite through Fly's authenticated
-                                               channel (the setup's first step: before its own SSH exists)
-    remote.py checkpoint --vm NAME list|create|restore|delete [LABEL]   a provider's snapshots (Sprites' checkpoints)
-    remote.py allow --vm NAME [--exact] [--remove] NAME... | --clear | --show   Fly Sprites: an allowlist of DNS
-                                               names as its network policy (--clear: back to EGRESS)
+    remote.py cloud status|doctor|setup|teardown PROVIDER [--json] [--forget OP] [its own options]
+        what metacomputer has made at a provider (tagged), checks, the provider's network, and removing it; a
+        provider's own options are its manifest's cloud_options
+    remote.py exec --vm NAME [--stdin] -- ARGV...   a command in the computer through its provider's own
+                                               authenticated channel (the setup's first step: before its own SSH
+                                               exists), where the provider has one
+    remote.py checkpoint --vm NAME list|create|restore|delete [LABEL]   a provider's snapshots, where it has them
+    remote.py allow --vm NAME [--exact] [--remove] NAME... | --clear | --show   an allowlist of DNS names as its
+                                               provider's network policy, where it has one (--clear: back to EGRESS)
     remote.py tunnel ... (target's options)    the vault's binding of a computer behind a provider's tunnel, one
                                                argument a line: the tunnel, its arguments, the provider's id and how
                                                to ask about it, all or a refusal; nothing for one SSH reaches straight
 
+What a provider does differently is its own (providers/<name>/remote.py, called with this module: hooks_for); what
+it has, the words it's shown with and its credentials are its manifest's (lib/cloud/manifests.py).
+
 The computer's settings are its settings file (config/vms/NAME.env, read through lib/labconfig.py, as every
 helper reads them); what its provider made (the instance, its address) is RUN_DIR/remote.json, written only here,
-0600. Provider credentials come only from the environment (PROVIDER_ENV: each driver's own). Nothing here prints
-one."""
+0600. Provider credentials come only from the environment (PROVIDER_ENV: each provider's manifest names its own).
+Nothing here prints one."""
 import argparse
 import contextlib
 import datetime
@@ -54,6 +61,7 @@ LAB = os.path.dirname(LIB)
 sys.path.insert(0, LIB)
 import cloud  # noqa: E402
 from cloud import guest as cloud_guest  # noqa: E402
+from cloud import manifests  # noqa: E402
 from cloud import transport  # noqa: E402
 from cloud.adapter import AdapterError  # noqa: E402
 
@@ -78,19 +86,18 @@ def now():
 # metacomputer starts this program with them in its environment (scripts/lib.sh remote_py) and nothing else. They
 # leave this process's environment before anything else runs, and go to the provider's adapter as a value: no child
 # this program starts (getconf, the settings resolver's bash, ssh) can inherit them.
-PROVIDER_ENV = ("OCI_USER", "OCI_TENANCY", "OCI_FINGERPRINT", "OCI_REGION", "OCI_API_KEY_PEM", "OCI_COMPARTMENT",
-                "HCLOUD_TOKEN", "DIGITALOCEAN_TOKEN", "VULTR_API_KEY")
+PROVIDER_ENV = manifests.credentials()      # every provider's, as its manifest names them (lib/cloud/manifests.py)
 CREDS = {}
 
 
-NOT_SECRET = ("OCI_REGION",)       # a credential's part that isn't one (a region's name is in ordinary messages)
+NOT_SECRET = manifests.not_secret()       # a credential's part that isn't one (a region's name is in ordinary messages)
 
 
 def cred_values():
     """What no message may show: each credential this program was given (PROVIDER_ENV, longest first), and each line
     of a multi-line one (an API key's PEM, whose lines a provider could echo one at a time). The only credentials this
-    process reads; Fly's sprite command keeps its own sign-in (this program never sees it), and what that command says
-    is scrubbed of anything credential-shaped where it becomes a message (lib/spritecli.py)."""
+    process reads; a provider whose own command keeps its sign-in has none here (this program never sees it), and what
+    that command says is scrubbed of anything credential-shaped where it becomes a message (its facade's job)."""
     out = set()
     for k, v in CREDS.items():
         if not v or k in NOT_SECRET:
@@ -240,8 +247,6 @@ def durable(fd):
 
 # Tests hand in a stand-in for the provider's SDK facade (a callable that returns one); never set otherwise.
 API_FACTORY = None
-# ...and for Fly's sprite command (a callable taking the command's path; lib/spritecli.py SpriteCLI otherwise).
-SPRITE_FACTORY = None
 
 
 @contextlib.contextmanager
@@ -275,19 +280,19 @@ def makes(a):
 
 
 def stop_start(a):
-    """Whether the provider's computers are stopped and started (OCI, Hetzner, DigitalOcean, Vultr): their adapters
-    take what the guest's SSH says (guest_up) and --force; a Sprite sleeps by itself and takes neither."""
+    """Whether the provider's computers are stopped and started (its manifest's sleep_wake): their adapters take what
+    the guest's SSH says (guest_up) and --force; one that sleeps by itself takes neither."""
     return a.manifest["sleep_wake"]["kind"] == "stop-start"
 
 
 def still_there(a, found, skip=()):
     """The instances of a listing the provider still has, asked one by one by id (a provider's listings can lag behind
-    a delete: DigitalOcean's do), less those in `skip`."""
+    a delete), less those in `skip`."""
     return [i for i in found if i["id"] not in skip and a.api.instance(i["id"]) is not None]
 
 
 def network_lock(prov):
-    """The lock a provider's shared resources (OCI's network; a computer's firewall and key) are changed under."""
+    """The lock a provider's shared resources (a shared network; a computer's firewall and key) are changed under."""
     return mac_lock(f"{prov}-network")
 
 
@@ -302,30 +307,28 @@ def adapter_for(s, state=None):
     return cloud.adapter(prov, computers={s["VM_NAME"]: s}, states={s["VM_NAME"]: state or {}}, **provider_kw(prov, s))
 
 
-def sprite_cli(path):
-    if SPRITE_FACTORY is not None:
-        return SPRITE_FACTORY(path)
-    import spritecli
-    return spritecli.SpriteCLI(path)
+def hooks_for(prov, need=None):
+    """The provider's own part of this program (providers/<name>/remote.py), or None: given `need`, only when it has
+    that hook. It's called with this module (R) for the records, refusals and locks here."""
+    h = cloud.registry.hooks(prov) if prov in cloud.registry.PROVIDERS else None
+    if h is None or (need is not None and not hasattr(h, need)):
+        return None
+    return h
 
 
 def provider_kw(prov, s=None):
     """What a provider's adapter is made with here: its credentials (a value, not the environment), the way to its
-    REST API (lib/provider_http.py: every provider but OCI, whose SDK has its own) and the lock its shared network,
-    or a computer's firewall and key, are changed under; for Fly Sprites, the facade of its sprite command (which keeps
-    its own sign-in)."""
-    if prov == "sprites":
-        from cloud import sprites as cloud_sprites
-        try:
-            path = cloud_sprites.cli_path(dict(s or {}, SPRITE_CLI=(s or {}).get("SPRITE_CLI") or os.environ.get("SPRITE_CLI", "")))
-        except AdapterError:
-            return {}               # the adapter refuses what needs the command, saying so
-        return {"cli": sprite_cli(path)}
+    REST API (lib/provider_http.py, for an adapter that says REST_API; an SDK has its own) and the lock its shared
+    network, or a computer's firewall and key, are changed under; or what its own hook makes it with (a provider
+    whose command keeps its own sign-in: the facade of that command)."""
+    h = hooks_for(prov, "provider_kw")
+    if h is not None:
+        return h.provider_kw(sys.modules[__name__], s)
     cls = cloud.ADAPTERS.get(prov)
     if cls is None or cls.test_only or cls.manifest["sleep_wake"]["kind"] == "none" or prov == "local-lume":
         return {}
     kw = {"api": API_FACTORY()} if API_FACTORY is not None else {"env": dict(CREDS)}
-    if prov != "oci" and API_FACTORY is None:
+    if getattr(cls, "REST_API", False) and API_FACTORY is None:
         import provider_http
         kw["http"] = provider_http.send
     kw["network_lock"] = lambda: network_lock(prov)
@@ -375,8 +378,9 @@ def cmd_create(s, args):
     a = adapter_for(s, st)
     if a.manifest["sleep_wake"]["kind"] == "none":
         raise Refused(f"{a.manifest['label']}: there's nothing to make (you bring the server)")
-    if a.name == "sprites":
-        return create_sprite(s, a, rd, st, op)
+    h = hooks_for(a.name, "create")
+    if h is not None:
+        return h.create(sys.modules[__name__], s, a, rd, st, op)
     if st.get("launching"):
         # An earlier operation that never finished: what it launched is found by the ids it journaled (asked one by
         # one) and its mark, and deleted, with what it made; one whose launch got no answer and shows nowhere yet
@@ -398,7 +402,7 @@ def cmd_create(s, args):
     st = {k: v for k, v in st.items() if k not in JOURNAL_KEYS}
     # Every operation started for this computer stays named in its record (`ops`, not journal keys: never cleared by a
     # later try), so what one of them made and couldn't delete (its group, at a provider whose groups go only by the
-    # record: Oracle Cloud) is found by its mark again at vm delete, never by the computer's name.
+    # record: groups_by_record) is found by its mark again at vm delete, never by the computer's name.
     ops = [o for o in (st.get("ops") or []) if isinstance(o, str) and OP_RE.fullmatch(o) and o != op][-(MAX_OPS - 1):] + [op]
     try:
         write_state(rd, dict(st, provider=a.name, launching=op, ops=ops))   # the journal, durable before anything is billed
@@ -453,51 +457,11 @@ def cmd_create(s, args):
     return 0
 
 
-def lost_sprite(a, s, st):
-    """The Sprite a launch journaled in `st` made though its answer was lost: only one that carries that launch's
-    operation label, set when Fly made it (lib/cloud/sprites.py owned_lost). A Sprite of that name without it is
-    nobody's this Mac can name: AdapterError, and it's left alone. A name and a time are never enough."""
-    if not st.get("launching"):
-        return None
-    return a.owned_lost(s["VM_NAME"], st["launching"])
-
-
-def create_sprite(s, a, rd, st, op):
-    """Fly Sprites: the computer's Sprite, journaled like any launch (lost answers are found by name and time), then
-    its network policy at EGRESS=internet for the setup's downloads (the build sets EGRESS when it ends)."""
-    from cloud import sprites as cloud_sprites
-    lost = lost_sprite(a, s, st)
-    if lost:
-        print(f"metacomputer: an earlier launch of {s['VM_NAME']} made a Sprite it never recorded (its label shows it): "
-              "deleting it", file=sys.stderr)
-        a.cli.destroy(cloud_sprites.org_of(s), cloud_sprites.sprite_of(s))
-    t0 = time.time()
-    st = {k: v for k, v in st.items() if k not in ("kept", "aborted", "deleted")}
-    try:
-        write_state(rd, dict(st, provider=a.name, launching=op, launch_t=t0))
-    except OSError as e:
-        raise Refused(f"couldn't make the launch's journal durable ({e.strerror or e}): nothing was made") from None
-    print(f"metacomputer: making {s['VM_NAME']} on {a.manifest['label']} (the Sprite {cloud_sprites.sprite_of(s)} in "
-          f"{cloud_sprites.org_of(s)})", file=sys.stderr)
-    made = a.create(s["VM_NAME"], persist=s.get("PERSIST") or "auto", op=op)
-    st = {"provider": a.name, "created": now(), "launch_started": t0, "op": op, "made_by_build": True, **made}
-    try:
-        write_state(rd, st)
-    except OSError as e:
-        a.cli.destroy(made["org"], made["sprite"])
-        raise Refused(f"couldn't record the Sprite it made ({e.strerror}), so it was deleted again; nothing is left "
-                      "billing") from None
-    a.states[s["VM_NAME"]] = st
-    kind, _ = a.set_policy(s["VM_NAME"], cloud_sprites.rules_for("internet"))
-    print(f"  the Sprite is made ({int(time.time() - t0)} s); its network policy: {kind} for the setup", file=sys.stderr)
-    return 0
-
-
 # What a launch leaves in the journal (lib/cloud: the `made` callback), cleared when a new operation starts.
 JOURNAL_KEYS = ("made_network", "made_nsg", "made_key", "made_instance", "launch_state", "kept", "unresolved")
 MAX_OPS = 64               # operations a computer's record keeps naming (ops)
 LOST_LAUNCH_LOOKS = 6       # a launch with no answer: the provider's listing is looked at this many times more,
-LOST_LAUNCH_GAP_S = 10      # this far apart (a listing can lag behind what was just made: DigitalOcean's did)
+LOST_LAUNCH_GAP_S = 10      # this far apart (a listing can lag behind what was just made: one provider's did)
 
 
 class NotOwned(Refused):
@@ -623,7 +587,7 @@ def forget_parts(a, computer, op):
 
 def delete_group(a, gid, name, op):
     """Deletes the security group (firewall) `gid` of computer `name`'s operation `op`. Where the provider's groups are
-    acted on only as the record names them (Oracle Cloud: groups_by_record), it goes only while, read by its id, it's
+    acted on only as the record names them (its adapter's groups_by_record), it goes only while, read by its id, it's
     tagged for that computer and that operation."""
     if getattr(a, "groups_by_record", False):
         return a.api.delete_nsg_by_id(gid, name, op)
@@ -685,8 +649,9 @@ def cmd_abort(s, args):
     if not mine:
         print(f"metacomputer: nothing of {s['VM_NAME']} was made by this build; nothing deleted", file=sys.stderr)
         return 0
-    if a.name == "sprites":
-        return abort_sprite(s, a, rd, st, op, args.keep)
+    h = hooks_for(a.name, "abort")
+    if h is not None:
+        return h.abort(sys.modules[__name__], s, a, rd, st, op, args.keep)
     found, unresolved = reconcile(s, st, a, op)
     if unresolved:
         write_state(rd, dict(st, unresolved=now()))      # the journal stays, so the next try looks again
@@ -723,34 +688,6 @@ def cmd_abort(s, args):
     if others:
         print(f"left alone: {len(others)} instance(s) of {s['VM_NAME']} this build didn't make "
               f"(metacomputer cloud status {a.name})", file=sys.stderr)
-    return 0
-
-
-def abort_sprite(s, a, rd, st, op, keep):
-    """A failed build's clean-up on Fly Sprites: the Sprite this operation made (its id recorded, or a lost launch
-    found by name and time) is deleted; --keep leaves it (asleep, it bills its disk only)."""
-    from cloud import sprites as cloud_sprites
-    org, sprite = cloud_sprites.org_of(s), cloud_sprites.sprite_of(s)
-    if not st.get("instance") and st.get("launching") == op:
-        lost = lost_sprite(a, s, st)
-        if lost:
-            st = dict({k: v for k, v in st.items() if k != "launching"}, instance=lost.get("id"), sprite=sprite,
-                      org=org, op=op)
-            write_state(rd, st)
-    if not st.get("instance"):
-        st = {k: v for k, v in st.items() if k != "launching"}
-        write_state(rd, dict(st, aborted=now()))
-        print("nothing to delete: no Sprite was made", file=sys.stderr)
-        return 0
-    if keep:
-        write_state(rd, dict(st, kept=now()))
-        print("kept")
-        return 0
-    a.states[s["VM_NAME"]] = st
-    a.delete(s["VM_NAME"])
-    st = {k: v for k, v in st.items() if k not in ("instance", "launching", "op")}
-    write_state(rd, dict(st, aborted=now()))
-    print(f"deleted the Sprite this build made ({a.manifest['label']})", file=sys.stderr)
     return 0
 
 
@@ -821,7 +758,7 @@ def cmd_wake(s, args):
     up = None
     if stop_start(a) and a.status(s["VM_NAME"]).get("provider_state") == "RUNNING":
         up = guest_up(s, st)
-        if up is False and a.name == "oci":
+        if up is False and getattr(a, "CONSOLE_POWEROFF", False):
             print(f"metacomputer: {s['VM_NAME']} runs at {a.manifest['label']} but doesn't answer: checking its "
                   "console for a power-off", file=sys.stderr)
     out = a.wake(s["VM_NAME"], guest_up=up) if stop_start(a) else a.wake(s["VM_NAME"])
@@ -862,21 +799,9 @@ def cmd_delete(s, args):
     if a.manifest["sleep_wake"]["kind"] == "none":
         print("nothing to delete at the provider: it's your own server", file=sys.stderr)
         return 0
-    if a.name == "sprites":
-        if st.get("instance"):
-            gone = a.delete(s["VM_NAME"])["deleted"]
-            print("deleted the Sprite, its disk and its checkpoints" if gone else "its Sprite was gone already",
-                  file=sys.stderr)
-        else:
-            lost = lost_sprite(a, s, st)
-            if lost:
-                from cloud import sprites as cloud_sprites
-                a.cli.destroy(cloud_sprites.org_of(s), cloud_sprites.sprite_of(s))
-                print("deleted a Sprite launched for it that this Mac had no record of (its label shows it)",
-                      file=sys.stderr)
-        st = {k: v for k, v in st.items() if k not in ("instance", "launching")}
-        write_state(rd, dict(st, deleted=now()))
-        return 0
+    h = hooks_for(a.name, "delete")
+    if h is not None:
+        return h.delete(sys.modules[__name__], s, a, rd, st, args)
     unresolved_op = None
     name, label, thing = s["VM_NAME"], a.manifest["label"], getattr(a, "thing", "instance")
     # What this deletes is decided, and checked, before anything is deleted: each instance read by its own id must
@@ -933,9 +858,10 @@ def cmd_delete(s, args):
         a.api.wait_state(iid, "TERMINATED", timeout=900)
     if unresolved_op is None:
         if getattr(a, "groups_by_record", False):
-            # Oracle Cloud: only the groups its record names (the ids it recorded, and the marks of the operations
-            # this Mac started for it), each read by its id and tagged for it and that operation: never one found by
-            # its name (another Mac's computer of the same name, or one being made, is left as it is)
+            # Groups acted on only by the record (groups_by_record): only the groups its record names (the ids it
+            # recorded, and the marks of the operations this Mac started for it), each read by its id and tagged for it
+            # and that operation: never one found by its name (another Mac's computer of the same name, or one being
+            # made, is left as it is)
             a.delete_groups(name, st)
         else:
             a.api.delete_nsg(s["VM_NAME"])
@@ -980,7 +906,7 @@ def cmd_status(s, args):
             write_state(rd, st)
         out["host"] = out.get("host") or st.get("host")
         if out.get("provider_state") == "RUNNING" and guest_up(s, st, tries=1) is False:
-            if a.name == "oci":
+            if getattr(a, "CONSOLE_POWEROFF", False):
                 out["note"] = ("it doesn't answer: if it powered itself off (unused for IDLE_STOP minutes), the provider "
                                "still counts it as running, and bills a billed size, until metacomputer stop (start does it "
                                "when its console shows the power-off)")
@@ -1033,8 +959,8 @@ def cmd_rates(s, args):
 
 def cmd_resolvers(s, args):
     """The DNS resolver let through a computer's firewall at a provider whose resolver is on its private network
-    (DigitalOcean): exactly that, port 53. --first-boot --set ADDRESS...: what the computer named at its first boot
-    (the build reads it before anything but cloud-init and bootstrap.sh has run in it), each checked to be the
+    (RESOLVER_EXCEPTION): exactly that, port 53. --first-boot --set ADDRESS...: what the computer named at its first
+    boot (the build reads it before anything but cloud-init and bootstrap.sh has run in it), each checked to be the
     provider's own resolver for its network, and pinned: taken once, never again. --pinned: the pinned ones (a build
     that sets the computer up again, and `net egress`, never read the computer); with none pinned, the provider's
     documented resolver. Prints them (or "none")."""
@@ -1058,20 +984,22 @@ def cmd_resolvers(s, args):
 
 def cmd_plan(s, args):
     """What the build and the CLI need to know, one KEY=VALUE per line: kind (made: a provider makes it; own: your
-    server), arch (from the size, for a provider's; else GUEST_ARCH or "detect"), label, idle_stop, egress, outside
-    (yes: the provider holds EGRESS outside the computer too), billing_stopped (what a stopped computer still bills:
-    storage, full, unknown), soft_stop (api: the provider asks the guest to shut down; guest: the CLI asks it over
-    SSH), provider (the adapter's name)."""
+    server; provider: the provider's own first steps, providers/<name>/build.sh), arch (from the size, for a
+    provider's; else GUEST_ARCH or "detect"), label, idle_stop, egress, outside (yes: the provider holds EGRESS outside
+    the computer too), billing_stopped (what a stopped computer still bills: storage, full, unknown), soft_stop (api:
+    the provider asks the guest to shut down; guest: the CLI asks it over SSH), provider (the adapter's name),
+    resolvers, and how the guest is set up there: target (MCOMP_TARGET: remote, or the provider's own), systemd,
+    cloud_init, guest_firewall (its own firewall is a layer there), keep_awake (a connection held open while it's set
+    up: a computer that sleeps by itself)."""
     a = adapter_for(s, read_state(run_dir(s)))
     made = makes(a)
     arch = "detect"
     common = (f"outside={'yes' if a.manifest['outside_egress']['enforced'] else 'no'}\n"
               f"billing_stopped={a.manifest['billing']['stopped']}\nsoft_stop={getattr(a, 'SOFT_STOP', 'api')}\n"
               f"provider={a.name}\nresolvers={'yes' if getattr(a, 'RESOLVER_EXCEPTION', False) else 'no'}")
-    if a.name == "sprites":
-        from cloud import ubuntu_vm
-        print(f"kind=sprite\narch=x86_64\nlabel={a.manifest['label']}\nidle_stop=off\n"
-              f"egress={ubuntu_vm.check_egress(s.get('EGRESS'))}\n{common}")
+    h = hooks_for(a.name, "plan")
+    if h is not None:
+        print(h.plan(sys.modules[__name__], s, a, common))
         return 0
     if made:
         arch = a.arch(s.get("SIZE") or None)
@@ -1083,7 +1011,8 @@ def cmd_plan(s, args):
         raise Refused(f"IDLE_STOP={idle}: minutes, or off")
     from cloud import ubuntu_vm
     print(f"kind={'made' if made else 'own'}\narch={arch}\nlabel={a.manifest['label']}\nidle_stop={idle}\n"
-          f"egress={ubuntu_vm.check_egress(s.get('EGRESS'))}\n{common}")
+          f"egress={ubuntu_vm.check_egress(s.get('EGRESS'))}\n{common}\n"
+          "target=remote\nsystemd=yes\ncloud_init=yes\nguest_firewall=yes\nkeep_awake=no")
     return 0
 
 
@@ -1102,43 +1031,12 @@ def cmd_user_data(s, args):
     return 0
 
 
-def sprite_computers(extra_org=None):
-    """The Sprites computers set up on this Mac (their settings, by name), and one stand-in per --org given, so the
-    organization is listed even with no computer of it here."""
-    out = {}
-    vms = os.path.join(LAB, "config", "vms")
-    for f in sorted(os.listdir(vms)) if os.path.isdir(vms) else []:
-        if not f.endswith(".env"):
-            continue
-        try:
-            st = settings_for(f[:-4])
-        except Exception:      # noqa: BLE001  (a file that doesn't resolve is listed by metacomputer list, not here)
-            continue
-        if st.get("PROVIDER") == "sprites":
-            out[st["VM_NAME"]] = st
-    if extra_org:
-        out.setdefault("-org-" + extra_org, {"VM_NAME": "-org-" + extra_org, "PROVIDER": "sprites",
-                                             "SPRITE_ORG": extra_org, "SPRITE_NAME": "x"})
-    return out
-
-
 def cmd_cloud(args):
     if args.provider not in cloud.ADAPTERS or args.provider in ("local-lume", "fake"):
         raise Refused(f"no provider called {args.provider} ({', '.join(sorted(cloud.providers().values()))})")
-    if args.provider == "sprites":
-        comps = sprite_computers(args.org)
-        a = cloud.adapter("sprites", computers=comps, **provider_kw("sprites"))
-        if args.action == "status":
-            out = {"provider": a.name, "sprites": a.list(),
-                   "note": "every Sprite in the organizations of this Mac's computers (and --org): here = one of them"}
-        elif args.action == "doctor":
-            out = {"provider": a.name, "checks": a.doctor()}
-        elif args.action == "setup":
-            out = a.setup()
-        else:
-            raise Refused("nothing to tear down at Fly Sprites: each computer's Sprite goes with metacomputer vm delete NAME")
-        print(json.dumps(out, indent=None if args.json else 2, sort_keys=True, default=str))
-        return 0
+    h = hooks_for(args.provider, "cloud")
+    if h is not None:
+        return h.cloud(sys.modules[__name__], args)
     a = cloud.adapter(args.provider, **provider_kw(args.provider))
     if args.action == "status":
         if a.name == "ubuntu-vm":
@@ -1202,8 +1100,7 @@ def cmd_cloud(args):
                               "if it was cut off: metacomputer vm delete NAME, then this again"
                               + (". A group no computer's record on this Mac names (another Mac's, or one whose "
                                  "record is gone) is never deleted on its name: delete it in "
-                                 f"{a.manifest['label']}'s console (Networking > Virtual cloud networks > metacomputer "
-                                 "> Network security groups) once you know it's no one's"
+                                 f"{a.manifest['label']}'s console ({a.GROUPS_IN_CONSOLE}) once you know it's no one's"
                                  if getattr(a, "groups_by_record", False) else ""))
             out = {"provider": a.name, "network_deleted": a.api.delete_network(), "unresolved_settled": settled,
                    "unresolved_left": [e["op"] for e in kept]}
@@ -1225,54 +1122,46 @@ def cmd_target(args):
     (no second reading of the settings) and the provider's record (the address it gave)."""
     ep = target_endpoint(args)
     wrapper = WRAPPER
-    if ep["transport"] == "sprite":
-        # Every connection goes to the computer's own Sprite, or none: checked now, and again by the ProxyCommand right
-        # before each connection's tunnel starts (lib/proxywrap.py --id), so arguments a caller keeps (scripts/lib.sh
-        # keeps them for the rest of its command, the hub for its life) never reach a Sprite made again under the name.
-        st = check_sprite(args, ep)
-        chk = sprite_check_argv(args, ep)
-        wrapper = (*WRAPPER, "--id", st["instance"], "--check", str(len(chk)), *chk)
+    h = transport_hooks(ep["transport"], "connect_wrapper")
+    if h is not None:
+        # A provider's tunnel: every connection goes to the computer's own, or none, checked now and again by the
+        # ProxyCommand right before each connection's tunnel starts (lib/proxywrap.py --id), so arguments a caller
+        # keeps (scripts/lib.sh keeps them for the rest of its command, the hub for its life) never reach one made
+        # again under the name.
+        wrapper = (*WRAPPER, *h.connect_wrapper(sys.modules[__name__], args, ep))
     out = transport.ssh_target(ep, args.user, wrapper=wrapper)
     sys.stdout.write("\0".join(out) + "\0")
     return 0
 
 
-def sprite_check_argv(args, ep):
-    """How Fly's command (the tunnel's own program) is asked about the Sprite: its record from the API, whose "id" must
-    be the one recorded when it was made (lib/proxywrap.py --check, and the vault's binding)."""
-    from cloud import sprites as cloud_sprites
-    org = cloud_sprites.org_of({"SPRITE_ORG": args.sprite_org})
-    return [ep["proxy"][0], "-o", org, "api", f"/v1/sprites/{ep['host']}", "--", "-sS"]
+def transport_hooks(name, need):
+    """The hooks of the provider whose transport `name` is (its manifest's transport), when it has `need`; else None."""
+    prov = manifests.by_transport(name)
+    return hooks_for(prov, need) if prov else None
 
 
-def check_sprite(args, ep, state=None):
-    """The Sprite a connection (or the vault's binding) goes to is the computer's own: made under the organization and
-    name the settings say, and the Sprite of that name at Fly has the id recorded when it was made. Refused otherwise
-    (one deleted and made again under the name is another, whoever made it). Returns its record."""
-    from cloud import sprites as cloud_sprites
-    state = read_state(args.run_dir) if state is None and args.run_dir else (state or {})
-    want = state.get("instance")
-    if not want:
-        raise Refused(f"{args.vm} has no Sprite on record: nothing to connect to")
-    org = cloud_sprites.org_of({"SPRITE_ORG": args.sprite_org})
-    if (state.get("org") and state["org"] != org) or (state.get("sprite") and state["sprite"] != ep["host"]):
-        raise Refused(f"{args.vm}'s settings name {ep['host']} in {org}, but it was made as {state.get('sprite')} in "
-                      f"{state.get('org')}: no connection was made")
-    cur = sprite_cli(ep["proxy"][0]).info(org, ep["host"])
-    if cur is None:
-        raise Refused(f"{args.vm}'s Sprite is gone from Fly: no connection was made (metacomputer vm delete {args.vm})")
-    if cur.get("id") != want:
-        raise Refused(f"the Sprite named {ep['host']} in {org} isn't the one {args.vm} was made as (another id): no "
-                      "connection was made")
-    return state
+def transport_settings(args):
+    """The settings a provider's transport reads (--setting KEY=VALUE, each a name its manifest's transport_settings
+    lists, given once): {KEY: VALUE}; Refused otherwise."""
+    allowed, out = set(manifests.transport_settings()), {}
+    for kv in getattr(args, "setting", None) or []:
+        k, eq, v = kv.partition("=")
+        if not eq or k not in allowed or k in out:
+            raise Refused(f"--setting {k[:64]!r}: not a setting of a provider's transport, or given twice")
+        out[k] = v
+    return out
+
+
+def setting(args, key):
+    """One of the transport's settings (transport_settings), or "" when it wasn't given."""
+    return transport_settings(args).get(key, "")
 
 
 def target_endpoint(args):
     """The endpoint from the values bash loaded (target, tunnel, probe) and the provider's record."""
     state = read_state(args.run_dir) if args.run_dir else {}
     settings = {"VM_NAME": args.vm, "TRANSPORT": args.transport, "SSH_HOST": args.host, "SSH_HOST_PORT": args.port,
-                "SPRITE_ORG": getattr(args, "sprite_org", ""), "SPRITE_NAME": getattr(args, "sprite_name", ""),
-                "SPRITE_CLI": getattr(args, "sprite_cli", "")}
+                **{k: "" for k in manifests.transport_settings()}, **transport_settings(args)}
     return transport.endpoint(settings, {"host": state.get("host")} if state.get("host") else None)
 
 
@@ -1282,15 +1171,15 @@ def cmd_tunnel(args):
     that carries its SSH: lib/cloud/transport.py endpoint's proxy), --tunnel-id ID (the provider's own id for it,
     recorded when it was made) and --tunnel-check-arg=ARG for each argument with which the same program asks the
     provider about it (an answer in JSON whose "id" must be that one). All of them together, from one look at the
-    computer's own Sprite (check_sprite), each checked to be a word the vault takes, or nothing and a refusal: never a
-    binding of the name as an address. Nothing for a computer reached straight over SSH."""
+    computer's own (its provider's tunnel hook checks it), each checked to be a word the vault takes, or nothing and
+    a refusal: never a binding of the name as an address. Nothing for a computer reached straight over SSH."""
     ep = target_endpoint(args)
     if not ep["proxy"]:
         return 0
-    if ep["transport"] != "sprite":
+    h = transport_hooks(ep["transport"], "tunnel")
+    if h is None:
         raise Refused(f"the {ep['transport']} transport gives the vault no provider id to check: nothing to bind")
-    st = check_sprite(args, ep)
-    proxy, chk, tid = ep["proxy"], sprite_check_argv(args, ep), st.get("instance")
+    proxy, chk, tid = h.tunnel(sys.modules[__name__], args, ep)
     word = re.compile(r"[A-Za-z0-9._:/@=+_-]{1,200}")       # vault/Store.swift validTunnelArg
     if not (proxy and proxy[0].startswith("/") and all(word.fullmatch(x) for x in proxy)
             and len(chk) > 1 and chk[0] == proxy[0] and all(word.fullmatch(x) for x in chk)
@@ -1308,23 +1197,14 @@ def cmd_probe(args):
     import socket
     try:
         ep = target_endpoint(args)
-    except AdapterError:
+    except (AdapterError, Refused):     # a refusal (its settings) can't be told either
         print("unknown")
         return 0
     if ep["proxy"] is not None:
-        # A connection through a provider's tunnel would wake (and bill) a computer that sleeps: Fly Sprites' API says
-        # asleep or awake instead, without waking it; any other tunnel can't be told.
-        word = "unknown"
-        if args.transport == "sprite":
-            try:
-                from cloud import sprites as cloud_sprites
-                cur = sprite_cli(ep["proxy"][0]).info(cloud_sprites.org_of({"SPRITE_ORG": args.sprite_org}), ep["host"])
-                want = (read_state(args.run_dir) if args.run_dir else {}).get("instance")
-                word = ("absent" if cur is None or (want and cur.get("id") != want)
-                        else "awake" if cur.get("status") == "running" else "asleep")
-            except (AdapterError, Refused):
-                pass
-        print(word)
+        # A connection through a provider's tunnel would wake (and bill) a computer that sleeps: a provider's own API
+        # may say asleep or awake instead, without waking it (its transport's probe hook); any other can't be told.
+        h = transport_hooks(args.transport, "probe")
+        print(h.probe(sys.modules[__name__], args, ep) if h is not None else "unknown")
         return 0
     try:
         with socket.create_connection((ep["host"], ep["port"]), timeout=args.timeout) as c:
@@ -1334,27 +1214,6 @@ def cmd_probe(args):
         ok = False
     print("reachable" if ok else "unreachable")
     return 0
-
-
-def require_narrowing(s, a, st, new_rules, setup=False, what="that"):
-    """Fly Sprites: a change of the network policy whose end state lets out anything the policy in force doesn't runs
-    only at the user's own terminal, however it's split into steps (judged on the policy it ends with: lib/cloud/
-    sprites.py widens). The one exception is the setup's own: --setup, while this computer's setup hasn't finished
-    (its record says so: setup-done), opens it for the packages it downloads, and the build sets EGRESS after."""
-    from cloud import sprites as cloud_sprites
-    import owners
-    cur = a.egress(s["VM_NAME"])
-    if not cloud_sprites.widens(cur.get("outside"), cur.get("allow") or [], new_rules):
-        return
-    if setup:
-        if st.get("setup_done"):
-            raise Refused(f"{s['VM_NAME']} is set up already: the setup's exception doesn't apply. Nothing changed")
-        if new_rules != cloud_sprites.rules_for("internet"):
-            raise Refused("the setup opens the policy to every name, and nothing else. Nothing changed")
-        return
-    if not owners.at_user_terminal((0, 2)):
-        raise Refused(f"{what} lets the computer reach more than the policy in force does: only at your own terminal: "
-                      f"metacomputer --vm {s['VM_NAME']} {what}. Nothing changed")
 
 
 def cmd_setup_done(s, args):
@@ -1376,9 +1235,9 @@ def cmd_egress(s, args):
         print("none: nothing outside the computer enforces its egress here (only its own firewall)")
         return 0
     if args.set:
-        if a.name == "sprites":
-            require_narrowing(s, a, st, __import__("cloud.sprites").sprites.rules_for(args.set), args.setup,
-                              f"net egress {args.set}")
+        h = hooks_for(a.name, "egress_check")
+        if h is not None:
+            h.egress_check(sys.modules[__name__], s, a, st, args)
         check_firewall(s, st, a)
         out = a.apply_egress(s["VM_NAME"], args.set)
     else:
@@ -1426,102 +1285,18 @@ def cmd_identity(s, args):
     return 0
 
 
-def sprites_only(s, what):
+def provider_command(s, args):
+    """A command only some providers have (exec, checkpoint, allow): run by the computer's provider's own hook
+    (providers/<name>/remote.py COMMANDS), or refused, naming the providers that have it."""
     st = read_state(run_dir(s))
     a = adapter_for(s, st)
-    if a.name != "sprites":
-        raise Refused(f"{what} is for a computer on Fly Sprites; {s['VM_NAME']} is on {a.manifest['label']}")
-    return a, st
-
-
-EXEC_MAX_INPUT = 64 << 20          # the bootstrap's folder is about 30 KB
-
-
-def cmd_exec(s, args):
-    """A command in the Sprite through Fly's own authenticated channel (`sprite exec`), with this command's standard
-    input; its output and exit status are the command's. The setup's first step (before its own SSH exists)."""
-    a, _st = sprites_only(s, "exec")
-    argv = list(args.argv[1:] if args.argv[:1] == ["--"] else args.argv)
-    if not argv:
-        raise Refused("exec needs a command")
-    # Its standard input only when asked (--stdin): a caller's own stdin may be a pipe that never ends (found live:
-    # desktop-restart from a background shell waited on it for good).
-    data = sys.stdin.buffer.read(EXEC_MAX_INPUT + 1) if args.stdin else None
-    if data is not None and len(data) > EXEC_MAX_INPUT:
-        raise Refused(f"exec takes at most {EXEC_MAX_INPUT} bytes on its standard input")
-    rc, out, err = a.exec(s["VM_NAME"], argv, input=data, timeout=args.timeout, max_output=args.max_output)
-    sys.stdout.buffer.write(out)
-    sys.stdout.flush()
-    sys.stderr.buffer.write(err[-65536:])
-    return rc
-
-
-def cmd_checkpoint(s, args):
-    """A provider's snapshots: list, create, restore or delete the checkpoint called LABEL (Fly Sprites)."""
-    a, st = sprites_only(s, "checkpoints at the provider")
-    if not st.get("instance"):
-        raise Refused(f"{s['VM_NAME']} has no Sprite that this Mac knows of")
-    if args.action == "list":
-        out = a.snapshots(s["VM_NAME"])
-        if args.json:
-            print(json.dumps(out, sort_keys=True))
-        else:
-            for c in out:
-                print(f"{c['label']}\t{c['version']}\t{c.get('created') or ''}")
-        return 0
-    if not args.label:
-        raise Refused(f"checkpoint {args.action} needs a name")
-    fn = {"create": a.snapshot, "restore": a.restore, "delete": a.delete_snapshot}[args.action]
-    t0 = time.monotonic()
-    older = [c["version"] for c in a.snapshots(s["VM_NAME"]) if c["label"] == args.label] if args.replace else []
-    out = fn(s["VM_NAME"], args.label)
-    out["seconds"] = round(time.monotonic() - t0, 2)
-    if older:                        # --replace: the new one is made first, then the older ones of that name go
-        from cloud import sprites as cloud_sprites
-        for v in older:
-            a.cli.delete_checkpoint(cloud_sprites.org_of(s), cloud_sprites.sprite_of(s), v)
-        out["replaced"] = older
-    print(json.dumps(out, sort_keys=True))
-    return 0
-
-
-def cmd_allow(s, args):
-    """Fly Sprites: the network policy as an allowlist of DNS names (each with its subdomains unless --exact), each change
-    read back. With a list in force, names are added or taken off (--remove); --clear goes back to EGRESS; --show
-    prints what's in force. A change whose resulting policy lets out more than the one in force only at the user's own
-    terminal (require_narrowing), judged on where it ends, whatever steps led there."""
-    a, st = sprites_only(s, "an allowlist of names")
-    if not st.get("instance"):
-        raise Refused(f"{s['VM_NAME']} has no Sprite that this Mac knows of")
-    from cloud import sprites as cloud_sprites
-    name, setting = s["VM_NAME"], (s.get("EGRESS") or "internet")
-    cur = a.egress(name)
-    kind, have = cur.get("outside"), list(cur.get("allow") or [])
-    if args.show:
-        out = cur
-    elif args.clear:
-        require_narrowing(s, a, st, cloud_sprites.rules_for(setting), what="net clear")
-        out = a.apply_egress(name, setting)
-    else:
-        if not args.names:
-            raise Refused("net allow and net remove need names")
-        try:
-            want = [r["domain"] for r in cloud_sprites.rules_for(allow=args.names, exact=args.exact)]
-        except ValueError as e:
-            raise Refused(str(e)) from None
-        if args.remove:
-            if kind != "allowlist":
-                raise Refused("no allowlist is in force to take names off (metacomputer net status)")
-            left = [d for d in have if d not in want]
-            new_rules = cloud_sprites.rules_for(allow=left, exact=True) if left else cloud_sprites.rules_for("off")
-        else:
-            new = list(dict.fromkeys((have if kind == "allowlist" else []) + want))
-            new_rules = cloud_sprites.rules_for(allow=new, exact=True)
-        require_narrowing(s, a, st, new_rules, what=f"net {'remove' if args.remove else 'allow'} {' '.join(args.names)}")
-        kind_new, names_new = cloud_sprites.policy_kind(new_rules)
-        out = a.set_egress(name, names_new, exact=True) if kind_new == "allowlist" else a.apply_egress(name, "off")
-    print(json.dumps({"outside": out.get("outside"), "allow": out.get("allow", [])}, sort_keys=True))
-    return 0
+    h = hooks_for(a.name, "COMMANDS")
+    if h is None or args.cmd not in h.COMMANDS:
+        have = [n for n in cloud.registry.PROVIDERS if args.cmd in getattr(hooks_for(n, "COMMANDS"), "COMMANDS", {})]
+        what = next((getattr(hooks_for(n), "COMMANDS")[args.cmd][0] for n in have), args.cmd)
+        labels = manifests.labels_where(lambda m: m["name"] in have) or "no provider here"
+        raise Refused(f"{what} is for a computer on {labels}; {s['VM_NAME']} is on {a.manifest['label']}")
+    return h.COMMANDS[args.cmd][1](sys.modules[__name__], s, a, st, args)
 
 
 def cmd_missing(args):
@@ -1574,6 +1349,11 @@ def shared_network_computers(a):
     return [c for c in comps if c["provider"] == prov]
 
 
+def no_teardown(prov):
+    """Whether `cloud teardown PROVIDER` has nothing to remove there (its manifest says so)."""
+    return prov in cloud.registry.PROVIDERS and not manifests.cli(prov)["teardown"]
+
+
 def main(argv=None):
     """The command line. Everything it prints, on standard output and error, passes no_creds (NoCreds)."""
     real = sys.stdout, sys.stderr
@@ -1595,9 +1375,8 @@ def run(argv=None):
         p.add_argument("--transport", default="ssh")
         p.add_argument("--host", default="")
         p.add_argument("--port", default="22")
-        p.add_argument("--sprite-org", default="")
-        p.add_argument("--sprite-name", default="")
-        p.add_argument("--sprite-cli", default="")
+        p.add_argument("--setting", action="append", default=[], help="KEY=VALUE: a setting the provider's transport "
+                       "reads (its manifest's transport_settings)")
         if name == "probe":
             p.add_argument("--timeout", type=float, default=4.0)
     p = sub.add_parser("exec")
@@ -1623,7 +1402,8 @@ def run(argv=None):
     p = sub.add_parser("egress")
     p.add_argument("--vm", required=True)
     p.add_argument("--set", choices=("internet", "off"))
-    p.add_argument("--setup", action="store_true", help="the build's own opening for its downloads (Fly Sprites)")
+    p.add_argument("--setup", action="store_true", help="the build's own opening for its downloads (a provider whose "
+                   "policy the setup opens)")
     p = sub.add_parser("setup-done")
     p.add_argument("--vm", required=True)
     p = sub.add_parser("identity")
@@ -1663,14 +1443,15 @@ def run(argv=None):
     p.add_argument("action", choices=("status", "doctor", "setup", "teardown"))
     p.add_argument("provider")
     p.add_argument("--json", action="store_true")
-    p.add_argument("--org", default=os.environ.get("SPRITES_ORG", ""))
+    for opt, env in manifests.cloud_options():          # a provider's own (its manifest's cloud_options)
+        p.add_argument(opt, default=os.environ.get(env, ""))
     p.add_argument("--forget", default=None, help="teardown: an unresolved launch's operation you've dealt with")
     a = ap.parse_args(argv)
     take_credentials()
     # What deletes at a provider whatever computer it was (teardown), or forgets a launch that may have made one, is
-    # the user's own call at their own terminal, run this way as through `metacomputer cloud` (Fly Sprites has nothing
-    # to tear down: cmd_cloud says so).
-    if a.cmd == "cloud" and (a.action == "teardown" or a.forget is not None) and a.provider != "sprites":
+    # the user's own call at their own terminal, run this way as through `metacomputer cloud` (a provider with nothing
+    # to tear down, its manifest's teardown False: cmd_cloud says so).
+    if a.cmd == "cloud" and (a.action == "teardown" or a.forget is not None) and not no_teardown(a.provider):
         import owners
         if not owners.at_user_terminal((0,)):
             print(f"metacomputer: cloud {a.action} {a.provider}{' --forget' if a.forget is not None else ''} deletes "
@@ -1708,8 +1489,8 @@ def run(argv=None):
         return {"create": cmd_create, "abort": cmd_abort, "wake": cmd_wake, "sleep": cmd_sleep, "delete": cmd_delete,
                 "status": cmd_status, "state": cmd_state, "rates": cmd_rates, "user-data": cmd_user_data,
                 "plan": cmd_plan, "key-lists": cmd_key_lists, "egress": cmd_egress, "resolvers": cmd_resolvers,
-                "identity": cmd_identity, "exec": cmd_exec, "checkpoint": cmd_checkpoint,
-                "allow": cmd_allow, "setup-done": cmd_setup_done}[a.cmd](s, a)
+                "identity": cmd_identity, "exec": provider_command, "checkpoint": provider_command,
+                "allow": provider_command, "setup-done": cmd_setup_done}[a.cmd](s, a)
     except (Refused, AdapterError) as e:
         print(f"metacomputer: {no_creds(e)}", file=sys.stderr)
         return 1

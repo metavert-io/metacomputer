@@ -163,9 +163,9 @@ runner's does.
   a SIGINT as the watch is first closed; a SIGINT as the watch is closed after a good record still kills its group and
   reaps it; a kqueue registration that fails leaves no kqueue open; one that has exited (not reaped) before the watch
   starts, which macOS's kqueue reports as no such process, is told by its own status: exit 0 resolves demo, exit 7 is
-  refused for that, not as lost, and nothing is sent. And nothing in `bin/`, `scripts/`, `lib/` or
-  `install.sh` reaps children it didn't start: Python read as code (`ast`, imports and aliases resolved: any-child
-  `waitpid`/`waitid`, `os.wait`/`wait3`/`wait4`, SIGCHLD, Safe/Fast child watchers), shell by text (a trap on CHLD);
+  refused for that, not as lost, and nothing is sent. And nothing in `bin/`, `scripts/`, `lib/`, `providers/` (less
+  their `guest/`) or `install.sh` reaps children it didn't start: Python read as code (`ast`, imports and aliases
+  resolved: any-child `waitpid`/`waitid`, `os.wait`/`wait3`/`wait4`, SIGCHLD, Safe/Fast child watchers), shell by text (a trap on CHLD);
   the scanner is checked against 20 forbidden forms (a multi-line `waitpid(-1, ...)`, `waitid(P_ALL, ...)`, `from os
   import wait; wait()` among them) and the allowed `os.waitpid(pid, 0)`.
 - `vm create`: the file (0600; identity, vault and spool; this Mac's choices copied, never
@@ -269,10 +269,10 @@ runner's does.
   quarantined (left, counted in `spool.json`, said once; never deleted) while valid events are consumed; with
   a `.quarantine` folder, the invalid file is moved there.
 - No bare recursive delete: every `rm -r`, `rmtree`, `removedirs` and runner delete in `bin/`, `scripts/`,
-  `lib/` and `install.sh` goes through `lib/safedelete.py`, or is in `DELETE_EXCEPTIONS`: the runner's
-  delete is one line, in `runner_delete` (which must call `safedelete.py check-runner` first, and whose every
-  caller must run after the identity rule), deletes inside the VM, printed hints. A Python function that
-  lists a folder (`os.walk`, `fwalk`, `listdir`, `scandir`, `glob`, `rglob`, `iterdir`), itself or through
+  `lib/`, `providers/` (less their `guest/`) and `install.sh` goes through `lib/safedelete.py`, or is in
+  `DELETE_EXCEPTIONS`: the runner's delete is one line, in `runner_delete` (which must call `safedelete.py
+  check-runner` first, and whose every caller must run after the identity rule), deletes inside the VM, printed hints.
+  A Python function that lists a folder (`os.walk`, `fwalk`, `listdir`, `scandir`, `glob`, `rglob`, `iterdir`), itself or through
   any function of its module it calls, and deletes, moves or rewrites files itself (`unlink`, `rmdir`,
   `rmtree`, `os.remove`, `os.rename`, `os.replace`, `shutil.move`, the programs' file writers) is in
   `DELETE_WALK_EXCEPTIONS` with why and the code that keeps it safe (each fragment must stay in the
@@ -294,7 +294,7 @@ Sprites API's answers in a file under its HOME.
   as `mcomp-NAME`; bad organizations, Sprite names and command paths refused.
 - The network policy: `EGRESS=internet` (every name), `off` (no name), an allowlist (each name with its subdomains
   unless `--exact`); addresses and anything that isn't a DNS name refused; what's read back classified.
-- The adapter through `lib/spritecli.py`: create (refused over an existing Sprite), wake, sleep, status, delete
+- The adapter through `providers/sprites/cli.py`: create (refused over an existing Sprite), wake, sleep, status, delete
   (never another Sprite of the same name), checkpoints by name, the policy read back; the command gets HOME, PATH
   and LANG only, and `exec` never forwards ports back to the Mac.
 - `lib/remote.py`: the launch journal, a lost launch found by name and time and deleted (an older Sprite of that name
@@ -406,7 +406,7 @@ environment. The vault's remote binding (its address, alias and the computer's i
 
 ## Places and providers: `tests/test_cloud_adapters.py`
 
-`python3 tests/test_cloud_adapters.py` (194 checks, a second) needs no VM and makes no network call.
+`python3 tests/test_cloud_adapters.py` (about 390 checks, a second) needs no VM and makes no network call.
 - The contract every registered adapter passes (`local-lume`, the in-memory `fake`, and the stand-in with a
   bare manifest and a keeping one): a sound manifest under its registered name; every interface method
   answers, or refuses with a reason (`NotSupported`, or `HandledByCLI` naming a command `bin/metacomputer`
@@ -427,6 +427,16 @@ environment. The vault's remote binding (its address, alias and the computer's i
   providers (as data):
   a provider's one computer, the default among several, unclear otherwise, `cloud` across providers; `--vm`
   and `--on` agreeing and disagreeing, `--on` with a computer's name, and the CLI's exit status and output.
+- Provider packages (`providers/<name>/`, providers/README.md): the registry is an explicit list of the folders there,
+  each with its adapter (registered under its folder's name, in the registry's order), manifest, settings (comments
+  only), page and doc-claims rows; every `CLI` manifest is sound and a broken one refused; what's made from them is
+  current (`scripts/gen-providers.py --check`: docs/providers.md, lib/cloud/providers.sh, the credential lines,
+  CODEOWNERS); and no shared code (bin/, scripts/, lib/, install.sh, get.sh) names a provider: the lint's pattern is
+  tried on known lines first, and every line it allows (`LINT_ALLOW`) is still there and says why. A provider's own
+  tests stay in tests/ for now (each is one of release.sh's suites by its name): `test_sprites.py` for Fly Sprites,
+  `test_remote.py` for the providers on servers (Oracle Cloud, Hetzner Cloud, DigitalOcean, Vultr) and the shared
+  remote code; its doc-claims rows that read only its own files are in its `claims.tsv`, which
+  `tests/test_doc_claims.py` reads with the rest.
 
 ## An agent session's computer: `tests/test_session_guard.py`
 

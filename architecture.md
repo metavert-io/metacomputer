@@ -995,15 +995,28 @@ otherwise).
   `fake`, an in-memory
   stand-in for the tests that never counts as a provider. `tests/test_cloud_adapters.py`
   runs the same contract against each registered adapter.
+- **Provider packages** (`providers/<name>/`, [providers/README.md](providers/README.md)). Each
+  provider is a folder of its own: its adapter, its manifest (`MANIFEST`, the capabilities;
+  `CLI`, what the command line needs: credentials, options, its transport, its words, its
+  owners), its settings, its page and its doc-claims rows, and, where it does things its own
+  way, hooks: `remote.py` (its part of `lib/remote.py`, called with that module), `cli.sh`
+  and `build.sh` (its steps in `bin/metacomputer`, `scripts/vm-commands.sh` and
+  `scripts/remote-build.sh`, found by `mc_pv_has`, never by its name), `guest/` (what goes
+  into the computer). `lib/cloud/registry.py` is the explicit list (it loads each folder
+  under a private package name, never from `sys.path`); `lib/cloud/manifests.py` reads and
+  checks the `CLI` manifests; `scripts/gen-providers.py` makes what follows from them
+  (`docs/providers.md`, `lib/cloud/providers.sh` for bash, the credential lines that run
+  before anything else, CODEOWNERS). Shared code names no provider: `tests/test_cloud_adapters.py`
+  fails on one (its allowlist says why each exception is there).
 - **A computer elsewhere** ([docs/remote.md](docs/remote.md)): an Ubuntu 24.04 VM reached
   over SSH. `lib/cloud/ubuntu_vm.py` has what every such VM shares (a persistent disk, no
   snapshots or volumes yet, its own firewall as the egress model, the live view as the one
   port forward) and the bring-your-own-server adapter, which needs no provider code;
-  `lib/cloud/oci.py` adds a thin driver (make, start, stop, delete, list, the network and
+  `providers/oci/adapter.py` adds a thin driver (make, start, stop, delete, list, the network and
   each computer's network security group, its serial console's last lines) on Oracle's
   SDK, imported only when a call needs it, with credentials only from the environment.
-  `lib/cloud/vps.py` is the base of three more thin drivers, `hetzner.py`, `digitalocean.py`
-  and `vultr.py`, for providers that bill servers by the hour: their REST APIs through
+  `lib/cloud/vps.py` is the base of three more thin drivers, `providers/hetzner/`, `digitalocean/`
+  and `vultr/`, for providers that bill servers by the hour: their REST APIs through
   `lib/provider_http.py` (handed in by `lib/remote.py`, so `lib/cloud` still opens no
   connection), a firewall and a first-boot key per computer made before the server and
   journaled by id, the server made by one call never retried, and a stopped server billed
@@ -1036,12 +1049,12 @@ otherwise).
   end it first) and ends the tunnel (SIGTERM, then SIGKILL) when ssh goes, so an orphaned
   tunnel can't keep a computer awake and billing. The vault does the same through itself
   (`mcomp-vault _tunnel`), with the tunnel's program pinned at bind.
-- **Fly Sprites** ([docs/sprites.md](docs/sprites.md)): `lib/cloud/sprites.py` (the
-  manifest, the adapter, the `sprite` opener: `sprite proxy -W :22`) over `lib/spritecli.py`,
+- **Fly Sprites** ([docs/sprites.md](docs/sprites.md)): `providers/sprites/` (the
+  manifest, the adapter, the `sprite` opener: `sprite proxy -W :22`) over its `cli.py`,
   the facade of Fly's `sprite` command (`sprite api` for the Sprites API, `sprite exec
   --no-port-forward` for the first step), which only `lib/remote.py` makes. The build
-  (`scripts/remote-build.sh`, `KIND=sprite`) makes the Sprite (journaled; a lost launch is
-  found by name and time), sets its network policy, runs `provisioning/sprite/bootstrap.sh`
+  (`scripts/remote-build.sh`, `KIND=provider`: its `build.sh`) makes the Sprite (journaled; a lost launch is
+  found by name and time), sets its network policy, runs `providers/sprites/guest/bootstrap.sh`
   through `sprite exec` (accounts, sshd as a Sprites service on the loopback, the host key
   read back over that channel), then the common payload and `provision.sh` with
   `MCOMP_TARGET=sprite` (Xvfb, no systemd, DNS over HTTPS off) over SSH with one connection

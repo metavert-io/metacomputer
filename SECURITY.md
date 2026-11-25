@@ -1920,7 +1920,7 @@ pinned before the first connection, read over Fly's authenticated channel), with
   `sprite` account, which has sudo: any account that reaches it has root (checked on a Sprite: the desktop account
   made a service that ran `sudo -n id` as root). It can also create tasks that keep the Sprite awake and billing, and
   make or restore checkpoints. This is the provider's, and it was reported to Fly. metacomputer's mitigation, a
-  **session** that everything of the desktop's and SSH's runs in (`provisioning/sprite/rootfs/opt/metacomputer/sprite/`):
+  **session** that everything of the desktop's and SSH's runs in (`providers/sprites/guest/rootfs/opt/metacomputer/sprite/`):
   - a mount namespace where `hide-sprite-api` covers `/.sprite` with an empty tmpfs, and a **PID namespace with its own
     `/proc`**, made by the `session` service (`svc-session`; `tini` is its init). sshd, the X server and the desktop
     join it (`in-session`) before anything runs as the desktop's account, the X cookie's `xauth` included: nothing of

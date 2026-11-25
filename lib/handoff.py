@@ -615,7 +615,7 @@ VM_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 def panel_identity():
     """(the VM's name, where it is) for the panel's words, so two VMs' panels can't be taken for each other: the name
     from the settings (MCOMP_VM_NAME, by the name rule) and the place's own words (lib/placement.py on_place, for
-    MCOMP_PLACE: "on this Mac", "on Oracle Cloud"...)."""
+    MCOMP_PLACE: "on this Mac", or on a provider's label)."""
     name = os.environ.get("MCOMP_VM_NAME") or "metacomputer"
     if not VM_NAME_RE.fullmatch(name):
         name = "this virtual computer"

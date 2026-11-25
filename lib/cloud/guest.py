@@ -20,7 +20,7 @@ import re
 
 from .adapter import check_name
 
-MAX_USER_DATA = 32000           # bytes, base64-encoded: the largest instance metadata the big providers take (OCI)
+MAX_USER_DATA = 32000           # bytes, base64-encoded: the largest instance metadata the big providers all take
 KEY_LINE = re.compile(r"(?:[a-z0-9-]+(?:=\"[^\"\n]*\")?(?:,[a-z0-9-]+(?:=\"[^\"\n]*\")?)* )?"
                       r"(ssh-ed25519|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]{20,2000}(?: \S{1,100})?")
 

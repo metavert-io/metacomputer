@@ -6,6 +6,19 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Each provider's code lives in its own folder** ([providers/README.md](providers/README.md)), for contributors:
+  `providers/<name>/` (`oci`, `sprites`, `hetzner`, `digitalocean`, `vultr`) holds its adapter (was
+  `lib/cloud/<name>.py`), its manifest (capabilities, and what the command line needs: credentials, options, its
+  transport, its words, its reviewers), its settings, its page, its doc-claims rows and the hooks for what it does its
+  own way (Fly Sprites': `remote.py`, `cli.sh`, `build.sh`, its facade `cli.py`, was `lib/spritecli.py`, and `guest/`,
+  was `provisioning/sprite/`). `lib/cloud/` keeps the framework, with the registry (one line per provider).
+  Shared code no longer names a provider: it reads the manifests (bash through `lib/cloud/providers.sh`, made by
+  `scripts/gen-providers.py`, which also writes [docs/providers.md](docs/providers.md) and `.github/CODEOWNERS`), and
+  a test fails on a line that names one. Adding a provider is its folder, one registry line and a line here. Nothing a
+  user sees changes: every command, option, message, setting and file location is as it was.
+
 ## [0.5.1] - 2026-11-24
 
 ### Added

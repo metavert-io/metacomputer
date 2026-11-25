@@ -268,9 +268,15 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   never another VM; what a command chose is passed on to its children, the main VM as `MCOMP_NO_DEFAULT_VM=1`;
   `default NAME` holds NAME's VM lock; `lib/labconfig.py` resolves it with lib.sh's `mc_load_settings`);
   `MCOMP_NO_DEFAULT_VM=1` leaves it out, and what means the main VM (`setup`, `update`, `version`, `each`'s main,
-  install.sh's build) leaves it out too. Places and providers: `lib/placement.py` (`--on`, `list`) and `lib/cloud/` (the adapter interface,
-  manifests, `PERSIST`, the feature map; `local-lume` hands actions to the existing commands, never reroutes
-  them); every registered adapter passes `tests/test_cloud_adapters.py`, which uses no VM and no network.
+  install.sh's build) leaves it out too. Places and providers: `lib/placement.py` (`--on`, `list`) and `lib/cloud/` (the framework: the adapter interface,
+  manifests, `PERSIST`, the feature map, the transport, the shared VPS base, the stand-ins, and the registry, an explicit
+  list; `local-lume` hands actions to the existing commands, never reroutes them); every registered adapter passes
+  `tests/test_cloud_adapters.py`, which uses no VM and no network. Each provider's code, manifest, settings, page,
+  doc-claims rows and hooks live in its own folder, `providers/<name>/` (providers/README.md): shared code (bin/,
+  scripts/, lib/) never names a provider, branching instead on its manifest (`lib/cloud/manifests.py`; bash reads
+  `lib/cloud/providers.sh`) or on the hooks it brings, and `tests/test_cloud_adapters.py` fails on a line that names one
+  (its LINT_ALLOW says why each exception is there). After changing a manifest or the registry, run
+  `python3 scripts/gen-providers.py` (docs/providers.md, providers.sh, the credential lines, CODEOWNERS).
   Which processes are agent sessions is `lib/owners.py` `agent_kind`/`agent_of` (Claude Code, Codex, OpenClaw, Hermes
   Agent, Gemini CLI, Antigravity CLI; by what a process executes (`process_agent`): its name, its executable (`proc_exe`, the realpath
   of its text image: a native gemini, Antigravity CLI's `agy`/`antigravity`, names matched exactly; the Antigravity app and
@@ -295,8 +301,8 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   (`tests/test_session_guard.py` fails on a new one). The bridge's own tools, `list_computers` and `select_computer`
   (lib/mcp_lazy.py), move the session's tools to another computer's own hub: one hub per computer. A hub's claims carry
   the client connection that wrote them, and a connection that goes drops only its own (`owners.drop_claim(pid, conn)`).
-  A computer elsewhere (docs/remote.md: `PLACE=server|oci` in a `config/vms/` file only; `lib/cloud/ubuntu_vm.py`,
-  `oci.py`, `lib/remote.py`, `scripts/remote-build.sh`, `provisioning/remote/`) is reached only through
+  A computer elsewhere (docs/remote.md: `PLACE=server|<provider>` in a `config/vms/` file only; `lib/cloud/ubuntu_vm.py`,
+  `providers/<name>/`, `lib/remote.py`, `scripts/remote-build.sh`, `provisioning/remote/`) is reached only through
   `lib/cloud/transport.py` (scripts/lib.sh `ssh_base`'s remote half and the vault's binding): its host key pinned as
   `mcomp-NAME`, never an address, never trusted on first use; a provider's tunnel registers there and runs through
   `lib/proxywrap.py`. Provider credentials come only from the environment and reach only `lib/remote.py`
@@ -311,10 +317,10 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   environment before it starts anything; owner checks never ride a shared SSH connection (`ControlPath=none`). Your own server: keep the owner's access (ports, saved SSH settings, checks with rollback). Everything a
   provider makes stays in the configured compartment, tagged. Tests: `python3 tests/test_remote.py` (no VM, no
   network).
-  Fly Sprites (docs/sprites.md; `PLACE=sprites`, `lib/cloud/sprites.py`, `lib/spritecli.py`, `provisioning/sprite/`) are
+  Fly Sprites (docs/sprites.md; `PLACE=sprites`, `providers/sprites/`: `adapter.py`, `cli.py`, `remote.py`, `guest/`) are
   reached through the `sprite` transport (`sprite proxy -W :22` through `lib/proxywrap.py`; the vault pins the program and
   runs it through `mcomp-vault _tunnel`, which ends it when ssh goes): a tunnel left open keeps a Sprite awake and billing.
-  Fly's `sprite` command keeps its own sign-in, and what it prints is read with byte caps (`lib/spritecli.py`); `sprite
+  Fly's `sprite` command keeps its own sign-in, and what it prints is read with byte caps (`providers/sprites/cli.py`); `sprite
   exec` always with `--no-port-forward`. Keep everything of the desktop's account inside the session (`svc-session`:
   a mount namespace with `/.sprite` covered and a PID namespace with its own `/proc`; services join it with
   `in-session` before anything runs as that account, `xauth` included): the Sprite's API socket is world-writable and
