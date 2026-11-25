@@ -83,6 +83,7 @@ PROGRAMS = {
     "scripts/sync-plugin.py": NONE,
     "scripts/gen-providers.py": NONE,                      # files of this checkout, made from the manifests
     "scripts/gen-agents.py": NONE,                         # files of this checkout, made from the agents' manifests
+    "scripts/gen-sinks.py": NONE,                          # files of this checkout, made from the sinks' manifests
     "scripts/build-openai-plugin.py": NONE,
     "scripts/vendor-driver-skill.py": NONE,
     "scripts/verify-audit.py": NONE,

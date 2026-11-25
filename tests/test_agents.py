@@ -214,13 +214,13 @@ def sessions_cases(t, base):
 
 
 # --- agent packages: their folders, their manifests, what's made from them, and shared code that names none -----------
-# Where shared code is: everything the CLI, the scripts, the helpers and the bench harness run (lib/agentkit, the
-# framework, holds the registry and reads the folders; it's checked by its own rules below). Not in it: the agents'
-# folders, tests (each agent's checks name it), docs and config (people's pages), the guest's side (provisioning/), the
+# Where shared code is: everything the CLI, the scripts, the helpers and the bench harness run, and the event sinks'
+# folders (sinks/; lib/agentkit, the framework, holds the registry and reads the folders; it's checked by its own rules
+# below). Not in it: the agents' folders, tests (each agent's checks name it), docs and config (people's pages), the guest's side (provisioning/), the
 # vault (vault/, Swift: it reads the agents' recognition tables, compiled in by scripts/build-vault.sh, and keeps its
 # rules) and the distribution folders (plugin/, agent-plugin/, .agents/: made by scripts/sync-plugin.py from the
 # agents' channel files, and kept byte for byte).
-SHARED = ("bin", "scripts", "lib", "install.sh", "get.sh", "bench")
+SHARED = ("bin", "scripts", "lib", "install.sh", "get.sh", "bench", "sinks")
 # Words of a label that name no agent by themselves ("Claude Code" is named by "Claude", "Hermes Agent" by "Hermes").
 GENERIC_WORDS = {"Code", "CLI", "Agent"}
 # Names an agent is known by that its manifest doesn't hold: the variable Claude Code sets in what it runs.

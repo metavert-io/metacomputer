@@ -100,7 +100,7 @@ class Box:
     def __init__(self, td, tag):
         self.root = os.path.join(td, tag)
         self.co = os.path.join(self.root, "co")
-        for d in ("bin", "scripts", "lib", "providers", "coding-agents"):
+        for d in ("bin", "scripts", "lib", "providers", "coding-agents", "sinks"):
             shutil.copytree(os.path.join(LAB, d), os.path.join(self.co, d),
                             ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy(os.path.join(LAB, "install.sh"), self.co)
@@ -3125,10 +3125,10 @@ REAP_ALLOWED = {
 
 def mac_side_files():
     """What runs on this Mac: install.sh and every file of bin/, scripts/, lib/, the providers' folders
-    (providers/<name>/) and the agents' (coding-agents/<name>/), less what a provider puts into the computer (its
-    guest/, as provisioning/ is left out)."""
+    (providers/<name>/), the agents' (coding-agents/<name>/) and the event sinks' (sinks/<kind>/), less what a provider
+    puts into the computer (its guest/, as provisioning/ is left out)."""
     out = []
-    for top in ("bin", "scripts", "lib", "providers", "coding-agents"):
+    for top in ("bin", "scripts", "lib", "providers", "coding-agents", "sinks"):
         for d, _, fs in os.walk(os.path.join(LAB, top)):
             rel_d = os.path.relpath(d, LAB)
             if "__pycache__" in d or (top == "providers" and "guest" in rel_d.split(os.sep)[2:3]):

@@ -224,7 +224,15 @@ project; its [DESKTOP.md](skills/metacomputer/DESKTOP.md) holds the desktop rule
   `events.emit` / `emit_async` in Python). New event fields go through
   `lib/events.py`'s cleaning; never put typed text, tokens or URL queries in
   an event. Other programs hand in events through the spool (architecture.md,
-  "Event spool"). Tests: `python3 tests/test_events.py` (no VM) and
+  "Event spool"). Each kind of sink (webhook, otlp, syslog, ntfy) lives in its own folder, `sinks/<kind>/`
+  (sinks/README.md): its manifest (words, settings, what it carries, its reviewers, the format the vault's audit sinks
+  share), its code (`sink.py`: its URL's rules, its format and its delivery, called by `lib/events.py` with itself as
+  E), its page and its cases (`tests/vault_cases.json`). `lib/sinkkit/` is the framework (the registry, an explicit
+  list; the manifests; `vault.py`, what scripts/build-vault.sh compiles into the vault); the delivery loop, backlogs,
+  limits, spool, cleaning, watcher and commands stay in `lib/events.py`, which never names a kind:
+  `tests/test_events.py` fails on shared code that does (its SINK_LINT_FILES and SINK_LINT_ALLOW say why each exception
+  is there). After changing a manifest or the registry, run `python3 scripts/gen-sinks.py` (docs/sinks.md,
+  `metacomputer help`'s line, CODEOWNERS). Tests: `python3 tests/test_events.py` (no VM) and
   `tests/test_options.py E` (VM).
 - Lessons (`metacomputer learn`, docs/learn.md; `lib/learn*.py`,
   `lib/transcripts.py`, which reads Claude Code's, Codex's, Gemini CLI's and Antigravity CLI's sessions, and `lib/session_dbs.py`, OpenClaw's and
@@ -496,7 +504,11 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   the user only with `INTERACTIVE_PROMPTS=on` (default off; never from a command without a terminal), their
   words passed as arguments, never spliced into a script.
   Its audit sinks use the same wrappings as the event stream (CloudEvents, OTLP,
-  syslog, ntfy) and its needs_you files follow the event spool contract.
+  syslog, ntfy), reading what they send alike (the kinds, the formats' constants, the signature header, the header
+  names) from the sinks' manifests, compiled in by scripts/build-vault.sh (`lib/sinkkit/vault.py swift`); the rules both
+  implement in code are checked against the same cases (tests/sink_cases.py: test_events for the stream, test_vault_ops
+  through the test build's `test-sink-cases`), each difference the vault keeps declared with why. Its needs_you files
+  follow the event spool contract.
 
 See README.md (usage), architecture.md (design), TESTING.md (tests),
 docs/chrome-investigation.md, and `.claude/skills/cua-driver/` (the

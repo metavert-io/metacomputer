@@ -456,11 +456,12 @@ def resolver():
 
 
 # --- provider packages: their folders, their CLI manifests, what's made from them, and shared code that names none ----
-# Where shared code is: everything the CLI, the scripts and the helpers run, lib/cloud's framework included. Not in it:
+# Where shared code is: everything the CLI, the scripts and the helpers run, lib/cloud's framework and the event sinks'
+# folders (sinks/) included. Not in it:
 # the providers' folders, tests (each provider's checks name it), docs and config (people's pages), the guest's side
 # (provisioning/: what runs inside a computer, which this lint leaves to the guest packages), and the vault (vault/,
 # Swift: unchanged by the provider packages).
-SHARED = ("bin", "scripts", "lib", "install.sh", "get.sh")
+SHARED = ("bin", "scripts", "lib", "install.sh", "get.sh", "sinks")
 # Whole files allowed: the registry (the one list) and what scripts/gen-providers.py makes (checked current below).
 LINT_FILES = {"lib/cloud/registry.py": "the registry: the explicit list of providers",
               "lib/cloud/providers.sh": "made from the manifests by scripts/gen-providers.py (checked current here)"}

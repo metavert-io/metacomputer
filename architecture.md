@@ -1094,6 +1094,13 @@ events watcher (30 s): spool, backlogs, netgw-blocked.jsonl (checked every 2 s),
   return (at most about 3 s, sinks in parallel); the hub and the relay emit on a
   background thread so a tool call never waits. A sink in its backoff isn't
   tried at all.
+- **Kinds.** Each kind of sink is a folder, `sinks/<kind>/` (sinks/README.md,
+  [docs/sinks.md](docs/sinks.md)): its manifest says what shared code needs (its
+  words, settings, batch, whether it's signed or reaches a phone, the format the
+  vault's audit sinks send alike), and its `sink.py` checks its URL, makes its
+  request and delivers it. `lib/events.py` calls them and never names one; the
+  cleaning, numbering, limits, backlogs, retries and deadlines are its own, the
+  same for every kind. `lib/sinkkit/` holds the registry and the manifests.
 - **State.** `~/.config/metacomputer/events.json` (sinks, 0600) and
   `events-state/` beside it: the sequence counter and a global lock; per sink
   and generation an append-only backlog file, a count of what was queued and

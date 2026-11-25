@@ -4235,11 +4235,11 @@ def code_fallbacks():
     """Where the code reads a security setting with a fallback (`${ACTION_LOG:-off}`, `.get("MCOMP_SSH_AUTH",
     "key")`), the fallback is config/defaults.env's value: a client that runs without the config gets the same
     protections the docs describe. Read: everything that runs on this Mac (lib/, bin/, scripts/, the installers, the
-    providers' and the agents' folders, the bench harness), not the guests' sides (providers/<name>/guest/,
-    bench/guest/: their defaults are the guest's own)."""
+    providers', the agents' and the event sinks' folders, the bench harness), not the guests' sides
+    (providers/<name>/guest/, bench/guest/: their defaults are the guest's own)."""
     print("the code's fallbacks for the security settings")
     files = subprocess.run(["git", "ls-files", "lib", "bin", "scripts", "providers", ":(exclude)providers/*/guest/*",
-                            "coding-agents", "bench", ":(exclude)bench/guest/*", "install.sh", "get.sh"],
+                            "coding-agents", "sinks", "bench", ":(exclude)bench/guest/*", "install.sh", "get.sh"],
                            cwd=LAB, capture_output=True, text=True).stdout.split()
     seen, wrong = {}, []
     for rel in files:
@@ -4257,11 +4257,12 @@ def code_fallbacks():
                             wrong.append(f"{rel}:{n}: {k} falls back to {v!r}, config/defaults.env says {D[k]!r}")
     check("every fallback for a security setting in lib/, bin/, scripts/, the providers' and the agents' folders, the "
           "bench harness and the installers is its default", not wrong, wrong)
-    code = [f for f in subprocess.run(["git", "ls-files", "coding-agents", "bench"], cwd=LAB, capture_output=True,
+    code = [f for f in subprocess.run(["git", "ls-files", "coding-agents", "sinks", "bench"], cwd=LAB, capture_output=True,
                                       text=True).stdout.split()
             if f.endswith((".py", ".sh")) and "/tests/" not in f and not f.startswith("bench/guest/")]
-    check("…the scan reads the code that runs on this Mac in the agents' folders and the bench harness too "
-          "(coding-agents/<name>/: setup.py, setup.sh, cli.sh, sessions.py, bench.py, ...; bench/*.py)",
+    check("…the scan reads the code that runs on this Mac in the agents' and the sinks' folders and the bench harness "
+          "too (coding-agents/<name>/: setup.py, setup.sh, cli.sh, sessions.py, bench.py, ...; sinks/<kind>/sink.py; "
+          "bench/*.py)",
           len(code) >= 30 and not [f for f in code if f not in files], [f for f in code if f not in files][:8])
     check("…and the scan found them (at least one for each of the hardening settings)",
           all(seen.get(k) for k in ("ACTION_LOG", "SSH_AUTH", "DRIVER_MODE", "VM_SHELL", "SHELL_LOG", "COORD_GUARD",

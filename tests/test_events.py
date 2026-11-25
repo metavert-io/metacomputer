@@ -280,8 +280,131 @@ def sink_cases():
           "fields and endpoints)", not wrong and kinds == {""} | set(events.KINDS), (wrong[:6], sorted(kinds)))
 
 
+# --- the sinks' folders, and no kind named in shared code ---------------------------------------
+# Shared code: everything that runs on this Mac but the framework (lib/sinkkit) and the kinds' own folders. Not the vault
+# (vault/, Swift: it keeps its own audit sinks, reading what they share with the stream from the manifests, compiled in by
+# scripts/build-vault.sh; tests/sink_cases.py holds its parity) nor the docs (they name the kinds for people).
+SINK_SHARED = ("bin", "scripts", "lib", "install.sh", "get.sh", "bench", "providers", "coding-agents", "tools")
+# Names a kind's format is known by that its manifest doesn't hold as a word of its own.
+SINK_EXTRA = {"webhook": ("CloudEvent",), "otlp": ("OpenTelemetry",)}
+# Whole files allowed, each for its reason.
+SINK_LINT_FILES = {
+    "scripts/verify-audit.py": "the vault's audit-capture checker: it reads what the vault's audit sinks send (each "
+                               "kind's wrapping, which stays the vault's own Swift), and its usage and messages name "
+                               "them; its SD-ID comes from the syslog manifest",
+}
+# Lines allowed, by file and a piece of the line, each for its reason. An entry that matches nothing fails.
+SINK_LINT_ALLOW = [
+    ("bin/metacomputer", "#                                  the optional event stream: ",
+     "`metacomputer help`'s line for the event stream (its header, printed as it is): made from the manifests' help "
+     "words by scripts/gen-sinks.py"),
+]
+
+
+def sink_words():
+    """{kind: a pattern for the words that name it}: its folder's name and its label in any case, a plural too, and
+    SINK_EXTRA, each as a whole word (a letter or digit next to it makes it another word; an underscore, a hyphen, a
+    dot or a + doesn't, so otlp_url, syslog+tls and ntfy.sh name theirs)."""
+    from sinkkit import manifests, registry
+    out = {}
+    for k in registry.SINKS:
+        ws = {k, manifests.manifest(k)["label"]} | set(SINK_EXTRA.get(k, ()))
+        alts = [f"(?i:{re.escape(w)})s?" for w in sorted(ws, key=lambda w: (-len(w), w))]
+        out[k] = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(alts) + r")(?![A-Za-z0-9])")
+    return out
+
+
+def sink_shared_files():
+    out = []
+    for top in SINK_SHARED:
+        full = os.path.join(LAB, top)
+        if os.path.isfile(full):
+            out.append(top)
+            continue
+        for d, ds, fs in os.walk(full):
+            ds[:] = sorted(x for x in ds if x != "__pycache__" and os.path.relpath(os.path.join(d, x), LAB) != "lib/sinkkit")
+            out += [os.path.relpath(os.path.join(d, f), LAB) for f in sorted(fs)]
+    return out
+
+
+def slug(heading):
+    """A heading's anchor, as GitHub makes it."""
+    return re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
+
+
+def sink_packages():
+    print("the sinks' folders, their manifests, the generated files, and no kind named in shared code")
+    from sinkkit import manifests, registry, vault
+    folders = sorted(d for d in os.listdir(os.path.join(LAB, "sinks"))
+                     if os.path.isdir(os.path.join(LAB, "sinks", d)) and d != "__pycache__")
+    missing = [f"sinks/{k}/{f}" for k in registry.SINKS for f in ("manifest.json", "sink.py", "README.md")
+               if not os.path.isfile(os.path.join(LAB, "sinks", k, f))]
+    check("every registered kind is a folder with its manifest, its code and its page; every folder is registered",
+          folders == sorted(registry.SINKS) and not missing and os.path.isfile(os.path.join(LAB, "sinks", "README.md")),
+          (folders, registry.SINKS, missing))
+    bad = vault.check() + manifests.conflicts()
+    check("the manifests are what lib/sinkkit and the vault's build read (lib/sinkkit/vault.py check)", not bad, bad)
+    shape = []
+    for k in registry.SINKS:
+        m = registry.module(k)
+        if not callable(getattr(m, "check_url", None)):
+            shape.append(f"{k}: no check_url")
+        if hasattr(m, "request") == hasattr(m, "deliver"):
+            shape.append(f"{k}: needs request (it POSTs) or deliver (a transport of its own), not both")
+        if hasattr(m, "accepted") and not hasattr(m, "request"):
+            shape.append(f"{k}: accepted goes with request")
+    check("each kind's sink.py brings the interface: check_url, and request (accepted too, if it reads answers) or "
+          "deliver", not shape, shape)
+    anchors = []
+    for k in registry.SINKS:
+        page, _, anchor = manifests.manifest(k)["docs"].partition("#")
+        try:
+            heads = {slug(h) for h in re.findall(r"^#+ (.+)$", open(os.path.join(LAB, page)).read(), re.M)}
+        except OSError:
+            heads = set()
+        if anchor not in heads:
+            anchors.append(manifests.manifest(k)["docs"])
+    check("each kind's docs are a section of a page that's there", not anchors, anchors)
+    r = subprocess.run([PY, os.path.join(LAB, "scripts", "gen-sinks.py"), "--check"], capture_output=True, text=True,
+                       timeout=60)
+    check("the files made from the manifests are current: docs/sinks.md, `metacomputer help`'s line, CODEOWNERS "
+          "(scripts/gen-sinks.py --check)", r.returncode == 0, r.stdout + r.stderr)
+    words = sink_words()
+    probes = [("def otlp_url(url):", ["otlp"]), ("syslog+tls://HOST:PORT", ["syslog"]), ("an ntfy URL names", ["ntfy"]),
+              ("CloudEvents 1.0", ["webhook"]), ("def cloudevent(ev):", ["webhook"]), ("webhooks", ["webhook"]), ("OpenTelemetry logs", ["otlp"]),
+              ("https://ntfy.sh/t", ["ntfy"]), ("SYSLOG_SEV", ["syslog"]), ("xwebhook ntfyx otlp2 webhookey", [])]
+    wrong = [(t, [k for k, p in words.items() if p.search(t)]) for t, want in probes
+             if [k for k, p in words.items() if p.search(t)] != want]
+    check("the lint's patterns find the kinds' names where they are, and only there (tried on known lines first)",
+          not wrong, wrong)
+    hits, used = [], set()
+    for rel in sink_shared_files():
+        if rel in SINK_LINT_FILES:
+            continue
+        try:
+            text = open(os.path.join(LAB, rel), encoding="utf-8").read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for i, line in enumerate(text.split("\n"), 1):
+            named = [k for k, p in words.items() if p.search(line)]
+            if not named:
+                continue
+            j = next((j for j, (f, piece, _w) in enumerate(SINK_LINT_ALLOW) if f == rel and piece in line), None)
+            if j is not None:
+                used.add(j)
+                continue
+            hits.append(f"{rel}:{i}: {','.join(named)}: {line.strip()[:120]}")
+    check("no shared code names a kind of sink outside its folder (allowed: SINK_LINT_FILES and SINK_LINT_ALLOW, each "
+          "for its reason)", not hits, hits[:12])
+    stale = [SINK_LINT_ALLOW[j][:2] for j in range(len(SINK_LINT_ALLOW)) if j not in used] + sorted(
+        f for f in SINK_LINT_FILES if not os.path.isfile(os.path.join(LAB, f))
+        or not any(p.search(open(os.path.join(LAB, f)).read()) for p in words.values()))
+    check("...and every allowance is still needed", not stale, stale)
+
+
 # --- tests ----------------------------------------------------------------------------------
 def main():
+    sink_packages()
     sink_cases()
     certs = make_certs(os.path.join(TD, "certs"))
     web, otlp, ntfy = HTTPRx(), HTTPRx(), HTTPRx()

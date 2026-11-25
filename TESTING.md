@@ -991,6 +991,16 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
+- the sink packages (`sinks/<kind>/`, sinks/README.md): every registered kind is a folder with its manifest, its code
+  and its page, and every folder is registered; the manifests are what lib/sinkkit and the vault's build read
+  (`lib/sinkkit/vault.py check`); each `sink.py` brings the interface (`check_url`, and `request`, with `accepted` if it
+  reads answers, or `deliver`); each kind's docs are a section of a page that's there; what's made from the manifests
+  is current (`scripts/gen-sinks.py --check`: docs/sinks.md, `metacomputer help`'s line for the event stream,
+  CODEOWNERS); no shared code (bin/, scripts/, lib/ but lib/sinkkit, install.sh, get.sh, bench/, the providers' and
+  the agents' folders, tools/) names a kind, the lint's pattern tried on known lines first and every allowance still
+  needed and saying why; and the stream answers every case in tests/fixtures/sink_cases.json and each kind's
+  `tests/vault_cases.json` as they say (tests/sink_cases.py; test_vault_ops runs the same cases through the vault).
+  A kind's other checks stay in this file, by what they test;
 - sinks are added, listed, shown and removed; the config is private; header values and ntfy topics are never printed; plain http off the Mac, syslog without TLS and credentials in URLs are refused;
 - four sinks receive the same events in order, in each format: CloudEvents with a valid HMAC signature, OTLP/HTTP JSON, RFC 5424 over TLS with octet counting, ntfy;
 - family and minimum-severity filters, and the opt-in `actions` family;
@@ -2401,7 +2411,10 @@ pseudo-terminal for the rest of the vault:
   audit log that can't be written refuses uses while a sink is required; syslog can't
   be `--required`, and a required OTLP sink whose answer rejects records (partial
   success) refuses the use; a `--ca` syslog sink still checks the host name; removing
-  one leaves the others;
+  one leaves the others; and the rules the audit sinks implement as the event stream's sinks do (header names, each
+  kind's URLs, `/v1/logs`, the severities, the time, a partial success's count, syslog's escaping and MSGID, ntfy's
+  endpoint, the signature) answer every case in tests/fixtures/sink_cases.json and the kinds' `tests/vault_cases.json`
+  as the stream does, or as each declared difference says (the test build's `test-sink-cases`);
 - **requesters** through a stand-in process named `claude`: the prompt and audit name
   its project and pid; `NAME session`, `NAME unlock` and plain `NAME` last as long as
   they should; `--project` limits;
