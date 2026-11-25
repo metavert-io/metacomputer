@@ -500,9 +500,10 @@ def cmd_update(a):
     same = tcommit == st["commit"]
     forward = same or is_ancestor(st["commit"], tcommit)
     if not forward:
-        if not a.ref and is_ancestor(tcommit, st["commit"]):
+        if not a.ref and not a.allow_downgrade and is_ancestor(tcommit, st["commit"]):
             # Past the newest release. On the repository's own main (a checkout that pulled main) there's nothing newer
-            # to move to yet: not an error, and not a way back.
+            # to move to yet: not an error, and not a way back. With --allow-downgrade it is the way back: a detached
+            # checkout goes back to the release, and main still only moves forward (below).
             if is_ancestor(st["commit"], "refs/remotes/origin/main"):
                 if a.json:
                     print(json.dumps({"current": st["version"], "latest": target, "up_to_date": True,

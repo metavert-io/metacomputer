@@ -177,6 +177,29 @@ check("…update --check --json: up to date, past the latest", rc == 0 and j["la
 rc, out, calls = upd(co8, "update", "--ref", "v0.3.0")
 check("…but asking for that release by name is going back: refused", rc == 3 and "main only moves forward" in out
       and git("rev-parse", "HEAD", cwd=co8) == head8 and not calls, out)
+rc, out, calls = upd(co8, "update", "--allow-downgrade")
+check("…and --allow-downgrade on main: still refused, main only moves forward (nothing moved or run)", rc == 3
+      and "main only moves forward" in out and git("rev-parse", "HEAD", cwd=co8) == head8 and not calls, (rc, out, calls))
+# The same commit, detached (an upstream commit checked out to try it): nothing newer without --allow-downgrade; with
+# it, back to the release, detached, and install.sh runs with --allow-downgrade.
+co10 = tempfile.mkdtemp(prefix="co-", dir=TD)
+git("clone", "-q", past, co10, cwd=TD)
+git("-c", "advice.detachedHead=false", "checkout", "-q", "--detach", "HEAD", cwd=co10)
+rc, out, calls = upd(co10, "update")
+check("past the newest release, detached at a commit of the repository's main: nothing newer (exit 0), nothing moved "
+      "or run", rc == 0 and "past the newest release, v0.3.0" in out and git("rev-parse", "HEAD", cwd=co10) == head8
+      and not calls, (rc, out, calls))
+rc, out, calls = upd(co10, "update", "--allow-downgrade")
+check("…with --allow-downgrade: back to v0.3.0, detached, and install.sh runs with --allow-downgrade",
+      rc == 0 and git("rev-parse", "HEAD", cwd=co10) == tags["0.3.0"] and subprocess.run(
+          ["git", "symbolic-ref", "-q", "HEAD"], cwd=co10, env=GENV).returncode != 0
+      and calls == ["install --yes --no-build --allow-downgrade restart=ask"], (rc, out, calls))
+# The repository can't be reached: refused at the fetch, nothing moved or run.
+co12 = fresh("0.1.0")
+git("remote", "set-url", "origin", os.path.join(TD, "gone"), cwd=co12)
+rc, out, calls = upd(co12, "update")
+check("the fetch fails (the repository can't be reached): refused (exit 3), nothing moved or run", rc == 3
+      and "git fetch" in out and git("rev-parse", "HEAD", cwd=co12) == tags["0.1.0"] and not calls, (rc, out, calls))
 co9 = fresh("0.3.0")
 write(os.path.join(co9, "MINE.md"), "my commit\n")
 git("add", "-A", cwd=co9)
@@ -387,6 +410,19 @@ rc, out, calls = upd(tag_branch, "update", "--ref", "v0.9.0")
 check("…nor accepted with --ref", rc == 3 and "isn't on the repository's main branch" in out and not calls, out)
 rc, out, calls = upd(tag_branch, "update", "--ref", "main")
 check("--ref takes only a release tag", rc == 3 and "release tag" in out, out)
+# The same off-main tag, seen from a detached checkout past the newest release on main: not taken as newer, and not
+# a place to go back to either.
+git("fetch", "-q", "origin", "refs/tags/v0.9.0:refs/tags/v0.9.0", cwd=past)
+co11 = tempfile.mkdtemp(prefix="co-", dir=TD)
+git("clone", "-q", past, co11, cwd=TD)
+git("-c", "advice.detachedHead=false", "checkout", "-q", "--detach", "HEAD", cwd=co11)
+rc, out, calls = upd(co11, "update", "--check")
+check("past the newest release with an off-main v0.9.0 about: nothing newer than v0.3.0", rc == 0
+      and "past the newest release, v0.3.0" in out and "v0.9.0" not in out and not calls, (rc, out))
+rc, out, calls = upd(co11, "update", "--ref", "v0.9.0", "--allow-downgrade")
+check("…and --ref v0.9.0 --allow-downgrade is refused (not on main), nothing moved or run", rc == 3
+      and "isn't on the repository's main branch" in out and git("rev-parse", "HEAD", cwd=co11) == head8 and not calls,
+      (rc, out, calls))
 link_co = fresh("0.1.0")
 os.rename(os.path.join(link_co, "install.sh"), os.path.join(TD, "elsewhere-install.sh"))
 os.symlink(os.path.join(TD, "elsewhere-install.sh"), os.path.join(link_co, "install.sh"))
