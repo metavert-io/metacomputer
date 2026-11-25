@@ -20,11 +20,14 @@ A manifest is a JSON object, checked by check():
                   "key": learn's count of its sessions (report["sources"][KEY]), "kinds": the Transcript kinds its
                   reader makes}: present when `metacomputer learn` reads its sessions
     bench        {"switch": its --agent word}: present when bench/bench.py runs it
+    release_file a channel file of its at the repository's root whose top-level "version" is the release's
+                 (scripts/release.sh sets it; at most one agent has one)
 Only lib/agentkit, lib/agent_setup.py and scripts/gen-agents.py read it; bash reads it through lib/agentkit/agents.sh
 (generated). Works under any python3 (macOS's 3.9 included)."""
 from . import registry
 
-KEYS = {"label", "flag", "prog", "short", "json_key", "docs", "owners", "tools", "install", "sessions", "bench"}
+KEYS = {"label", "flag", "prog", "short", "json_key", "docs", "owners", "tools", "install", "sessions", "bench",
+        "release_file"}
 REQUIRED = ("label", "flag", "prog", "short", "docs", "owners", "tools")
 INSTALL_KEYS = {"options", "missing", "steps", "only_note"}
 SESSION_KEYS = {"source", "key", "kinds"}
@@ -64,6 +67,12 @@ def by_flag(flag):
     return next((n for n in registry.AGENTS if manifest(n)["flag"] == flag), None)
 
 
+def release_file():
+    """The channel file that carries the release's version (the one agent's "release_file"), or None."""
+    files = [manifest(n)["release_file"] for n in registry.AGENTS if manifest(n).get("release_file")]
+    return files[0] if files else None
+
+
 def generic():
     """The agents whose install and uninstall are lib/agent_setup.py's (no setup.sh steps of their own)."""
     return [n for n in registry.AGENTS if manifest(n)["install"]["steps"] == "generic"]
@@ -97,6 +106,8 @@ def check(name):
     if ses is not None and (not isinstance(ses, dict) or set(ses) - SESSION_KEYS
                             or ses.get("source") not in ("files", "databases")):
         bad.append("'sessions' isn't one this knows")
+    if "release_file" in raw and not (isinstance(raw["release_file"], str) and "/" not in raw["release_file"]):
+        bad.append("its release_file isn't a file at the repository's root")
     if isinstance(raw.get("docs"), str) and not raw["docs"].startswith("docs/"):
         bad.append("its docs page isn't under docs/")
     return bad
@@ -107,6 +118,11 @@ def conflicts():
     out, seen = [], {}
     for n in registry.AGENTS:
         m = manifest(n)
+        if m.get("release_file"):
+            v = ("release_file", "*")       # one agent's at most
+            if v in seen:
+                out.append(f"{n} and {seen[v]} both have a release_file")
+            seen[v] = n
         for k in ("flag", "label", "json_key", "prog"):
             v = (k, m.get(k))
             if v in seen:

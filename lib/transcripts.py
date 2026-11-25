@@ -1,5 +1,7 @@
-"""Claude Code transcripts (and Codex's and Gemini CLI's sessions) that used the metacomputer tools: find them, read
-them, and turn them into an ordered list of tool calls with their results and times.
+"""Claude Code transcripts (and the other agents' session files) that used the metacomputer tools: find them, read
+them, and turn them into an ordered list of tool calls with their results and times. An agent whose sessions are files
+brings its format in its folder (coding-agents/<name>/sessions.py: FORMAT, MARKER, roots; Gemini CLI's is there),
+tried by parse() in its FORMAT's order.
 
 Two Claude Code formats carry the same messages:
 - a headless session's stream-json output (`claude -p --output-format stream-json`), as kept by
@@ -10,12 +12,6 @@ Codex keeps its sessions as $CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl (els
 session_meta line (id, cwd), then events; each finished MCP call is an item_completed event holding an McpToolCall
 (server, tool, arguments, result, status, start and end in ms), and each shell command a CommandExecution, which
 this module reads as a Bash call so the same counts apply.
-Gemini CLI keeps its sessions as ~/.gemini/tmp/<project>/chats/session-*.jsonl (GEMINI_CLI_HOME moves ~/.gemini; checked
-with Gemini CLI 0.70.0): a first line with sessionId and projectHash, then one line per message ({"id", "timestamp",
-"type": "user" | "gemini" | ..., "toolCalls": [{"id", "name", "args", "status", "result", ...}]}), a message written again
-with the same id as its tool calls move on (the last copy counts) and {"$set": ...} lines for the first one. Its MCP tools
-are named mcp_<server>_<tool> (mcp_metacomputer_click); run_shell_command is read as a Bash call. The project folder comes
-from ~/.gemini/projects.json, which names each project's folder under tmp/.
 Antigravity CLI (agy) keeps a JSONL transcript of each conversation beside its own database (checked with agy 1.5.15):
 <app data>/brain/<conversation id>/.system_generated/logs/transcript.jsonl, the app data folder being
 ~/.gemini/antigravity-cli (ANTIGRAVITY_APP_DATA_DIR, which agy gives the commands it runs). One step per line ({"step_index",
@@ -53,12 +49,43 @@ MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__"
 # A tool_use of a metacomputer tool, as both Claude Code formats write it (compact JSON; a space allowed), a Codex call
 # of the metacomputer server, a Gemini CLI tool call (mcp_metacomputer_<tool>), or Antigravity CLI's call_mcp_tool of the
 # metacomputer server (its ServerName JSON-encoded in the compact transcript, as it was in the full one).
-USE_MARKER = re.compile(rb'"name":\s?"mcp__(?:plugin_metacomputer_)?metacomputer__[a-z_]'
-                        rb'|"server":\s?"metacomputer",\s?"tool":\s?"[a-z_]'
-                        rb'|"name":\s?"mcp_metacomputer_[a-z_]'
-                        rb'|"ServerName":\s?"(?:\\")?metacomputer(?:_metacomputer)?(?:\\")?"')
-GEMINI_PREFIX = "mcp_metacomputer_"         # Gemini CLI's name for the metacomputer server's tools
-GEMINI_DONE = ("success", "error")          # a tool call that ran (scheduled, executing, cancelled ... didn't, or not yet)
+STREAM_MARKER = rb'"name":\s?"mcp__(?:plugin_metacomputer_)?metacomputer__[a-z_]'
+LEGACY_MARKERS = (rb'"server":\s?"metacomputer",\s?"tool":\s?"[a-z_]',
+                  rb'"ServerName":\s?"(?:\\")?metacomputer(?:_metacomputer)?(?:\\")?"')     # not in their folders yet
+_USE_MARKER = []
+
+
+def use_marker():
+    """USE_MARKER, made once: the stream's marker, or any agent format's (its sessions.py MARKER)."""
+    if not _USE_MARKER:
+        _USE_MARKER.append(re.compile(b"|".join([STREAM_MARKER, *LEGACY_MARKERS,
+                                                 *(m.MARKER for _n, m in _file_agents() if getattr(m, "MARKER", None))])))
+    return _USE_MARKER[0]
+
+
+def _file_agents():
+    """[(name, its sessions.py)] of the registered agents whose sessions are transcript files, in the registry's
+    order."""
+    from agentkit import manifests, registry
+    return [(n, registry.module(n, "sessions")) for n in registry.AGENTS
+            if (manifests.manifest(n).get("sessions") or {}).get("source") == "files" and registry.has(n, "sessions.py")]
+
+
+def formats():
+    """[(order, take)] of the agents' transcript formats (their sessions.py FORMAT), and the ones not in their folders
+    yet, in order: parse() tries each take(tr, ev, typ, t, st, slim) in turn, the first that says it's its own wins."""
+    out = [(20, _take_antigravity), (40, _take_codex)]
+    out += [m.FORMAT for _n, m in _file_agents() if getattr(m, "FORMAT", None)]
+    return sorted(out, key=lambda x: x[0])
+
+
+class State:
+    """What parse() keeps between events: when the model's input last arrived (last_t), and the stream's and Claude
+    Code's calls by their ids (by_id)."""
+
+    def __init__(self):
+        self.last_t = None
+        self.by_id = {}
 # a `metacomputer` command: bare, or ~/.local/bin/metacomputer / <checkout>/bin/metacomputer (or mcomp)
 MCOMP_CMD = re.compile(r"(^|[/\s])metacomputer(\s|$)")
 CLI_SUB = re.compile(r"(?:^|[\s/;&|(])(?:metacomputer|mcomp)\s+([a-z][a-z-]*)")
@@ -117,57 +144,12 @@ def mcp_tool(name):
     return None
 
 
-def _gemini_text(result):
-    """A Gemini CLI tool call's result parts as text (the output its functionResponse carries, without the
-    <untrusted_context> wrapper Gemini CLI puts around an MCP result), and how many images they hold."""
-    texts, imgs = [], 0
-    for part in result if isinstance(result, list) else []:
-        if not isinstance(part, dict):
-            continue
-        if isinstance(part.get("inlineData"), dict):
-            imgs += 1
-        fr = part.get("functionResponse")
-        resp = fr.get("response") if isinstance(fr, dict) else None
-        if isinstance(resp, dict):
-            v = resp.get("output") if isinstance(resp.get("output"), str) else resp.get("error")
-            if isinstance(v, str):
-                texts.append(v[:TEXT_KEEP_WINDOWS])
-            parts = fr.get("parts")
-            for x in parts if isinstance(parts, list) else []:
-                if isinstance(x, dict) and isinstance(x.get("inlineData"), dict):
-                    imgs += 1
-    t = "\n".join(texts)
-    if t.startswith("<untrusted_context>"):
-        t = t[len("<untrusted_context>"):].removesuffix("</untrusted_context>").strip("\n")
-    return t, imgs
-
-
-def _gemini_call(tc, t, last_t, slim):
-    """A finished Gemini CLI tool call as a call (or None): an MCP tool of the metacomputer server, run_shell_command
-    as a Bash call, or another tool by its name."""
-    if not isinstance(tc, dict) or tc.get("status") not in GEMINI_DONE:
-        return None
-    raw = _str(tc.get("name"), 200) or ""
-    args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
-    t_use = _ts({"timestamp": tc.get("timestamp")}) or t
-    if raw == "run_shell_command":
-        name, inp = "Bash", {"command": _str(args.get("command"), 2000 if slim else 4096) or ""}
-    else:
-        name = "mcp__metacomputer__" + raw[len(GEMINI_PREFIX):] if raw.startswith(GEMINI_PREFIX) else raw
-        inp = (bounded(args) if mcp_tool(name) else {}) if slim else args
-    drv = mcp_tool(name)
-    text, imgs = _gemini_text(tc.get("result"))
-    keep = TEXT_KEEP_WINDOWS if drv in ("list_windows", "launch_app") else TEXT_KEEP
-    return {"id": _str(tc.get("id"), 200) or f"gemini-{raw}", "name": name, "tool": drv, "input": inp, "ctx": "",
-            "t_use": t_use, "t_prev": last_t, "error": tc.get("status") == "error",
-            "text": "" if slim and name == "Bash" else text[:keep], "images": imgs, "t_result": t}
-
-
 AGY_SHELL = "run_command"
 AGY_MCP = "call_mcp_tool"
 # metacomputer's server as Antigravity CLI names it: registered by install.sh, or brought by a plugin (agy plugin install
 # of the repository, converted from its Gemini CLI extension), whose servers it names <plugin>_<server>
 AGY_SERVERS = ("metacomputer", "metacomputer_metacomputer")
+AGY_EAGER = "mcp_metacomputer_"         # an MCP tool loaded eagerly: mcp_<server>_<tool>
 AGY_STAMP = re.compile(r"^(?:Created|Completed) At: [^\n]{0,40}\n")
 AGY_EXIT = re.compile(r"Command exited with code (-?\d+)")
 
@@ -263,8 +245,8 @@ def _agy_call(tc, t, last_t, slim):
             except (ValueError, RecursionError):
                 inp = {}
         inp = inp if isinstance(inp, dict) else {}
-    elif raw.startswith(GEMINI_PREFIX):
-        rest = raw[len(GEMINI_PREFIX):]
+    elif raw.startswith(AGY_EAGER):
+        rest = raw[len(AGY_EAGER):]
         rest = rest[len("metacomputer_"):] if rest.startswith("metacomputer_") else rest      # the plugin's server
         name, inp = "mcp__metacomputer__" + rest, args
     else:
@@ -306,32 +288,6 @@ def codex_sessions_dir(env=None):
     return os.path.join(base, "sessions")
 
 
-def gemini_sessions_dir(env=None):
-    """Gemini CLI's per-project folders, each with its chats/: ~/.gemini/tmp ($GEMINI_CLI_HOME/.gemini/tmp)."""
-    env = os.environ if env is None else env
-    base = env.get("GEMINI_CLI_HOME") or env.get("HOME") or os.path.expanduser("~")
-    return os.path.join(base, ".gemini", "tmp")
-
-
-def gemini_project(path):
-    """The project folder of a Gemini CLI session file, from projects.json beside tmp/ ({"projects": {folder: name}},
-    the name being the folder under tmp/ that holds chats/); None when it can't be told."""
-    parts = os.path.abspath(path).split(os.sep)
-    if "tmp" not in parts:
-        return None
-    i = len(parts) - 1 - parts[::-1].index("tmp")
-    if i + 1 >= len(parts):
-        return None
-    try:
-        with open_regular(os.sep.join(parts[:i] + ["projects.json"])) as f:
-            d = json.loads(f.read(1 << 20))
-    except (OSError, ValueError):
-        return None
-    projects = d.get("projects") if isinstance(d, dict) else None
-    hits = [k for k, v in (projects or {}).items() if v == parts[i + 1] and isinstance(k, str)] if isinstance(projects, dict) else []
-    return hits[0][:4096] if len(hits) == 1 else None
-
-
 def open_regular(path):
     """A binary reader for a regular file (no link, FIFO or device), gunzipped for .gz; raises OSError."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -360,7 +316,7 @@ def uses_tools(path, chunk=1 << 20):
                 if not block:
                     return False
                 total += len(block)
-                if USE_MARKER.search(tail + block):
+                if use_marker().search(tail + block):
                     return True
                 tail = block[-80:]
         return False
@@ -535,14 +491,70 @@ def _codex_call(tr, ev, item, t, last_t, slim):
     return None
 
 
+def _take_antigravity(tr, ev, typ, t, st, slim):
+    """One step of an Antigravity CLI conversation, read into tr (True when it's Antigravity CLI's)."""
+    if not (tr.kind == "antigravity" or ("step_index" in ev and "source" in ev and isinstance(typ, str)
+                                         and "message" not in ev)):
+        return False
+    if tr.kind != "antigravity":                                          # an Antigravity CLI conversation
+        tr.kind = "antigravity"
+        parts = os.path.abspath(tr.path).split(os.sep) if tr.path else []
+        tr.session_id = parts[-4][:200] if len(parts) >= 4 and parts[-3] == ".system_generated" else None
+        tr.cwd = antigravity_project(tr.path) if tr.path else None
+        tr.agy_pending = []
+    if typ == "USER_INPUT":
+        st.last_t = t if t is not None else st.last_t
+    elif typ == "PLANNER_RESPONSE":
+        for tc in ev.get("tool_calls") if isinstance(ev.get("tool_calls"), list) else []:
+            if not isinstance(tc, dict):
+                continue
+            if len(tr.calls) >= MAX_CALLS:
+                tr.info["truncated"] = "calls"
+                break
+            call = _agy_call(tc, t, st.last_t, slim)
+            call["id"] = f"{call['id']}-{len(tr.calls)}"
+            tr.calls.append(call)
+            tr.agy_pending.append(call)
+        st.last_t = t if t is not None else st.last_t
+    elif ev.get("source") == "MODEL" and tr.agy_pending:                  # the next call's result, in order
+        _agy_result(tr.agy_pending.pop(0), ev, t, slim)
+        st.last_t = t if t is not None else st.last_t
+    return True
+
+
+def _take_codex(tr, ev, typ, t, st, slim):
+    """One line of a Codex session file, read into tr (True when it's Codex's: its session_meta or an event_msg)."""
+    if typ == "session_meta" and isinstance(ev.get("payload"), dict):        # a Codex session
+        pl = ev["payload"]
+        tr.kind = "codex"
+        tr.session_id = tr.session_id or _str(pl.get("id"), 200) or _str(pl.get("session_id"), 200)
+        tr.cwd = tr.cwd or _str(pl.get("cwd"))
+        return True
+    if typ == "event_msg" and isinstance(ev.get("payload"), dict):
+        pl = ev["payload"]
+        item = pl.get("item") if isinstance(pl.get("item"), dict) else {}
+        if pl.get("type") == "item_completed" and item.get("type") == "UserMessage":
+            st.last_t = _ms(pl.get("completed_at_ms")) or t
+        elif pl.get("type") == "item_completed":
+            if len(tr.calls) >= MAX_CALLS:
+                tr.info["truncated"] = "calls"
+                return True
+            call = _codex_call(tr, pl, item, t, st.last_t, slim)
+            if call is not None:
+                tr.calls.append(call)
+                st.last_t = call["t_result"] or st.last_t   # the model's next input arrives when this call ends
+        return True
+    return False
+
+
 def parse(path, events=None, slim=False):
     """Read a transcript (or the given events) into a Transcript. Fields of the wrong type are ignored, at most
     MAX_CALLS tool calls are kept, and with slim=True each call keeps only a bounded() copy of its input (and a
     Bash call its first 2,000 characters of command). `tr.info` says whether reading was cut short."""
     tr = Transcript(path)
     tr.info = {}
-    by_id = {}
-    last_t = None
+    st = State()
+    takes = [take for _order, take in formats()]
     for ev in (events if events is not None else read_events(path, tr.info)):
         typ = ev.get("type")
         t = _ts(ev)
@@ -559,74 +571,7 @@ def parse(path, events=None, slim=False):
             tr.final = ev
             tr.kind = "stream"
             continue
-        if tr.kind == "antigravity" or ("step_index" in ev and "source" in ev and isinstance(typ, str)
-                                         and "message" not in ev):
-            if tr.kind != "antigravity":                                          # an Antigravity CLI conversation
-                tr.kind = "antigravity"
-                parts = os.path.abspath(path).split(os.sep) if path else []
-                tr.session_id = parts[-4][:200] if len(parts) >= 4 and parts[-3] == ".system_generated" else None
-                tr.cwd = antigravity_project(path) if path else None
-                tr.agy_pending = []
-            if typ == "USER_INPUT":
-                last_t = t if t is not None else last_t
-            elif typ == "PLANNER_RESPONSE":
-                for tc in ev.get("tool_calls") if isinstance(ev.get("tool_calls"), list) else []:
-                    if not isinstance(tc, dict):
-                        continue
-                    if len(tr.calls) >= MAX_CALLS:
-                        tr.info["truncated"] = "calls"
-                        break
-                    call = _agy_call(tc, t, last_t, slim)
-                    call["id"] = f"{call['id']}-{len(tr.calls)}"
-                    tr.calls.append(call)
-                    tr.agy_pending.append(call)
-                last_t = t if t is not None else last_t
-            elif ev.get("source") == "MODEL" and tr.agy_pending:                  # the next call's result, in order
-                _agy_result(tr.agy_pending.pop(0), ev, t, slim)
-                last_t = t if t is not None else last_t
-            continue
-        if tr.kind == "gemini" or (typ is None and "projectHash" in ev and isinstance(ev.get("sessionId"), str)):
-            if tr.kind != "gemini":                                               # a Gemini CLI session's first line
-                tr.kind = "gemini"
-                tr.session_id = _str(ev.get("sessionId"), 200)
-                tr.cwd = gemini_project(path) if path else None
-                tr.gemini_seen = set()
-                continue
-            if typ == "user" and t is not None:
-                last_t = t
-            elif typ == "gemini" and isinstance(ev.get("toolCalls"), list):
-                for tc in ev["toolCalls"]:
-                    key = _str(tc.get("id"), 200) if isinstance(tc, dict) else None
-                    if not key or key in tr.gemini_seen:
-                        continue
-                    if len(tr.calls) >= MAX_CALLS:
-                        tr.info["truncated"] = "calls"
-                        break
-                    call = _gemini_call(tc, t, last_t, slim)
-                    if call is not None:
-                        tr.gemini_seen.add(key)              # the message is written again as its calls move on
-                        tr.calls.append(call)
-                        last_t = call["t_result"] or last_t
-            continue
-        if typ == "session_meta" and isinstance(ev.get("payload"), dict):        # a Codex session
-            pl = ev["payload"]
-            tr.kind = "codex"
-            tr.session_id = tr.session_id or _str(pl.get("id"), 200) or _str(pl.get("session_id"), 200)
-            tr.cwd = tr.cwd or _str(pl.get("cwd"))
-            continue
-        if typ == "event_msg" and isinstance(ev.get("payload"), dict):
-            pl = ev["payload"]
-            item = pl.get("item") if isinstance(pl.get("item"), dict) else {}
-            if pl.get("type") == "item_completed" and item.get("type") == "UserMessage":
-                last_t = _ms(pl.get("completed_at_ms")) or t
-            elif pl.get("type") == "item_completed":
-                if len(tr.calls) >= MAX_CALLS:
-                    tr.info["truncated"] = "calls"
-                    continue
-                call = _codex_call(tr, pl, item, t, last_t, slim)
-                if call is not None:
-                    tr.calls.append(call)
-                    last_t = call["t_result"] or last_t   # the model's next input arrives when this call ends
+        if any(take(tr, ev, typ, t, st, slim) for take in takes):        # an agent's own format
             continue
         if typ not in ("assistant", "user"):
             continue
@@ -637,7 +582,7 @@ def parse(path, events=None, slim=False):
         content = msg.get("content") if isinstance(msg, dict) else None
         ctx = _str(ev.get("parent_tool_use_id"), 200) or ""
         if typ == "user" and t is not None:
-            last_t = t                          # the model's input arrived: its time runs from here
+            st.last_t = t                          # the model's input arrived: its time runs from here
         if isinstance(content, list):
             for c in content:
                 if not isinstance(c, dict):
@@ -652,14 +597,14 @@ def parse(path, events=None, slim=False):
                         inp = ({"command": _str(inp.get("command"), 2000) or ""} if name == "Bash"
                                else bounded(inp) if mcp_tool(name) else {})
                     call = {"id": c["id"][:200], "name": name, "tool": mcp_tool(name), "input": inp, "ctx": ctx,
-                            "t_use": t, "t_prev": last_t, "error": None, "text": "", "images": 0, "t_result": None}
-                    by_id[call["id"]] = call
+                            "t_use": t, "t_prev": st.last_t, "error": None, "text": "", "images": 0, "t_result": None}
+                    st.by_id[call["id"]] = call
                     tr.calls.append(call)
                     if t is not None:
-                        last_t = t              # a second call in the same turn took no model time of its own
+                        st.last_t = t              # a second call in the same turn took no model time of its own
                 elif typ == "user" and c.get("type") == "tool_result":
                     tid = c.get("tool_use_id")
-                    call = by_id.get(tid[:200]) if isinstance(tid, str) else None
+                    call = st.by_id.get(tid[:200]) if isinstance(tid, str) else None
                     if call is None or call["error"] is not None:
                         continue
                     text, imgs = result_text(c.get("content"))

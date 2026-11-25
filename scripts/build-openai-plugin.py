@@ -65,7 +65,10 @@ def sync_plugin():
 
 
 def release_version():
-    return json.load(open(os.path.join(LAB, "gemini-extension.json"), encoding="utf-8"))["version"]
+    """The release's version: the one its channel file carries (an agent's manifest's "release_file"), which
+    scripts/release.sh sets."""
+    from agentkit import manifests
+    return json.load(open(os.path.join(LAB, manifests.release_file()), encoding="utf-8"))["version"]
 
 
 def no_link(rel):

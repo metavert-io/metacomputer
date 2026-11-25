@@ -863,7 +863,6 @@ agent_config_mentions() { # NAME: 0 when a file of the agent's configuration may
     AG_CONFIG_FILES=(); "ag_${1}_config_files"; set -- ${AG_CONFIG_FILES[@]+"${AG_CONFIG_FILES[@]}"}
   else
   case "$1" in
-    gemini) set -- "${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json" "$HOME/.gemini/settings.json" ;;
     antigravity) set -- "$HOME/.gemini/config/mcp_config.json" ;;
   esac
   fi

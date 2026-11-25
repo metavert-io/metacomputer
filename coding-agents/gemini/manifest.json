@@ -10,5 +10,13 @@
   "tools": "mcp_metacomputer_*",
   "bench": {
     "switch": "gemini"
+  },
+  "release_file": "gemini-extension.json",
+  "sessions": {
+    "source": "files",
+    "key": "gemini_sessions",
+    "kinds": [
+      "gemini"
+    ]
   }
 }

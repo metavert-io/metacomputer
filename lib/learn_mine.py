@@ -459,9 +459,7 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
     out, scanned, bad = [], 0, 0
     roots = []
     if projects:
-        roots.append((transcripts.claude_projects_dir(env), "project"))
-        roots.append((transcripts.codex_sessions_dir(env), "project"))     # Codex's sessions (rollout-*.jsonl)
-        roots.append((transcripts.gemini_sessions_dir(env), "project"))    # Gemini CLI's (tmp/<project>/chats/*.jsonl)
+        roots += [(r, "project") for r in session_roots(env)]           # each agent's folders of session files
     roots += [(os.path.abspath(os.path.expanduser(d)), "stream") for d in extra_dirs]
     for root, source in roots:
         if not os.path.isdir(root):
@@ -484,8 +482,8 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
                     bad += 1
                 elif hit:
                     out.append((p, source))
-    # Antigravity CLI's conversations: one compact transcript each (transcripts.antigravity_transcripts)
-    for p in transcripts.antigravity_transcripts(env) if projects else []:
+    # the agents that list their session files one by one (an Antigravity CLI conversation's compact transcript)
+    for p in session_files(env) if projects else []:
         try:
             st = os.lstat(p)
         except OSError:
@@ -521,6 +519,54 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
                 elif hit:
                     out.append((p, "bench"))
     return out, scanned, bad
+
+
+# The agents whose readers aren't in their folders yet: their session folders and files (transcripts.py's).
+_LEGACY_ROOTS = {"claude-code": lambda env: [transcripts.claude_projects_dir(env)],
+                 "codex": lambda env: [transcripts.codex_sessions_dir(env)]}
+_LEGACY_FILES = {"antigravity": lambda env: transcripts.antigravity_transcripts(env)}
+_LEGACY_KINDS = {"project": "claude-code", "codex": "codex", "antigravity": "antigravity"}
+
+
+def _readers():
+    """{name: its sessions.py} of the registered agents whose sessions are files, and their order."""
+    from agentkit import registry
+    return dict(transcripts._file_agents()), registry.AGENTS
+
+
+def session_roots(env):
+    """The folders of the agents' session files (each one's sessions.py roots), in the registry's order."""
+    mods, order = _readers()
+    out = []
+    for n in order:
+        if n in mods and hasattr(mods[n], "roots"):
+            out += mods[n].roots(env)
+        elif n in _LEGACY_ROOTS:
+            out += _LEGACY_ROOTS[n](env)
+    return out
+
+
+def session_files(env):
+    """The session files the agents list one by one (each one's sessions.py files), in the registry's order."""
+    mods, order = _readers()
+    out = []
+    for n in order:
+        if n in mods and hasattr(mods[n], "files"):
+            out += mods[n].files(env)
+        elif n in _LEGACY_FILES:
+            out += _LEGACY_FILES[n](env)
+    return out
+
+
+def source_of(kind):
+    """The agent (its folder's name) a Transcript kind is, from the manifests' sessions kinds: a project file
+    (Transcript's own default kind) is the agent whose files those are."""
+    from agentkit import manifests, registry
+    src = dict(_LEGACY_KINDS)
+    for n in registry.AGENTS:
+        for k in (manifests.manifest(n).get("sessions") or {}).get("kinds") or ():
+            src[k] = n
+    return src.get(kind, src["project"])
 
 
 def _probe(path):
@@ -589,8 +635,7 @@ def _mine_tr(tr, source, cutoff, project):
         shift = end - (tr.last or 0.0)
         tr.first, tr.last = (tr.first or 0.0) + shift, (tr.last or 0.0) + shift
     else:
-        src = ("headless" if tr.kind == "stream" else tr.kind
-               if tr.kind in ("codex", "gemini", "antigravity", "openclaw", "hermes") else "claude-code")
+        src = "headless" if tr.kind == "stream" else source_of(tr.kind)
     if project and src != "bench" and not _under(tr.cwd, project):
         return None
     if tr.last is not None and tr.last < cutoff:

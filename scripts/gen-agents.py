@@ -57,6 +57,7 @@ def agents_sh():
            f"MC_AGENT_GENERIC={sh_quote(' '.join(manifests.manifest(n)['flag'] for n in manifests.generic()))}",
            f"MC_AGENT_INSTALL_FLAGS={sh_quote(' '.join(install_flags()))}",
            f"MC_AGENT_LABELS_OR={sh_quote(manifests.in_words(manifests.labels()))}",
+           f"MC_AGENT_RELEASE_FILE={sh_quote(manifests.release_file() or '')}",
            "mc_agent() { # FLAG KEY: that agent's dir (its folder under coding-agents/), label, prog, docs, missing (line or",
            "  # listed), steps (generic or hooks) or only_note; status 1: no such agent",
            "  case \"$1:$2\" in"]

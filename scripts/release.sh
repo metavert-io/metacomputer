@@ -260,9 +260,11 @@ if n != 1:
 new = re.sub(r"(## \[" + re.escape(version) + r"\] - [0-9-]+\n)\n*", r"\1\n", new, count=1)
 open(path, "w", encoding="utf-8").write(new)
 PY
-# gemini-extension.json's version (Gemini CLI shows it, and its extensions gallery lists it) is the release's too: set in
-# the same commit. Its one top-level "version" line changes, and the file must still read as that version.
-EXT=gemini-extension.json
+# The channel file that carries the release's version (an agent's manifest's "release_file": its agent shows it, and
+# its gallery lists it) is the release's too: set in the same commit. Its one top-level "version" line changes, and the
+# file must still read as that version.
+. "$ROOT/lib/agentkit/agents.sh" || die "couldn't read lib/agentkit/agents.sh: this checkout is incomplete"
+EXT="$MC_AGENT_RELEASE_FILE"
 FILES=(CHANGELOG.md)
 if [ -f "$EXT" ]; then
   python3 - "$EXT" "$VERSION" > "$TMP/ext.new" <<'PY' || die "couldn't set the version in $EXT"

@@ -668,6 +668,13 @@ def sh_function(rel, name):
     return text[i:text.index("\n}\n", i) + 3]
 
 
+def install_steps():
+    """install.sh and every agent's own steps in it (coding-agents/<name>/setup.sh), as one text."""
+    from agentkit import registry
+    return raw("install.sh") + "".join(raw(os.path.join("coding-agents", n, "setup.sh")) for n in registry.AGENTS
+                                       if registry.has(n, "setup.sh"))
+
+
 def function_src(rel, name):
     """A top-level function's source; "Class.method" for a method (up to the class's next method, or its end)."""
     text = raw(rel)
@@ -2511,9 +2518,9 @@ CLAIMS = [
      and not os.path.exists(os.path.join(LAB, "plugin", ".mcp.json"))
      and not os.path.exists(os.path.join(LAB, "plugin", "hooks"))),
     ("plugin/README.md", r"It changes no Claude Code permission settings",
-     lambda m: not re.search(r"permission|(?<!\.gemini/)settings\.json|allowedTools", raw("install.sh"), re.I)
-     and raw("install.sh").count(".gemini/settings.json")                     # read only, by agent_config_mentions
-     == sh_function("install.sh", "agent_config_mentions").count(".gemini/settings.json") >= 1),
+     lambda m: not re.search(r"permission|(?<!\.gemini/)settings\.json|allowedTools", install_steps(), re.I)
+     and install_steps().count(".gemini/settings.json")                       # read only, by its config_files hook
+     == sh_function("coding-agents/gemini/setup.sh", "ag_gemini_config_files").count(".gemini/settings.json") >= 1),
     ("plugin/README.md", r"metacomputer's MCP server for every project \(user scope, named `metacomputer`, running `~/\.local/bin/metacomputer mcp-lazy`",
      lambda m: 'claude mcp add -s user metacomputer "$CMD_LINK" mcp-lazy' in raw("install.sh")
      and 'CMD_LINK="$HOME/.local/bin/metacomputer"' in raw("install.sh")),
@@ -3037,7 +3044,8 @@ CLAIMS = [
     ("docs/codex.md", r"a manifest \(`\.codex-plugin/plugin\.json`:.*?\) with the release's version and `\"requires_local_executor\": true`, which "
                       r"makes it \"Desktop only\".*?It\s+carries no MCP server, launcher or script",
      lambda m: 'd["requires_local_executor"] = True' in function_src("scripts/build-openai-plugin.py", "manifest")
-     and 'json.load(open(os.path.join(LAB, "gemini-extension.json"), encoding="utf-8"))["version"]' in raw("scripts/build-openai-plugin.py")
+     and 'json.load(open(os.path.join(LAB, manifests.release_file()), encoding="utf-8"))["version"]' in raw("scripts/build-openai-plugin.py")
+     and '"release_file": "gemini-extension.json"' in raw("coding-agents/gemini/manifest.json")
      and not re.search(r"bin/metacomputer|get\.sh", raw("scripts/build-openai-plugin.py").split("SKILLS = ", 1)[1].split("DATE =", 1)[0])
      and 'for k in ("mcpServers", "apps", "hooks", "commands"):' in function_src("scripts/build-openai-plugin.py", "problems")),
     ("docs/codex.md", r"Its sources are regular\s+files only: a skill folder, the icon, the license or the notices that is a link, or sits "

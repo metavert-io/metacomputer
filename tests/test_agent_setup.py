@@ -958,7 +958,7 @@ def unit_cases():
         agent_setup._entry_res(d)["kind"] == "error" for d in ({"command": 3}, {"command": "x", "args": "mcp-lazy"},
                                                                {"command": "x", "args": [1]}, [])))
 
-    class Fake(agent_setup.Gemini):
+    class Fake(type(agent_setup.AGENTS["gemini"])):
         """Gemini CLI whose settings change between the read and the add (another program writes them)."""
         def __init__(self, seq):
             self.seq = list(seq)
