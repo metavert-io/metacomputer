@@ -48,9 +48,24 @@ def otlp_body(E, events):
         "scopeLogs": [{"scope": {"name": "metacomputer.events", "version": "1"}, "logRecords": recs}]}]}
 
 
+def otlp_count(raw):
+    """A count in an OTLP/HTTP JSON answer (an int64: in JSON a number, or a string of digits; null is the default, 0),
+    or None when it isn't a non-negative integer (true, 2.7, -1, "x", one past int64)."""
+    if raw is None:
+        return 0
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        n = raw
+    elif isinstance(raw, str) and raw.isascii() and raw.isdigit():
+        n = int(raw)
+    else:
+        return None
+    return n if 0 <= n < 2 ** 63 else None
+
+
 def otlp_rejected(E, body, sent):
     """(records the collector rejected, its message) from an OTLP/HTTP JSON answer: a 2xx with
-    partialSuccess.rejectedLogRecords > 0 stored only part of the batch. OTLP says not to retry those."""
+    partialSuccess.rejectedLogRecords > 0 stored only part of the batch. OTLP says not to retry those. The count is None
+    when the answer's isn't a non-negative integer: such an answer is an error reply, never an acceptance."""
     try:
         d = json.loads(body or b"{}")
     except ValueError:
@@ -58,13 +73,9 @@ def otlp_rejected(E, body, sent):
     ps = (d.get("partialSuccess") or d.get("partial_success")) if isinstance(d, dict) else None
     if not isinstance(ps, dict):
         return 0, ""
-    raw = ps.get("rejectedLogRecords", ps.get("rejected_log_records", 0))   # an int64: a number or a string in JSON
-    try:
-        n = int(raw) if isinstance(raw, (int, str)) and not isinstance(raw, bool) else 0
-    except ValueError:
-        n = 0
+    n = otlp_count(ps.get("rejectedLogRecords", ps.get("rejected_log_records", 0)))
     msg = ps.get("errorMessage") or ps.get("error_message") or ""
-    return max(0, min(n, sent)), E.clean_str(msg, 160) if isinstance(msg, str) else ""
+    return (None if n is None else min(n, sent)), E.clean_str(msg, 160) if isinstance(msg, str) else ""
 
 
 def otlp_url(url):
@@ -84,8 +95,12 @@ def request(E, sink, batch, extra):
 
 def accepted(E, answer, batch):
     """None when the collector took every record; else the delivery's result: delivered, but with how many it refused
-    (dropped, not retried, as OTLP says) and why."""
+    (dropped, not retried, as OTLP says) and why; or, for an answer whose count of refused records isn't one, not
+    delivered (an error reply: retried)."""
     n, msg = otlp_rejected(E, answer, len(batch))
+    if n is None:
+        return (False, "the collector's answer can't be read: its partial success's count of rejected records isn't a "
+                "whole number" + (f" ({msg})" if msg else ""), False, 0)
     if n:
         return (True, f"the collector rejected {n} of {len(batch)} event(s) (OTLP partial success"
                 + (f": {msg}" if msg else "") + "); not retried", False, n)

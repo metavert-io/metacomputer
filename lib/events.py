@@ -31,7 +31,6 @@ command that emitted. At most RATE_CAP events per family per RATE_WINDOW reach t
 sinks (the rest are logged and summed up). Every event says which code path made it
 (`origin`). Stdlib only.
 """
-import argparse
 import base64
 import calendar
 import fcntl
@@ -395,7 +394,7 @@ SECRET_KEY_RE = re.compile(
     r"session|jwt|bearer|(^|_)key$|(^|_)sig(nature)?($|_)|(^|_)auth(orization)?($|_)|_code$|"
     r"^(text|value|values|script|typed|otp|totp|code|pin|vnc.*)$")
 MAX = {"message": 500, "action": 300, "string": 300, "list": 50, "keys": 50, "depth": 4, "data_bytes": 4096}
-_known = {"at": 0.0, "values": []}
+_known = {"at": 0.0, "values": [], "config": None}
 
 
 def url_secret_parts(url):
@@ -411,11 +410,24 @@ def url_secret_parts(url):
     return [p for p in parts if len(p) >= 6]
 
 
+def _config_stamp():
+    """events.json as it is now, for known_secrets(): its path, inode, size and modification time (one lstat)."""
+    p = config_path()
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return (p, None)
+    return (p, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def known_secrets():
     """Values that must never appear in an event: sink header values, signing keys and secret URL parts, and
     the live-view password when it's kept in a file ($SSH_DIR/vnc-pass). When it's kept in your own secret
-    store it is never fetched for this (nothing in the event code handles it)."""
-    if time.time() - _known["at"] < 30:
+    store it is never fetched for this (nothing in the event code handles it). Kept for 30 s, but read again as soon
+    as events.json changes (its stat is compared on every call), so a sink another process adds is hidden from a
+    long-running process's (the hub's, a bridge's) very next event."""
+    stamp = _config_stamp()
+    if time.time() - _known["at"] < 30 and stamp == _known["config"]:
         return _known["values"]
     vals = []
     try:
@@ -434,8 +446,8 @@ def known_secrets():
             vals.append(open(p).read().strip())
     except OSError:
         pass
-    _known["values"] = sorted({v for v in vals if isinstance(v, str) and len(v) >= 6}, key=len, reverse=True)
-    _known["at"] = time.time()
+    _known.update(values=sorted({v for v in vals if isinstance(v, str) and len(v) >= 6}, key=len, reverse=True),
+                  at=time.time(), config=stamp)
     return _known["values"]
 
 
