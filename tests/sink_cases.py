@@ -91,8 +91,9 @@ def stream(c):
         return list(mod.OTLP_SEV[s])
     if fn == "time_ns":
         return str(events.iso_to_ns(s))
-    if fn == "rejected":
-        return mod.otlp_rejected(events, s.encode(), 10**9)[0]
+    if fn == "rejected":              # how many records were refused, or "error": an answer whose count isn't one
+        n = mod.otlp_rejected(events, s.encode(), 10**9)[0]
+        return "error" if n is None else n
     if fn == "syslog_pri":
         return mod.SYSLOG_FACILITY * 8 + mod.SYSLOG_SEV[s]
     if fn == "sd_escape":
