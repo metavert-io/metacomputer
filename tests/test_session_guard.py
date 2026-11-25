@@ -203,6 +203,7 @@ FORMS = [
     ("secrets", ["revoke", "--all"], "act"), ("secrets", ["disconnect", "--vm", "x"], "act"), ("secrets", ["audit-sink", "add", "s"], "act"),
     ("secrets", ["audit-sink", "remove", "s"], "act"), ("secrets", ["test-legacy-totp-link"], "act"),
     ("secrets", ["test-agent-kind", "cases.json"], "act"),       # test builds only: what lib/owners.py is checked against
+    ("secrets", ["test-sink-cases", "cases.json"], "act"),       # test builds only: what the stream's sinks are checked against
     # paying for things: a store's rules and what's public or waiting only read; every purchase and change acts
     ("secrets", ["merchant-rules", "https://shop.example"], "exempt"), ("secrets", ["ap2", "key"], "exempt"),
     ("secrets", ["ap2", "key", "--json"], "exempt"), ("secrets", ["wba", "status"], "exempt"), ("secrets", ["wba", "directory"], "exempt"),

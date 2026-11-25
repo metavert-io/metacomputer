@@ -24,7 +24,11 @@ A manifest is a JSON object, checked by check():
     release_file a channel file of its at the repository's root whose top-level "version" is the release's
                  (scripts/release.sh sets it; at most one agent has one)
 Only lib/agentkit, lib/agent_setup.py and scripts/gen-agents.py read it; bash reads it through lib/agentkit/agents.sh
-(generated). Works under any python3 (macOS's 3.9 included)."""
+(generated). A manifest is a contributor's input (a pull request may touch its folder only), and its values reach
+generated shell, CODEOWNERS and docs: check() holds each to a whitelist of its own (lib/gensafe.py). Works under any
+python3 (macOS's 3.9 included)."""
+import re
+
 from . import registry
 
 KEYS = {"label", "flag", "prog", "short", "json_key", "docs", "owners", "tools", "install", "sessions", "bench",
@@ -32,6 +36,16 @@ KEYS = {"label", "flag", "prog", "short", "json_key", "docs", "owners", "tools",
 REQUIRED = ("label", "flag", "prog", "short", "docs", "owners", "tools")
 INSTALL_KEYS = {"options", "missing", "steps", "only_note", "switch"}
 SESSION_KEYS = {"source", "key", "kinds"}
+NAME = re.compile(r"[a-z][a-z0-9-]{0,40}")                 # an agent's name: its folder, its registry line
+# Each field's whitelist: (pattern, what it is, its longest), or an int: one line of text at most that long.
+FIELDS = {
+    "label": 64, "short": 32, "tools": 120,
+    "prog": (r"[A-Za-z0-9][A-Za-z0-9._+-]*", "a command's name (letters, digits and . _ + -)", 64),
+    "json_key": (r"[a-z][a-z0-9_]*", "a JSON key (lowercase letters, digits and _)", 64),
+    "release_file": (r"[A-Za-z0-9][A-Za-z0-9._-]*", "a file at the repository's root (letters, digits and . _ -)", 128),
+}
+OPTION = (r"--[a-z][a-z0-9-]+", "an option (--word: lowercase letters, digits and -)", 42)
+WORD = (r"[a-z][a-z0-9_-]*", "a lowercase word (letters, digits, _ and -)", 41)
 
 
 def manifest(name):
@@ -85,8 +99,17 @@ def generic():
     return [n for n in registry.AGENTS if manifest(n)["install"]["steps"] == "generic"]
 
 
+def _field(v, rule):
+    """None when v passes rule (FIELDS' form), else what it should be."""
+    import gensafe              # lib/gensafe.py: only checks need it
+    return gensafe.text(v, rule) if isinstance(rule, int) else gensafe.matches(v, rule[0], rule[1], rule[2])
+
+
 def check(name):
-    """What's wrong with an agent's manifest: [str] (empty: nothing)."""
+    """What's wrong with an agent's manifest: [str] (empty: nothing). Each problem names its field."""
+    import gensafe
+    if not (isinstance(name, str) and NAME.fullmatch(name)):
+        return [f"the agent's name {name!r} isn't a lowercase word (a letter, then letters, digits and -)"]
     try:
         raw = registry.data(name, "manifest")
     except (OSError, ValueError) as e:
@@ -99,24 +122,42 @@ def check(name):
     for k in ("label", "flag", "prog", "short", "json_key", "docs", "tools"):
         if k in raw and not isinstance(raw[k], str):
             bad.append(f"{k!r} isn't text")
+    for k, rule in FIELDS.items():
+        if isinstance(raw.get(k), str) and _field(raw[k], rule):
+            bad.append(f"{k!r} isn't {_field(raw[k], rule)}")
     flag = raw.get("flag")
     if isinstance(flag, str) and not registry.PART.fullmatch(flag):
         bad.append("its flag isn't a plain lowercase word")
-    if not isinstance(raw.get("owners"), list) or not all(isinstance(o, str) and o.startswith("@") for o in raw.get("owners") or [None]):
-        bad.append("'owners' isn't a list of @names")
+    if not isinstance(raw.get("owners"), list) or gensafe.owners(raw["owners"]):
+        bad.append(f"'owners' isn't {gensafe.owners(None)}")
     inst = raw.get("install", {})
     if not isinstance(inst, dict) or set(inst) - INSTALL_KEYS:
         bad.append("'install' has keys this doesn't know")
     elif inst.get("missing", "listed") not in ("line", "listed") or inst.get("steps", "generic") not in ("generic", "hooks"):
         bad.append("'install' says something this doesn't know")
+    else:
+        opts = inst.get("options", [])
+        if not isinstance(opts, list) or any(_field(o, OPTION) for o in opts):
+            bad.append(f"install.options isn't a list, each {OPTION[1]}")
+        for k in ("only_note", "switch"):
+            if k in inst and gensafe.text(inst[k]):
+                bad.append(f"install.{k} isn't {gensafe.text(inst[k])}")
     ses = raw.get("sessions")
     if ses is not None and (not isinstance(ses, dict) or set(ses) - SESSION_KEYS
                             or ses.get("source") not in ("files", "databases")):
         bad.append("'sessions' isn't one this knows")
+    elif ses is not None and (_field(ses.get("key"), FIELDS["json_key"]) or not isinstance(ses.get("kinds", []), list)
+                              or any(_field(x, WORD) for x in ses.get("kinds", []))):
+        bad.append(f"sessions.key isn't {FIELDS['json_key'][1]}, or sessions.kinds isn't a list, each {WORD[1]}")
+    bench = raw.get("bench")
+    if bench is not None and (not isinstance(bench, dict) or set(bench) != {"switch"} or _field(bench["switch"], WORD)):
+        bad.append(f"'bench' isn't {{\"switch\": {WORD[1]}}}")
     if "release_file" in raw and not (isinstance(raw["release_file"], str) and "/" not in raw["release_file"]):
         bad.append("its release_file isn't a file at the repository's root")
     if isinstance(raw.get("docs"), str) and not raw["docs"].startswith("docs/"):
         bad.append("its docs page isn't under docs/")
+    elif isinstance(raw.get("docs"), str) and gensafe.docs_page(raw["docs"]):
+        bad.append(f"'docs' isn't {gensafe.docs_page(None)}")
     return bad
 
 

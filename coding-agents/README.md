@@ -62,6 +62,12 @@ setting variables and defining functions of its own, the generated files being c
 code), then the agent's own tests (its README says which: they're in tests/, its recognition cases in its folder's
 tests/).
 
+A manifest's values reach generated shell, CODEOWNERS and the docs, and its recognition tables the vault's Swift, so
+each is held to a whitelist of its own (`lib/agentkit/manifests.py` and `recognition.py` check: a command's name, an
+option, a docs page, one line of printable text...) and written quoted or escaped where it lands (`lib/gensafe.py`).
+`scripts/gen-agents.py` and `scripts/build-vault.sh` refuse one that fails, naming the agent and the field
+(tests/hostile_manifests.py tries each with what would break out of it).
+
 ## Hooks
 
 Shared code finds an agent's own behaviour by what its folder brings, never by its name:

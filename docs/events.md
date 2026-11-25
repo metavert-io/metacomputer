@@ -206,6 +206,8 @@ pass tool names, counts, origins and paths.
 
 ## Kinds
 
+[sinks.md](sinks.md) lists them, with what each takes.
+
 ### `webhook`: CloudEvents 1.0, signed
 
 One HTTPS `POST` per event, in [CloudEvents](https://cloudevents.io) structured

@@ -33,6 +33,10 @@ A manifest is plain data (a dict), checked by check_manifest():
     sizes, regions         tuples of what create() takes (empty: not chosen per computer)
     fresh_start            bool: the computer can start from its image every time (PERSIST=none)
 
+A provider's manifest is a contributor's input (a pull request may touch its folder only), and its words reach the
+generated docs/providers.md and lib/cloud/providers.sh: check_manifest() holds each to a whitelist (names and places:
+lowercase words; sizes and regions: plain words; labels and notes: one line of printable text; lib/gensafe.py).
+
 PERSIST=auto|disk|volume|backup|none is a computer's setting: disk (the root disk keeps everything), volume (the home
 folder is on an attached volume; the system starts fresh from the image), backup (its files are saved to object
 storage when it sleeps or stops and put back when it starts), none (fresh every start). auto picks the first of
@@ -53,6 +57,11 @@ KEYS = ("name", "place", "label", "beta", "root_disk", "volumes", "snapshots", "
         "egress", "outside_egress", "billing", "input", "port_forward", "sizes", "regions", "fresh_start")
 BILLING_STOPPED = ("none", "storage", "full", "unknown")
 BILLING_POWEROFF = ("stops-billing", "nothing", "n/a")
+# The words a manifest gives: (pattern, what it is, its longest) for a name, a place, a size or a region; the longest of
+# each text (one line of printable characters).
+NAME_WORD = (r"[a-z][a-z0-9-]*", "a lowercase word (letters, digits and -)", 41)
+PLAIN_WORD = (r"[A-Za-z0-9][A-Za-z0-9._-]*", "a plain word (letters, digits and . _ -)", 64)
+TEXT = {"label": 64, "note": 400}
 
 
 class Unavailable(ValueError):
@@ -83,11 +92,16 @@ def check_manifest(m):
             if key not in v or not test(v[key]):
                 bad.append(f"{k}.{key}: {what}")
 
+    import gensafe              # lib/gensafe.py: only checks need it
     num_or_none = (lambda x: x is None or (isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0))
     is_bool = (lambda x: isinstance(x, bool))
-    is_text = (lambda x: isinstance(x, str) and bool(x.strip()))
+    is_text = (lambda x: isinstance(x, str) and bool(x.strip()) and not gensafe.text(x, TEXT["note"]))
     for k in ("name", "place", "label"):
-        kind(k, is_text(m[k]), "text")
+        kind(k, is_text(m[k]), "one line of printable text")
+    for k in ("name", "place"):
+        kind(k, not gensafe.matches(m[k], *NAME_WORD), NAME_WORD[1])
+    kind("label", not gensafe.text(m["label"], TEXT["label"]),
+         f"one line of printable text, at most {TEXT['label']} long")
     for k in ("beta", "port_forward", "fresh_start"):
         kind(k, is_bool(m[k]), "True or False")
     kind("root_disk", m["root_disk"] in ROOT_DISK, " or ".join(ROOT_DISK))
@@ -122,7 +136,8 @@ def check_manifest(m):
             or not is_text(ip.get("note")):
         bad.append("input: {'background': bool, 'note': text}")
     for k in ("sizes", "regions"):
-        kind(k, isinstance(m[k], tuple) and all(is_text(x) for x in m[k]), "a tuple of names")
+        kind(k, isinstance(m[k], tuple) and all(is_text(x) and not gensafe.matches(x, *PLAIN_WORD) for x in m[k]),
+             f"a tuple of names, each {PLAIN_WORD[1]}")
     return bad
 
 

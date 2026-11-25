@@ -1,0 +1,36 @@
+{
+  "label": "OTLP",
+  "about": "OpenTelemetry logs, OTLP/HTTP JSON (POST URL/v1/logs)",
+  "docs": "docs/events.md#otlp-opentelemetry-logs-over-otlphttp-json",
+  "owners": [
+    "@jonradoff"
+  ],
+  "batch": 50,
+  "url_words": [
+    "collector",
+    "otlp"
+  ],
+  "partial": "OTLP partial success",
+  "format": {
+    "content_type": "application/json",
+    "path": "/v1/logs",
+    "severity": {
+      "info": [
+        9,
+        "INFO"
+      ],
+      "warn": [
+        13,
+        "WARN"
+      ],
+      "error": [
+        17,
+        "ERROR"
+      ]
+    }
+  },
+  "vault": {
+    "acknowledges": true,
+    "headers": true
+  }
+}

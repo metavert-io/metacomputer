@@ -24,7 +24,10 @@ A provider's CLI is a dict, checked by check_cli():
     teardown           whether `cloud teardown` has anything to remove there
     idle_stop_default  IDLE_STOP for a new computer when --idle-stop isn't given (default 15)
     words              {KEY: text}: the provider's own words for the messages that name SHELL_WORDS' keys
-Only lib/cloud and scripts/gen-providers.py read it; bash reads it through lib/cloud/providers.sh (generated)."""
+Only lib/cloud and scripts/gen-providers.py read it; bash reads it through lib/cloud/providers.sh (generated). It's a
+contributor's input (a pull request may touch its provider's folder only), and its values reach generated shell, docs
+and CODEOWNERS: check_cli() holds each to a whitelist of its own (lib/gensafe.py), and scripts/gen-providers.py makes
+nothing until every provider's passes it and capabilities.check_manifest."""
 from . import registry
 
 KEYS = {"owners", "place_words", "docs", "credentials", "not_secret", "credential_words", "ask_needs", "python",
@@ -64,8 +67,11 @@ def cli(name):
 
 
 def check_cli(name):
-    """The problems with a provider's CLI dict, as a list of strings (empty: it's sound)."""
+    """The problems with a provider's CLI dict, as a list of strings (empty: it's sound). Each names its field."""
     import re
+    import gensafe              # lib/gensafe.py: only checks need it
+    if not (isinstance(name, str) and registry.PART.fullmatch(name)):
+        return [f"the provider's name {name!r} isn't a lowercase word (a letter, then letters, digits and _)"]
     raw = getattr(registry.manifest(name), "CLI", None)
     if not isinstance(raw, dict):
         return ["CLI: a dict"]
@@ -73,9 +79,8 @@ def check_cli(name):
     c = cli(name)
     env = re.compile(r"[A-Z][A-Z0-9_]{1,63}")
     opt = re.compile(r"--[a-z][a-z0-9-]{1,30}")
-    if not c["owners"] or not all(isinstance(o, str) and re.fullmatch(r"@[A-Za-z0-9][A-Za-z0-9/_.-]{0,80}", o)
-                                  for o in c["owners"]):
-        bad.append("CLI owners: one or more GitHub @names")
+    if gensafe.owners(c["owners"]):
+        bad.append("CLI owners: one or more GitHub @names (@login or @org/team)")
     for k in ("credentials", "not_secret", "ask_needs", "copy_settings", "transport_settings"):
         if not all(isinstance(v, str) and env.fullmatch(v) for v in c[k]):
             bad.append(f"CLI {k}: environment variables' names")
@@ -88,7 +93,7 @@ def check_cli(name):
     if c["transport_settings"] and not c["transport"]:
         bad.append("CLI transport_settings: only with a transport of its own")
     for o in c["create_options"]:
-        if not (len(o) == 4 and opt.fullmatch(str(o[0])) and isinstance(o[1], str) and o[1].strip()
+        if not (len(o) == 4 and opt.fullmatch(str(o[0])) and not gensafe.text(o[1], 120)
                 and (o[2] == "" or env.fullmatch(str(o[2]))) and isinstance(o[3], bool)):
             bad.append(f"CLI create_options: (OPTION, WHAT ITS VALUE IS, DEFAULT'S VARIABLE or \"\", ONLY FOR IT), "
                        f"not {o!r}")
@@ -106,10 +111,12 @@ def check_cli(name):
     if c["api_host"] is not None and not re.fullmatch(r"[a-z0-9.-]{3,253}", str(c["api_host"])):
         bad.append("CLI api_host: a host name")
     bad += [f"CLI words: unknown key {k}" for k in c["words"] if k not in SHELL_WORDS]
-    bad += [f"CLI words: {k} isn't text" for k, v in c["words"].items() if not isinstance(v, str) or "\n" in v]
-    for k in ("place_words", "docs", "credential_words"):
-        if not isinstance(c[k], str) or not c[k].strip() or "\n" in c[k]:
-            bad.append(f"CLI {k}: one line of text")
+    bad += [f"CLI words: {k} isn't {gensafe.text(v, 400)}" for k, v in c["words"].items() if gensafe.text(v, 400)]
+    for k in ("place_words", "credential_words"):
+        if gensafe.text(c[k], 120):
+            bad.append(f"CLI {k}: {gensafe.text(c[k], 120)}")
+    if gensafe.docs_page(c["docs"]):
+        bad.append(f"CLI docs: {gensafe.docs_page(None)}")
     return bad
 
 

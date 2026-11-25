@@ -940,7 +940,7 @@ final class UnlockServer {
         guard let p = try? load() else { return "the vault can't be read" }
         let required = (p.audit_sinks ?? [:]).filter { $0.value.required }
         if required.isEmpty { return nil }
-        if let bad = required.keys.sorted().first(where: { ["syslog", "ntfy"].contains(required[$0]!.kind) }) {
+        if let bad = required.keys.sorted().first(where: { sinkKindsWithoutAck.contains(required[$0]!.kind) }) {
             return "the required audit sink \(bad) is \(required[bad]!.kind), which can't acknowledge what it receives; make it optional (remove it and add it again without --required) or require a webhook or OTLP sink"
         }
         guard sinkLock.lock(before: Date().addingTimeInterval(30)) else {

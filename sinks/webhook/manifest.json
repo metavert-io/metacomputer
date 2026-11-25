@@ -1,0 +1,24 @@
+{
+  "label": "webhook",
+  "about": "CloudEvents 1.0 structured JSON, signed: X-Metacomputer-Signature: sha256=HMAC(body)",
+  "docs": "docs/events.md#webhook-cloudevents-10-signed",
+  "owners": [
+    "@jonradoff"
+  ],
+  "batch": 1,
+  "signed": true,
+  "url_words": [
+    "hook",
+    "hooks",
+    "webhook",
+    "webhooks"
+  ],
+  "format": {
+    "content_type": "application/cloudevents+json; charset=utf-8",
+    "type_prefix": "io.metavert.metacomputer"
+  },
+  "vault": {
+    "acknowledges": true,
+    "headers": true
+  }
+}

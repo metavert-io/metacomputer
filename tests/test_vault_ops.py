@@ -465,7 +465,7 @@ def spec_walk(BIN, env, vdir, calls, audit_recs):
     cases = {c for line in re.findall(r'^\s*case ((?:"[^"]+",?\s*)+):', body, re.M) for c in re.findall(r'"([^"]+)"', line)}
     subs = {"ap2", "wba", "rule", "session", "audit-sink", "shop-cli"}
     undeclared = sorted(c for c in cases if c not in specs and c not in subs and c != "_tunnel"
-                        and c not in ("test-legacy-totp-link", "test-agent-kind"))
+                        and c not in ("test-legacy-totp-link", "test-agent-kind", "test-sink-cases"))
     check("runMain's every command has its declaration (vault/ArgSpecs.swift), found in its dispatch, not a list",
           len(cases) > 40 and not undeclared and all(any(k.startswith(s + " ") for k in specs) for s in subs), undeclared)
     # The two the review found, and that their right forms still go through (the parser, not the command, refused).
@@ -1473,6 +1473,16 @@ def run(td, procs):
     check(f"every app pattern in the agents' tables ({len(decided)}: each app's bundle and helper) compiles in the "
           "vault's ICU and matches there as in Python: each decides a case (lib/owners.py tells it otherwise without "
           "that pattern) that the vault tells right", decided and not unproved, (unproved, sorted(decided)))
+    # The rules the vault's audit sinks have as the event stream's sinks do, through the vault's own copy of each (its
+    # test-sink-cases): every case answered as the stream answers it ("out", which tests/test_events.py checks the stream
+    # against) or, where the vault keeps a rule of its own, as declared ("vault", with why)
+    import sink_cases
+    scs = sink_cases.cases()
+    vans, vr = sink_cases.vault_answers(BIN, scs, env)
+    wrong = [(c["where"], c["in"], a) for c, a in zip(scs, vans) if a != c.get("vault", c["out"])]
+    check(f"the vault's audit sinks answer the event stream's sink cases ({len(scs)}: header names, URLs, the formats' "
+          f"numbers and fields) as the stream does, but {sum('vault' in c for c in scs)} declared differences",
+          vr.returncode == 0 and len(scs) > 80 and not wrong, (wrong[:6], vr.stderr[-300:]))
     h = detached_start("fill", "web-each", "--vm", "opsvm", "--field", "password")
     u.expect("Type web-each to allow")
     u.send("web-each unlock\n")

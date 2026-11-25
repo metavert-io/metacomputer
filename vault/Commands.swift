@@ -157,7 +157,7 @@ func runMain(_ argv: [String]) -> Int32 {
         // The command line against its form's declaration (vault/ArgSpecs.swift), before anything runs.
         #if MCOMP_VAULT_TESTING
         if cmd == "_argspecs" { return cmdArgSpecs() }
-        if !["test-legacy-totp-link", "test-agent-kind"].contains(cmd) { try checkArgs(cmd, rest) }
+        if !["test-legacy-totp-link", "test-agent-kind", "test-sink-cases"].contains(cmd) { try checkArgs(cmd, rest) }
         // Test builds: MCOMP_PARSE_ONLY=1 ends a command line its declaration took (tests/test_vault_ops.py's valid rows),
         // with 99 ("parse only: nothing was done"), never success.
         if ProcessInfo.processInfo.environment["MCOMP_PARSE_ONLY"] == "1" { oprint("parse-only: mcomp-vault \(cmd): taken"); return 99 }
@@ -210,6 +210,7 @@ func runMain(_ argv: [String]) -> Int32 {
         #if MCOMP_VAULT_TESTING
         case "test-legacy-totp-link": return try testLegacyTOTPLink(paths, rest)
         case "test-agent-kind": return try testAgentKind(rest)
+        case "test-sink-cases": return try testSinkCases(rest)
         #endif
         case "version": return cmdVersion(rest)
         case "help", "-h", "--help": oprint(usageText); return Exit.ok
@@ -262,6 +263,49 @@ func testAgentKind(_ argv: [String]) throws -> Int32 {
         let args = c["argv"] as? [String]
         let exe = c["exe"] as? String, cwd = c["cwd"] as? String
         oprint(agentKindOf(name, exe: exe, args: { args }, cwd: { cwd }) ?? "-")
+    }
+    return Exit.ok
+}
+
+/// Test builds only: each case through the vault's own copy of a rule the event stream has too, one line each
+/// ({"out": its answer}), for the cases the stream's code is checked against too (each kind's tests/vault_cases.json, as
+/// tests/sink_cases.py makes them: [{"fn": the rule, "kind": its sink kind, "in": {"s": its text, ...}}]).
+func testSinkCases(_ argv: [String]) throws -> Int32 {
+    guard argv.count == 1, let data = FileManager.default.contents(atPath: argv[0]),
+          let cases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        throw usageError("usage: test-sink-cases CASES.json")
+    }
+    for c in cases {
+        let i = c["in"] as? [String: Any] ?? [:]
+        let s = i["s"] as? String ?? ""
+        var out: Any = NSNull()
+        switch c["fn"] as? String ?? "" {
+        case "header_name": out = validHeaderName(s)
+        case "url_ok": out = checkSinkURL(c["kind"] as? String ?? "", s) == nil
+        case "otlp_severity": out = [sinkSeverity(s).otlp, sinkSeverity(s).text] as [Any]
+        case "syslog_pri": out = syslogFacility * 8 + sinkSeverity(s).syslog
+        case "ntfy_severity": out = [ntfyPriority[s] ?? 0, ntfySeverityTags[s] ?? []] as [Any]
+        case "otlp_url": out = otlpLogsURL(s)
+        case "time_ns": out = epochNanos(s)
+        case "rejected":       // how many records the answer says were refused ("the collector rejected N record(s)...")
+            out = otlpRejection(Data(s.utf8)).flatMap { r in r.split(separator: " ").dropFirst(3).first.flatMap { Int($0) } } ?? 0
+        case "sd_escape": out = sdEscape(s)
+        case "syslog_field": out = syslogField(s, max: (i["max"] as? NSNumber)?.intValue ?? 32)
+        case "ntfy_endpoint":
+            let ev = OutEvent(seq: 1, raw: "{}", e: ["op": "x"], verified: true, tamper: false)
+            if let (root, body) = ntfyRequest(s, ev), let b = parseJSONObject(Array(body.utf8)) {
+                out = [root.absoluteString, b["topic"] as? String ?? ""] as [Any]
+            }
+        case "signature":
+            let sink = AuditSink(kind: "webhook", url: "https://h.example/", headers: [], required: false,
+                                 hmac_key: i["key"] as? String ?? "", ca_pem: nil, created: "", start_seq: 0)
+            out = sinkHeaders(sink, s, contentType: "").first { $0.0 == sinkSignatureHeader }?.1 ?? NSNull()
+        case "cloudevent_type":
+            let ev = OutEvent(seq: 1, raw: "{}", e: ["op": s], verified: true, tamper: false)
+            out = (parseJSONObject(Array(cloudEventBody(ev).utf8))?["type"] as? String) ?? NSNull()
+        default: out = "unknown fn"
+        }
+        oprint(jsonLine(["out": out]))
     }
     return Exit.ok
 }

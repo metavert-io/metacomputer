@@ -1,0 +1,26 @@
+{
+  "label": "syslog",
+  "help": "syslog-TLS",
+  "about": "RFC 5424 over TLS with octet counting (RFC 5425), syslog+tls://host:port",
+  "docs": "docs/events.md#syslog-rfc-5424-over-tls",
+  "owners": [
+    "@jonradoff"
+  ],
+  "batch": 100,
+  "headers": false,
+  "format": {
+    "scheme": "syslog+tls",
+    "port": 6514,
+    "sd_id": "metacomputer@32473",
+    "facility": 1,
+    "severity": {
+      "info": 6,
+      "warn": 4,
+      "error": 3
+    }
+  },
+  "vault": {
+    "acknowledges": false,
+    "headers": false
+  }
+}

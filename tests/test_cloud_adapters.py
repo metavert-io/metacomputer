@@ -36,6 +36,8 @@ import placement  # noqa: E402
 from cloud import capabilities as caps  # noqa: E402
 from cloud.adapter import INTERFACE, AdapterError, HandledByCLI, NotSupported  # noqa: E402
 from cloud.fake import MANIFEST as FAKE_MANIFEST, Fake  # noqa: E402
+sys.path.insert(0, os.path.join(LAB, "tests"))
+import hostile_manifests  # noqa: E402  (every manifest value that reaches a generated file, tried with what breaks out)
 
 FAILS = []
 
@@ -456,11 +458,12 @@ def resolver():
 
 
 # --- provider packages: their folders, their CLI manifests, what's made from them, and shared code that names none ----
-# Where shared code is: everything the CLI, the scripts and the helpers run, lib/cloud's framework included. Not in it:
+# Where shared code is: everything the CLI, the scripts and the helpers run, lib/cloud's framework and the event sinks'
+# folders (sinks/) included. Not in it:
 # the providers' folders, tests (each provider's checks name it), docs and config (people's pages), the guest's side
 # (provisioning/: what runs inside a computer, which this lint leaves to the guest packages), and the vault (vault/,
 # Swift: unchanged by the provider packages).
-SHARED = ("bin", "scripts", "lib", "install.sh", "get.sh")
+SHARED = ("bin", "scripts", "lib", "install.sh", "get.sh", "sinks")
 # Whole files allowed: the registry (the one list) and what scripts/gen-providers.py makes (checked current below).
 LINT_FILES = {"lib/cloud/registry.py": "the registry: the explicit list of providers",
               "lib/cloud/providers.sh": "made from the manifests by scripts/gen-providers.py (checked current here)"}
@@ -731,6 +734,7 @@ def main():
     manifests()
     resolver()
     packages()
+    hostile_manifests.providers(check)
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed: ' + ', '.join(FAILS)}")
     return 1 if FAILS else 0
 

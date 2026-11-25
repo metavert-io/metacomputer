@@ -47,6 +47,7 @@ for k in ("MCOMP_ACTION_LOG", "MCOMP_CONFIG"):
 sys.path.insert(0, os.path.join(LAB, "lib"))
 sys.path.insert(0, os.path.join(LAB, "tests"))
 import events  # noqa: E402
+import hostile_manifests  # noqa: E402  (every manifest value that reaches a generated file, tried with what breaks out)
 
 EV = os.path.join(LAB, "lib", "events.py")
 PY = sys.executable
@@ -257,8 +258,184 @@ def parse_5424(frame):
             "msg": json.loads(msg)}
 
 
+# --- the sinks' cases ----------------------------------------------------------------------------
+def sink_cases():
+    """The cases the vault's audit sinks are checked against too (tests/sink_cases.py; tests/test_vault_ops.py runs
+    them through the vault): the stream's code answers each as it says."""
+    print("the sinks' cases (the vault's copy of the same rules is checked against them)")
+    import sink_cases as sc
+    cs = sc.cases()
+    shapes = [b for c in cs for b in sc.check_shape(c)]
+    check("every case has its form (a rule of its folder, the answer, and a reason for each declared difference)",
+          cs and not shapes, shapes[:6])
+    wrong = []
+    for c in cs:
+        try:
+            got = sc.stream(c)
+        except Exception as e:
+            got = f"raised {e!r}"
+        if got != c["out"]:
+            wrong.append((c["where"], c["in"], got, c["out"]))
+    from sinkkit import manifests
+    kinds = {c["kind"] for c in cs}
+    need = {""} | {k for k in events.KINDS if manifests.manifest(k).get("vault")}      # the shared ones, and the vault's
+    check(f"the stream's sinks answer all {len(cs)} cases as they say (header names, each kind's URLs, formats' numbers, "
+          "fields and endpoints); every kind the vault's audit sinks have has its cases", not wrong and need <= kinds,
+          (wrong[:6], sorted(need - kinds)))
+
+
+# --- the sinks' folders, and no kind named in shared code ---------------------------------------
+# Shared code: everything that runs on this Mac but the framework (lib/sinkkit) and the kinds' own folders. Not the vault
+# (vault/, Swift: it keeps its own audit sinks, reading what they share with the stream from the manifests, compiled in by
+# scripts/build-vault.sh; tests/sink_cases.py holds its parity) nor the docs (they name the kinds for people).
+SINK_SHARED = ("bin", "scripts", "lib", "install.sh", "get.sh", "bench", "providers", "coding-agents", "tools")
+# Names a kind's format is known by that its manifest doesn't hold as a word of its own.
+SINK_EXTRA = {"webhook": ("CloudEvent",), "otlp": ("OpenTelemetry",)}
+# Whole files allowed, each for its reason.
+SINK_LINT_FILES = {
+    "scripts/verify-audit.py": "the vault's audit-capture checker: it reads what the vault's audit sinks send (each "
+                               "kind's wrapping, which stays the vault's own Swift), and its usage and messages name "
+                               "them; its SD-ID comes from the syslog manifest",
+}
+# Lines allowed, by file and a piece of the line, each for its reason. An entry that matches nothing fails.
+SINK_LINT_ALLOW = [
+    ("bin/metacomputer", "#                                  the optional event stream: ",
+     "`metacomputer help`'s line for the event stream (its header, printed as it is): made from the manifests' help "
+     "words by scripts/gen-sinks.py"),
+]
+
+
+def sink_words():
+    """{kind: a pattern for the words that name it}: its folder's name and its label in any case, a plural too, and
+    SINK_EXTRA, each as a whole word (a letter or digit next to it makes it another word; an underscore, a hyphen, a
+    dot or a + doesn't, so otlp_url, syslog+tls and ntfy.sh name theirs)."""
+    from sinkkit import manifests, registry
+    out = {}
+    for k in registry.SINKS:
+        ws = {k, manifests.manifest(k)["label"]} | set(SINK_EXTRA.get(k, ()))
+        alts = [f"(?i:{re.escape(w)})s?" for w in sorted(ws, key=lambda w: (-len(w), w))]
+        out[k] = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(alts) + r")(?![A-Za-z0-9])")
+    return out
+
+
+def sink_shared_files():
+    out = []
+    for top in SINK_SHARED:
+        full = os.path.join(LAB, top)
+        if os.path.isfile(full):
+            out.append(top)
+            continue
+        for d, ds, fs in os.walk(full):
+            ds[:] = sorted(x for x in ds if x != "__pycache__" and os.path.relpath(os.path.join(d, x), LAB) != "lib/sinkkit")
+            out += [os.path.relpath(os.path.join(d, f), LAB) for f in sorted(fs)]
+    return out
+
+
+def slug(heading):
+    """A heading's anchor, as GitHub makes it."""
+    return re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
+
+
+def docs_missing():
+    """Each kind's docs that aren't there: a page that isn't, or a section (#anchor) its page hasn't. Docs with no
+    section (the kind's own README.md, or a whole page: manifests.py allows both) need only their page."""
+    from sinkkit import manifests, registry
+    out = []
+    for k in registry.SINKS:
+        docs = manifests.manifest(k)["docs"]
+        page, _, anchor = docs.partition("#")
+        try:
+            heads = {slug(h) for h in re.findall(r"^#+ (.+)$", open(os.path.join(LAB, page)).read(), re.M)}
+        except OSError:
+            out.append(docs)
+            continue
+        if anchor and anchor not in heads:
+            out.append(docs)
+    return out
+
+
+def sink_packages():
+    print("the sinks' folders, their manifests, the generated files, and no kind named in shared code")
+    from sinkkit import manifests, registry, vault
+    folders = sorted(d for d in os.listdir(os.path.join(LAB, "sinks"))
+                     if os.path.isdir(os.path.join(LAB, "sinks", d)) and d != "__pycache__")
+    missing = [f"sinks/{k}/{f}" for k in registry.SINKS for f in ("manifest.json", "sink.py", "README.md")
+               if not os.path.isfile(os.path.join(LAB, "sinks", k, f))]
+    check("every registered kind is a folder with its manifest, its code and its page; every folder is registered",
+          folders == sorted(registry.SINKS) and not missing and os.path.isfile(os.path.join(LAB, "sinks", "README.md")),
+          (folders, registry.SINKS, missing))
+    bad = vault.check() + manifests.conflicts()
+    check("the manifests are what lib/sinkkit and the vault's build read (lib/sinkkit/vault.py check)", not bad, bad)
+    shape = []
+    for k in registry.SINKS:
+        m = registry.module(k)
+        if not callable(getattr(m, "check_url", None)):
+            shape.append(f"{k}: no check_url")
+        if hasattr(m, "request") == hasattr(m, "deliver"):
+            shape.append(f"{k}: needs request (it POSTs) or deliver (a transport of its own), not both")
+        if hasattr(m, "accepted") and not hasattr(m, "request"):
+            shape.append(f"{k}: accepted goes with request")
+    check("each kind's sink.py brings the interface: check_url, and request (accepted too, if it reads answers) or "
+          "deliver", not shape, shape)
+    missing = docs_missing()
+    check("each kind's docs are a page that's there, and the section they name is in it", not missing, missing)
+    real, probe = registry.data, registry.SINKS[0]
+    tried = {}
+    for docs in (f"sinks/{probe}/README.md", "docs/events.md", "docs/events.md#no-such-section",
+                 "docs/no-such-page.md"):
+        changed = dict(real(probe), docs=docs)
+        registry.data = lambda k, c=changed: c if k == probe else real(k)
+        try:
+            tried[docs] = (not manifests.check(probe), docs_missing())
+        finally:
+            registry.data = real
+    check("...docs with no section (the kind's README.md, a whole page) pass both the manifest's check and this one; a "
+          "section or a page that isn't there fails this one (codex review of item 5c, P3)",
+          tried[f"sinks/{probe}/README.md"] == (True, []) and tried["docs/events.md"] == (True, [])
+          and tried["docs/events.md#no-such-section"][1] == ["docs/events.md#no-such-section"]
+          and tried["docs/no-such-page.md"][1] == ["docs/no-such-page.md"], tried)
+    r = subprocess.run([PY, os.path.join(LAB, "scripts", "gen-sinks.py"), "--check"], capture_output=True, text=True,
+                       timeout=60)
+    check("the files made from the manifests are current: docs/sinks.md, `metacomputer help`'s line, CODEOWNERS "
+          "(scripts/gen-sinks.py --check)", r.returncode == 0, r.stdout + r.stderr)
+    words = sink_words()
+    probes = [("def otlp_url(url):", ["otlp"]), ("syslog+tls://HOST:PORT", ["syslog"]), ("an ntfy URL names", ["ntfy"]),
+              ("CloudEvents 1.0", ["webhook"]), ("def cloudevent(ev):", ["webhook"]), ("webhooks", ["webhook"]), ("OpenTelemetry logs", ["otlp"]),
+              ("https://ntfy.sh/t", ["ntfy"]), ("SYSLOG_SEV", ["syslog"]), ("xwebhook ntfyx otlp2 webhookey", [])]
+    wrong = [(t, [k for k, p in words.items() if p.search(t)]) for t, want in probes
+             if [k for k, p in words.items() if p.search(t)] != want]
+    check("the lint's patterns find the kinds' names where they are, and only there (tried on known lines first)",
+          not wrong, wrong)
+    hits, used = [], set()
+    for rel in sink_shared_files():
+        if rel in SINK_LINT_FILES:
+            continue
+        try:
+            text = open(os.path.join(LAB, rel), encoding="utf-8").read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for i, line in enumerate(text.split("\n"), 1):
+            named = [k for k, p in words.items() if p.search(line)]
+            if not named:
+                continue
+            j = next((j for j, (f, piece, _w) in enumerate(SINK_LINT_ALLOW) if f == rel and piece in line), None)
+            if j is not None:
+                used.add(j)
+                continue
+            hits.append(f"{rel}:{i}: {','.join(named)}: {line.strip()[:120]}")
+    check("no shared code names a kind of sink outside its folder (allowed: SINK_LINT_FILES and SINK_LINT_ALLOW, each "
+          "for its reason)", not hits, hits[:12])
+    stale = [SINK_LINT_ALLOW[j][:2] for j in range(len(SINK_LINT_ALLOW)) if j not in used] + sorted(
+        f for f in SINK_LINT_FILES if not os.path.isfile(os.path.join(LAB, f))
+        or not any(p.search(open(os.path.join(LAB, f)).read()) for p in words.values()))
+    check("...and every allowance is still needed", not stale, stale)
+
+
 # --- tests ----------------------------------------------------------------------------------
 def main():
+    sink_packages()
+    hostile_manifests.sinks(check)
+    sink_cases()
     certs = make_certs(os.path.join(TD, "certs"))
     web, otlp, ntfy = HTTPRx(), HTTPRx(), HTTPRx()
     sysrx = SyslogRx(certs[1], certs[2]) if certs else None
@@ -1216,8 +1393,9 @@ def main():
         events.emit("needs_you", "other", "auth check")
         check("nit: an ntfy ?auth= query is kept", any(p_ == "/?auth=tok123456" for p_, _, _ in ntfy.reqs), ntfy.reqs[-1][0])
         sink_remove("ntfyauth")
-        check("nit: otlp_url puts /v1/logs before a query", events.otlp_url("https://h.example/x?y=1")
-              == "https://h.example/x/v1/logs?y=1" and events.otlp_url("http://127.0.0.1:4318/v1/logs/")
+        otlp_url = events.sinkkit.registry.module("otlp").otlp_url      # sinks/otlp/sink.py
+        check("nit: otlp_url puts /v1/logs before a query", otlp_url("https://h.example/x?y=1")
+              == "https://h.example/x/v1/logs?y=1" and otlp_url("http://127.0.0.1:4318/v1/logs/")
               == "http://127.0.0.1:4318/v1/logs")
         refill()
         orx = HTTPRx()
@@ -1465,30 +1643,36 @@ def main():
         for _ in range(events.ADMIN_MAX_ATTEMPTS):
             events.flush_admin(force=True)
 
-        # F7: the relay's per-record check reads events.json only when it changes
+        # F7: the relay's per-record check reads events.json only when it changes. What's counted is every parse on the
+        # call path but the redaction list's own (known_secrets: the values to hide, read again when it's 30 s old,
+        # whatever the cache does), which is made due in both halves here: under load the suite reaches this check at a
+        # different point of those 30 s, and that parse was counted too ((1, 1) or (0, 2)).
         calls_ = [0]
         real_load = events.load_config
 
         def counting():
-            if threading.current_thread() is threading.main_thread():   # the call path, not the sending thread
+            # the call path, not the sending thread; not the redaction list's refresh
+            if threading.current_thread() is threading.main_thread() and sys._getframe(1).f_code.co_name != "known_secrets":
                 calls_[0] += 1
             return real_load()
         events.load_config = counting
         try:
             events.config_for_reading()
             calls_[0] = 0
+            events._known["at"] = 0                 # the redaction list is due: it reads events.json in this half
             for i_ in range(50):
                 events.emit_async("actions", "call", f"record {i_}", data={"seq": i_})
             unchanged = calls_[0]
             sink_add("acts", "--kind", "webhook", "--url", web.url("/acts"), "--families", "actions")
             calls_[0] = 0
+            events._known["at"] = 0                 # ...and in this one
             events.emit_async("actions", "call", "after a change")
             changed = calls_[0]
         finally:
             events.load_config = real_load
             events.flush_async()
-        check("F7 50 action-log records with events.json unchanged: parsed 0 times; once after it changes",
-              unchanged == 0 and changed == 1, (unchanged, changed))
+        check("F7 50 action-log records with events.json unchanged: parsed 0 times; once after it changes (the redaction "
+              "list's own refresh aside, due in both)", unchanged == 0 and changed == 1, (unchanged, changed))
         sink_remove("acts")
 
         # R4: sink generations; replacing waits for a sender

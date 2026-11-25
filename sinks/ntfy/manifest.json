@@ -1,0 +1,33 @@
+{
+  "label": "ntfy",
+  "about": "one short human message per event (https; http only to this Mac's loopback)",
+  "docs": "docs/events.md#ntfy-a-message-for-a-person",
+  "owners": [
+    "@jonradoff"
+  ],
+  "batch": 1,
+  "phone": true,
+  "url_words": [
+    "notify"
+  ],
+  "format": {
+    "content_type": "application/json",
+    "priority": {
+      "info": 3,
+      "warn": 4,
+      "error": 4
+    },
+    "severity_tags": {
+      "warn": [
+        "warning"
+      ],
+      "error": [
+        "rotating_light"
+      ]
+    }
+  },
+  "vault": {
+    "acknowledges": false,
+    "headers": true
+  }
+}

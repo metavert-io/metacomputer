@@ -25,12 +25,15 @@
 //            [metacomputer@32473 ... verified= sig=] with sig = HMAC(MSG)
 //   ntfy     one message per event for a phone (no signature)
 // Each sink has its own HMAC key (shown once when it's added).
+//
+// What these send alike with the event stream (the kinds, their formats' constants, the signature header, the header
+// names) comes from the sinks' manifests (sinks/<kind>/manifest.json), compiled in by scripts/build-vault.sh as
+// SinkDefs.swift (lib/sinkkit/vault.py): sinkKinds, syslogSDID (metacomputer@32473: IANA's example enterprise number,
+// RFC 5612, a documented placeholder) and the rest. The rules below that the stream has too (a URL's, a field's, an
+// escape) are checked against the same cases as its code: each kind's tests/vault_cases.json (tests/sink_cases.py).
 import Foundation
 import Network
 import Security
-
-let sinkKinds = ["webhook", "otlp", "syslog", "ntfy"]
-let syslogSDID = "metacomputer@32473"   // 32473: IANA's example enterprise number (RFC 5612), a documented placeholder
 
 struct SinkState: Codable {
     var delivered: Int
@@ -77,7 +80,7 @@ func checkSinkURL(_ kind: String, _ url: String) -> String? {
     let loopback = host == "127.0.0.1" || host == "localhost"
     switch kind {
     case "syslog":
-        guard u.scheme == "syslog+tls" else { return "syslog sinks use syslog+tls://host:port (TLS only; no plain TCP or UDP)" }
+        guard u.scheme == syslogScheme else { return "syslog sinks use syslog+tls://host:port (TLS only; no plain TCP or UDP)" }
     default:
         guard u.scheme == "https" || (u.scheme == "http" && loopback) else { return "use https:// (http only for 127.0.0.1 or localhost, for testing)" }
         if kind == "ntfy", u.path.split(separator: "/").isEmpty { return "an ntfy URL names its topic: https://ntfy.sh/<topic>" }
@@ -96,7 +99,7 @@ func maskedURL(_ s: String) -> String {
     return (u.string ?? "?") + (more ? "/..." : "")
 }
 
-func validHeaderName(_ s: String) -> Bool { matches(s, "^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$") }
+func validHeaderName(_ s: String) -> Bool { matches(s, sinkHeaderNamePattern) }
 
 /// "Name: value" from --header; nil when it isn't a safe header line.
 func parseHeaderLine(_ s: String) -> (String, String)? {
@@ -242,10 +245,15 @@ func syslogSend(host: String, port: UInt16, caPEM: String?, frames: [Data], time
 /// An event's severity, as the events stream names it: info, warn (refused, locked) or error.
 func severityOf(_ e: [String: Any]) -> (name: String, text: String, otlp: Int, syslog: Int) {
     switch e["result"] as? String {
-    case "denied", "locked": return ("warn", "WARN", 13, 4)
-    case "error": return ("error", "ERROR", 17, 3)
-    default: return ("info", "INFO", 9, 6)
+    case "denied", "locked": return sinkSeverity("warn")
+    case "error": return sinkSeverity("error")
+    default: return sinkSeverity("info")
     }
+}
+
+/// A severity's OTLP text and number and its syslog number, as the sinks' manifests give them.
+func sinkSeverity(_ name: String) -> (name: String, text: String, otlp: Int, syslog: Int) {
+    (name, otlpSeverity[name]?.text ?? "", otlpSeverity[name]?.number ?? 0, syslogSeverity[name] ?? 0)
 }
 
 /// This Mac's short host name for the sinks (gethostname: no DNS lookup, unlike ProcessInfo.hostName).
@@ -293,7 +301,7 @@ func cloudEventBody(_ ev: OutEvent) -> String {
         + ",\"source\":" + canonicalString("metacomputer/" + hostLabel()) + ",\"specversion\":\"1.0\""
     if let vm = e["vm"] as? String { s += ",\"subject\":" + canonicalString(vm) }
     return s + ",\"time\":" + canonicalString((e["ts"] as? String) ?? "") + ",\"type\":"
-        + canonicalString("io.metavert.metacomputer.vault." + op) + "}"
+        + canonicalString(cloudEventsTypePrefix + ".vault." + op) + "}"
 }
 
 /// OTLP/HTTP JSON logs, as the events stream sends them (family "vault", type = op), plus the
@@ -338,15 +346,21 @@ func sdEscape(_ s: String) -> String {
 /// of MSG; without the octet count.
 func syslogMessage(_ ev: OutEvent, key: [UInt8]) -> String {
     let raw = ev.raw, e = ev.e
-    let pri = 1 * 8 + severityOf(e).syslog
-    let op = String(((e["op"] as? String) ?? "event").unicodeScalars.filter { $0.value > 32 && $0.value < 127 }.prefix(32).map(Character.init))
+    let pri = syslogFacility * 8 + severityOf(e).syslog
+    let op = syslogField((e["op"] as? String) ?? "event", max: 32)
     let sig = recordSignature(key, raw, verified: ev.verified)
     var sd = "[\(syslogSDID) seq=\"\((e["seq"] as? NSNumber)?.intValue ?? 0)\" family=\"vault\""
     if let vm = e["vm"] as? String { sd += " vm=\"\(sdEscape(vm))\"" }
     sd += " id=\"\(sdEscape((e["id"] as? String) ?? ""))\" hash=\"\(sdEscape((e["hash"] as? String) ?? ""))\""
         + " prev=\"\(sdEscape((e["prev"] as? String) ?? ""))\" verified=\"\(ev.verified)\" sig=\"\(sig)\"]"
     let ts = (e["ts"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "-"
-    return "<\(pri)>1 \(ts) \(hostLabel()) metacomputer-vault - \(op.isEmpty ? "-" : op) \(sd) \(raw)"
+    return "<\(pri)>1 \(ts) \(hostLabel()) metacomputer-vault - \(op) \(sd) \(raw)"
+}
+
+/// A syslog header field (the MSGID): printable ASCII only, at most max characters; "-" when nothing is left.
+func syslogField(_ s: String, max: Int) -> String {
+    let f = String(s.unicodeScalars.filter { $0.value > 32 && $0.value < 127 }.prefix(max).map(Character.init))
+    return f.isEmpty ? "-" : f
 }
 
 /// One line for a phone: seq, what, outcome and where. Never a value.
@@ -373,9 +387,9 @@ func ntfyRequest(_ sinkURL: String, _ ev: OutEvent) -> (URL, String)? {
     guard let root = u.url else { return nil }
     let sev = severityOf(e)
     let title = "\((e["vm"] as? String) ?? hostLabel()) - vault: \(((e["op"] as? String) ?? "event").replacingOccurrences(of: "_", with: " "))"
-    let tags = ["lock"] + (sev.name == "warn" ? ["warning"] : sev.name == "error" ? ["rotating_light"] : [])
+    let tags = ["lock"] + (ntfySeverityTags[sev.name] ?? [])
     let body: [String: Any] = ["topic": topic, "title": clean(title, max: 200), "message": (ev.verified ? "" : "[unverified] ") + ntfySummary(e),
-                               "priority": sev.name == "info" ? 3 : 4, "tags": tags]
+                               "priority": ntfyPriority[sev.name] ?? 4, "tags": tags]
     return (root, canonicalJSON(body))
 }
 
@@ -488,18 +502,20 @@ func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink, auditKey: [U
         d.stateTrusted = from != nil || trusted
         while d.problem == nil {
             if Date() >= deadline { d.incomplete = true; break }   // the rest goes on the next round
-            let events = pendingEvents(paths, after: d.delivered, limit: sink.kind == "otlp" ? 50 : 100, auditKey: auditKey, known: known,
-                                       legacyThrough: legacyThrough)
+            // otlp and syslog send what's read in one request (one connection): their manifests' batch; the others
+            // send one event a request, read 100 at a time.
+            let batched = ["otlp", "syslog"].contains(sink.kind)
+            let events = pendingEvents(paths, after: d.delivered, limit: batched ? sinkBatches[sink.kind] ?? 100 : 100, auditKey: auditKey,
+                                       known: known, legacyThrough: legacyThrough)
             if events.isEmpty { break }
             var sentThrough = d.delivered
             var sent: [OutEvent] = []
             switch sink.kind {
             case "otlp":
-                var url = sink.url.hasSuffix("/") ? String(sink.url.dropLast()) : sink.url
-                if !url.hasSuffix("/v1/logs") { url += "/v1/logs" }
+                let url = otlpLogsURL(sink.url)
                 let body = otlpBody(events, key: key)
                 if let u = URL(string: url) {
-                    let (why, answer) = httpPostAnswer(u, headers: sinkHeaders(sink, body, contentType: "application/json"), body: Data(body.utf8))
+                    let (why, answer) = httpPostAnswer(u, headers: sinkHeaders(sink, body, contentType: sinkContentTypes["otlp"]!), body: Data(body.utf8))
                     d.problem = why ?? otlpRejection(answer)
                 } else {
                     d.problem = "bad URL"
@@ -511,21 +527,24 @@ func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink, auditKey: [U
                     let m = Array(syslogMessage(ev, key: key).utf8)
                     return Data(Array("\(m.count) ".utf8) + m)
                 }
-                d.problem = syslogSend(host: host, port: UInt16(u.port ?? 6514), caPEM: sink.ca_pem, frames: frames)
+                d.problem = syslogSend(host: host, port: UInt16(u.port ?? syslogDefaultPort), caPEM: sink.ca_pem, frames: frames)
                 if d.problem == nil { sent = events }
             default:
                 for ev in events {
                     var target: URL?
                     let body: String
+                    let contentType: String
                     if sink.kind == "ntfy" {
                         guard let (root, b) = ntfyRequest(sink.url, ev) else { d.problem = "bad URL (https://server/topic)"; break }
                         target = root
                         body = b
+                        contentType = sinkContentTypes["ntfy"]!
                     } else {
                         target = URL(string: sink.url)
                         body = cloudEventBody(ev)
+                        contentType = sinkContentTypes["webhook"]!
                     }
-                    let headers = sinkHeaders(sink, body, contentType: sink.kind == "ntfy" ? "application/json" : "application/cloudevents+json; charset=utf-8")
+                    let headers = sinkHeaders(sink, body, contentType: contentType)
                     d.problem = target.map { httpPost($0, headers: headers, body: Data(body.utf8)) } ?? "bad URL"
                     if d.problem != nil { break }
                     sent.append(ev)
@@ -553,8 +572,15 @@ func deliverSink(_ paths: Paths, _ name: String, _ sink: AuditSink, auditKey: [U
 func sinkHeaders(_ sink: AuditSink, _ body: String, contentType: String) -> [(String, String)] {
     let key = Array(Data(base64Encoded: sink.hmac_key) ?? Data())
     return [("Content-Type", contentType), ("User-Agent", "metacomputer-vault/1"),
-            ("X-Metacomputer-Signature", "sha256=" + hmacSHA256Hex(key: key, data: Array(body.utf8)))]
+            (sinkSignatureHeader, "sha256=" + hmacSHA256Hex(key: key, data: Array(body.utf8)))]
         + sink.headers.compactMap { $0.count == 2 ? ($0[0], $0[1]) : nil }
+}
+
+/// The URL an OTLP sink posts to: its URL with /v1/logs added (one trailing / dropped first), unless it ends with it.
+func otlpLogsURL(_ s: String) -> String {
+    var url = s.hasSuffix("/") ? String(s.dropLast()) : s
+    if !url.hasSuffix(otlpLogsPath) { url += otlpLogsPath }
+    return url
 }
 
 /// The events not yet delivered to a sink, from its saved place (for display).

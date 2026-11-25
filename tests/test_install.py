@@ -724,8 +724,9 @@ def test_install_lock():
 
 
 def copy_agents(root):
-    """The agents' folders and their framework (lib/agentkit), which lib/owners.py and install.sh read."""
-    for d in ("coding-agents", os.path.join("lib", "agentkit")):
+    """The agents' folders and their framework (lib/agentkit), which lib/owners.py and install.sh read; and the event
+    sinks' (sinks/, lib/sinkkit), which lib/events.py reads."""
+    for d in ("coding-agents", os.path.join("lib", "agentkit"), "sinks", os.path.join("lib", "sinkkit")):
         if not os.path.exists(os.path.join(root, d)):
             shutil.copytree(os.path.join(LAB, d), os.path.join(root, d), ignore=shutil.ignore_patterns("__pycache__"))
 

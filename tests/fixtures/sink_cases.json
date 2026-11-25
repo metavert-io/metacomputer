@@ -1,0 +1,18 @@
+[
+  {"fn": "header_name", "in": {"s": "Authorization"}, "out": true},
+  {"fn": "header_name", "in": {"s": "X-Api-Key"}, "out": true},
+  {"fn": "header_name", "in": {"s": "x"}, "out": true},
+  {"fn": "header_name", "in": {"s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "out": true},
+  {"fn": "header_name", "in": {"s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "out": false},
+  {"fn": "header_name", "in": {"s": ""}, "out": false},
+  {"fn": "header_name", "in": {"s": "Bad Name"}, "out": false},
+  {"fn": "header_name", "in": {"s": "Name:"}, "out": false},
+  {"fn": "header_name", "in": {"s": "Name\n"}, "out": false},
+  {"fn": "header_name", "in": {"s": "Na\nme"}, "out": false},
+  {"fn": "header_name", "in": {"s": "ÄÖ"}, "out": false},
+  {"fn": "header_name", "in": {"s": "X_Under_score"}, "out": true},
+  {"fn": "header_name", "in": {"s": "!#$%&'*+.^_`|~-"}, "out": true},
+  {"fn": "header_name", "in": {"s": "a\tb"}, "out": false},
+  {"fn": "header_name", "in": {"s": "Name\r"}, "out": false},
+  {"fn": "header_name", "in": {"s": " Name"}, "out": false}
+]
