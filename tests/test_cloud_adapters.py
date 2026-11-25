@@ -203,13 +203,15 @@ def registry():
           cloud.registered())
     check("every registered adapter is an Adapter, under its own name",
           all(issubclass(c, cloud.Adapter) and c.name == n for n, c in cloud.ADAPTERS.items()))
-    check("the providers are your own server, Oracle Cloud, Fly Sprites, Hetzner Cloud, DigitalOcean and Vultr (the "
-          "stand-in and this Mac don't count)",
+    check("the providers are your own server, Oracle Cloud, Fly Sprites, Hetzner Cloud, DigitalOcean, Vultr and Vercel "
+          "Sandbox (the stand-in and this Mac don't count)",
           cloud.providers() == {"server": "your own server", "oci": "Oracle Cloud", "sprites": "Fly Sprites",
-                                "hetzner": "Hetzner Cloud", "digitalocean": "DigitalOcean", "vultr": "Vultr"}
+                                "hetzner": "Hetzner Cloud", "digitalocean": "DigitalOcean", "vultr": "Vultr",
+                                "vercel": "Vercel Sandbox"}
           == placement.PROVIDERS, cloud.providers())
     check("...each provider's place is its own name", all(cloud.by_place(p).name == p for p in
-                                                           ("oci", "sprites", "hetzner", "digitalocean", "vultr")))
+                                                           ("oci", "sprites", "hetzner", "digitalocean", "vultr",
+                                                            "vercel")))
     check("by_place finds each place's adapter, and none for a place there isn't",
           cloud.by_place("mac").name == "local-lume" and cloud.by_place("oci").name == "oci"
           and cloud.by_place("server").name == "ubuntu-vm" and cloud.by_place("sprites").name == "sprites"
@@ -336,10 +338,13 @@ def manifests():
     truth = {n: (c.manifest["outside_egress"], c.manifest["billing"]["stopped"], c.manifest["billing"]["guest_poweroff"])
              for n, c in cloud.ADAPTERS.items() if n != "fake"}
     check("each provider's cost and egress truth: Oracle Cloud bills a stopped computer's disk, and a guest that "
-          "powered itself off as running; its rules outside refuse private ranges but not the metadata service; your "
-          "own server: nothing enforced outside, its billing unknown; this Mac: nothing billed",
+          "powered itself off as running; its rules outside refuse private ranges but not the metadata service; Vercel "
+          "Sandbox bills a stopped computer's snapshot, its policy outside refuses private ranges and the metadata "
+          "address (checked live); your own server: nothing enforced outside, its billing unknown; this Mac: nothing "
+          "billed",
           truth["oci"] == ({"enforced": True, "private_ranges": True, "metadata": False, "off": True}, "storage", "nothing")
           and truth["sprites"] == ({"enforced": True, "private_ranges": True, "metadata": True, "off": True}, "storage", "n/a")
+          and truth["vercel"] == ({"enforced": True, "private_ranges": True, "metadata": True, "off": True}, "storage", "n/a")
           and truth["ubuntu-vm"] == (nothing, "unknown", "n/a") and truth["local-lume"][1:] == ("none", "n/a"), truth)
 
 
@@ -472,7 +477,7 @@ LINT_FILES = {"lib/cloud/registry.py": "the registry: the explicit list of provi
 LINT_ALLOW = [
     ("bin/metacomputer", "#                                  there), server (your own server), oci (Oracle Cloud), sprites (Fly Sprites),",
      "usage text (`metacomputer help` prints these comment lines as they are): which places get a label isn't data"),
-    ("bin/metacomputer", "#                                  hetzner (Hetzner Cloud), digitalocean, vultr, or cloud (anywhere but this Mac).",
+    ("bin/metacomputer", "#                                  hetzner (Hetzner Cloud), digitalocean, vultr, vercel (Vercel Sandbox), or cloud",
      "usage text, as above"),
     ("bin/metacomputer", "#   vm create NAME --on server --host ADDRESS --user ACCOUNT [--port P] | --on oci [--size SIZE] [--egress internet|off]",
      "usage text: its grouping of providers (Oracle Cloud alone, the hourly three together, Sprites apart) isn't "
@@ -482,7 +487,12 @@ LINT_ALLOW = [
     ("bin/metacomputer", "#   vm create NAME --on sprites --org ORG [--sprite SPRITE] [--egress internet|off]", "usage text, as above"),
     ("bin/metacomputer", "#                                  a Sprite on Fly.io, reached through Fly's tunnel (docs/sprites.md)",
      "usage text, as above"),
-    ("bin/metacomputer", "#                                  what metacomputer made at a provider (oci, sprites, hetzner, digitalocean, vultr),",
+    ("bin/metacomputer", "#                                  what metacomputer made at a provider (oci, sprites, hetzner, digitalocean, vultr,",
+     "usage text, as above"),
+    ("bin/metacomputer", "#                                  vercel),", "usage text, as above"),
+    ("bin/metacomputer", "#   vm create NAME --on vercel [--sandbox NAME] [--size SIZE] [--region REGION] [--egress internet|off] [--idle-stop MIN|off]",
+     "usage text, as above"),
+    ("bin/metacomputer", "#                                  a Vercel sandbox, reached through Vercel's API (docs/vercel.md)",
      "usage text, as above"),
     ("scripts/vm-commands.sh", '*) die "usage: metacomputer vm list [--on PLACE] [--json] | create NAME [--ssh-port P --vnc-port P] [--no-build] [--yes] | create NAME --on server --host ADDRESS --user ACCOUNT [--port P] | create NAME --on oci|hetzner|digitalocean|vultr [--size SIZE] [--region REGION] [--egress internet|off] | create NAME --on sprites --org ORG [--sprite SPRITE] [--egress internet|off] | delete NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volumes] [--checked-provider]" ;;',
      "a usage message: it groups Oracle Cloud with the hourly three and lists Sprites last, which isn't the "
@@ -491,6 +501,8 @@ LINT_ALLOW = [
      "a usage message whose grouping (Oracle Cloud, the hourly three, then Sprites) isn't the registry's order, as above"),
     ("scripts/release.sh", "test_traces test_page_guest test_update test_agents test_cloud_adapters test_session_guard test_remote test_sprites",
      "a test suite's name in the no-VM suites a release runs (the list CLAUDE.md and the release's tests check)"),
+    ("scripts/release.sh", "test_agent_setup test_vault_payments test_help test_acting test_vercel)",
+     "a test suite's name in the no-VM suites a release runs, as above"),
     ("scripts/check-public.sh", "domain), phone numbers, home-directory paths, Fly.io machine ids, and every deny-list term;",
      "the publish check looks for any Fly.io app's machine ids in any repository: not the Sprites provider"),
     ("scripts/check-public.sh", "# A Fly.io machine id has letters; fourteen digits alone are a number",
