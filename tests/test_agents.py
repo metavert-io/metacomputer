@@ -569,7 +569,8 @@ def portable_checks(real, app):
                            ("(?=l)language_server", "lookahead"), ("^\\w+$", "\\w"), ("^language.server$", "unescaped ."),
                            ("^language_server_?\\s?$", "\\s"), ("^language_server.*?$", "unescaped ."),
                            ("^language_server_*?$", "repeat after a repeat"), ("^language_server{,2}$", "{"),
-                           ("^[[:alpha:]_]+$", "[ inside a class"), ("^[a-z&&x]+$", "&& inside a class"),
+                           ("^[[:alpha:]_]+$", "[ inside a class"),
+                           ("^language_server_[:digit:]+$", "first character is :"), ("^x[^:a]$", "first character is :"), ("^[a-z&&x]+$", "&& inside a class"),
                            ("^language_server\\Z", "\\Z"), ("", "empty pattern"), ("^lánguage_server$", "printable ASCII")):
         caps = refused("helper", pattern)
         tried[pattern] = [b for b in caps if b.startswith(f"{app}: apps[0].helper uses ") and words in b]

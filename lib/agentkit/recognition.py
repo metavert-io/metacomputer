@@ -146,6 +146,8 @@ def _class(p, i):
         j += 1
     if j < n and p[j] == "]":
         return None, "a class whose first character is ] (write \\])"
+    if j < n and p[j] == ":":
+        return None, "a class whose first character is : (ICU reads [:name:] as a POSIX class: write \\:)"
     while j < n:
         c = p[j]
         if c == "]":
