@@ -857,9 +857,10 @@ def cmd_delete(s, args):
         a.api.wait_state(iid, "TERMINATED", timeout=900)
     if unresolved_op is None:
         if getattr(a, "groups_by_record", False):
-            # Groups acted on only by the record (groups_by_record): only the groups its record names (the ids it recorded, and the marks of the operations
-            # this Mac started for it), each read by its id and tagged for it and that operation: never one found by
-            # its name (another Mac's computer of the same name, or one being made, is left as it is)
+            # Groups acted on only by the record (groups_by_record): only the groups its record names (the ids it
+            # recorded, and the marks of the operations this Mac started for it), each read by its id and tagged for it
+            # and that operation: never one found by its name (another Mac's computer of the same name, or one being
+            # made, is left as it is)
             a.delete_groups(name, st)
         else:
             a.api.delete_nsg(s["VM_NAME"])
@@ -957,8 +958,8 @@ def cmd_rates(s, args):
 
 def cmd_resolvers(s, args):
     """The DNS resolver let through a computer's firewall at a provider whose resolver is on its private network
-    (RESOLVER_EXCEPTION): exactly that, port 53. --first-boot --set ADDRESS...: what the computer named at its first boot
-    (the build reads it before anything but cloud-init and bootstrap.sh has run in it), each checked to be the
+    (RESOLVER_EXCEPTION): exactly that, port 53. --first-boot --set ADDRESS...: what the computer named at its first
+    boot (the build reads it before anything but cloud-init and bootstrap.sh has run in it), each checked to be the
     provider's own resolver for its network, and pinned: taken once, never again. --pinned: the pinned ones (a build
     that sets the computer up again, and `net egress`, never read the computer); with none pinned, the provider's
     documented resolver. Prints them (or "none")."""
@@ -1170,8 +1171,7 @@ def cmd_tunnel(args):
     recorded when it was made) and --tunnel-check-arg=ARG for each argument with which the same program asks the
     provider about it (an answer in JSON whose "id" must be that one). All of them together, from one look at the
     computer's own (its provider's tunnel hook checks it), each checked to be a word the vault takes, or nothing and
-    a refusal: never a
-    binding of the name as an address. Nothing for a computer reached straight over SSH."""
+    a refusal: never a binding of the name as an address. Nothing for a computer reached straight over SSH."""
     ep = target_endpoint(args)
     if not ep["proxy"]:
         return 0
