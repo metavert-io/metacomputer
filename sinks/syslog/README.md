@@ -10,7 +10,7 @@ data, rsyslog's configuration); every kind is listed in [docs/sinks.md](../../do
 |---|---|
 | `manifest.json` | its words and settings: 100 events a connection, no headers; `format`: the scheme, the default port, the structured data's SD-ID, the facility and the severity numbers, which the vault's audit sinks use too |
 | `sink.py` | its URL's rules (`syslog+tls://HOST:PORT`, nothing more), the message (PRI, timestamp, HOSTNAME and MSGID as printable ASCII, the `[metacomputer@32473 ...]` element, the event as MSG) and its own transport: one TLS connection a batch, closed with close_notify (no acknowledgement: best effort) |
-| `tests/vault_cases.json` | the cases its rules are checked against in both places, the stream's code and the vault's audit sinks (its URLs, PRI, escaping in the structured data, the MSGID field), with the differences the vault keeps on purpose and why |
+| `tests/vault_cases.json` | the cases its rules are checked against in both places, the stream's code and the vault's audit sinks (its URLs, PRI, escaping in the structured data, the MSGID field), with any difference the vault keeps on purpose and why |
 
 Its tests: `tests/test_events.py` (its cases, a TLS receiver with its own CA: the message and its fields, the octet counts, a
 receiver that resets the connection); `tests/test_vault_ops.py` runs its cases through the vault's own code.

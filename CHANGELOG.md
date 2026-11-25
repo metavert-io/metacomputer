@@ -37,6 +37,28 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ### Fixed
 
+- **The vault's OTLP audit sinks post to the right path when their URL has a query:** `/v1/logs` went after the query
+  (`https://c.example/x?q=1` posted to `/x?q=1/v1/logs`, and a `#fragment` swallowed it), so the collector was asked
+  for another path. It now goes on the URL's path, before the query, as the event stream puts it (every trailing `/`
+  dropped first), and a fragment is never sent.
+- **The vault's ntfy audit sinks keep the URL's query** (`?auth=`, ntfy's access token), as the event stream's do: it
+  was dropped, so a topic that needs it refused every message. `audit-sink list` masks it like the topic, and it's
+  never shown or logged.
+- **`secrets audit-sink add` checks a URL as `events sink add` does:** it refuses a `#fragment`, a port outside 1-65535
+  and a syslog URL with a path or a query, and takes plain http to `[::1]` (this Mac's IPv6 loopback), which it
+  refused. Such a port was worse than a typo: macOS's networking wraps it (70000 reaches port 4464), and a syslog
+  sink's stopped the process sending to it, the unlock process included. A sink an earlier version saved with one is
+  now never sent to: `audit-sink list`, `audit-sink test` and the unlock terminal say why and to remove it and add it
+  again (a required one goes on refusing uses until then, as one that can't be reached does). One saved with a
+  `#fragment` (never sent) or a syslog URL's path or query (never used) goes on working.
+- **An OTLP collector's partial success whose count of rejected records isn't a whole number** (`true`, `2.7`, `-1`,
+  `"x"`, `"+3"`) is an error reply, in the vault's audit sinks and in the event stream: the batch is sent again, and
+  a required audit sink doesn't count it as accepting the record. The vault read `true` and `2.7` as 1 and 2, and
+  `-1`, `false`, `0.5` and `"x"` as none rejected, which let a use that needs a required sink go ahead; the event
+  stream read them all as none rejected (`"+3"` as 3), counting the batch as delivered.
+- **A new event sink's header values are hidden at once in long-running processes:** the hub and the bridges kept
+  their list of values to hide from events for 30 s, so for up to 30 s after `events sink add` a new sink's header
+  value could appear in an event they sent. They now read the list again whenever `events.json` changes.
 - **`metacomputer learn`**: when reading one agent's sessions fails with an error the reader doesn't expect, the other
   agents' sessions are still read, and the report's note names the agent whose weren't (`note: OpenClaw: its sessions
   weren't read (TypeError)`). Before, such an error in OpenClaw's or Hermes Agent's reader left both agents' sessions
