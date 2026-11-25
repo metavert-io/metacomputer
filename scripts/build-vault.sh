@@ -57,13 +57,17 @@ if [ "$mode" = test ]; then   # checked before anything is created
 fi
 
 # The agents' recognition tables (coding-agents/<name>/recognition.json, the same ones lib/owners.py reads), as Swift: compiled
-# in with the vault's own files, so the vault keeps no second copy of them.
+# in with the vault's own files, so the vault keeps no second copy of them. Each program checks its manifests first
+# (each is a contributor's input: lib/gensafe.py) and writes nothing when one isn't sound, saying why: the build stops
+# here.
 recognition="$(python3 "$ROOT/lib/agentkit/recognition.py" swift)" \
-  || die "couldn't read the agents' recognition tables (python3 lib/agentkit/recognition.py check says why)"
+  || die "the agents' recognition tables aren't sound, or can't be read: nothing was built" \
+         "(python3 lib/agentkit/recognition.py check lists why)"
 # What the audit sinks send alike with the event stream (sinks/<kind>/manifest.json, the same ones lib/events.py reads), as
 # Swift, the same way.
 sinkdefs="$(python3 "$ROOT/lib/sinkkit/vault.py" swift)" \
-  || die "couldn't read the sinks' manifests (python3 lib/sinkkit/vault.py check says why)"
+  || die "the sinks' manifests aren't sound, or can't be read: nothing was built" \
+         "(python3 lib/sinkkit/vault.py check lists why)"
 # The source this binary is built from.
 src_hash="$({ cat "$SRC"/*.swift; printf '%s\n' "$recognition"; printf '%s\n' "$sinkdefs"; } | shasum -a 256 | cut -c1-16)"
 if [ "$mode" = install ] && [ "$force" = 0 ] && [ -x "$INSTALLED" ] \

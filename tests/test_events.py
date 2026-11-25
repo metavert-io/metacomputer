@@ -47,6 +47,7 @@ for k in ("MCOMP_ACTION_LOG", "MCOMP_CONFIG"):
 sys.path.insert(0, os.path.join(LAB, "lib"))
 sys.path.insert(0, os.path.join(LAB, "tests"))
 import events  # noqa: E402
+import hostile_manifests  # noqa: E402  (every manifest value that reaches a generated file, tried with what breaks out)
 
 EV = os.path.join(LAB, "lib", "events.py")
 PY = sys.executable
@@ -433,6 +434,7 @@ def sink_packages():
 # --- tests ----------------------------------------------------------------------------------
 def main():
     sink_packages()
+    hostile_manifests.sinks(check)
     sink_cases()
     certs = make_certs(os.path.join(TD, "certs"))
     web, otlp, ntfy = HTTPRx(), HTTPRx(), HTTPRx()

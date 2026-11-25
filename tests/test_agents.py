@@ -26,6 +26,8 @@ LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AG = os.path.join(LAB, "lib", "agents.py")
 sys.path.insert(0, os.path.join(LAB, "lib"))
 from agentkit import manifests, recognition, registry  # noqa: E402
+sys.path.insert(0, os.path.join(LAB, "tests"))
+import hostile_manifests  # noqa: E402  (every manifest value that reaches a generated file, tried with what breaks out)
 FAILS = []
 
 
@@ -889,6 +891,7 @@ def main():
     finally:
         shutil.rmtree(t, ignore_errors=True)
     packages()
+    hostile_manifests.agents(check)
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
     return 1 if FAILS else 0
 

@@ -36,6 +36,8 @@ import placement  # noqa: E402
 from cloud import capabilities as caps  # noqa: E402
 from cloud.adapter import INTERFACE, AdapterError, HandledByCLI, NotSupported  # noqa: E402
 from cloud.fake import MANIFEST as FAKE_MANIFEST, Fake  # noqa: E402
+sys.path.insert(0, os.path.join(LAB, "tests"))
+import hostile_manifests  # noqa: E402  (every manifest value that reaches a generated file, tried with what breaks out)
 
 FAILS = []
 
@@ -732,6 +734,7 @@ def main():
     manifests()
     resolver()
     packages()
+    hostile_manifests.providers(check)
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed: ' + ', '.join(FAILS)}")
     return 1 if FAILS else 0
 

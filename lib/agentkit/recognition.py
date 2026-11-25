@@ -48,6 +48,11 @@ combining marks as one), and the empty pattern (Python's matches everything, ICU
 differs: $ before a line break that ends the text (Python's matches before a final \\n, ICU's before U+0085 and U+2028
 too, and the vault's call not always before \\n), which an executable's path never ends with.
 
+A recognition.json is a contributor's input (a pull request may touch its folder only), and the vault's build compiles
+it in: check() holds every name to a whitelist (kinds, labels and the question's words: one line of printable text;
+the tables' words: printable ASCII; titles, subcommands and helpers: plain words; within: a small number), and swift()
+writes each as a Swift literal (lib/gensafe.py), so a value can't end its literal either.
+
     python3 lib/agentkit/recognition.py swift     the tables as Swift (scripts/build-vault.sh)
     python3 lib/agentkit/recognition.py check     exit 1 and say what's wrong with the agents' recognition.json files
 Works under any python3 (macOS's 3.9 included)."""
@@ -66,6 +71,11 @@ KEYS = {"kinds", "executables", "version_folders", "names", "apps", "path_words"
 WORD_TABLES = ("executables", "version_folders", "names", "path_words", "modules", "package_words", "packages",
                "node_scripts")
 SHARED_KEYS = {"label", "under", "always", "titles", "subcommands", "within"}
+# A table's word (a file name, a folder, a path's word, a module, a package): printable ASCII, no space at either end.
+TABLE_WORD = (r"[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?",
+              "printable ASCII (1 to 128 characters, no space at either end)", 128)
+# A title, a subcommand or a helper's folder: a plain word.
+PLAIN_WORD = (r"[A-Za-z0-9_][A-Za-z0-9._+-]*", "a plain word (letters, digits and . _ + -)", 64)
 
 
 def raw(name):
@@ -239,8 +249,18 @@ def unportable(p):
     return "an unbalanced (" if depth else None
 
 
+def _words(xs, rule):
+    """None when xs is a list (or tuple) of words that pass rule, else what it should be."""
+    import gensafe              # lib/gensafe.py: only checks and the Swift need it
+    if not isinstance(xs, (list, tuple)) or any(gensafe.matches(x, *rule) for x in xs):
+        return f"a list, each {rule[1]}"
+    return None
+
+
 def check():
-    """What's wrong with the agents' recognition.json files: [str] (empty: nothing)."""
+    """What's wrong with the agents' recognition.json files: [str] (empty: nothing). Each problem names the agent
+    and its field."""
+    import gensafe
     bad, kinds, words = [], {}, {}
     for n in registry.AGENTS:
         try:
@@ -255,6 +275,8 @@ def check():
         own = r.get("kinds") or []
         if not own or not all(isinstance(k, str) and k for k in own):
             bad.append(f"{n}: no kinds")
+        bad += [f"{n}: kinds {k!r} isn't {gensafe.text(k, 64)}" for k in own if isinstance(k, str) and k
+                and gensafe.text(k, 64)]
         for k in own:
             if k in kinds:
                 bad.append(f"{n}: the kind {k!r} is {kinds[k]}'s too")
@@ -265,12 +287,16 @@ def check():
             for w, kind in (r.get(table) or {}).items():
                 if not isinstance(w, str) or not w or kind not in own:
                     bad.append(f"{n}: {table} {w!r} names a kind that isn't its own ({kind!r})")
+                elif gensafe.matches(w, *TABLE_WORD):
+                    bad.append(f"{n}: {table} {w!r} isn't {TABLE_WORD[1]}")
                 if (table, w) in words:
                     bad.append(f"{n}: {table} {w!r} is {words[(table, w)]}'s too")
                 words[(table, w)] = n
         for f, v in (r.get("package_folders") or {}).items():
             if not isinstance(v, dict) or v.get("kind") not in own or not all(isinstance(h, str) for h in v.get("helpers") or ()):
                 bad.append(f"{n}: package_folders {f!r} isn't {{kind, helpers}} of its own")
+            elif gensafe.matches(f, *TABLE_WORD) or _words(v.get("helpers") or [], PLAIN_WORD):
+                bad.append(f"{n}: package_folders {f!r} isn't {TABLE_WORD[1]}, with helpers {PLAIN_WORD[1]}")
         for i, a in enumerate(r.get("apps") or ()):
             odd = {f: unportable(a[f]) for f in ("bundle", "helper")
                    if isinstance(a, dict) and isinstance(a.get(f), str)}
@@ -287,25 +313,28 @@ def check():
             elif not all(x == x.lower() for x in a["folders"]):
                 bad.append(f"{n}: an app's folders aren't lowercase (each folder of a path is lowercased before it's "
                            f"compared with them)")
+            elif _words(a["folders"], TABLE_WORD):
+                bad.append(f"{n}: apps[{i}].folders isn't {_words(a['folders'], TABLE_WORD)}")
         for kind, s in (r.get("shared") or {}).items():
             if kind not in own or not isinstance(s, dict) or set(s) - SHARED_KEYS or not s.get("label") \
                     or not s.get("under") or not isinstance(s.get("within", None), (int, type(None))):
                 bad.append(f"{n}: shared {kind!r} isn't one this knows")
+                continue
+            for k, why in (("label", gensafe.text(s["label"], 64)), ("under", gensafe.text(s["under"])),
+                           ("titles", _words(s.get("titles") or [], PLAIN_WORD)),
+                           ("subcommands", _words(s.get("subcommands") or [], PLAIN_WORD)),
+                           ("within", s.get("within") is not None and gensafe.number(s["within"], 0, 1000)),
+                           ("always", "always" in s and not isinstance(s["always"], bool) and "true or false")):
+                if why:
+                    bad.append(f"{n}: shared {kind!r} {k} isn't {why}")
     return bad
 
 
 # --- the vault's copy, as Swift ----------------------------------------------------------------------------------
 def _s(v):
-    """A Swift string literal."""
-    out = []
-    for c in v:
-        if c in '\\"':
-            out.append("\\" + c)
-        elif ord(c) < 0x20 or ord(c) == 0x7f:
-            out.append("\\u{%x}" % ord(c))
-        else:
-            out.append(c)
-    return '"' + "".join(out) + '"'
+    """A Swift string literal: \\ and " escaped, anything outside printable ASCII as \\u{...} (lib/gensafe.py)."""
+    import gensafe
+    return gensafe.swift_string(v)
 
 
 def _dict(d):
@@ -323,11 +352,12 @@ def _list(xs):
 def swift():
     """The tables as Swift source: vault/Util.swift's agentKind and the Requester read them (scripts/build-vault.sh
     compiles this file with the vault's own)."""
+    import gensafe
     t = tables()
     labels = manifests.labels()
     shared = []
     for kind, s in t["shared"].items():
-        within = "nil" if s.get("within") is None else str(int(s["within"]))
+        within = "nil" if s.get("within") is None else gensafe.swift_int(s["within"], 0, 1000)
         shared.append(f"    {_s(kind)}: SharedAgentKind(label: {_s(s['label'])}, under: {_s(s['under'])}, "
                       f"always: {'true' if s.get('always') else 'false'}, titles: {_list(s.get('titles') or ())}, "
                       f"subcommands: {_list(s.get('subcommands') or ())}, within: {within})")

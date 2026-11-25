@@ -22,7 +22,10 @@ A manifest is a JSON object, checked by check():
                build compiles it in (lib/sinkkit/vault.py), so it's written once
     vault      present when the vault's audit sinks have this kind too: {"acknowledges": whether its receiver
                acknowledges each record (only such a sink can be --required), "headers": whether it takes --header}
-Only lib/sinkkit, lib/events.py and scripts/gen-sinks.py read it. Works under any python3 (macOS's 3.9 included)."""
+Only lib/sinkkit, lib/events.py and scripts/gen-sinks.py read it. A manifest is a contributor's input (a pull request
+may touch its folder only), and its values reach generated shell, Swift, CODEOWNERS and docs: check() holds each to a
+whitelist of its own (lib/gensafe.py), and vault.py check holds the format to the vault's. Works under any python3
+(macOS's 3.9 included)."""
 import os
 import re
 
@@ -33,6 +36,9 @@ KEYS = {"label", "help", "about", "docs", "owners", "batch", "headers", "signed"
 REQUIRED = ("label", "about", "docs", "owners")
 VAULT_KEYS = {"acknowledges", "headers"}
 WORD = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+KIND = re.compile(r"[a-z][a-z0-9_]{0,31}")     # a kind's name (its folder, its registry line)
+# Each text field's longest: one line of printable characters (lib/gensafe.py text).
+TEXT = {"label": 64, "help": 64, "about": 200, "partial": 120}
 
 
 def manifest(kind):
@@ -87,7 +93,10 @@ def in_words(words, last="and"):
 
 
 def check(kind):
-    """What's wrong with a kind's manifest and folder: [str] (empty: nothing)."""
+    """What's wrong with a kind's manifest and folder: [str] (empty: nothing). Each problem names its field."""
+    import gensafe              # lib/gensafe.py: only checks need it, never the event stream itself
+    if not (isinstance(kind, str) and KIND.fullmatch(kind)):
+        return [f"the kind's name {kind!r} isn't a lowercase word (a letter, then letters, digits and _)"]
     try:
         raw = registry.data(kind)
     except (OSError, ValueError) as e:
@@ -99,12 +108,13 @@ def check(kind):
     for k in ("label", "help", "about", "docs", "partial"):
         if k in raw and not (isinstance(raw[k], str) and raw[k].strip()):
             bad.append(f"{k!r} isn't text")
+        elif k in raw and k in TEXT and gensafe.text(raw[k], TEXT[k]):
+            bad.append(f"{k!r} isn't {gensafe.text(raw[k], TEXT[k])}")
     for k in ("headers", "signed", "phone"):
         if k in raw and not isinstance(raw[k], bool):
             bad.append(f"{k!r} isn't true or false")
-    if not isinstance(raw.get("owners"), list) or not all(isinstance(o, str) and o.startswith("@")
-                                                           for o in raw.get("owners") or [None]):
-        bad.append("'owners' isn't a list of @names")
+    if not isinstance(raw.get("owners"), list) or gensafe.owners(raw["owners"]):
+        bad.append(f"'owners' isn't {gensafe.owners(None)}")
     b = raw.get("batch", 1)
     if not isinstance(b, int) or isinstance(b, bool) or not 1 <= b <= 1000:
         bad.append("'batch' isn't a number of events from 1 to 1000")
@@ -116,6 +126,8 @@ def check(kind):
         bad.append(f"its docs aren't a page under docs/ or sinks/{kind}/README.md (and a section of it)")
     if not isinstance(raw.get("format", {}), dict):
         bad.append("'format' isn't an object")
+    elif "content_type" in raw.get("format", {}) and gensafe.content_type(raw["format"]["content_type"]):
+        bad.append(f"format.content_type isn't {gensafe.content_type(None)}")     # a header's value
     v = raw.get("vault")
     if v is not None and (not isinstance(v, dict) or set(v) != VAULT_KEYS
                           or not all(isinstance(x, bool) for x in v.values())):
