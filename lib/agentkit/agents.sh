@@ -7,6 +7,7 @@ MC_AGENT_GENERIC='openclaw hermes gemini antigravity'
 MC_AGENT_INSTALL_FLAGS='--claude --no-claude --only-claude --no-plugin --codex --no-codex --only-codex --openclaw --no-openclaw --only-openclaw --hermes --no-hermes --only-hermes --gemini --no-gemini --only-gemini --antigravity --no-antigravity --only-antigravity'
 MC_AGENT_LABELS_OR='Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI'
 MC_AGENT_RELEASE_FILE='gemini-extension.json'
+MC_AGENT_SWITCH_WORDS='Claude Code'\''s plugin and MCP server'
 mc_agent() { # FLAG KEY: that agent's dir (its folder under coding-agents/), label, prog, docs, missing (line or
   # listed), steps (generic or hooks) or only_note; status 1: no such agent
   case "$1:$2" in

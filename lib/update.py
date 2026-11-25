@@ -40,9 +40,10 @@ CLI = os.path.join(LAB, "bin", "metacomputer")
 STAMP = os.path.expanduser("~/.local/share/metacomputer/installed.json")
 CHECK_CACHE = os.path.expanduser("~/.cache/metacomputer/update-check.json")
 CHECK_EVERY_S = 24 * 3600
-# install.sh's agent steps, as installed.json's "incomplete" names them, and how messages say them
-AGENT_STEPS = {"claude": "Claude Code", "codex": "Codex", "openclaw": "OpenClaw", "hermes": "Hermes Agent",
-               "gemini": "Gemini CLI", "antigravity": "Antigravity CLI"}
+# install.sh's agent steps, as installed.json's "incomplete" names them (each agent's flag), and how messages say them
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from agentkit import manifests as _manifests, registry as _registry  # noqa: E402  (the agents' words)
+AGENT_STEPS = {_manifests.manifest(n)["flag"]: _manifests.label(n) for n in _registry.AGENTS}
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 GUEST_KEYS = ("CUA_DRIVER_VERSION", "CUA_DRIVER_SHA256", "UBUNTU_IMAGE", "UBUNTU_RELEASE", "BROWSERS", "EXTRA_PACKAGES",
               "BROWSER_EXTENSIONS", "VIRTUAL_AUDIO", "GUEST_USER", "ADMIN_USER", "SECRETS_PROXY_PORT", "NET_GATEWAY_IP")

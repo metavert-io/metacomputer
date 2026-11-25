@@ -3,6 +3,7 @@
 # rule: coding-agents/claude-code/claude_mcp.py); and what --uninstall removes of them. Each runs in install.sh, with
 # its helpers (ok, warn, ask, tildify, old_target, link_command, link_points_here, keep_cmd_for, agent_record).
 MKT=metacomputer; PLUGIN_ID=metacomputer@metacomputer
+PLUGIN=1           # --no-plugin: 0 (a skill link instead of the plugin, and the same server)
 SERVER_ADDED=0     # 1 once this run registered Claude Code's MCP server (a restart, or /mcp, loads its tools)
 REG_LEFT=""        # register_server's: what's left after a registration that didn't work: "none" (no server), "unknown"
                    # (it can't be read), or "other" (something that was there stays)
@@ -558,4 +559,33 @@ ag_claude_uninstall_rest() { # --uninstall, after the vault's program
              UNINSTALL_FAILED=1 ;;
     esac
   fi
+}
+ag_claude_option() { # ARG: its own install option
+  case "$1" in --no-plugin) PLUGIN=0; return 0 ;; esac
+  return 1
+}
+ag_claude_stage() { # its part of the agents' step: its step when its command is there (or --claude), else said
+  if has_claude || [ "$CLAUDE" = yes ]; then
+    printf '%s\n' "  Claude Code:"
+    ag_claude_step
+  else
+    printf '%s\n' "  Claude Code isn't installed; once it is: ./install.sh --only-agents (or metacomputer update)"
+  fi
+}
+ag_claude_plan_link() { # its line in the plan, which links the command too; 1: none (the plan says the link alone)
+  if ag_claude_wanted && { has_claude || [ "$CLAUDE" = yes ]; }; then
+    todo+=("link the metacomputer command and set Claude Code up: the plugin (skills) and metacomputer's MCP server (tools), in every project; --no-claude leaves Claude Code alone")
+    return 0
+  fi
+  return 1
+}
+ag_claude_agents_note() { # what --only-agents says last
+  if [ "$SERVER_ADDED" = 1 ]; then
+    printf '%s' "Start new sessions to pick this up (in an open Claude Code one, /mcp loads metacomputer's tools, added in this run)."
+  else
+    printf '%s' "Start new sessions (or run /reload-plugins in Claude Code) to pick this up."
+  fi
+}
+ag_claude_done() { # the line before the example a full install ends with
+  printf '%s' "In Claude Code ($([ "$SERVER_ADDED" = 1 ] && echo "restart open sessions, or run /mcp in them, to load the tools added in this run" || echo "restart open sessions, or run /reload-plugins in them")), try:"
 }

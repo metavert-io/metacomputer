@@ -521,12 +521,6 @@ def candidates(env, cutoff, project=None, extra_dirs=(), bench_dirs=(), projects
     return out, scanned, bad
 
 
-# The agents whose readers aren't in their folders yet: their session folders and files (transcripts.py's).
-_LEGACY_ROOTS = {}
-_LEGACY_FILES = {}
-_LEGACY_KINDS = {}
-
-
 def _readers():
     """{name: its sessions.py} of the registered agents whose sessions are files, and their order."""
     from agentkit import registry
@@ -540,8 +534,6 @@ def session_roots(env):
     for n in order:
         if n in mods and hasattr(mods[n], "roots"):
             out += mods[n].roots(env)
-        elif n in _LEGACY_ROOTS:
-            out += _LEGACY_ROOTS[n](env)
     return out
 
 
@@ -552,8 +544,19 @@ def session_files(env):
     for n in order:
         if n in mods and hasattr(mods[n], "files"):
             out += mods[n].files(env)
-        elif n in _LEGACY_FILES:
-            out += _LEGACY_FILES[n](env)
+    return out
+
+
+def session_sources():
+    """[(agent, its count's key in a report's sources, its name)] of every agent learn reads, in a report's order: the
+    agents whose sessions are files, then those whose sessions are databases, each in the registry's order."""
+    from agentkit import manifests, registry
+    out = []
+    for source in ("files", "databases"):
+        for n in registry.AGENTS:
+            ses = manifests.manifest(n).get("sessions")
+            if ses and ses["source"] == source:
+                out.append((n, ses["key"], manifests.label(n)))
     return out
 
 
@@ -561,7 +564,7 @@ def source_of(kind):
     """The agent (its folder's name) a Transcript kind is, from the manifests' sessions kinds: a project file
     (Transcript's own default kind) is the agent whose files those are."""
     from agentkit import manifests, registry
-    src = dict(_LEGACY_KINDS)
+    src = {}
     for n in registry.AGENTS:
         for k in (manifests.manifest(n).get("sessions") or {}).get("kinds") or ():
             src[k] = n
@@ -648,7 +651,7 @@ def _dedupe(items, scanned, found, unreadable, cut):
     stream_ids = {x["sid"] for x in items if x["src"] == "headless" and x["sid"]}
     best, dupes = {}, 0
     for x in items:
-        if x["src"] == "claude-code" and x["sid"] in stream_ids:
+        if x["src"] == source_of("project") and x["sid"] in stream_ids:     # a headless copy's own session file
             dupes += 1
             continue
         key = x["path"] if x["src"] == "bench" or not x["sid"] else (x["sid"], x["agent"])
@@ -769,10 +772,7 @@ def aggregate(mined, stats, action, events, since_label, cutoff, project):
         "project": project,
         "window": {"from": time.strftime("%Y-%m-%d", time.localtime(min(starts))) if starts else None,
                    "to": time.strftime("%Y-%m-%d", time.localtime(max(ends))) if ends else None},
-        "sources": {"claude_code_sessions": src["claude-code"], "codex_sessions": src["codex"],
-                    "gemini_sessions": src["gemini"], "antigravity_sessions": src["antigravity"],
-                    "openclaw_sessions": src["openclaw"],
-                    "hermes_sessions": src["hermes"],
+        "sources": {**{key: src[name] for name, key, _label in session_sources()},
                     "headless_transcripts": src["headless"],
                     "benchmark_sessions": src["bench"], **stats},
         "sessions": n, "driver_calls": driver, "failed_calls": failed,

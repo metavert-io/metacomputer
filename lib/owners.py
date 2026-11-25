@@ -715,7 +715,7 @@ def write_claim(bridge_pid, claude_pid, cwd, tool, started, kind=None, sid=None,
     rec = {"bridge_pid": bridge_pid, "claude_pid": claude_pid, "cwd": cwd, "started": started,
            "last_call": time.time(), "last_tool": tool}
     if claude_pid and not (extra or {}).get("agent"):
-        rec["agent"] = agent_name(claude_pid) or "Claude Code"
+        rec["agent"] = agent_name(claude_pid) or RECORD_DEFAULT_AGENT
     # Which process the session is: its pid and its start time (claude_start, lib/sessionvm.py proc_start), which the
     # caller passes in extra: taken when the session took the claim (a live ancestor's, the hub's client at its hello),
     # and kept through every refresh (a lease, the inner Claude's keeper). It's never looked up here: the process that
@@ -1165,7 +1165,7 @@ def others(self_pid=None, table=None, mine=None, my_claude=None, direct=None, si
 
 
 def _agent(o):
-    return o.get("agent") if o.get("agent") in AGENTS else "Claude Code"
+    return o.get("agent") if o.get("agent") in AGENTS else RECORD_DEFAULT_AGENT
 
 
 def describe(o):

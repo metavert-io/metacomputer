@@ -1007,9 +1007,15 @@ def setup_options_check():
     inst = open(os.path.join(LAB, "install.sh")).read()
     loop = re.search(r'^for a in "\$@"; do\n(.*?)^done$', inst, re.S | re.M).group(1)
     theirs = set(re.findall(r"(?<![\w-])(--?[a-z][a-z=-]*)(?=[|)])", loop.split("-h|--help")[0]))   # its case labels
+    # The agents' options (--FLAG, --no-FLAG, --only-FLAG and each one's own) are lib/agentkit/agents.sh's list, which
+    # install.sh's loop takes through agent_option and bin/metacomputer's names by its variable.
+    agent_opts = re.search(r"^MC_AGENT_INSTALL_FLAGS='([^']*)'$",
+                           open(os.path.join(LAB, "lib", "agentkit", "agents.sh")).read(), re.M).group(1).split()
+    if '*) agent_option "$a" ||' in loop:
+        theirs |= set(agent_opts)
     src = open(os.path.join(LAB, "bin", "metacomputer")).read()
     m = re.search(r'^    setup\)\s.*?mc_take "setup [^"]*" 0 0 "([^"]*)"', src, re.S | re.M)
-    ours = set(m.group(1).replace("\\\n", " ").split()) if m else set()
+    ours = set(m.group(1).replace("\\\n", " ").replace("$MC_AGENT_INSTALL_FLAGS", " ".join(agent_opts)).split()) if m else set()
     check("setup's options in bin/metacomputer's strict parser are install.sh's (none missing, none extra)",
           ours and ours == theirs, (sorted(theirs - ours), sorted(ours - theirs)))
 

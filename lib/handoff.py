@@ -67,6 +67,7 @@ import flockwait  # noqa: E402
 import input_reset  # noqa: E402
 import owners  # noqa: E402
 import termsafe  # noqa: E402
+from agentkit import manifests as _manifests, registry as _registry  # noqa: E402  (the agents' words)
 
 DEFAULT_TIMEOUT_S = 900
 MIN_TIMEOUT_S = 30
@@ -88,9 +89,11 @@ LIVE_VIEW = ("Open the live view: run `metacomputer view --open` on your Mac. Sc
 ACTION = ("Run `metacomputer view --open` (Screen Sharing; paste the live-view password with Cmd+V if it asks), "
           "do it in the live view, then run `metacomputer handoff done` (or `metacomputer handoff cancel`)")
 SPACES = re.compile(r"\s+")
-AGENT_NAMES = {"Claude Code": "Claude", "Codex": "Codex", "OpenClaw": "OpenClaw", "Hermes Agent": "Hermes",
-               "Gemini CLI": "Gemini", "Antigravity CLI": "Antigravity",
-               "Antigravity app": "Antigravity", owners.UNKNOWN_AGENT: "Your agent"}
+# Each agent session's short name (its manifest's "short"), by the name records give it (every kind its recognition
+# lists), and the default's for a record that names none.
+AGENT_NAMES = dict({k: _manifests.manifest(n)["short"] for n in _registry.AGENTS
+                    for k in _registry.data(n, "recognition")["kinds"]}, **{owners.UNKNOWN_AGENT: "Your agent"})
+DEFAULT_SHORT = AGENT_NAMES[owners.RECORD_DEFAULT_AGENT]
 
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -108,9 +111,9 @@ def hub_on_other_code():
 
 
 def agent_word(rec):
-    """Who asked, for the user's messages: the short name of the agent whose session opened the handoff ("Codex",
-    "OpenClaw", "Hermes", "Gemini"), else "Claude"."""
-    return AGENT_NAMES.get(rec.get("agent"), "Claude") if isinstance(rec, dict) else "Claude"
+    """Who asked, for the user's messages: the short name of the agent whose session opened the handoff, else the
+    records' default agent's."""
+    return AGENT_NAMES.get(rec.get("agent"), DEFAULT_SHORT) if isinstance(rec, dict) else DEFAULT_SHORT
 
 
 def at_terminal():

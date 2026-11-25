@@ -58,6 +58,7 @@ def agents_sh():
            f"MC_AGENT_INSTALL_FLAGS={sh_quote(' '.join(install_flags()))}",
            f"MC_AGENT_LABELS_OR={sh_quote(manifests.in_words(manifests.labels()))}",
            f"MC_AGENT_RELEASE_FILE={sh_quote(manifests.release_file() or '')}",
+           f"MC_AGENT_SWITCH_WORDS={sh_quote(manifests.switch_words())}",
            "mc_agent() { # FLAG KEY: that agent's dir (its folder under coding-agents/), label, prog, docs, missing (line or",
            "  # listed), steps (generic or hooks) or only_note; status 1: no such agent",
            "  case \"$1:$2\" in"]
@@ -79,7 +80,7 @@ def docs_index():
                      ("yes (" + ("its transcript files" if ses["source"] == "files" else "its session databases") + ")")
                      if ses else "no",
                      f"`--agent {m['bench']['switch']}`" if m.get("bench") else "no",
-                     f"[{m['docs']}]({os.path.relpath(m['docs'], 'docs')})", f"[coding-agents/{n}/](../agents/{n}/)"))
+                     f"[{m['docs']}]({os.path.relpath(m['docs'], 'docs')})", f"[coding-agents/{n}/](../coding-agents/{n}/)"))
     head = ("Agent", "Command", "install.sh", "Tools", "`learn` reads it", "`bench`", "Docs", "Code")
     out = ["# Coding agents",
            "",

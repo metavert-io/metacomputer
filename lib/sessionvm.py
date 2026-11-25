@@ -705,7 +705,8 @@ def show(argv):
         print(json.dumps({"agent_pid": agent, "records": recs, "folder": sessions_dir()}, indent=2))
         return 0
     if not agent:
-        print("Not run from an agent session (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI).")
+        from agentkit import manifests
+        print(f"Not run from an agent session ({manifests.in_words(manifests.labels())}).")
         return 0
     if not recs:
         print("This agent session holds no computer yet.")

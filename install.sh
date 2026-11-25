@@ -66,9 +66,8 @@
 #   7. builds the VM: about 1.5 GB of downloads, then a few minutes unattended
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-YES=0; CHROME=""; BUILD=""; CLAUDE=auto; PLUGIN=1; ONLY_CLAUDE=0; UNINSTALL=0; LUME_CHOICE=""; REPLACE_VM=0; FRESH_SOURCES=0
-SWITCH=0; ALLOW_DOWNGRADE=0; CODEX=auto; ONLY_CODEX=0; ONLY_AGENTS=0
-OPENCLAW=auto; HERMES=auto; GEMINI=auto; ANTIGRAVITY=auto; ONLY_OPENCLAW=0; ONLY_HERMES=0; ONLY_GEMINI=0; ONLY_ANTIGRAVITY=0
+YES=0; CHROME=""; BUILD=""; UNINSTALL=0; LUME_CHOICE=""; REPLACE_VM=0; FRESH_SOURCES=0
+SWITCH=0; ALLOW_DOWNGRADE=0; ONLY_AGENTS=0
 # The command-line rules every metacomputer program follows (scripts/strictargs.sh): each option once, nothing else.
 . "$ROOT/scripts/strictargs.sh"
 # The coding agents (lib/agentkit/agents.sh, made from their manifests by scripts/gen-agents.py) and each one's own
@@ -77,37 +76,52 @@ OPENCLAW=auto; HERMES=auto; GEMINI=auto; ANTIGRAVITY=auto; ONLY_OPENCLAW=0; ONLY
 for mc_d in $MC_AGENTS; do
   if [ -f "$ROOT/coding-agents/$mc_d/setup.sh" ]; then . "$ROOT/coding-agents/$mc_d/setup.sh"; fi
 done
-unset mc_d
+# Each agent's switches: FLAG (auto, yes for --FLAG, no for --no-FLAG) and ONLY_FLAG (1 for --only-FLAG), by its flag
+# in capitals (CLAUDE, ONLY_CLAUDE); its step's FLAG_TRIED and FLAG_FAILED (agent_record).
+for mc_d in $MC_AGENT_FLAGS; do
+  mc_u="$(printf '%s' "$mc_d" | tr '[:lower:]' '[:upper:]')"
+  eval "$mc_u=auto; ONLY_$mc_u=0; ${mc_u}_TRIED=0; ${mc_u}_FAILED=0"
+done
+unset mc_d mc_u
+agent_option() { # ARG: 0 when it's an agent's install option (--FLAG, --no-FLAG, --only-FLAG, or one of its own:
+  # its setup.sh's ag_FLAG_option), which is now set
+  local f u
+  for f in $MC_AGENT_FLAGS; do
+    u="$(printf '%s' "$f" | tr '[:lower:]' '[:upper:]')"
+    case "$1" in
+      "--$f") eval "$u=yes"; return 0 ;;
+      "--no-$f") eval "$u=no"; return 0 ;;
+      "--only-$f") eval "ONLY_$u=1"; return 0 ;;
+    esac
+    if declare -F "ag_${f}_option" >/dev/null && "ag_${f}_option" "$1"; then return 0; fi
+  done
+  return 1
+}
 SA_DEFER=1
 if ! sa_check install.sh "./install.sh [OPTIONS]   (./install.sh --help lists them)" 0 0 "--yes -y --no-chrome --no-build \
-       --replace-vm --fresh-sources --no-claude --claude --only-agents --no-plugin --only-claude --uninstall --switch \
-       --allow-downgrade --codex --no-codex --only-codex --openclaw --no-openclaw --only-openclaw --hermes --no-hermes \
-       --only-hermes --gemini --no-gemini --only-gemini --antigravity --no-antigravity --only-antigravity" "--lume=" "$@"; then
+       --replace-vm --fresh-sources --only-agents --uninstall --switch --allow-downgrade $MC_AGENT_INSTALL_FLAGS" "--lume=" "$@"; then
   sed -n '2,/^set -Eeuo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0
 fi
 for a in "$@"; do
   case "$a" in
     --yes|-y) YES=1 ;; --no-chrome) CHROME=no ;; --no-build) BUILD=no ;; --replace-vm) REPLACE_VM=1 ;; --fresh-sources) FRESH_SOURCES=1 ;;
-    --no-claude) CLAUDE=no ;; --claude) CLAUDE=yes ;; --only-agents) ONLY_AGENTS=1 ;; --no-plugin) PLUGIN=0 ;; --only-claude) ONLY_CLAUDE=1 ;; --uninstall) UNINSTALL=1 ;;
+    --only-agents) ONLY_AGENTS=1 ;; --uninstall) UNINSTALL=1 ;;
     --switch) SWITCH=1 ;; --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
-    --codex) CODEX=yes ;; --no-codex) CODEX=no ;; --only-codex) ONLY_CODEX=1 ;;
-    --openclaw) OPENCLAW=yes ;; --no-openclaw) OPENCLAW=no ;; --only-openclaw) ONLY_OPENCLAW=1 ;;
-    --hermes) HERMES=yes ;; --no-hermes) HERMES=no ;; --only-hermes) ONLY_HERMES=1 ;;
-    --gemini) GEMINI=yes ;; --no-gemini) GEMINI=no ;; --only-gemini) ONLY_GEMINI=1 ;;
-    --antigravity) ANTIGRAVITY=yes ;; --no-antigravity) ANTIGRAVITY=no ;; --only-antigravity) ONLY_ANTIGRAVITY=1 ;;
     --lume=mcomp-vm|--lume=standard) LUME_CHOICE="${a#--lume=}" ;;
     --lume=secure) LUME_CHOICE=mcomp-vm ;;   # mcomp-vm's former name, lume-secure
     -h|--help) sed -n '2,/^set -Eeuo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown option: $a (see --help)" >&2; exit 2 ;;
+    *) agent_option "$a" || { echo "unknown option: $a (see --help)" >&2; exit 2; } ;;
   esac
 done
-[ "$ONLY_CLAUDE" = 0 ] || [ "$CLAUDE" != no ] || { echo "--only-claude and --no-claude together leave nothing to do" >&2; exit 2; }
-[ "$ONLY_CODEX" = 0 ] || [ "$CODEX" != no ] || { echo "--only-codex and --no-codex together leave nothing to do" >&2; exit 2; }
-[ "$ONLY_OPENCLAW" = 0 ] || [ "$OPENCLAW" != no ] || { echo "--only-openclaw and --no-openclaw together leave nothing to do" >&2; exit 2; }
-[ "$ONLY_HERMES" = 0 ] || [ "$HERMES" != no ] || { echo "--only-hermes and --no-hermes together leave nothing to do" >&2; exit 2; }
-[ "$ONLY_GEMINI" = 0 ] || [ "$GEMINI" != no ] || { echo "--only-gemini and --no-gemini together leave nothing to do" >&2; exit 2; }
-[ "$ONLY_ANTIGRAVITY" = 0 ] || [ "$ANTIGRAVITY" != no ] || { echo "--only-antigravity and --no-antigravity together leave nothing to do" >&2; exit 2; }
-[ "$((ONLY_CODEX + ONLY_CLAUDE + ONLY_AGENTS + ONLY_OPENCLAW + ONLY_HERMES + ONLY_GEMINI + ONLY_ANTIGRAVITY))" -le 1 ] || { echo "--only-claude, --only-codex, --only-openclaw, --only-hermes, --only-gemini, --only-antigravity and --only-agents: one at a time (--only-agents does them all)" >&2; exit 2; }
+mc_only=0; mc_onlys=""
+for mc_d in $MC_AGENT_FLAGS; do
+  mc_u="$(printf '%s' "$mc_d" | tr '[:lower:]' '[:upper:]')"
+  eval "mc_o=\$ONLY_$mc_u; mc_v=\$$mc_u"
+  [ "$mc_o" = 0 ] || [ "$mc_v" != no ] || { echo "--only-$mc_d and --no-$mc_d together leave nothing to do" >&2; exit 2; }
+  mc_only=$((mc_only + mc_o)); mc_onlys="${mc_onlys:+$mc_onlys, }--only-$mc_d"
+done
+[ "$((mc_only + ONLY_AGENTS))" -le 1 ] || { echo "$mc_onlys and --only-agents: one at a time (--only-agents does them all)" >&2; exit 2; }
+unset mc_d mc_u mc_o mc_v mc_only mc_onlys
 sa_parsed install.sh
 
 b=$'\033[1m'; d=$'\033[2m'; g=$'\033[32m'; y=$'\033[33m'; r=$'\033[31m'; o=$'\033[0m'
@@ -159,14 +173,9 @@ old_target() {
 TAB=$'\t'; US=$'\037'
 CLAUDE_MCP=user    # this installer registers Claude Code's MCP server itself, at user scope; plugin/bin/metacomputer looks
                    # for this line (an install.sh without it relied on the plugin for the server)
-CLAUDE_FAILED=0    # 1 when Claude Code's setup didn't finish: the run ends with exit status 1, after everything else
-CLAUDE_TRIED=0     # 1 once this run set Claude Code up (ag_claude_step with a claude command): only then is its result
-                   # recorded (agent_record); a run that skipped it leaves an earlier unfinished one recorded
-CODEX_FAILED=0     # the same two for Codex's step (codex_step: its MCP server)
-CODEX_TRIED=0
-# and for OpenClaw's, Hermes Agent's, Gemini CLI's and Antigravity CLI's (agent_step: their MCP servers)
-OPENCLAW_FAILED=0; OPENCLAW_TRIED=0; HERMES_FAILED=0; HERMES_TRIED=0; GEMINI_FAILED=0; GEMINI_TRIED=0
-ANTIGRAVITY_FAILED=0; ANTIGRAVITY_TRIED=0
+# An agent's FLAG_FAILED is 1 when its setup didn't finish: the run ends with exit status 1, after everything else;
+# FLAG_TRIED is 1 once this run set it up (its step, with its command there): only then is its result recorded
+# (agent_record); a run that skipped it leaves an earlier unfinished one recorded.
 # What to do when something fails: the stage's own advice (FAIL_HINT, set by each stage), then
 # the two causes behind most failures, a full disk and no network, when they're the case now.
 on_error() { # LINE COMMAND
@@ -233,7 +242,7 @@ agent_python() { # found as install.sh's py311_ok finds it (Homebrew's, then pyt
   return 1
 }
 # The agents: each one installed is set up, by a first install and by every later run (so one installed since gets
-# set up by the next update), unless you said --no-NAME (--no-claude, --no-codex, ...), which is remembered until --NAME.
+# set up by the next update), unless you said --no-NAME (an agent's flag), which is remembered until --NAME.
 AGENTS_FILE="$HOME/.local/share/metacomputer/agents.json"
 agent_choice() { # NAME: "on" (you asked for it), "off" (--no-NAME in an earlier run) or nothing
   [ -f "$AGENTS_FILE" ] || return 0
@@ -241,7 +250,7 @@ agent_choice() { # NAME: "on" (you asked for it), "off" (--no-NAME in an earlier
 }
 agent_remember() { # NAME on|off: an explicit --NAME / --no-NAME, for later runs
   local n v body="" sep=""
-  for n in claude codex openclaw hermes gemini antigravity; do
+  for n in $MC_AGENT_FLAGS; do
     if [ "$n" = "$1" ]; then v="$2"; else v="$(agent_choice "$n")"; fi
     body="$body$sep  \"$n\": \"${v:-auto}\""; sep=$',\n'
   done
@@ -259,8 +268,8 @@ link_command() { # ~/.local/bin/metacomputer and mcomp (every install, whichever
   else
     ln -sfn "$ROOT/bin/metacomputer" "$ALIAS_LINK" && ok "alias: mcomp"
   fi
-  # Command names used by earlier versions (vc, cua-lab, virtual-computer, vcomp). The old Claude Code skill name is
-  # ag_claude_step's: --no-claude leaves everything of Claude Code's alone.
+  # Command names used by earlier versions (vc, cua-lab, virtual-computer, vcomp). An agent's own old names are its
+  # step's: --no-FLAG leaves everything of that agent's alone.
   local old
   for old in "$HOME/.local/bin/vc" "$HOME/.local/bin/cua-lab" "$HOME/.local/bin/virtual-computer" \
              "$HOME/.local/bin/vcomp"; do
@@ -272,38 +281,17 @@ link_command() { # ~/.local/bin/metacomputer and mcomp (every install, whichever
 }
 agents_stage() { # step 5 (and --only-agents): each agent, as the switches and earlier choices say
   link_command
-  if ag_claude_wanted; then
-    [ "$CLAUDE" = yes ] && agent_remember claude on
-    if has_claude || [ "$CLAUDE" = yes ]; then
-      printf '%s\n' "  Claude Code:"
-      ag_claude_step
-    else
-      printf '%s\n' "  Claude Code isn't installed; once it is: ./install.sh --only-agents (or metacomputer update)"
-    fi
-  else
-    [ "$CLAUDE" = no ] && agent_remember claude off
-    printf '%s\n' "  Claude Code: left alone (--no-claude$([ "$CLAUDE" = no ] || echo " in an earlier run"); --claude sets it up)"
-  fi
-  if agent_wanted codex; then
-    [ "$CODEX" = yes ] && agent_remember codex on
-    ag_codex_step
-  else
-    [ "$CODEX" = no ] && agent_remember codex off
-    if [ "$CODEX" = no ] || [ "$(agent_choice codex)" = off ]; then
-      printf '%s\n' "  Codex: left alone (--no-codex$([ "$CODEX" = no ] || echo " in an earlier run"); --codex sets it up)"
-    else
-      printf '%s\n' "  Codex isn't installed; once it is: ./install.sh --only-agents (or metacomputer update)"
-    fi
-  fi
   local a missing=""
-  for a in $MORE_AGENTS; do
+  for a in $MC_AGENT_FLAGS; do
     if agent_wanted "$a"; then
       if [ "$(agent_flag "$a")" = yes ]; then agent_remember "$a" on; fi
-      agent_step "$a"
+      if declare -F "ag_${a}_stage" >/dev/null; then "ag_${a}_stage"; else agent_run_step "$a"; fi
     else
       if [ "$(agent_flag "$a")" = no ]; then agent_remember "$a" off; fi
       if [ "$(agent_flag "$a")" = no ] || [ "$(agent_choice "$a")" = off ]; then
         printf '%s\n' "  $(agent_label "$a"): left alone (--no-$a$([ "$(agent_flag "$a")" = no ] || echo " in an earlier run"); --$a sets it up)"
+      elif [ "$(mc_agent "$a" missing)" = line ]; then
+        printf '%s\n' "  $(agent_label "$a") isn't installed; once it is: ./install.sh --only-agents (or metacomputer update)"
       else
         missing="${missing:+$missing, }$(agent_label "$a")"
       fi
@@ -311,41 +299,49 @@ agents_stage() { # step 5 (and --only-agents): each agent, as the switches and e
   done
   [ -z "$missing" ] || printf '%s\n' "  Not installed here: $missing; once one is: ./install.sh --only-agents (or metacomputer update)"
   if ! any_agent; then
-    warn "no coding agent is installed (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI): metacomputer works from any of them. Install one, then: ./install.sh --only-agents"
+    warn "no coding agent is installed ($MC_AGENT_LABELS_OR): metacomputer works from any of them. Install one, then: ./install.sh --only-agents"
   fi
   printf '%s\n' "  (metacomputer agents shows this any time)"
+}
+agent_run_step() { # FLAG: the agent's step (its setup.sh's ag_FLAG_step, else lib/agent_setup.py's: agent_step)
+  if declare -F "ag_${1}_step" >/dev/null; then "ag_${1}_step"; else agent_step "$1"; fi
+}
+agent_hook_line() { # HOOK DEFAULT: what the first agent with ag_FLAG_HOOK says (a line), else DEFAULT
+  local a
+  for a in $MC_AGENT_FLAGS; do
+    if declare -F "ag_${a}_$1" >/dev/null; then "ag_${a}_$1"; return 0; fi
+  done
+  printf '%s' "$2"
 }
 skill_link_ours() { # PATH: 0 when it's a link metacomputer made, one that points into this checkout's own skill folders
   # (skills/, .claude/skills/; a relative target read from the link's own folder): lib/agent_setup.py's rule, for every
   # agent. Anything else, a broken link or one into another folder of the same name included, isn't.
   [ -L "$1" ] && "$CPY" "$ROOT/lib/agent_setup.py" link-ours "$1" --root "$ROOT" >/dev/null 2>&1 </dev/null
 }
-keep_cmd_for() { # WHOSE ("Claude Code's", "Codex's"): an MCP server metacomputer that stays runs, or may run, the
+keep_cmd_for() { # WHOSE (an agent's label, "Codex's"): an MCP server metacomputer that stays runs, or may run, the
   # command links, so --uninstall keeps them
   KEEP_CMD=1
   case "$KEEP_WHY" in "") KEEP_WHY="$1" ;; *"$1"*) ;; *) KEEP_WHY="$KEEP_WHY and $1" ;; esac
 }
-# --- OpenClaw, Hermes Agent, Gemini CLI and Antigravity CLI (docs/openclaw.md, hermes.md, gemini.md, antigravity.md) ---
+# --- the generic agents (their manifests' install steps "generic": coding-agents/NAME/setup.py) ----------------------
 # Each one's MCP server metacomputer (~/.local/bin/metacomputer mcp-lazy), registered with the agent's own CLI, and the
-# skills where the agent reads them: lib/agent_setup.py. Its MCP server follows the rule Codex's does: only
+# skills where the agent reads them: lib/agent_setup.py. Its MCP server follows the rule every agent's does: only
 # metacomputer's own entry (exactly ~/.local/bin/metacomputer or this checkout's launcher, with exactly mcp-lazy) is
 # ever changed or removed, read again right before; anything else is named by its program and left, and the step counts
 # as unfinished (recorded by agent_record, so `metacomputer update` runs it again).
-MORE_AGENTS="openclaw hermes gemini antigravity"
-agent_label() { case "$1" in openclaw) echo "OpenClaw" ;; hermes) echo "Hermes Agent" ;; gemini) echo "Gemini CLI" ;;
-                             antigravity) echo "Antigravity CLI" ;; esac; }
-agent_cmd() { case "$1" in antigravity) echo agy ;; *) echo "$1" ;; esac; }   # NAME: the agent's command
+agent_label() { mc_agent "$1" label; echo; }                    # FLAG: the agent's name
+agent_cmd() { mc_agent "$1" prog; echo; }                        # FLAG: the agent's command
 agent_upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 agent_var() { eval "printf '%s' \"\${$1:-}\""; }                # VARNAME: its value
 agent_flag() { local v; v="$(agent_var "$(agent_upper "$1")")"; printf '%s' "${v:-auto}"; }   # auto, yes, no
 has_agent() { command -v "$(agent_cmd "$1")" >/dev/null 2>&1; }   # NAME
 any_agent() { # is any coding agent installed?
   local a
-  if has_claude || has_codex; then return 0; fi
-  for a in $MORE_AGENTS; do if has_agent "$a"; then return 0; fi; done
+  for a in $MC_AGENT_FLAGS; do if has_agent "$a"; then return 0; fi; done
   return 1
 }
-agent_wanted() { # NAME: --NAME, or installed and not --no-NAME before
+agent_wanted() { # NAME: --NAME, or installed and not --no-NAME before (or the agent's own rule: ag_NAME_wanted)
+  if declare -F "ag_${1}_wanted" >/dev/null; then "ag_${1}_wanted"; return; fi
   case "$(agent_flag "$1")" in yes) return 0 ;; no) return 1 ;; esac
   has_agent "$1" && [ "$(agent_choice "$1")" != off ]
 }
@@ -355,7 +351,7 @@ agent_lines() { # agent_setup.py's lines on stdin: ok, warn, say; "keep" (uninst
     case "$kind" in ok) ok "$text" ;; warn) warn "$text" ;; say) printf '%s\n' "  $text" ;; keep) keep_cmd_for "$text" ;; esac
   done
 }
-agent_step() { # NAME: openclaw, hermes, gemini or antigravity
+agent_step() { # NAME: a generic agent's flag
   local up label out rc=0
   up="$(agent_upper "$1")"; label="$(agent_label "$1")"
   link_command
@@ -433,19 +429,20 @@ agent_uninstall() { # NAME
 if [ "$UNINSTALL" = 1 ]; then
   step "Removing what $ROOT set up for the coding agents"
   UNINSTALL_FAILED=0; KEEP_CMD=0; KEEP_WHY=""
-  ag_claude_uninstall_server
-  ag_codex_uninstall_server
-  for a in $MORE_AGENTS; do agent_uninstall "$a"; done
+  # Each agent's MCP server first, while the command it runs is still there (its hook, or lib/agent_setup.py's step).
+  for a in $MC_AGENT_FLAGS; do
+    if declare -F "ag_${a}_uninstall_server" >/dev/null; then "ag_${a}_uninstall_server"
+    elif [ "$(mc_agent "$a" steps)" = generic ]; then agent_uninstall "$a"; fi
+  done
   for l in "$CMD_LINK" "$ALIAS_LINK"; do
     if ! link_points_here "$l" "$ROOT/bin/metacomputer"; then :
     elif [ "$KEEP_CMD" = 1 ]; then warn "kept $l: an MCP server metacomputer that stays ($KEEP_WHY) runs, or may run, this command"
     else rm "$l" && ok "removed $l"; fi
   done
-  ag_claude_uninstall_after_links
+  for a in $MC_AGENT_FLAGS; do if declare -F "ag_${a}_uninstall_after_links" >/dev/null; then "ag_${a}_uninstall_after_links"; fi; done
   [ -f "$HOME/.local/share/metacomputer/bin/mcomp-vault" ] && rm "$HOME/.local/share/metacomputer/bin/mcomp-vault" \
     && ok "removed the secrets vault program (your vault file stays: ~/Library/Application Support/metacomputer)"
-  ag_claude_uninstall_rest
-  ag_codex_uninstall_rest
+  for a in $MC_AGENT_FLAGS; do if declare -F "ag_${a}_uninstall_rest" >/dev/null; then "ag_${a}_uninstall_rest"; fi; done
   # shellcheck source=/dev/null
   . "$ROOT/config/defaults.env"; [ -f "$CONF" ] && . "$CONF"
   # The runner this checkout uses (LUME in config/local.env; mcomp-vm by default), found as
@@ -469,10 +466,10 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
-# Whether an agent's step finished (claude: Claude Code's, codex: Codex's MCP server), kept in installed.json's
-# "incomplete" (what `metacomputer update` reads): recorded by the step itself as its last action, so Claude Code's is
-# recorded before Codex's step runs (which could end the run), and only when the step ran (TRIED): a run that skipped it
-# (no claude or codex command, --no-claude, --no-codex) leaves an earlier unfinished one recorded. So an update runs the
+# Whether an agent's step finished (by its flag), kept in installed.json's "incomplete" (what `metacomputer update`
+# reads): recorded by the step itself as its last action, so one agent's is recorded before the next one's step runs
+# (which could end the run), and only when the step ran (TRIED): a run that skipped it (no command for it, --no-FLAG)
+# leaves an earlier unfinished one recorded. So an update runs the
 # install again after a step that didn't finish (whichever way it ran), a run whose step finishes clears that, and a
 # full install's last step follows the same rule (install_incomplete). Without installed.json, nothing's installed yet:
 # update installs anyway.
@@ -516,13 +513,10 @@ except (OSError, ValueError):
 sys.exit(0 if isinstance(d, dict) and isinstance(d.get("incomplete"), list) and sys.argv[2] in d["incomplete"] else 1)
 PY
 }
-install_incomplete() { # what a full install's last step records as unfinished, as "claude", "codex", "claude,gemini"...: a
+install_incomplete() { # what a full install's last step records as unfinished, the agents' flags ("a,b"): a
   # step that failed this run, or wasn't set up this run while installed.json already records it as unfinished
-  local out=""
-  if [ "$CLAUDE_FAILED" = 1 ] || { [ "$CLAUDE_TRIED" = 0 ] && stamp_incomplete claude; }; then out=claude; fi
-  if [ "$CODEX_FAILED" = 1 ] || { [ "$CODEX_TRIED" = 0 ] && stamp_incomplete codex; }; then out="${out:+$out,}codex"; fi
-  local a up
-  for a in $MORE_AGENTS; do
+  local out="" a up
+  for a in $MC_AGENT_FLAGS; do
     up="$(agent_upper "$a")"
     if [ "$(agent_var "${up}_FAILED")" = 1 ] || { [ "$(agent_var "${up}_TRIED")" = 0 ] && stamp_incomplete "$a"; }; then
       out="${out:+$out,}$a"
@@ -531,11 +525,8 @@ install_incomplete() { # what a full install's last step records as unfinished, 
   printf '%s\n' "$out"
 }
 agents_failed_exit() { # an agent's step didn't finish: say so, and end the run with exit status 1
-  local which=""
-  [ "$CLAUDE_FAILED" = 0 ] || which="Claude Code's"
-  [ "$CODEX_FAILED" = 0 ] || which="${which:+$which and }Codex's"
-  local a
-  for a in $MORE_AGENTS; do
+  local which="" a
+  for a in $MC_AGENT_FLAGS; do
     [ "$(agent_var "$(agent_upper "$a")_FAILED")" = 0 ] || which="${which:+$which and }$(agent_label "$a")'s"
   done
   [ -n "$which" ] || return 0
@@ -544,7 +535,7 @@ agents_failed_exit() { # an agent's step didn't finish: say so, and end the run 
 }
 # --- an install that's already here: another checkout's (switching needs a yes), or a newer one (downgrading needs --allow-downgrade)
 stamp_field() { sed -n "s/^ *\"$1\": \"\\([^\"]*\\)\".*/\\1/p" "$HOME/.local/share/metacomputer/installed.json" 2>/dev/null | head -1 || true; }
-existing_checks() { # main | claude: the plan's lines go into todo only for main
+existing_checks() { # main | agent: the plan's lines go into todo only for main
   local here other="" tgt od s_dir s_commit s_tag this_tag head
   here="$(real_dir "$ROOT")"
   if [ -L "$CMD_LINK" ]; then      # every run links the command, whichever agents it sets up
@@ -555,13 +546,13 @@ existing_checks() { # main | claude: the plan's lines go into todo only for main
   fi
   if [ -n "$other" ]; then
     if [ "$SWITCH" = 1 ]; then
-      [ "$1" != main ] || todo+=("switch the metacomputer command and Claude Code's plugin and MCP server from $(tildify "$other") to this checkout (--switch)")
+      [ "$1" != main ] || todo+=("switch the metacomputer command${MC_AGENT_SWITCH_WORDS:+ and $MC_AGENT_SWITCH_WORDS} from $(tildify "$other") to this checkout (--switch)")
     elif [ "$YES" = 1 ] || [ ! -t 0 ]; then
-      die "the metacomputer command runs another checkout, $(tildify "$other"), and this run would switch it (and Claude Code's plugin and MCP server) to $(tildify "$ROOT")." \
+      die "the metacomputer command runs another checkout, $(tildify "$other"), and this run would switch it${MC_AGENT_SWITCH_WORDS:+ (and $MC_AGENT_SWITCH_WORDS)} to $(tildify "$ROOT")." \
           "To update that install instead: metacomputer update." \
           "To move to this checkout: ./install.sh --switch (that checkout's VM, settings and vault are left as they are)."
-    elif ask "The metacomputer command runs another checkout, $(tildify "$other"). Switch it and Claude Code's plugin and MCP server to this one?" N; then
-      [ "$1" != main ] || todo+=("switch the metacomputer command and Claude Code's plugin and MCP server from $(tildify "$other") to this checkout")
+    elif ask "The metacomputer command runs another checkout, $(tildify "$other"). Switch it${MC_AGENT_SWITCH_WORDS:+ and $MC_AGENT_SWITCH_WORDS} to this one?" N; then
+      [ "$1" != main ] || todo+=("switch the metacomputer command${MC_AGENT_SWITCH_WORDS:+ and $MC_AGENT_SWITCH_WORDS} from $(tildify "$other") to this checkout")
     else
       echo "  Nothing was changed. To update the install that's there: metacomputer update."; exit 0
     fi
@@ -585,44 +576,23 @@ existing_checks() { # main | claude: the plan's lines go into todo only for main
   fi
   return 0
 }
-if [ "$ONLY_CLAUDE" = 1 ]; then
-  existing_checks claude
-  step "Claude Code"
-  CLAUDE=yes; agent_remember claude on
-  ag_claude_step
-  printf '\n%s\n' "$(ag_claude_only_note)"
-  agents_failed_exit
-  exit 0
-fi
-if [ "$ONLY_CODEX" = 1 ]; then
-  existing_checks claude
-  step "Codex"
-  CODEX=yes; agent_remember codex on
-  ag_codex_step
-  printf '\n%s\n' "Start a new Codex session to pick this up."
-  agents_failed_exit
-  exit 0
-fi
-for a in $MORE_AGENTS; do
+for a in $MC_AGENT_FLAGS; do       # --only-FLAG: that agent's step alone
   if [ "$(agent_var "ONLY_$(agent_upper "$a")")" = 1 ]; then
-    existing_checks claude
+    existing_checks agent
     step "$(agent_label "$a")"
     eval "$(agent_upper "$a")=yes"; agent_remember "$a" on
-    agent_step "$a"
-    printf '\n%s\n' "Start a new $(agent_label "$a") session to pick this up."
+    agent_run_step "$a"
+    if declare -F "ag_${a}_only_note" >/dev/null; then printf '\n%s\n' "$("ag_${a}_only_note")"
+    else printf '\n%s\n' "$(mc_agent "$a" only_note)"; fi
     agents_failed_exit
     exit 0
   fi
 done
 if [ "$ONLY_AGENTS" = 1 ]; then
-  existing_checks claude
+  existing_checks agent
   step "Coding agents"
   agents_stage
-  if [ "$SERVER_ADDED" = 1 ]; then
-    printf '\n%s\n' "Start new sessions to pick this up (in an open Claude Code one, /mcp loads metacomputer's tools, added in this run)."
-  else
-    printf '\n%s\n' "Start new sessions (or run /reload-plugins in Claude Code) to pick this up."
-  fi
+  printf '\n%s\n' "$(agent_hook_line agents_note "Start new sessions to pick this up.")"
   agents_failed_exit
   exit 0
 fi
@@ -894,21 +864,21 @@ elif [ "$LUME_CHOICE" = mcomp-vm ]; then todo+=("build mcomp-vm, the VM runner, 
 else todo+=("download Cua's standard Lume, the VM runner (it always shares your clipboard, audio and Rosetta with the VM)"); fi
 if [ -f "$CONF" ]; then done_+=("settings")
 else todo+=("write this Mac's settings to $(tildify "$CONF"): Firefox$([ "$chrome_in" = 1 ] && echo " and Google Chrome") in the VM$([ "$chrome_in" = 1 ] && echo " (Chrome means accepting Google's terms: https://www.google.com/chrome/terms/; --no-chrome leaves it out)")"); fi
-if ag_claude_wanted && { has_claude || [ "$CLAUDE" = yes ]; }; then
-  todo+=("link the metacomputer command and set Claude Code up: the plugin (skills) and metacomputer's MCP server (tools), in every project; --no-claude leaves Claude Code alone")
-else
-  todo+=("link the metacomputer command")
-fi
-if agent_wanted codex; then
-  ag_codex_plan
-fi
-for a in $MORE_AGENTS; do
+mc_linked=0                    # an agent's line that links the command too (ag_FLAG_plan_link), else a line of its own
+for a in $MC_AGENT_FLAGS; do
+  if [ "$mc_linked" = 0 ] && declare -F "ag_${a}_plan_link" >/dev/null && "ag_${a}_plan_link"; then mc_linked=1; fi
+done
+[ "$mc_linked" = 1 ] || todo+=("link the metacomputer command")
+for a in $MC_AGENT_FLAGS; do
   if agent_wanted "$a"; then
-    todo+=("add metacomputer to $(agent_label "$a"): its MCP server and the skills (--no-$a leaves it alone)")
+    if declare -F "ag_${a}_plan" >/dev/null; then "ag_${a}_plan"
+    elif [ "$(mc_agent "$a" steps)" = generic ]; then
+      todo+=("add metacomputer to $(agent_label "$a"): its MCP server and the skills (--no-$a leaves it alone)")
+    fi
   fi
 done
 if ! any_agent; then
-  todo+=("note: no coding agent is installed (Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI or Antigravity CLI); metacomputer works from any of them (install one, then ./install.sh --only-agents)")
+  todo+=("note: no coding agent is installed ($MC_AGENT_LABELS_OR); metacomputer works from any of them (install one, then ./install.sh --only-agents)")
 fi
 [ "$vault_ok" = 1 ] && todo+=("build the secrets vault (metacomputer secrets)  ${d}(about 1 minute; skipped if it's up to date)${o}")
 case "$vm_state:$build_vm:$vm_replace" in
@@ -1025,9 +995,9 @@ fi
 # shellcheck source=/dev/null
 . "$CONF"
 
-# --- 5. the agents: Claude Code, Codex, OpenClaw, Hermes Agent, Gemini CLI, Antigravity CLI -------------------
+# --- 5. the agents (lib/agentkit/registry.py's, in its order) ------------------------------------------------------
 step "Coding agents"
-agents_stage      # each agent's result is recorded by its own step (agent_record), Claude Code's before Codex's runs
+agents_stage      # each agent's result is recorded by its own step (agent_record), before the next one's runs
 
 # --- 6. the secrets vault -------------------------------------------------------------
 step "Secrets vault (metacomputer secrets)" "$([ "$vault_ok" = 1 ] && echo "about 1 minute, unless it's up to date" || echo "skipped")"
@@ -1105,7 +1075,7 @@ cat <<EOF
   metacomputer status     check every layer; exit code 0 means ready
   metacomputer view       watch or take over the desktop
   metacomputer help       everything else
-In Claude Code ($([ "$SERVER_ADDED" = 1 ] && echo "restart open sessions, or run /mcp in them, to load the tools added in this run" || echo "restart open sessions, or run /reload-plugins in them")), try:
+$(agent_hook_line done "Try:")
   "Get yourself a virtual computer and tell me what's on its screen."
 EOF
 # What's running now, against this checkout: services on older code, a VM on an earlier gateway, a vault to bind

@@ -78,7 +78,8 @@ def run(argv, env=None, timeout=TIMEOUT, cwd=None):
 def choices():
     try:
         d = json.load(open(AGENTS_FILE))
-        return {k: d.get(k) for k in ("claude", "codex", "openclaw", "hermes", "gemini", "antigravity")
+        from agentkit import manifests, registry
+        return {k: d.get(k) for k in (manifests.manifest(n)["flag"] for n in registry.AGENTS)
                 if d.get(k) in ("on", "off")}
     except (OSError, ValueError):
         return {}

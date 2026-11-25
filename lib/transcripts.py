@@ -36,14 +36,13 @@ MCP_PREFIXES = ("mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__"
 # of the metacomputer server, a Gemini CLI tool call (mcp_metacomputer_<tool>), or Antigravity CLI's call_mcp_tool of the
 # metacomputer server (its ServerName JSON-encoded in the compact transcript, as it was in the full one).
 STREAM_MARKER = rb'"name":\s?"mcp__(?:plugin_metacomputer_)?metacomputer__[a-z_]'
-LEGACY_MARKERS = ()
 _USE_MARKER = []
 
 
 def use_marker():
     """USE_MARKER, made once: the stream's marker, or any agent format's (its sessions.py MARKER)."""
     if not _USE_MARKER:
-        _USE_MARKER.append(re.compile(b"|".join([STREAM_MARKER, *LEGACY_MARKERS,
+        _USE_MARKER.append(re.compile(b"|".join([STREAM_MARKER,
                                                  *(m.MARKER for _n, m in _file_agents() if getattr(m, "MARKER", None))])))
     return _USE_MARKER[0]
 
@@ -57,10 +56,9 @@ def _file_agents():
 
 
 def formats():
-    """[(order, take)] of the agents' transcript formats (their sessions.py FORMAT), and the ones not in their folders
-    yet, in order: parse() tries each take(tr, ev, typ, t, st, slim) in turn, the first that says it's its own wins."""
-    out = []
-    out += [m.FORMAT for _n, m in _file_agents() if getattr(m, "FORMAT", None)]
+    """[(order, take)] of the agents' transcript formats (their sessions.py FORMAT), in order: parse() tries each
+    take(tr, ev, typ, t, st, slim) in turn, the first that says it's its own wins."""
+    out = [m.FORMAT for _n, m in _file_agents() if getattr(m, "FORMAT", None)]
     return sorted(out, key=lambda x: x[0])
 
 

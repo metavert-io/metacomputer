@@ -14,7 +14,8 @@
       "--no-plugin"
     ],
     "missing": "line",
-    "steps": "hooks"
+    "steps": "hooks",
+    "switch": "Claude Code's plugin and MCP server"
   },
   "bench": {
     "switch": "claude"

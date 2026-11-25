@@ -15,7 +15,8 @@ A manifest is a JSON object, checked by check():
     install      {"options": install.sh options of its own besides --FLAG/--no-FLAG/--only-FLAG, "missing": "line"
                  (an install that finds it missing says so on a line of its own) or "listed" (with the others in one
                  "Not installed here" line), "steps": "generic" (lib/agent_setup.py's install and uninstall) or "hooks"
-                 (its setup.sh's), "only_note": what --only-FLAG says last}
+                 (its setup.sh's), "only_note": what --only-FLAG says last, "switch": what of it --switch moves to
+                 this checkout besides the command, in words}
     sessions     {"source": "files" (transcript files: lib/transcripts.py) or "databases" (lib/session_dbs.py),
                   "key": learn's count of its sessions (report["sources"][KEY]), "kinds": the Transcript kinds its
                   reader makes}: present when `metacomputer learn` reads its sessions
@@ -29,7 +30,7 @@ from . import registry
 KEYS = {"label", "flag", "prog", "short", "json_key", "docs", "owners", "tools", "install", "sessions", "bench",
         "release_file"}
 REQUIRED = ("label", "flag", "prog", "short", "docs", "owners", "tools")
-INSTALL_KEYS = {"options", "missing", "steps", "only_note"}
+INSTALL_KEYS = {"options", "missing", "steps", "only_note", "switch"}
 SESSION_KEYS = {"source", "key", "kinds"}
 
 
@@ -41,6 +42,7 @@ def manifest(name):
     out["json_key"] = raw.get("json_key") or raw.get("flag")
     out["owners"] = tuple(raw.get("owners") or ())
     out["install"] = {"options": tuple(inst.get("options") or ()), "missing": inst.get("missing") or "listed",
+                      "switch": inst.get("switch") or "",
                       "steps": inst.get("steps") or "generic",
                       "only_note": inst.get("only_note") or f"Start a new {raw.get('label')} session to pick this up."}
     return out
@@ -65,6 +67,11 @@ def in_words(words, last="or"):
 def by_flag(flag):
     """The registered agent whose install.sh word is flag, else None."""
     return next((n for n in registry.AGENTS if manifest(n)["flag"] == flag), None)
+
+
+def switch_words():
+    """What --switch moves besides the command, in words: each agent's install "switch", joined with "and"."""
+    return " and ".join(manifest(n)["install"]["switch"] for n in registry.AGENTS if manifest(n)["install"].get("switch"))
 
 
 def release_file():

@@ -1565,7 +1565,8 @@ def test_incomplete_marker():
         def fn(name):
             i = src.index(f"\n{name}() {{")
             return src[i:src.index("\n}\n", i) + 3]
-        more = src[src.index("\nMORE_AGENTS="):].split("\n", 2)[1] + "\n"
+        more = next(ln for ln in open(os.path.join(LAB, "lib", "agentkit", "agents.sh")).read().splitlines()
+                    if ln.startswith("MC_AGENT_FLAGS=")) + "\n"     # the agents' flags (lib/agentkit/agents.sh)
         script = ("set -Eeuo pipefail\ntrap 'echo ERR-TRAP >&2' ERR\n" + more + fn("agent_upper") + fn("agent_var")
                   + fn("stamp_incomplete") + fn("install_incomplete") + 'printf "[%s]" "$(install_incomplete)"\n')
         # (CLAUDE_FAILED, CLAUDE_TRIED, CODEX_FAILED, CODEX_TRIED), and the other agents' (FAILED, TRIED): each agent by

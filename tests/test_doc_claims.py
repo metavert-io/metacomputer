@@ -1551,7 +1551,9 @@ CLAIMS = [
                     r"\"OpenClaw\", \"Hermes\" or\s+\"Gemini\" for those agents' sessions\) and the "
                     r"`--say` text \(cleaned like an event, at most (\d+) characters\)",
      lambda m: int(m[1]) == handoff.DIALOG_TEXT_MAX and 'who & " needs you: " & msg' in handoff.DIALOG_SCRIPT
-     and 'return AGENT_NAMES.get(rec.get("agent"), "Claude") if isinstance(rec, dict) else "Claude"' in raw("lib/handoff.py")
+     and 'return AGENT_NAMES.get(rec.get("agent"), DEFAULT_SHORT) if isinstance(rec, dict) else DEFAULT_SHORT' in raw("lib/handoff.py")
+     and handoff.DEFAULT_SHORT == "Claude" and handoff.AGENT_NAMES.get("Codex") == "Codex"
+     and [handoff.AGENT_NAMES.get(a) for a in ("OpenClaw", "Hermes Agent", "Gemini CLI")] == ["OpenClaw", "Hermes", "Gemini"]
      and "t = clean_text(say)" in raw("lib/handoff.py")),
     ("SECURITY.md", r"The text reaches osascript as an argument of a fixed AppleScript, never as part of one",
      lambda m: dialog_text_is_data()),
@@ -2580,8 +2582,7 @@ CLAIMS = [
      and "if has_claude; then CLAUDE_TRIED=1; fi" in sh_function("coding-agents/claude-code/setup.sh", "ag_claude_step")
      and '[ "$2" = 1 ] || return 0' in sh_function("install.sh", "agent_record")
      and 'now = [x for x in was if x != name] + ([name] if how == "failed" else [])' in install_steps()
-     and '{ [ "$CLAUDE_TRIED" = 0 ] && stamp_incomplete claude; }' in sh_function("install.sh", "install_incomplete")
-     and '{ [ "$CODEX_TRIED" = 0 ] && stamp_incomplete codex; }' in sh_function("install.sh", "install_incomplete")
+     and "for a in $MC_AGENT_FLAGS; do" in sh_function("install.sh", "install_incomplete")
      and 'incomplete="$(install_incomplete)"' in install_steps()
      and re.search(r'\n  agent_record "\$1" "\$\(agent_var "\$\{up\}_TRIED"\)" "\$\(agent_var "\$\{up\}_FAILED"\)"\n}\n',
                    sh_function("install.sh", "agent_step")) is not None
@@ -2590,9 +2591,10 @@ CLAIMS = [
      and len(re.findall(r"^\s*agent_record ", install_steps(), re.M)) == 3),
     ("docs/commands.md", r"`--uninstall` removes metacomputer's server before the command it runs, and keeps the command \(`~/\.local/bin/metacomputer` and `mcomp`\) while any MCP server that stays, any agent's \(Claude Code's, Codex's, OpenClaw's, Hermes Agent's, Gemini CLI's or Antigravity CLI's\), metacomputer's or not, runs it, or\s+may: an agent's configuration that can't be read \(its CLI missing, or no Python to read it\) keeps them too",
      lambda m: 'if [ "$srv_ours" = 1 ] && ! entry_unchanged metacomputer "$srv_sum"; then' in sh_function("coding-agents/claude-code/setup.sh", "ag_claude_uninstall_server")
-     and raw("install.sh").index("  ag_claude_uninstall_server\n")
-     < raw("install.sh").index("  ag_codex_uninstall_server\n") < raw("install.sh").index('  for a in $MORE_AGENTS; do agent_uninstall "$a"; done\n')
+     and raw("install.sh").index('    if declare -F "ag_${a}_uninstall_server" >/dev/null; then "ag_${a}_uninstall_server"\n'
+                                 '    elif [ "$(mc_agent "$a" steps)" = generic ]; then agent_uninstall "$a"; fi\n')
      < raw("install.sh").index('  for l in "$CMD_LINK" "$ALIAS_LINK"; do')
+     and raw("lib/agentkit/agents.sh").index("MC_AGENT_FLAGS='claude codex ")
      and 'keep) keep_cmd_for "$text" ;;' in sh_function("install.sh", "agent_lines")
      and 'out("keep", f"{agent.label}\'s")' in function_src("lib/agent_setup.py", "uninstall")
      and function_src("lib/agent_setup.py", "_unregister").count('out("keep", f"{agent.label}\'s")') == 6

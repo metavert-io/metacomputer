@@ -507,10 +507,8 @@ mc_strict() { # CMD ARGS...
                        "$MC_PROVIDER_CLOUD_VALUES--forget=" "$@" ;;
     setup)           # install.sh's options (its own loop refuses the rest, but only once a terminal or --yes lets it run)
                      mc_take "setup [--yes] [install.sh's options: ./install.sh --help]" 0 0 "--yes -y --no-chrome --no-build \
-                       --replace-vm --fresh-sources --no-claude --claude --only-agents --no-plugin --only-claude --uninstall \
-                       --switch --allow-downgrade --codex --no-codex --only-codex --openclaw --no-openclaw --only-openclaw \
-                       --hermes --no-hermes --only-hermes --gemini --no-gemini --only-gemini --antigravity --no-antigravity \
-                       --only-antigravity --lume=mcomp-vm \
+                       --replace-vm --fresh-sources --only-agents --uninstall --switch --allow-downgrade \
+                       $MC_AGENT_INSTALL_FLAGS --lume=mcomp-vm \
                        --lume=standard --lume=secure" "" "$@" ;;
     _task-sync)      mc_take "_task-sync NAME" 1 1 "" "" "$@" ;;
   esac
