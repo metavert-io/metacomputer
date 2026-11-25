@@ -39,6 +39,11 @@ All notable changes to metacomputer are recorded here. The format follows
   the computer that has the disk: `{}` or an empty host refused nothing, and now refuses (and a start never writes one
   without a host). A record or lock file larger than 1 MiB refuses, where only its first MiB was read. Each refuses
   as an unreadable record does, naming the file, with nothing changed; `volume list` still only shows.
+- **A build no longer fails on a page of unrelated apt errors when Mozilla's package list doesn't arrive.** Firefox
+  comes from Mozilla's repository; when apt had no usable index from it, its candidate was Ubuntu's firefox, a snap
+  installer this VM refuses, and the install failed (found on a Fly Sprite: one build in three). The setup now checks
+  that Firefox's candidate is Mozilla's after fetching the lists, fetches them once more if it isn't, and otherwise
+  stops before installing anything, saying what's wrong and to try again.
 
 ## [0.5.1] - 2026-11-24
 

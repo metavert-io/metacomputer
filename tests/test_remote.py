@@ -4380,7 +4380,63 @@ def view_tunnel_pipes():
         shutil.rmtree(td, ignore_errors=True)
 
 
+def firefox_origin(td):
+    """provision.sh's firefox_from_mozilla: apt's Firefox candidate must come from Mozilla's repository, or the setup
+    fetches the lists again and then fails plainly (found live on a Sprite, 2026-11-24: an index that didn't arrive left
+    Ubuntu's snap installer as the candidate, and the install failed on the no-snap pin)."""
+    print("\nprovision.sh: Firefox from Mozilla's repository, or a plain failure")
+    prov = open(os.path.join(LAB, "provisioning", "guest", "provision.sh")).read()
+
+    def in_order(src, *keys):
+        """Each key in src, each found after the one before (a key may appear more than once)."""
+        at = 0
+        for k in keys:
+            at = src.find(k, at)
+            if at < 0:
+                return False
+            at += len(k)
+        return True
+    fn = "firefox_from_mozilla() {" + prov.split("firefox_from_mozilla() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n" \
+        if "firefox_from_mozilla() {" in prov else ""
+    moz = "       1000 https://packages.mozilla.org/apt mozilla/main amd64 Packages\n"     # as apt 3.2 aligns it
+    ubu = "        500 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 Packages\n"
+    cases = (
+        ("Mozilla's version is the candidate", True,
+         "firefox:\n  Installed: (none)\n  Candidate: 161.0~build1\n  Version table:\n     161.0~build1 1000\n" + moz
+         + "     1:1snap1-0ubuntu9.1 500\n" + ubu),
+        ("Mozilla's version installed and the candidate (***)", True,
+         "firefox:\n  Installed: 161.0~build1\n  Candidate: 161.0~build1\n  Version table:\n *** 161.0~build1 1000\n" + moz
+         + "        100 /var/lib/dpkg/status\n"),
+        ("no index from Mozilla: Ubuntu's snap installer is the candidate", False,
+         "firefox:\n  Installed: (none)\n  Candidate: 1:1snap1-0ubuntu9.1\n  Version table:\n     1:1snap1-0ubuntu9.1 500\n" + ubu),
+        ("Mozilla's listed, but an older version than the candidate from Ubuntu", False,
+         "firefox:\n  Installed: (none)\n  Candidate: 1:1snap1-0ubuntu9.1\n  Version table:\n     1:1snap1-0ubuntu9.1 500\n" + ubu
+         + "     160.0~build2 1000\n" + moz),
+        ("no candidate at all", False, "firefox:\n  Installed: (none)\n  Candidate: (none)\n  Version table:\n"),
+        ("apt-cache prints nothing", False, ""))
+    stub = os.path.join(td, "bin")
+    os.makedirs(stub, exist_ok=True)
+    for what, want, out in cases:
+        with open(os.path.join(td, "policy.txt"), "w") as f:
+            f.write(out)
+        with open(os.path.join(stub, "apt-cache"), "w") as f:
+            f.write('#!/bin/sh\n[ "$1 $2" = "policy firefox" ] && cat "$POLICY"\n')
+        os.chmod(os.path.join(stub, "apt-cache"), 0o755)
+        r = subprocess.run(["/bin/bash", "-c", fn + "firefox_from_mozilla"], capture_output=True, text=True,
+                           env=dict(os.environ, PATH=stub + ":/usr/bin:/bin", POLICY=os.path.join(td, "policy.txt")))
+        check(f"firefox_from_mozilla, {what}: {'yes' if want else 'no'}", bool(fn) and (r.returncode == 0) == want,
+              (r.returncode, r.stderr[-200:]))
+    check("...checked after the lists are fetched and before the install, with one more fetch, then a plain failure",
+          in_order(prov, 'step "apt: update + full upgrade"', "if ! firefox_from_mozilla; then", '"${APT[@]}" update',
+                   "if ! firefox_from_mozilla; then", "false", '"${APT[@]}" install --no-install-recommends "${PKGS[@]}"'))
+
+
 def main():
+    td = tempfile.mkdtemp(prefix="mcff-")
+    try:
+        firefox_origin(td)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
     transports()
     proxywrap()
     guest_side()
