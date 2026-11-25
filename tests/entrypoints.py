@@ -82,6 +82,7 @@ PROGRAMS = {
     "bench/guest/calc-overlay.sh": P("guard", [["lodeb"]]),
     "bench/guest/server.py": P("py", [["site", "requests.jsonl", "8000"], ["root", "log"]]),
     "lib/agentkit/recognition.py": P("py", [["swift"], ["check"]], synth=True),
+    "lib/sinkkit/vault.py": P("py", [["swift"], ["check"]], synth=True),
     "lib/actionlog.py": P("py", [["list"], ["show", "latest", "--json"], ["verify", "--all"], ["verify", "f.jsonl"]]),
     "lib/agent_setup.py": P("py", [["link-ours", "p", "--root", "r"], ["install", "openclaw", "--root", "r", "--link", "l"],
                                    ["status", "antigravity", "--root", "r", "--link", "l"]], synth=True),

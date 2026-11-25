@@ -9,6 +9,7 @@ and [sinks/README.md](../README.md) says what a folder holds.
 |---|---|
 | `manifest.json` | its words and settings: one event a request, headers taken, `signed` (each sink gets a 32-byte key, printed once by `sink add` and again by `sink show NAME --key`), the path words of its URLs that are never secret; `format`: the content type and the CloudEvents type prefix, which the vault's audit sinks use too |
 | `sink.py` | its URL's rules (https, or http only to this Mac's loopback), the CloudEvent, and the request: `X-Metacomputer-Signature: sha256=HMAC-SHA256(body)` |
+| `tests/vault_cases.json` | the cases its rules are checked against in both places, the stream's code and the vault's audit sinks (its URLs, the signature, the CloudEvents type), with the differences the vault keeps on purpose and why |
 
-Its tests: `tests/test_events.py` (the CloudEvent, its signature over the exact body, the headers, a receiver that's down
-or refuses, sink changes announced to it).
+Its tests: `tests/test_events.py` (its cases, the CloudEvent, its signature over the exact body, the headers, a receiver that's down
+or refuses, sink changes announced to it); `tests/test_vault_ops.py` runs its cases through the vault's own code.

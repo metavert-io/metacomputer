@@ -39,13 +39,14 @@ out, 1 when something doesn't, 2 for usage errors. Standard library only.
 """
 import argparse, base64, binascii, hashlib, hmac, json, re, sys
 
-SD_ID = "metacomputer@32473"
 ZERO = "0" * 64
 
 
 sys.path.insert(0, __import__("os").path.join(__import__("os").path.dirname(__import__("os").path.dirname(
     __import__("os").path.abspath(__file__))), "lib"))
 import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+import sinkkit.registry  # noqa: E402
+SD_ID = sinkkit.registry.data("syslog")["format"]["sd_id"]     # metacomputer@32473 (sinks/syslog/manifest.json)
 
 
 def parse_key(text):

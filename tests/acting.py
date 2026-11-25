@@ -96,6 +96,7 @@ PROGRAMS = {
     "bench/guest/server.py": GUEST,
     "lib/actionlog.py": NONE,
     "lib/agentkit/recognition.py": NONE,                  # the agents' recognition tables, printed
+    "lib/sinkkit/vault.py": NONE,                         # what the vault's audit sinks share with the stream, printed
     "lib/agent_setup.py": NONE,
     "lib/agents.py": NONE,
     "coding-agents/codex/setup.py": NONE,                 # Codex's MCP server, read (codex mcp get)

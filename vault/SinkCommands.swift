@@ -27,7 +27,7 @@ func cmdAuditSink(_ paths: Paths, _ argv: [String]) throws -> Int32 {
 
 func sinkAdd(_ paths: Paths, _ name: String, _ a: Args) throws -> Int32 {
     guard let kind = a.last("kind"), sinkKinds.contains(kind) else { throw usageError("--kind webhook, otlp, syslog or ntfy") }
-    if a.has("required") && (kind == "syslog" || kind == "ntfy") {
+    if a.has("required") && sinkKindsWithoutAck.contains(kind) {
         throw usageError("--required needs a sink that acknowledges each record: \(kind) can't (syslog over TLS confirms only that "
                          + "bytes left this Mac; ntfy keeps no record). Use a webhook or OTLP sink for --required, "
                          + "or a collector that accepts OTLP and forwards to syslog")
@@ -39,7 +39,7 @@ func sinkAdd(_ paths: Paths, _ name: String, _ a: Args) throws -> Int32 {
     var headers: [[String]] = []
     for h in a.all("header") {
         guard let (k, v) = parseHeaderLine(h) else { throw usageError("--header: 'Name: value' on one line, printable (value {ask} to type it)") }
-        guard kind != "syslog" else { throw usageError("--header goes with webhook, otlp and ntfy sinks") }
+        guard !sinkKindsWithoutHeaders.contains(kind) else { throw usageError("--header goes with webhook, otlp and ntfy sinks") }
         headers.append([k, v])
     }
     var ca: String?

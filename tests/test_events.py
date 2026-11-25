@@ -257,8 +257,32 @@ def parse_5424(frame):
             "msg": json.loads(msg)}
 
 
+# --- the sinks' cases ----------------------------------------------------------------------------
+def sink_cases():
+    """The cases the vault's audit sinks are checked against too (tests/sink_cases.py; tests/test_vault_ops.py runs
+    them through the vault): the stream's code answers each as it says."""
+    print("the sinks' cases (the vault's copy of the same rules is checked against them)")
+    import sink_cases as sc
+    cs = sc.cases()
+    shapes = [b for c in cs for b in sc.check_shape(c)]
+    check("every case has its form (a rule of its folder, the answer, and a reason for each declared difference)",
+          cs and not shapes, shapes[:6])
+    wrong = []
+    for c in cs:
+        try:
+            got = sc.stream(c)
+        except Exception as e:
+            got = f"raised {e!r}"
+        if got != c["out"]:
+            wrong.append((c["where"], c["in"], got, c["out"]))
+    kinds = {c["kind"] for c in cs}
+    check(f"the stream's sinks answer all {len(cs)} cases as they say (header names, each kind's URLs, formats' numbers, "
+          "fields and endpoints)", not wrong and kinds == {""} | set(events.KINDS), (wrong[:6], sorted(kinds)))
+
+
 # --- tests ----------------------------------------------------------------------------------
 def main():
+    sink_cases()
     certs = make_certs(os.path.join(TD, "certs"))
     web, otlp, ntfy = HTTPRx(), HTTPRx(), HTTPRx()
     sysrx = SyslogRx(certs[1], certs[2]) if certs else None
