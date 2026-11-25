@@ -17,6 +17,7 @@ TLS syslog server with its own CA, made with openssl) and checks:
   `actions` events, `actions verify` failures and `web open-untrusted` findings.
 Everything lives in a temporary folder; nothing is sent off this Mac.
 """
+import ast
 import base64
 import hashlib
 import hmac
@@ -377,6 +378,18 @@ def sink_packages():
             shape.append(f"{k}: accepted goes with request")
     check("each kind's sink.py brings the interface: check_url, and request (accepted too, if it reads answers) or "
           "deliver", not shape, shape)
+    unused = []
+    for rel in ["lib/events.py"] + [f"lib/sinkkit/{f}" for f in sorted(os.listdir(os.path.join(LAB, "lib", "sinkkit")))
+                                    if f.endswith(".py")] + [f"sinks/{k}/sink.py" for k in registry.SINKS]:
+        tree = ast.parse(open(os.path.join(LAB, rel), encoding="utf-8").read())
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                unused += [f"{rel}: {a.name}" for a in n.names
+                           if ((a.asname or a.name).split(".")[0] if isinstance(n, ast.Import) else a.asname or a.name)
+                           not in used]
+    check("the event stream's code (lib/events.py, lib/sinkkit, each kind's sink.py) imports nothing it doesn't use",
+          not unused, unused)
     missing = docs_missing()
     check("each kind's docs are a page that's there, and the section they name is in it", not missing, missing)
     real, probe = registry.data, registry.SINKS[0]
@@ -1231,6 +1244,23 @@ def main():
         check("L3 a webhook signing key and an ntfy topic are redacted",
               hk not in ev["message"] and "test-topic" not in ev["message"]
               and ev["message"].count("[redacted]") == 2, ev["message"])
+        # A sink another process adds: its header value is hidden from this process's very next event. The list of values
+        # to hide was kept 30 s whatever events.json did, so a long-running process (the hub, a bridge) could send a
+        # new header's value in that time; it's read again now whenever events.json's stat changes.
+        events.known_secrets()                      # the list read just now: well within its 30 s
+        fresh_val, frx = "dummy-fresh-header-value-58", HTTPRx()
+        r = sink_add("fresh", "--kind", "webhook", "--url", frx.url("/fresh"), "--families", "task",
+                     "--header", f"X-Fresh: {fresh_val}")
+        n_web = len(web.reqs)
+        ev = events.emit("task", "finished", f"leak {fresh_val} end", data={"note": f"also {fresh_val}"})
+        sent_ = [b for _, _, b in web.reqs[n_web:]] + [b for _, _, b in frx.reqs]
+        check("a header another process adds to events.json is redacted from this process's very next event (its "
+              "message, data, local log and every sink), not 30 s later",
+              r.returncode == 0 and ev and fresh_val not in json.dumps(ev) and "[redacted]" in ev["message"]
+              and fresh_val not in json.dumps(local_log()[-1]) and sent_ and not any(fresh_val.encode() in b for b in sent_),
+              (r.stderr[-200:], ev and ev["message"], len(sent_)))
+        sink_remove("fresh")
+        frx.close()
         r = cli("_remember-redaction", "vnc")
         check("R7 no stored tag of the live-view password: the command is gone and nothing like it is kept",
               r.returncode == 2 and not os.path.exists(os.path.join(events.state_dir(), "redact.json"))
@@ -1550,8 +1580,9 @@ def main():
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                 recs_ = [r_ for rl in body.get("resourceLogs", []) for sl in rl.get("scopeLogs", []) for r_ in sl.get("logRecords", [])]
                 part["got"].append(len(recs_))
-                ans = json.dumps({"partialSuccess": {"rejectedLogRecords": str(part["reject"]),
-                                                     "errorMessage": "attribute too long \x1b[31m(red)"}}).encode()
+                count = part["raw"] if "raw" in part else str(part["reject"])
+                ans = part["body"] if "body" in part else json.dumps({"partialSuccess": {
+                    "rejectedLogRecords": count, "errorMessage": "attribute too long \x1b[31m(red)"}}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(ans)))
@@ -1580,6 +1611,57 @@ def main():
         st_list = cli("sink", "list").stdout
         check("F17 events status and sink list show the rejection", "rejected 1 of 1" in st_line and "partial (1:" in st_line
               and "refused by the receiver" in st_list, (st_line[-600:], st_list[-600:]))
+        # A partial success whose count of refused records isn't a non-negative integer is an error reply: nothing is
+        # counted as delivered or dropped and the events are sent again (true, 2.7, -1, "x" were read as 0, everything
+        # delivered; "+3" as 3 refused, dropped)
+        refill()
+        odd = []
+        for raw in (True, 2.7, -1, "x", "+3", False):
+            part["raw"] = raw
+            s0, n0 = stat_of("partial"), len(part["got"])
+            events.emit("task", "finished", f"an answer whose count is {raw!r}")
+            events.flush_sink("partial", events.load_config()["sinks"]["partial"], force=True)
+            s1 = stat_of("partial")
+            odd.append((raw, len(part["got"]) > n0, s1["delivered"] - s0["delivered"], s1["dropped"] - s0["dropped"],
+                        s1["sent_seq"] == s0["sent_seq"], s1["last_error"]))
+        part.pop("raw")
+        part["reject"] = 0
+        s0 = stat_of("partial")
+        events.flush_sink("partial", events.load_config()["sinks"]["partial"], force=True)
+        s1 = stat_of("partial")
+        check("F17 an answer whose count of refused records isn't a whole number (true, 2.7, -1, \"x\", \"+3\", false) "
+              "is an error reply: not delivered, nothing dropped, sent again; then a good answer takes all six",
+              all(asked and dd == 0 and dr == 0 and same and "can't be read" in (err or "") for _, asked, dd, dr, same, err in odd)
+              and s1["delivered"] - s0["delivered"] == 6 and s1["dropped"] == s0["dropped"], (odd, s0, s1))
+        # ...and so is an answer that can't be read at all (it counted as everything delivered): a count too long to
+        # convert (5,000 digits) or too large for a double (1e999), a body that isn't JSON or isn't an object. An empty
+        # body (OTLP's empty response, as protobuf encodes it), only whitespace or a null partialSuccess is a full success.
+        refill()
+
+        def answer_with(body):
+            part["body"] = body
+            s0, n0 = stat_of("partial"), len(part["got"])
+            events.emit("task", "finished", "an answer of " + repr(body[:40]))
+            events.flush_sink("partial", events.load_config()["sinks"]["partial"], force=True)
+            s1 = stat_of("partial")
+            return (len(part["got"]) > n0, s1["delivered"] - s0["delivered"], s1["dropped"] - s0["dropped"],
+                    s1["sent_seq"] == s0["sent_seq"], s1["last_error"])
+        unread = {b[:30]: answer_with(b) for b in (b'{"partialSuccess": {"rejectedLogRecords": ' + b"9" * 5000 + b"}}",
+                                                   b'{"partialSuccess": {"rejectedLogRecords": 1e999}}', b"not json", b"[1]")}
+        part["body"] = b"{}"
+        s0 = stat_of("partial")
+        events.flush_sink("partial", events.load_config()["sinks"]["partial"], force=True)
+        s1 = stat_of("partial")
+        fine = {b: answer_with(b) for b in (b"", b" \r\n", b'{"partialSuccess": null}')}
+        part.pop("body")
+        check("F17 an answer that can't be read (a count of 5,000 digits or 1e999, a body that isn't JSON or isn't an "
+              "object) is an error reply: not delivered, nothing dropped, sent again; an empty body, whitespace or a null "
+              "partialSuccess is a full success",
+              all(asked and dd == 0 and dr == 0 and same and "can't be read" in (err or "")
+                  for asked, dd, dr, same, err in unread.values())
+              and s1["delivered"] - s0["delivered"] == 4 and s1["dropped"] == s0["dropped"]
+              and all(asked and dd == 1 and dr == 0 and not same for asked, dd, dr, same, _ in fine.values()),
+              (unread, s0["delivered"], s1["delivered"], fine))
         sink_remove("partial")
         psrv.shutdown()
         psrv.server_close()

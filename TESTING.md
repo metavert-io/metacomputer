@@ -993,7 +993,7 @@ for watching, but nudge it in the editor if a sound has to land on an exact fram
 
 ## Event stream: `tests/test_events.py`, `tests/test_options.py E`
 
-`python3 tests/test_events.py` needs no VM (246 checks, about two minutes). It keeps
+`python3 tests/test_events.py` needs no VM (250 checks, about two minutes). It keeps
 everything in a temporary folder and runs a local receiver for each kind: an
 HTTP server for webhook, OTLP and ntfy, and a TLS syslog server with its own
 CA, made with `openssl` (the syslog checks are skipped without it). It checks:
@@ -1004,7 +1004,8 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
   with no section, such as the kind's own README.md, pass too); what's made from the manifests is current (`scripts/gen-sinks.py --check`: docs/sinks.md, `metacomputer help`'s line for the event stream,
   CODEOWNERS); no shared code (bin/, scripts/, lib/ but lib/sinkkit, install.sh, get.sh, bench/, the providers' and
   the agents' folders, tools/) names a kind, the lint's pattern tried on known lines first and every allowance still
-  needed and saying why; and the stream answers every case in tests/fixtures/sink_cases.json and each kind's
+  needed and saying why; the stream's code (lib/events.py, lib/sinkkit, each `sink.py`) imports nothing it doesn't
+  use; and the stream answers every case in tests/fixtures/sink_cases.json and each kind's
   `tests/vault_cases.json` as they say (tests/sink_cases.py; test_vault_ops runs the same cases through the vault).
   A kind's other checks stay in this file, by what they test;
 - hostile manifests (tests/hostile_manifests.py `sinks`): every manifest value that reaches a generated file, a URL or
@@ -1022,7 +1023,7 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
 - sinks are added, listed, shown and removed; the config is private; header values and ntfy topics are never printed; plain http off the Mac, syslog without TLS and credentials in URLs are refused;
 - four sinks receive the same events in order, in each format: CloudEvents with a valid HMAC signature, OTLP/HTTP JSON, RFC 5424 over TLS with octet counting, ntfy;
 - family and minimum-severity filters, and the opt-in `actions` family;
-- cleaning: control characters and escape sequences, URL queries and credentials, secret-looking keys, size caps, a sink's header value and the live-view password;
+- cleaning: control characters and escape sequences, URL queries and credentials, secret-looking keys, size caps, a sink's header value (one another process adds is hidden from this process's very next event: the list of values to hide is read again when `events.json` changes) and the live-view password;
 - the spool, including invalid and oversized files;
 - a receiver that fails, then the backlog arriving in order once it's back; a sink that never answers costs at most about 3 s; the backoff;
 - eight processes emitting at once; debounce; `notify`;
@@ -1063,10 +1064,10 @@ CA, made with `openssl` (the syslog checks are skipped without it). It checks:
   - an encoded secret key name (`pa%73sword`) and an encoded `token=` after a query;
   - `events-state/redact.json` from an earlier build deleted, and noted.
 - the 2026-11-18 review's fixes:
-  - an OTLP collector's partial success: the rejected record counted as dropped, with its message as `last_error`, not retried, and shown by `events status` and `sink list`;
+  - an OTLP collector's partial success: the rejected record counted as dropped, with its message as `last_error`, not retried, and shown by `events status` and `sink list`; an answer whose count isn't a whole number (`true`, `2.7`, `-1`, `"x"`, `"+3"`, `false`) is an error reply: nothing delivered or dropped, sent again, all six taken once the answer is good; so is an answer that can't be read (a count of 5,000 digits or `1e999`, a body that isn't JSON or isn't an object), while an empty body, only whitespace or a null `partialSuccess` is a full success;
   - a server that sends one byte a second: `deliver`, `sink remove`, `flush_admin` and an ordinary emit all end on time;
   - 50 action-log records with `events.json` unchanged parse it zero times, and once after it changes (the redaction
-    list's own refresh every 30 s, made due in both halves, isn't the cache's parse);
+    list's own refresh, every 30 s and when `events.json` changes, made due in both halves, isn't the cache's parse);
   - the state lock: a second holder gets `Busy` after its wait, with no file left open; leaving unlocks it.
 
 Sink changes in these tests run on a pseudo-terminal with `--yes`, since they refuse without a terminal.
@@ -2381,7 +2382,7 @@ person would. It checks that:
 `MCOMP_VAULT_SKIP_RELEASE=1` skips the release build. When the test itself runs inside
 tmux or screen, its ordinary unlocks pass `--allow-multiplexer`.
 
-`python3 tests/test_vault_ops.py` (236 checks, about 3 minutes) reuses that stub and
+`python3 tests/test_vault_ops.py` (262 checks, about 3 minutes) reuses that stub and
 pseudo-terminal for the rest of the vault:
 - **declarations:** every form of every command, as the test build lists them (`_argspecs`), given an unknown
   option, another form's option, a word too many, a request for usage as an option's value (`--site --help`,
@@ -2438,8 +2439,20 @@ pseudo-terminal for the rest of the vault:
   to look caught up, and stops the very next proxied request when it goes down; an
   audit log that can't be written refuses uses while a sink is required; syslog can't
   be `--required`, and a required OTLP sink whose answer rejects records (partial
-  success) refuses the use; a `--ca` syslog sink still checks the host name; removing
-  one leaves the others; and the rules the audit sinks implement as the event stream's sinks do (header names, each
+  success), or whose count of rejected records isn't a whole number (`"x"`, `-1`, `false`,
+  `0.5`, `true`, `2.7`), or whose answer can't be read (a count of `1e999` or of 5,000
+  digits, a body that isn't JSON or isn't an object), refuses the use, while an empty
+  body, only whitespace or a null `partialSuccess` lets it go ahead; a `--ca` syslog sink still checks the host name;
+  removing one leaves the others; URLs the event stream refuses are refused when a sink is
+  added (a `#fragment`, a port outside 1-65535 or past 2^63, a syslog URL's path or query), and plain
+  http to `[::1]` is taken and delivered to; an OTLP sink's query goes after `/v1/logs`
+  and an ntfy sink's `?auth=` is kept, neither shown by add, test, list, the unlock
+  terminal, the audit log or the saved state; sinks an earlier vault saved with such URLs
+  (a test build takes them unchecked with `MCOMP_VAULT_TEST_EARLIER_SINK_URL=1`): one with
+  a port outside 1-65535 is never sent to (65536 + N reached port N, a syslog one's
+  stopped the process, and one past 2^63 went to the default port: a receiver on 6514
+  gets nothing now) and `test`, `list` and the unlock terminal, which keeps running,
+  say how to fix it, while a `#fragment` or a syslog path and query still deliver; and the rules the audit sinks implement as the event stream's sinks do (header names, each
   kind's URLs, `/v1/logs`, the severities, the time, a partial success's count, syslog's escaping and MSGID, ntfy's
   endpoint, the signature) answer every case in tests/fixtures/sink_cases.json and the kinds' `tests/vault_cases.json`
   as the stream does, or as each declared difference says (the test build's `test-sink-cases`);

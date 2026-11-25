@@ -35,7 +35,7 @@ func sinkAdd(_ paths: Paths, _ name: String, _ a: Args) throws -> Int32 {
     // `--url ask` and a header value of `{ask}` are typed with the echo off, so a secret in them
     // (a webhook path, an ntfy topic, a collector's token) stays off the command line.
     guard var url = a.last("url") else { throw usageError("--url: where to send the events (or `ask`)") }
-    if url != "ask", let why = checkSinkURL(kind, url) { throw usageError("--url: \(why)") }
+    if url != "ask", !testEarlierSinkURL(), let why = checkSinkURL(kind, url) { throw usageError("--url: \(why)") }
     var headers: [[String]] = []
     for h in a.all("header") {
         guard let (k, v) = parseHeaderLine(h) else { throw usageError("--header: 'Name: value' on one line, printable (value {ask} to type it)") }
@@ -57,7 +57,7 @@ func sinkAdd(_ paths: Paths, _ name: String, _ a: Args) throws -> Int32 {
         var raw = try readHidden("URL for the audit sink \(name): ")
         defer { wipe(&raw) }
         url = String(decoding: raw, as: UTF8.self).trimmingCharacters(in: .whitespaces)
-        if let why = checkSinkURL(kind, url) { throw VaultError("that URL: \(why)") }
+        if !testEarlierSinkURL(), let why = checkSinkURL(kind, url) { throw VaultError("that URL: \(why)") }
     }
     for i in headers.indices where headers[i][1] == "{ask}" {
         var raw = try readHidden("Value of the \(headers[i][0]) header: ")
@@ -93,6 +93,16 @@ func sinkAdd(_ paths: Paths, _ name: String, _ a: Args) throws -> Int32 {
     }
     oprint("The unlock process sends events from now on, in order; events made while the vault is locked go at the next unlock.")
     return Exit.ok
+}
+
+/// Test builds only: take --url without checking it, as an earlier vault took URLs it refuses now (a port outside
+/// 1-65535, a #fragment, a syslog URL's path or query), to test what a sink saved then does (MCOMP_VAULT_TEST_EARLIER_SINK_URL=1).
+func testEarlierSinkURL() -> Bool {
+    #if MCOMP_VAULT_TESTING
+    return ProcessInfo.processInfo.environment["MCOMP_VAULT_TEST_EARLIER_SINK_URL"] == "1"
+    #else
+    return false
+    #endif
 }
 
 func sinkRemove(_ paths: Paths, _ name: String) throws -> Int32 {

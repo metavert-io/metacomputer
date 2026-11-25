@@ -287,8 +287,8 @@ func testSinkCases(_ argv: [String]) throws -> Int32 {
         case "ntfy_severity": out = [ntfyPriority[s] ?? 0, ntfySeverityTags[s] ?? []] as [Any]
         case "otlp_url": out = otlpLogsURL(s)
         case "time_ns": out = epochNanos(s)
-        case "rejected":       // how many records the answer says were refused ("the collector rejected N record(s)...")
-            out = otlpRejection(Data(s.utf8)).flatMap { r in r.split(separator: " ").dropFirst(3).first.flatMap { Int($0) } } ?? 0
+        case "rejected":       // how many records the answer says were refused, or "error": a count that isn't one
+            out = otlpRejected(Data(s.utf8)).map { NSNumber(value: $0.0) as Any } ?? "error"
         case "sd_escape": out = sdEscape(s)
         case "syslog_field": out = syslogField(s, max: (i["max"] as? NSNumber)?.intValue ?? 32)
         case "ntfy_endpoint":
