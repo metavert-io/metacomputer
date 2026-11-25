@@ -1,0 +1,54 @@
+#!/usr/bin/python3
+"""metacomputer on Vercel Sandbox: one SSH connection's guest end (run through Vercel's command API by the Mac's
+broker, providers/vercel/broker.py, as Vercel's `ubuntu` account). Its standard input goes to sshd on the sandbox's
+127.0.0.1:22 as bytes; what sshd sends comes back on standard output as base64, one line per read (the API's output
+stream is text, not bytes). It ends when either side closes."""
+import base64
+import json
+import os
+import select
+import socket
+import sys
+
+# metacomputer's command-line rules (lib/strictargs.py; this runs in the VM on its own): no arguments; -h or --help
+# shows the usage; anything else is refused (exit 2) before anything is connected.
+USAGE = "relay (no arguments: run by the Mac's broker through Vercel's API)"
+if sys.argv[1:]:
+    print("usage: " + USAGE, file=sys.stdout if sys.argv[1:] in (["-h"], ["--help"]) else sys.stderr)
+    sys.exit(0 if sys.argv[1:] in (["-h"], ["--help"]) else 2)
+if os.environ.get("MCOMP_PARSE_ONLY") == "1":   # tests/test_help.py's valid forms: taken, nothing done
+    print("parse-only: relay: taken " + json.dumps({"flags": [], "values": [], "words": 0, "max_words": 0}))
+    sys.exit(99)        # parse only: nothing was done (never 0: a check run this way refuses)
+# end of the command-line rules
+
+
+def main():
+    s = socket.create_connection(("127.0.0.1", 22), timeout=10)
+    s.settimeout(None)
+    out = sys.stdout.buffer
+    fds = [s, 0]
+    while True:
+        r, _w, _x = select.select(fds, [], [])
+        if s in r:
+            d = s.recv(65536)
+            if not d:
+                return 0
+            out.write(base64.b64encode(d) + b"\n")
+            out.flush()
+        if 0 in r:
+            d = os.read(0, 262144)
+            if not d:
+                try:
+                    s.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                fds = [s]
+            else:
+                s.sendall(d)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (BrokenPipeError, ConnectionResetError):
+        sys.exit(0)

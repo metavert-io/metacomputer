@@ -41,6 +41,21 @@ if [ -e /etc/metacomputer/sprite ]; then
     idle) echo "idle: a Sprite sleeps by itself when nothing is connected" >&2; exit 2 ;;
   esac
 fi
+# A Vercel sandbox (/etc/metacomputer/vercel): no systemd. Its sshd and desktop are started by its boot script, which
+# only Vercel's own API runs (the Mac's metacomputer start, desktop-restart, logs); its egress is Vercel's policy.
+if [ -e /etc/metacomputer/vercel ]; then
+  case "${1:-}" in
+    restart-desktop|reboot|poweroff|updates)
+      echo "$1: in a Vercel sandbox this is done from the Mac (metacomputer desktop-restart, stop, logs; a new computer for updates)" >&2; exit 2 ;;
+    status) echo "a Vercel sandbox: sshd and the desktop are started by its boot script (metacomputer logs on the Mac)"; exit 0 ;;
+    logs) N="${2:-200}"; case "$N" in ''|*[!0-9]*) echo "logs: N must be a number" >&2; exit 2 ;; esac
+          tail -n "$N" /var/log/metacomputer-provision.log 2>/dev/null; exit 0 ;;
+    firewall) echo "none for egress in the guest: Vercel's network policy, outside the VM (metacomputer net status on the Mac)"; exit 0 ;;
+    egress) [ "${2:-}" = status ] && { echo provider; exit 0; }
+            echo "egress: Vercel's network policy, set from the Mac (metacomputer net egress)" >&2; exit 2 ;;
+    idle) echo "idle: a Vercel sandbox stops by itself at its session's timeout (IDLE_STOP, set from the Mac)" >&2; exit 2 ;;
+  esac
+fi
 case "${1:-}" in
   restart-desktop) systemctl restart lightdm ;;
   reboot)          systemctl reboot ;;

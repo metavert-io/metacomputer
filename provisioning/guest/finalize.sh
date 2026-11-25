@@ -40,7 +40,8 @@ visudo -cf /etc/sudoers.d/90-metacomputer
 # A VM a provider made (reached over SSH, no owner's account): no sudo rule but metacomputer's. Its image may carry
 # rules for the provider's agent (OCI's Ubuntu images do, for its run-command account), whose agent isn't there.
 # Not a Fly Sprite (/etc/metacomputer/sprite, no /etc/metacomputer/remote): its own `sprite` account's sudo is what
-# Fly's exec and services run as (the controller's channel, like the Mac's owner), and stays.
+# Fly's exec and services run as (the controller's channel, like the Mac's owner), and stays. Nor a Vercel sandbox
+# (/etc/metacomputer/vercel): its `ubuntu` account is what Vercel's command API runs as, with sudo, and stays.
 if [ -e /etc/metacomputer/remote ] && [ -z "$OWNER" ]; then
   for f in /etc/sudoers.d/*; do
     case "$(basename "$f")" in 90-metacomputer|README) ;; *) rm -f -- "$f" ;; esac
@@ -59,4 +60,4 @@ if [ -e /etc/metacomputer/remote ]; then
   /opt/metacomputer/bin/guest-firewall apply
 fi
 date -Is > /var/lib/metacomputer/finalized
-echo "finalized: sudo narrowed$([ -e /etc/metacomputer/sprite ] || echo ", cloud-init disabled")"
+echo "finalized: sudo narrowed$([ -e /etc/metacomputer/sprite ] || [ -e /etc/metacomputer/vercel ] || echo ", cloud-init disabled")"

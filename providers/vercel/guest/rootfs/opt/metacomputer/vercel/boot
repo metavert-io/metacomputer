@@ -1,0 +1,127 @@
+#!/bin/bash
+# metacomputer on Vercel Sandbox: what a session needs, started at every session (root, through Vercel's API: the Mac's
+# metacomputer start, and the build). A stop keeps the disk, not the programs, and the next session has a new hostname:
+#   1. Vercel's agent port (tcp 23456, an HTTP listener of Vercel's own, root, outside the sandbox's view: what it
+#      serves isn't documented) refused to every account but root (nftables, by uid). First, before anything of the
+#      desktop's runs; the rule is gone at every stop (a fresh kernel), so it's put back here each time, and the boot
+#      stops if it isn't in force.
+#   2. The new hostname in /etc/hosts (sudo, X and LibreOffice look it up).
+#   3. sshd on the sandbox's 127.0.0.1 (its relay reaches it there).
+#   4. Once the desktop is set up (/var/lib/metacomputer/provisioned): what the stop left behind cleared (the X lock,
+#      LibreOffice's and Firefox's profile locks, the session's runtime folder: /run is on the disk here), a new X
+#      cookie, Xvfb, then XFCE on its own D-Bus session with accessibility on (its autostart runs session-init: the
+#      session's environment for SSH sessions, the live view on 127.0.0.1); it waits until the session is ready. Cua
+#      Driver starts with each of the hub's connections (driver-mcp), as anywhere.
+#   boot                    all of the above (what's running already is left running)
+#   boot restart-desktop    the desktop's processes ended first, then all of the above
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="boot [restart-desktop]"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "boot: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 0:|1:restart-desktop) ;; *) echo "boot: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
+set -u
+[ "$(id -u)" = 0 ] || { echo "boot: run it as root" >&2; exit 1; }
+LOG=/var/log/metacomputer-vercel-boot.log
+T0=$(date +%s%N)
+say() { local m; m="boot: $* ($(( ($(date +%s%N) - T0) / 1000000 )) ms)"; echo "$m"; echo "$(date -Is) $m" >> "$LOG"; }
+fail() { say "FAILED: $*"; exit 1; }
+exec 9> /run/metacomputer-vercel-boot.lock
+flock -w 120 9 || fail "another boot is running"
+
+# 1. Vercel's agent port, for root only.
+PORT=23456
+block_agent_port() {
+  nft delete table inet metacomputer_vercel 2>/dev/null
+  nft -f - <<NFT
+table inet metacomputer_vercel {
+  chain output {
+    type filter hook output priority 0; policy accept;
+    tcp dport $PORT meta skuid != 0 counter reject with tcp reset
+  }
+}
+NFT
+}
+block_agent_port || fail "nftables didn't take the rule keeping Vercel's agent port from the desktop: nothing else was started"
+nft list table inet metacomputer_vercel 2>/dev/null | grep -q "tcp dport $PORT meta skuid != 0 .*reject" \
+  || fail "the rule keeping Vercel's agent port from the desktop isn't in force: nothing else was started"
+say "Vercel's agent port ($PORT) refused to every account but root"
+
+# 2. The hostname this session has.
+H="$(hostname)"
+if ! grep -q "^127\.0\.1\.1 $H # metacomputer-vercel$" /etc/hosts; then
+  sed -i '/ # metacomputer-vercel$/d' /etc/hosts
+  echo "127.0.1.1 $H # metacomputer-vercel" >> /etc/hosts
+fi
+
+# 3. sshd, on the sandbox's loopback.
+[ -s /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key
+install -d -m 0755 /run/sshd
+if ! pgrep -x sshd >/dev/null; then
+  /usr/sbin/sshd -t || fail "sshd refused its settings"
+  # Its own output and the boot's lock aren't handed on (the API's command ends only when its output closes).
+  /usr/sbin/sshd < /dev/null > /dev/null 2>> "$LOG" 9>&- || fail "sshd didn't start"
+fi
+for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/22) 2>/dev/null && break; sleep 0.1; done
+(exec 3<>/dev/tcp/127.0.0.1/22) 2>/dev/null || fail "sshd isn't listening on 127.0.0.1:22"
+say "sshd on 127.0.0.1:22"
+
+# 4. The desktop, once it's set up.
+if [ ! -e /var/lib/metacomputer/provisioned ]; then
+  say "the desktop isn't set up yet: nothing more"
+  exit 0
+fi
+. /etc/metacomputer/vercel.env
+U="${GUEST_USER:-cua}"; UID_="$(id -u "$U")"; D="${DISPLAY_NUM:-0}"; G="${SCREEN:-1920x1080}"
+HOME_="$(getent passwd "$U" | cut -d: -f6)"; XA="$HOME_/.Xauthority"; RUN="/run/user/$UID_"
+if [ "${1:-}" = restart-desktop ]; then
+  pkill -u "$U" 2>/dev/null; pkill -x Xvfb 2>/dev/null
+  for _ in $(seq 1 50); do pgrep -u "$U" >/dev/null || pgrep -x Xvfb >/dev/null || break; sleep 0.1; done
+  pkill -9 -u "$U" 2>/dev/null; pkill -9 -x Xvfb 2>/dev/null
+  say "the desktop's processes ended"
+fi
+if pgrep -x Xvfb >/dev/null && pgrep -u "$U" -x xfce4-session >/dev/null && [ -s "$RUN/metacomputer/session-ready" ]; then
+  say "the desktop runs already"
+  exit 0
+fi
+# What a stop left behind (no process survives one): the X server's lock, the session's runtime folder (/run is on the
+# disk here, not in memory), LibreOffice's and Firefox's locks (LibreOffice would stop on "another instance on host
+# ..."), each only when nothing of the desktop's runs.
+if ! pgrep -u "$U" >/dev/null && ! pgrep -x Xvfb >/dev/null; then
+  rm -f "/tmp/.X$D-lock" "/tmp/.X11-unix/X$D"
+  rm -rf --one-file-system "$RUN"
+  rm -f "$HOME_/.config/libreoffice/4/.lock"
+  find "$HOME_" -xdev -type f -name '.~lock.*#' -user "$U" -delete 2>/dev/null
+  for d in "$HOME_/.mozilla/firefox" "$HOME_/.config/mozilla/firefox"; do
+    [ -d "$d" ] && find "$d" -mindepth 2 -maxdepth 2 \( -name lock -o -name .parentlock \) \( -type l -o -type f \) -delete 2>/dev/null
+  done
+  say "stale locks from the stop cleared"
+fi
+install -d -o "$U" -g "$U" -m 0700 "$RUN"
+install -d -m 1777 /tmp/.X11-unix
+if ! pgrep -x Xvfb >/dev/null; then
+  # A new X cookie: the old one was the old hostname's.
+  rm -f "$XA"
+  runuser -u "$U" -- touch "$XA"
+  runuser -u "$U" -- xauth -q -f "$XA" add ":$D" MIT-MAGIC-COOKIE-1 "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  setsid runuser -u "$U" -- /usr/bin/Xvfb ":$D" -screen 0 "${G}x24" -dpi 96 -nolisten tcp -nolisten local -auth "$XA" \
+    +extension RANDR >> /var/log/metacomputer-vercel-xvfb.log 2>&1 < /dev/null 9>&- &
+  for _ in $(seq 1 100); do [ -S "/tmp/.X11-unix/X$D" ] && break; sleep 0.1; done
+  [ -S "/tmp/.X11-unix/X$D" ] || fail "Xvfb didn't start (/var/log/metacomputer-vercel-xvfb.log)"
+  say "Xvfb on :$D ($G)"
+fi
+if ! pgrep -u "$U" -x xfce4-session >/dev/null; then
+  setsid runuser -u "$U" -- env -i \
+    HOME="$HOME_" USER="$U" LOGNAME="$U" SHELL=/bin/bash PATH=/usr/local/bin:/usr/bin:/bin \
+    LANG=en_US.UTF-8 DISPLAY=":$D" XAUTHORITY="$XA" XDG_RUNTIME_DIR="$RUN" \
+    XDG_SESSION_TYPE=x11 XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=xfce \
+    GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0 GNOME_ACCESSIBILITY=1 QT_ACCESSIBILITY=1 \
+    QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 SAL_USE_VCLPLUGIN=gtk3 MOZ_ENABLE_WAYLAND=0 \
+    CUA_DRIVER_RS_TELEMETRY_ENABLED=0 CUA_DRIVER_RS_UPDATE_CHECK=0 CUA_TELEMETRY_ENABLED=0 \
+    /usr/bin/dbus-run-session -- /usr/bin/xfce4-session >> /var/log/metacomputer-vercel-desktop.log 2>&1 < /dev/null 9>&- &
+fi
+for _ in $(seq 1 300); do [ -s "$RUN/metacomputer/session-ready" ] && break; sleep 0.2; done
+[ -s "$RUN/metacomputer/session-ready" ] || fail "the desktop session didn't become ready in 60 s (/var/log/metacomputer-vercel-desktop.log)"
+say "the desktop is ready"

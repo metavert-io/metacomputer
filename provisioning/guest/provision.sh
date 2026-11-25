@@ -15,6 +15,11 @@
 # is Xvfb and the desktop runs as Sprites services (providers/sprites/guest/rootfs/opt/metacomputer/sprite/), Ubuntu
 # 26.04 on amd64, no full upgrade of Fly's image, no guest firewall (Fly's network policy is the boundary, outside the
 # VM), browsers' own DNS-over-HTTPS locked off (it would bypass that policy's names), and the setup doesn't reboot.
+# MCOMP_TARGET=vercel (a Vercel sandbox, docs/vercel.md: providers/vercel/guest/bootstrap.sh made the accounts and sshd,
+# through Vercel's own API) is set up as a Sprite is (no systemd, Xvfb, no full upgrade, no guest firewall, DoH locked
+# off: `nosysd`) except where Vercel differs: its own SSH listen settings, and the desktop started by its boot script
+# (providers/vercel/guest/rootfs/opt/metacomputer/vercel/boot), which Vercel's API runs at every session (a stop keeps
+# the disk, not the programs).
 # metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
 # exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
 # refused (exit 2), and nothing is done.
@@ -48,9 +53,12 @@ TARGET="${MCOMP_TARGET:-lume}"
 ARCH="$(dpkg --print-architecture)"
 case "$TARGET" in
   lume) ;;
-  remote|sprite) [ "$ARCH" = "${MCOMP_GUEST_ARCH:-$ARCH}" ] || { echo "the payload is for ${MCOMP_GUEST_ARCH}, this is $ARCH"; false; } ;;
-  *) echo "MCOMP_TARGET must be lume, remote or sprite, not $TARGET"; false ;;
+  remote|sprite|vercel) [ "$ARCH" = "${MCOMP_GUEST_ARCH:-$ARCH}" ] || { echo "the payload is for ${MCOMP_GUEST_ARCH}, this is $ARCH"; false; } ;;
+  *) echo "MCOMP_TARGET must be lume, remote, sprite or vercel, not $TARGET"; false ;;
 esac
+# A computer with no systemd, cloud-init or display manager, whose provider's policy outside it is the boundary (a Fly
+# Sprite, a Vercel sandbox): set up the same way but where each says otherwise.
+nosysd() { [ "$TARGET" = sprite ] || [ "$TARGET" = vercel ]; }
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 # Cua Driver: no telemetry, no update checks - for every process in this
 # guest (SSH sessions included), set before the driver binary ever runs.
@@ -194,6 +202,21 @@ sprite_ssh() {
   chmod 0644 /etc/metacomputer/vnc-listen /etc/metacomputer/sprite.env /etc/metacomputer/egress
 }
 if [ "$TARGET" = sprite ]; then sprite_ssh; fi
+# A Vercel sandbox: the same, with its own listen settings (sshd on the sandbox's 127.0.0.1, reached through the relay
+# its broker runs through Vercel's API). sshd isn't a service there: the boot script starts it at every session.
+vercel_ssh() {
+  step "SSH settings (Vercel sandbox: sshd on the sandbox's loopback, reached through Vercel's API)"
+  install -m 0644 "$PAYLOAD/remote/rootfs/etc/ssh/sshd_config.d/17-metacomputer-view.conf" /etc/ssh/sshd_config.d/
+  install -m 0644 "$PAYLOAD/vercel/rootfs/etc/ssh/sshd_config.d/05-metacomputer-vercel.conf" /etc/ssh/sshd_config.d/
+  rm -f /etc/ssh/sshd_config.d/09-metacomputer-bootstrap.conf
+  sshd -t
+  pkill -HUP -x sshd || true
+  printf '127.0.0.1\n' > /etc/metacomputer/vnc-listen
+  printf 'GUEST_USER=%s\nDISPLAY_NUM=0\nSCREEN=%s\n' "$GUSER" "${MCOMP_SCREEN:-1920x1080}" > /etc/metacomputer/vercel.env
+  printf '%s\n' "${MCOMP_EGRESS:-internet}" > /etc/metacomputer/egress
+  chmod 0644 /etc/metacomputer/vnc-listen /etc/metacomputer/vercel.env /etc/metacomputer/egress
+}
+if [ "$TARGET" = vercel ]; then vercel_ssh; fi
 chown -R "$GUSER:$GUSER" "/home/$GUSER"
 install -d -m 0755 /etc/apt/keyrings
 # Only the pinned key (scripts/pin-gpg-key.sh on the Mac); mozilla.sources names it in Signed-By.
@@ -206,8 +229,8 @@ if [ "$TARGET" = remote ] && [ "$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" 
   grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
-if [ "$TARGET" = sprite ]; then
-  step "apt: update (Fly's image is Fly's: it isn't upgraded whole here; the packages below are the newest)"
+if nosysd; then
+  step "apt: update (the provider's image is the provider's: it isn't upgraded whole here; the packages below are the newest)"
   "${APT[@]}" update
 else
 step "apt: update + full upgrade"
@@ -275,11 +298,13 @@ PKGS=(
 # A VM with no display of its own draws into memory; its own firewall is nftables (guest-firewall).
 if [ "$TARGET" = remote ]; then PKGS+=(xserver-xorg-video-dummy nftables); fi
 # A Fly Sprite: Xvfb (no display manager, no systemd to run one), its own D-Bus session and sshd; nothing that needs
-# systemd to do its job (LightDM, ufw, unattended-upgrades). libatk-bridge2.0-0 is only a virtual name on 26.04.
-if [ "$TARGET" = sprite ]; then
+# systemd to do its job (LightDM, ufw, unattended-upgrades). libatk-bridge2.0-0 is only a virtual name on 26.04. A Vercel
+# sandbox the same (its boot script keeps Vercel's agent port from the desktop with nftables).
+if nosysd; then
   drop=" xserver-xorg-core xserver-xorg-input-libinput xserver-xorg-legacy xinit lightdm lightdm-gtk-greeter unattended-upgrades ufw libatk-bridge2.0-0 "
   kept=(); for p in "${PKGS[@]}"; do case "$drop" in *" $p "*) ;; *) kept+=("$p") ;; esac; done
   PKGS=("${kept[@]}" xvfb dbus dbus-x11 libatk-bridge2.0-0t64 libglib2.0-bin openssh-server)
+  [ "$TARGET" != vercel ] || PKGS+=(nftables)
 fi
 "${APT[@]}" install --no-install-recommends "${PKGS[@]}"
 # Nothing that locks the screen or syncs the host clipboard may be present.
@@ -289,11 +314,12 @@ purge_unwanted() {
 }
 purge_unwanted
 firefox --version || true
-XPKGS="xserver-xorg-core lightdm"; [ "$TARGET" != sprite ] || XPKGS="xvfb openssh-server"
+XPKGS="xserver-xorg-core lightdm"; ! nosysd || XPKGS="xvfb openssh-server"
 dpkg-query -W -f='${Package} ${Version}\n' firefox libreoffice-core libreoffice-calc gnome-calculator $XPKGS xfce4-session ffmpeg python3-openpyxl | tee "$STATE/package-versions.txt"
-if [ "$TARGET" = sprite ]; then
+if nosysd; then
   # Fly's network policy is a list of DNS names, enforced outside the VM: a browser that resolves names itself
-  # (DNS over HTTPS) would bypass it, and its addresses would be refused as raw IPs. Off, and locked off.
+  # (DNS over HTTPS) would bypass it, and its addresses would be refused as raw IPs. Off, and locked off. (Vercel's
+  # policy matches names too: the same there.)
   pol=/etc/firefox/policies/policies.json
   jq '.policies.DNSOverHTTPS = {"Enabled": false, "Locked": true}' < "$pol" > "$pol.new" && mv "$pol.new" "$pol"
   chmod 0644 "$pol"
@@ -535,6 +561,8 @@ if [ "$TARGET" = remote ]; then
   WP_TEXT="metacomputer  |  Ubuntu 24.04 $(echo "$ARCH" | tr a-z A-Z) cloud VM  |  not the user's computer"
 elif [ "$TARGET" = sprite ]; then
   WP_TEXT="metacomputer  |  Ubuntu $(. /etc/os-release; echo "$VERSION_ID") x86_64 on Fly Sprites  |  not the user's computer"
+elif [ "$TARGET" = vercel ]; then
+  WP_TEXT="metacomputer  |  Ubuntu $(. /etc/os-release; echo "$VERSION_ID") x86_64 on Vercel Sandbox  |  not the user's computer"
 fi
 IM=convert; command -v magick >/dev/null 2>&1 && IM=magick      # ImageMagick 7 (26.04) is `magick`
 "$IM" -size 1920x1080 xc:'#17324d' -gravity center \
@@ -548,6 +576,8 @@ dconf update
 
 if [ "$TARGET" = sprite ]; then
   step "the desktop: Sprites services (xvfb, desktop), made when the setup has checked it (scripts/remote-build.sh)"
+elif [ "$TARGET" = vercel ]; then
+  step "the desktop: started by /opt/metacomputer/vercel/boot, which Vercel's API runs at every session (scripts/remote-build.sh runs it first)"
 else
 step "display manager: LightDM autologin into XFCE on Xorg"
 systemctl set-default graphical.target
@@ -562,6 +592,8 @@ modprobe uinput || true
 
 if [ "$TARGET" = sprite ]; then
   step "egress: Fly's network policy, outside the VM (set from the Mac: EGRESS=${MCOMP_EGRESS:-internet}); no guest firewall"
+elif [ "$TARGET" = vercel ]; then
+  step "egress: Vercel's network policy, outside the VM (set from the Mac: EGRESS=${MCOMP_EGRESS:-internet}); no guest firewall"
 elif [ "$TARGET" = remote ]; then
   step "the guest firewall, as the setup leaves it (it was put in place before anything was upgraded)"
   /opt/metacomputer/bin/guest-firewall apply
@@ -583,7 +615,7 @@ ufw --force enable
 ufw status verbose
 fi
 
-if [ "$TARGET" = sprite ]; then
+if nosysd; then
   step "no systemd here: services to trim and update timers don't apply (updates: a new computer, or apt over sh)"
 else
 step "trim services the lab doesn't need"
@@ -621,4 +653,4 @@ if [ "${MCOMP_TARGET:-}" = remote ]; then
   touch /etc/cloud/cloud-init.disabled
 fi
 date -Is > "$STATE/provisioned"
-step "provisioning complete; $([ "$TARGET" = sprite ] && echo "the desktop starts as Sprites services" || echo "cloud-init will reboot into the desktop")"
+step "provisioning complete; $(case "$TARGET" in sprite) echo "the desktop starts as Sprites services" ;; vercel) echo "the desktop starts by the boot script" ;; *) echo "cloud-init will reboot into the desktop" ;; esac)"
