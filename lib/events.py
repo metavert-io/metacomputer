@@ -59,6 +59,9 @@ from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import flockwait  # noqa: E402
+import sinkkit  # noqa: E402  (the kinds of sink: sinks/<kind>/, lib/sinkkit/)
+import sinkkit.manifests  # noqa: E402
+import sinkkit.registry  # noqa: E402
 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -67,11 +70,11 @@ ALL = ("needs_you", "task", "security", "lifecycle")          # "all"; actions i
 DEFAULT_SEVERITY = {"needs_you": "warn", "task": "info", "security": "warn", "lifecycle": "info", "actions": "info"}
 SEVERITIES = ("info", "warn", "error")
 SEV_RANK = {s: i for i, s in enumerate(SEVERITIES)}
-KINDS = ("webhook", "otlp", "syslog", "ntfy")
+KINDS = sinkkit.registry.SINKS
 WHY = ("login", "captcha", "2fa", "dialog", "approval", "payment", "other")
 TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
+HEADER_NAME_RE = re.compile(sinkkit.HEADER_NAME)
 
 # Which code path made an event, set by that code, never by the caller: a metacomputer command (cli), the
 # agents' bridge or the action-log relay (bridge), the watcher, another program through the spool, or
@@ -117,10 +120,9 @@ ADMIN_MAX_ATTEMPTS = 20           # a sink-change announcement is retried this o
 MAX_BACKLOG = 10000
 LOG_MAX = 10 * 2**20
 SPOOL_MAX_BYTES = 64 * 1024
-BATCH = {"webhook": 1, "ntfy": 1, "otlp": 50, "syslog": 100}
 
 CE_PREFIX = "io.metavert.metacomputer"
-SIGNATURE_HEADER = "X-Metacomputer-Signature"
+SIGNATURE_HEADER = sinkkit.SIGNATURE_HEADER
 SD_ID = "metacomputer@32473"     # 32473: the documentation enterprise number (RFC 5612)
 SYSLOG_FACILITY = 1              # user-level
 SYSLOG_SEV = {"info": 6, "warn": 4, "error": 3}
@@ -410,7 +412,8 @@ def url_secret_parts(url):
         u = urlsplit(url)
     except ValueError:
         return []
-    parts = [p for p in u.path.split("/") if p and p.lower() not in KEEP_SEGMENTS]
+    keep = keep_segments()
+    parts = [p for p in u.path.split("/") if p and p.lower() not in keep]
     for kv in u.query.split("&"):
         parts.append(kv.partition("=")[2])
     return [p for p in parts if len(p) >= 6]
@@ -1303,6 +1306,9 @@ def _deliver(sink, batch, timeout, track):
     except EventsError as e:
         return False, f"the URL isn't allowed: {e}", False, 0
     extra = {k: v for k, v in sink.get("headers") or []}
+    mod = sinkkit.registry.hooks(kind)
+    if hasattr(mod, "deliver"):                 # a transport of its own (sinks/<kind>/sink.py)
+        return mod.deliver(sys.modules[__name__], sink, batch, timeout, track)
     if kind == "syslog":
         # Syslog over TCP has no acknowledgement: success means TLS took every byte and the connection
         # closed without a transport or TLS error (no close_notify back, or the server just closing, is
@@ -1327,7 +1333,9 @@ def _deliver(sink, batch, timeout, track):
             return True, None, False, 0
         except (OSError, ssl.SSLError, ValueError) as e:
             return False, short_error(e), False, 0
-    if kind == "webhook":
+    if hasattr(mod, "request"):                 # an HTTP POST (sinks/<kind>/sink.py)
+        target, body, headers = mod.request(sys.modules[__name__], sink, batch, extra)
+    elif kind == "webhook":
         ev = batch[0]
         body = dumps(cloudevent(ev)).encode()
         headers = {**extra, "Content-Type": "application/cloudevents+json; charset=utf-8", "User-Agent": USER_AGENT,
@@ -1347,7 +1355,11 @@ def _deliver(sink, batch, timeout, track):
     if err:
         return False, err, False, 0
     if 200 <= status < 300:
-        if kind == "otlp":
+        if hasattr(mod, "accepted"):            # what the answer says, for a kind whose answers say more than a status
+            took = mod.accepted(sys.modules[__name__], answer, batch)
+            if took:
+                return took
+        elif kind == "otlp":
             n, msg = otlp_rejected(answer, len(batch))
             if n:
                 return (True, f"the collector rejected {n} of {len(batch)} event(s) (OTLP partial success"
@@ -1454,11 +1466,11 @@ def flush_sink(name, sink, budget=EMIT_BUDGET, force=False, wait_lock=1.0):
             left = deadline - time.time()
             if left < 0.3:
                 break
-            size = BATCH.get(sink["kind"], 1)
+            size = sinkkit.manifests.batches().get(sink["kind"], 1)
             if pending[i]["seq"] <= st.get("single_until", 0):
                 size = 1                              # after a refused batch: one at a time past it
             batch = pending[i:i + size]
-            if sink["kind"] == "ntfy":
+            if sink["kind"] in sinkkit.manifests.phones():
                 room, free_at = phone_slot(name)     # every attempt takes a slot, retries included
                 if not room:                         # the phone's cap: wait for a slot (not a failure)
                     st.update(next_retry=free_at, waiting="phone limit")
@@ -1664,7 +1676,7 @@ def flush_admin(budget=EMIT_BUDGET, force=False):
             if deadline - time.time() < 0.3:
                 break
             sink = items[0][1]["sink"]
-            if sink.get("kind") == "ntfy":
+            if sink.get("kind") in sinkkit.manifests.phones():
                 room, free_at = phone_slot(name)
                 if not room:                    # wait for the phone's next slot (not an attempt)
                     for p, t in items:
@@ -2507,8 +2519,18 @@ def recording_event(mp4):
 
 
 # --- CLI ---------------------------------------------------------------------------------------
-KEEP_SEGMENTS = {"v1", "v2", "logs", "api", "hooks", "hook", "webhook", "webhooks", "services", "ingest", "events",
-                 "otlp", "collector", "notify"}
+# Path segments of a sink's URL that are never secret, whatever its kind; each kind adds its own (its manifest's
+# url_words).
+KEEP_SEGMENTS = {"v1", "v2", "logs", "api", "services", "ingest", "events"}
+
+
+def keep_segments():
+    """KEEP_SEGMENTS and every kind's url_words. Without the kinds' words (a manifest that can't be read), more of a URL
+    is taken for a secret, never less: known_secrets() must go on to every sink's header values and keys."""
+    try:
+        return KEEP_SEGMENTS | sinkkit.manifests.url_words()
+    except Exception:
+        return KEEP_SEGMENTS
 NOTIFY_DUP_S = 300
 
 
@@ -2524,7 +2546,8 @@ def mask_url(url):
     if ":" in host:
         host = f"[{host}]"
     netloc = host + (f":{port}" if port else "")
-    parts = [p if p.lower() in KEEP_SEGMENTS else "***" for p in u.path.split("/") if p]
+    keep = keep_segments()
+    parts = [p if p.lower() in keep else "***" for p in u.path.split("/") if p]
     return f"{u.scheme}://{netloc}" + ("/" + "/".join(parts) if parts else "") + ("?***" if u.query else "")
 
 
@@ -2540,20 +2563,30 @@ def check_url(kind, url):
         raise EventsError("the URL can't have a #fragment")
     if u.port == 0:
         raise EventsError("port 0 isn't a port")
+    mod = sinkkit.registry.hooks(kind)
+    if hasattr(mod, "check_url"):           # the kind's own rules (sinks/<kind>/sink.py)
+        mod.check_url(sys.modules[__name__], u)
+        return
     if kind == "syslog":
         if u.scheme != "syslog+tls" or not u.hostname:
             raise EventsError("syslog sinks are TLS only: syslog+tls://HOST:PORT (RFC 5425; port 6514 by default)")
         if u.path not in ("", "/") or u.query:
             raise EventsError("a syslog URL is just syslog+tls://HOST:PORT")
         return
+    require_https(u)
+    if kind == "ntfy" and not u.path.strip("/"):
+        raise EventsError("an ntfy URL names the topic: https://ntfy.sh/YOUR-TOPIC")
+
+
+def require_https(u):
+    """A URL that goes over HTTP (u: urlsplit's): https, or http only to this Mac's loopback. What every kind that posts
+    over HTTP checks, and what a kind that isn't one of the registered ones gets (events.json may say anything)."""
     if u.scheme == "https" and u.hostname:
         pass
     elif u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1"):
         pass
     else:
         raise EventsError("use https:// (http:// only to this Mac's loopback, e.g. a local Collector or test receiver)")
-    if kind == "ntfy" and not u.path.strip("/"):
-        raise EventsError("an ntfy URL names the topic: https://ntfy.sh/YOUR-TOPIC")
 
 
 def parse_header(h):
@@ -2595,6 +2628,12 @@ def parse_families(s):
     return fams
 
 
+def partial_words():
+    """How `sink list` names a receiver accepting a request but refusing some of its events: the words of the kinds
+    whose receivers can (their manifests' "partial")."""
+    return sinkkit.manifests.in_words(w for w in (sinkkit.manifests.partial(k) for k in KINDS) if w)
+
+
 def ago(ts):
     if not ts:
         return "never"
@@ -2608,7 +2647,7 @@ def sink_summary(name, sink):
     return {"name": name, "kind": sink["kind"], "url": mask_url(sink["url"]),
             "families": sink.get("families") or ["all"], "min_severity": sink.get("min_severity") or "info",
             "headers": [h[0] for h in sink.get("headers") or []], "ca": bool(sink.get("ca_pem")),
-            "signed": sink["kind"] == "webhook", "created": sink.get("created"), "backlog": waiting,
+            "signed": sink["kind"] in sinkkit.manifests.signed(), "created": sink.get("created"), "backlog": waiting,
             "delivered": st["delivered"], "dropped": st["dropped"], "last_ok_at": st["last_ok_at"],
             "rejected": int(st.get("rejected") or 0),
             # a failure, a backlog, or a receiver's refusal (OTLP partial success) since its last full success
@@ -2704,8 +2743,8 @@ def cmd_sink(a):
             raise EventsError(f"a sink named {a.name} exists (--replace to overwrite it)")
         check_url(a.kind, a.url)
         headers = [parse_header(h) for h in a.header or []] + [parse_header_env(h) for h in a.header_env or []]
-        if a.kind == "syslog" and headers:
-            raise EventsError("syslog has no headers")
+        if a.kind in sinkkit.manifests.without_headers() and headers:
+            raise EventsError(f"{a.kind} has no headers")
         ca_pem = None
         if a.ca:
             ca_pem = open(a.ca, encoding="ascii").read()
@@ -2715,7 +2754,7 @@ def cmd_sink(a):
         sink = {"kind": a.kind, "url": a.url, "headers": headers, "ca_pem": ca_pem,
                 "families": parse_families(a.families), "min_severity": a.min_severity, "created": now_iso(),
                 "generation": secrets.token_hex(8)}
-        if a.kind == "webhook":
+        if a.kind in sinkkit.manifests.signed():
             sink["hmac_key"] = base64.b64encode(secrets.token_bytes(32)).decode()
         old = sinks.get(a.name)
         replacing = old is not None
@@ -2732,7 +2771,7 @@ def cmd_sink(a):
                   "were dropped")
         if prior:
             print(f"  told the sinks you had ({', '.join(prior)}): security.sink_added")
-        if a.kind == "webhook":
+        if a.kind in sinkkit.manifests.signed():
             print(f"signing key for {SIGNATURE_HEADER} (HMAC-SHA256 over the body, key = these 32 bytes, base64):")
             print(f"  {sink['hmac_key']}")
             print(f"  shown again with: metacomputer events sink show {a.name} --key")
@@ -2746,7 +2785,7 @@ def cmd_sink(a):
             return 0
         if not rows:
             print("no event sinks (nothing is sent anywhere). Add one: metacomputer events sink add NAME --kind "
-                  "webhook|otlp|syslog|ntfy --url URL  (docs/events.md)")
+                  f"{'|'.join(KINDS)} --url URL  (docs/events.md)")
             return 0
         for r in rows:
             state = (f"error {ago(r['last_error_at'])}: {r['last_error']}"
@@ -2757,7 +2796,7 @@ def cmd_sink(a):
             if r["headers"]:
                 print(f"{'':14} headers: " + ", ".join(f"{h}: (hidden)" for h in r["headers"]))
             if r["rejected"]:
-                print(f"{'':14} refused by the receiver in accepted requests (OTLP partial success; dropped, "
+                print(f"{'':14} refused by the receiver in accepted requests ({partial_words()}; dropped, "
                       f"not retried): {r['rejected']} event(s)")
         return 0
     if a.name not in sinks:
@@ -2766,8 +2805,9 @@ def cmd_sink(a):
     if a.sub == "show":
         r = sink_summary(a.name, sink)
         if a.key:
-            if sink["kind"] != "webhook":
-                raise EventsError("only webhook sinks sign their requests")
+            if sink["kind"] not in sinkkit.manifests.signed():
+                raise EventsError(f"only {sinkkit.manifests.in_words(sinkkit.manifests.signed())} sinks sign their "
+                                  "requests")
             r["hmac_key"] = sink["hmac_key"]
         if a.json:
             print(json.dumps(r, indent=2))
