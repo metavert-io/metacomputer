@@ -3021,13 +3021,14 @@ CLAIMS = [
      and "if st.st_uid != _me():\n        raise Unreadable(OTHERS)" in function_src("lib/session_dbs.py", "_mine")
      and "if not stat.S_ISREG(_mine(fd).st_mode):" in function_src("lib/session_dbs.py", "_open_in")
      and "dfd, name = _folder(path, root)" in function_src("lib/session_dbs.py", "open_db")
-     and 'p = _place(s, "agents", a, "agent", "openclaw-agent.sqlite")' in function_src("lib/session_dbs.py", "openclaw_dbs")
+     and 'p = _place(s, "agents", a, "agent", "openclaw-agent.sqlite")' in function_src("coding-agents/openclaw/sessions.py", "databases")
      and 'con.execute("PRAGMA temp_store = MEMORY")' in function_src("lib/session_dbs.py", "_guard")
      and "con.set_progress_handler(lambda: time.monotonic() > deadline, " in function_src("lib/session_dbs.py", "_guard")
      and "deadline = time.monotonic() + MAX_SECONDS" in function_src("lib/session_dbs.py", "sessions")
      and "ORDER BY w DESC LIMIT ?" in function_src("lib/session_dbs.py", "_recent")
      and "(cutoff, MAX_SESSIONS + 1)" in function_src("lib/session_dbs.py", "_recent")
-     and all("_recent(con, " in function_src("lib/session_dbs.py", f) for f in ("read_openclaw", "read_hermes"))),
+     and "_recent(con, " in function_src("coding-agents/openclaw/sessions.py", "read")
+     and "_recent(con, " in function_src("lib/session_dbs.py", "read_hermes")),
     # Codex's marketplace and the OpenAI package (scripts/sync-plugin.py, scripts/build-openai-plugin.py)
     ("docs/codex.md", r"It brings the skills, `metacomputer`, `cua-driver` and `learn` \(`\$metacomputer:learn`, or `/skills`\), and no MCP server",
      lambda m: '"skills": ["./skills/", "./.claude/skills/"]' in function_src("scripts/sync-plugin.py", "codex_plugin_json")
@@ -3055,7 +3056,8 @@ CLAIMS = [
                             r"other agents.*?Anything else is never changed or removed",
      lambda m: 'return [prog, "mcp", "add", NAME, link, *claude_mcp.MCP_ARGS]' in function_src("lib/agent_setup.py", "Antigravity.add_argv")
      and 'if classify(agent.read(prog, env), root, link) != "absent":' in function_src("lib/agent_setup.py", "_register")
-     and 'AGENTS = {a.name: a for a in (OpenClaw(), Hermes(), Gemini(), Antigravity())}' in raw("lib/agent_setup.py")),
+     and "for n in manifests.generic():" in function_src("lib/agent_setup.py", "_agents")
+     and '"antigravity",' in raw("lib/agentkit/registry.py")),
     ("docs/antigravity.md", r"when\s+metacomputer's own entry has no `timeoutSeconds` \(one you set stays as you set it\), the install writes the file again.*?"
                             r"with `\"timeoutSeconds\": (\d+)` added to that entry, to a new file\s+beside it that replaces it only while the "
                             r"file is still exactly what was read.*?A `mcp_config.json` that is a link \(a file you keep elsewhere\) is never "
@@ -4099,6 +4101,33 @@ def provider_claims():
 
 
 CLAIMS += provider_claims()
+
+
+def agent_claims():
+    """Each registered agent's promises (coding-agents/<name>/claims.tsv, as a provider's): rows of CLAIMS, its
+    conditions against files in its own folder."""
+    from agentkit import registry
+    promises = {}
+    for name in registry.AGENTS:
+        rel = os.path.join("coding-agents", name, "claims.tsv")
+        if not os.path.isfile(os.path.join(LAB, rel)):      # (tests/test_agents.py checks that every agent has one)
+            continue
+        for i, line in enumerate(raw(rel).splitlines(), 1):
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) != 4:
+                raise ValueError(f"{rel}:{i}: a document, a phrase, a file and its text, tab-separated")
+            d, phrase, f, text = parts
+            promises.setdefault((d, phrase), []).append((os.path.join("coding-agents", name, f),
+                                                         text.replace("\\n", "\n").replace("\\t", "\t")))
+
+    def holds(conds):
+        return lambda m: all((t[1:] not in raw(f)) if t.startswith("!") else (t in raw(f)) for f, t in conds)
+    return [(d, phrase, holds(conds)) for (d, phrase), conds in promises.items()]
+
+
+CLAIMS += agent_claims()
 
 
 def run_claims():

@@ -10,5 +10,12 @@
   "tools": "metacomputer__*",
   "bench": {
     "switch": "openclaw"
+  },
+  "sessions": {
+    "source": "databases",
+    "key": "openclaw_sessions",
+    "kinds": [
+      "openclaw"
+    ]
   }
 }

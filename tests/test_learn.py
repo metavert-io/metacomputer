@@ -55,6 +55,12 @@ import userterm  # noqa: E402
 import mcp_hub  # noqa: E402
 import transcripts  # noqa: E402
 import session_dbs  # noqa: E402
+from agentkit import registry as agent_registry  # noqa: E402  (each agent's session reader, in its folder)
+
+
+def agent_sessions(name):
+    """coding-agents/NAME/sessions.py, the agent's session reader for learn."""
+    return agent_registry.module(name, "sessions")
 
 FAILS = []
 P1, P2 = "mcp__metacomputer__", "mcp__plugin_metacomputer_metacomputer__"
@@ -1418,7 +1424,7 @@ def write_oc_db(path, sessions, compress=False):
             if compress and role == "toolResult":
                 b = raw.encode()
                 con.execute("INSERT INTO transcript_events VALUES (?, ?, NULL, ?, ?, ?, ?)",
-                            (sid, seq, when, session_dbs._zstd.compress(b), len(b), role))
+                            (sid, seq, when, agent_sessions("openclaw")._zstd.compress(b), len(b), role))
             else:
                 con.execute("INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL, NULL, ?)",
                             (sid, seq, raw, when, role))
@@ -1505,7 +1511,7 @@ def test_db_sessions():
     # a profile's state folder (~/.openclaw-<profile>), its tool results compressed when this Python can compress
     db2 = os.path.join(oc, ".openclaw-work", "agents", "ops", "agent", "openclaw-agent.sqlite")
     write_oc_db(db2, [("oc-prof-5555", oc_events("oc-prof-5555", os.path.join(TD, "elsewhere"), now - 900,
-                                                 DB_CALLS[:3]))], compress=session_dbs._zstd is not None)
+                                                 DB_CALLS[:3]))], compress=agent_sessions("openclaw")._zstd is not None)
     hdb = os.path.join(hroot, "state.db")
     write_he_db(hdb, [("local-he-aaaa", None, he_rows("local-he-aaaa", now - 1000, DB_CALLS))])
     pdb = os.path.join(hroot, "profiles", "work", "state.db")
@@ -1553,17 +1559,17 @@ def test_db_sessions():
         sp = learn_mine.mine(env, since="7d", project=proj, log_dirs=[], bench_dirs=[])["sources"]
         check("--project: the session's folder decides (OpenClaw's session event, Hermes Agent's sessions.cwd)",
               sp.get("openclaw_sessions") == 2 and sp.get("hermes_sessions") == 2, sp)
-        if session_dbs._zstd is None:
+        if agent_sessions("openclaw")._zstd is None:
             check("without Python 3.14's zstd, OpenClaw's compressed rows are counted in a note, not read",
                   any("compressed" in n for n in src.get("notes", [])), src.get("notes"))
         else:
             check("OpenClaw's compressed rows are expanded (Python 3.14's compression.zstd) and read",
                   not src.get("notes"), src.get("notes"))
-            zstd, session_dbs._zstd = session_dbs._zstd, None       # as with Python 3.11 to 3.13
+            zstd, agent_sessions("openclaw")._zstd = agent_sessions("openclaw")._zstd, None       # as with Python 3.11 to 3.13
             try:
                 notes = learn_mine.mine(env, since="7d", log_dirs=[], bench_dirs=[])["sources"].get("notes") or []
             finally:
-                session_dbs._zstd = zstd
+                agent_sessions("openclaw")._zstd = zstd
             check("…and without it (Python before 3.14) they're counted in a note, not read",
                   notes == ["OpenClaw: compressed entries weren't read (they need Python 3.14 or later) (3)"], notes)
         out = []
@@ -1896,7 +1902,7 @@ def test_db_bounds():
         session_dbs.MAX_SNAPSHOT = 1024
         session_dbs._in_place = swapped
         try:
-            con, _ = session_dbs.open_db(session_dbs.openclaw_dbs(_db_env(sb))[0])
+            con, _ = session_dbs.open_db(agent_sessions("openclaw").databases(_db_env(sb))[0])
             seen = [r[0] for r in con.execute("SELECT DISTINCT session_id FROM transcript_events")]
             con.close()
         except session_dbs.Unreadable as e:

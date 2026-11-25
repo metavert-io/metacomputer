@@ -52,6 +52,8 @@ import os
 import stat
 import sys
 
+if __name__ == "__main__":         # the agents' setup.py import this module by its name: the same module, not a second
+    sys.modules.setdefault("agent_setup", sys.modules[__name__])
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "lib"))
 import agents        # noqa: E402  (trusted, run, version, link_target, choices)
@@ -145,6 +147,14 @@ def _entry_res(d):
     if url_kind not in (None, "stdio"):
         return {"kind": url_kind if isinstance(url_kind, str) else "remote", "entry": d}
     return {"kind": "stdio", "entry": {"command": cmd, "args": list(args or []), "env": dict(envs or {})}}
+
+
+def manifest_words(folder):
+    """(name, label, prog, tools, doc) of an agent, from its manifest (coding-agents/FOLDER/manifest.json): its install
+    word (its flag), its name, its command, how it names metacomputer's tools, its page."""
+    from agentkit import manifests
+    m = manifests.manifest(folder)
+    return m["flag"], m["label"], m["prog"], m["tools"], m["docs"]
 
 
 class Agent:
@@ -629,87 +639,29 @@ class Hermes(Agent):
         return f"{self.cli()} config unset mcp_servers.{NAME}"
 
 
-class OpenClaw(Agent):
-    """OpenClaw: mcp.servers in ~/.openclaw/openclaw.json (OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR move it), read with
-    `openclaw mcp show metacomputer --json`, added with `openclaw mcp add --no-probe` (which refuses a name that's
-    there) with a 600 s request timeout (its default is 60 s), removed with `openclaw mcp unset`. Skills: it reads
-    ~/.agents/skills with its default state folder; `openclaw skills info` says whether it sees them."""
-    name, label, prog, tools, doc = "openclaw", "OpenClaw", "openclaw", "metacomputer__*", "docs/openclaw.md"
-
-    def env(self, env):
-        return dict(env, OPENCLAW_NO_AUTO_UPDATE="1")        # no update check for a quick command
-
-    def homes(self, env):
-        """The homes OpenClaw keeps its folders in: OPENCLAW_HOME (when set) and yours."""
-        return _distinct([env.get("OPENCLAW_HOME") or home(env), home(env)])
-
-    def config_files(self, env):
-        # The one its CLI uses: OPENCLAW_CONFIG_PATH, else OPENCLAW_STATE_DIR's, else a named OPENCLAW_PROFILE's
-        # (~/.openclaw-PROFILE), else ~/.openclaw's; then every other one: ~/.openclaw and every ~/.openclaw-NAME.
-        base, prof = self.homes(env)[0], env.get("OPENCLAW_PROFILE") or ""
-        state = env.get("OPENCLAW_STATE_DIR") or os.path.join(
-            base, f".openclaw-{prof}" if prof and prof != "default" else ".openclaw")
-        return _distinct([env.get("OPENCLAW_CONFIG_PATH") or os.path.join(state, "openclaw.json")] +
-                         [f for h in self.homes(env) for f in [os.path.join(h, ".openclaw", "openclaw.json")] +
-                          [os.path.join(d, "openclaw.json") for d in entries(h, ".openclaw-")]])
-
-    def config_dirs(self, env):
-        return self.homes(env)
-
-    def read(self, prog, env):
-        rc, out, err = self.run([prog, "mcp", "show", NAME, "--json"], env)
-        try:
-            d = json.loads(out)
-        except ValueError:
-            d = None
-        # Missing: exit 1 and, with --json, {"ok": false, "error": {"message": "No MCP server named \"metacomputer\" in ..."}}
-        failed = isinstance(d, dict) and d.get("ok") is False
-        said = (d.get("error") or {}).get("message") if failed and isinstance(d.get("error"), dict) else ""
-        if rc == 1 and failed and isinstance(said, str) and said.startswith(f'No MCP server named "{NAME}" in '):
-            return {"kind": "absent"}
-        if rc != 0 or failed:
-            return {"kind": "error", "why": f"openclaw mcp show failed (exit {rc})"}
-        if d is None:
-            return {"kind": "error", "why": "openclaw mcp show answered in a shape this doesn't know"}
-        res = _entry_res(d)
-        res["raw"] = d
-        return res
-
-    def add_argv(self, prog, link):
-        return [prog, "mcp", "add", NAME, "--command", link, *[x for a in claude_mcp.MCP_ARGS for x in ("--arg", a)],
-                "--timeout", str(TOOL_TIMEOUT), "--no-probe"]
-
-    def remove_argv(self, prog):
-        return [prog, "mcp", "unset", NAME]
-
-    def add_line(self, link_shown):
-        return f"openclaw mcp add {NAME} --command {link_shown} --arg mcp-lazy --timeout {TOOL_TIMEOUT} --no-probe"
-
-    def remove_line(self):
-        return f"openclaw mcp unset {NAME}"
-
-    def check_skill(self, prog, env):
-        missing, hidden = [], []
-        for name in SKILLS:
-            rc, out, _ = self.run([prog, "skills", "info", name, "--json"], env)
-            try:
-                d = json.loads(out) if rc == 0 else None
-            except ValueError:
-                d = None
-            if not isinstance(d, dict) or d.get("ok") is False:
-                missing.append(name)
-            elif d.get("eligible") is False:
-                hidden.append(name)
-        if missing:
-            return (False, f"OpenClaw doesn't list the skill{'s' if len(missing) > 1 else ''} {' and '.join(missing)} "
-                           "(with a state folder of its own, it doesn't read ~/.agents/skills: docs/openclaw.md)")
-        if hidden:
-            return (False, f"OpenClaw lists the skill{'s' if len(hidden) > 1 else ''} {' and '.join(hidden)} but doesn't "
-                           f"offer {'them' if len(hidden) > 1 else 'it'} (openclaw skills info {hidden[0]} says why)")
-        return (True, "OpenClaw sees both skills")
+_HERE = {"hermes": Hermes, "gemini": Gemini, "antigravity": Antigravity}    # not in their folders yet
+_AGENTS = None
 
 
-AGENTS = {a.name: a for a in (OpenClaw(), Hermes(), Gemini(), Antigravity())}
+def _agents():
+    """{name: Agent} of the agents whose install and uninstall are these steps (agents/<name>/setup.py's AGENT), in the
+    registry's order."""
+    global _AGENTS
+    if _AGENTS is None:
+        from agentkit import manifests, registry
+        out = {}
+        for n in manifests.generic():
+            mod = registry.hooks(n, "setup")
+            a = mod.AGENT if mod is not None else _HERE[n]()
+            out[a.name] = a
+        _AGENTS = out
+    return _AGENTS
+
+
+def __getattr__(name):              # AGENTS, made when first asked for (an agent's setup.py imports this module)
+    if name == "AGENTS":
+        return _agents()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # --- ownership ---------------------------------------------------------------------------------------------------
@@ -1186,12 +1138,12 @@ def main(argv):
             print("usage: agent_setup.py link-ours PATH --root CHECKOUT", file=sys.stderr)
             return 2
         return 0 if os.path.islink(argv[1]) and ours_link(argv[1], argv[3]) else 1
-    if len(argv) != 6 or argv[0] not in ("install", "uninstall", "status") or argv[1] not in AGENTS \
+    if len(argv) != 6 or argv[0] not in ("install", "uninstall", "status") or argv[1] not in _agents() \
             or argv[2] != "--root" or argv[4] != "--link":
-        print("usage: agent_setup.py install|uninstall|status openclaw|hermes|gemini|antigravity --root CHECKOUT --link "
+        print(f"usage: agent_setup.py install|uninstall|status {'|'.join(_agents())} --root CHECKOUT --link "
               "~/.local/bin/metacomputer\n       agent_setup.py link-ours PATH --root CHECKOUT", file=sys.stderr)
         return 2
-    what, agent, root, link = argv[0], AGENTS[argv[1]], argv[3], argv[5]
+    what, agent, root, link = argv[0], _agents()[argv[1]], argv[3], argv[5]
     env = dict(os.environ)
     if what == "status":
         print(json.dumps(status(agent, root, link, env), indent=2))

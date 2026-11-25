@@ -1216,6 +1216,8 @@ def old_layout_checkout(t):
     shutil.copy2(os.path.join(LAB, "lib", "strictargs.py"), os.path.join(co, "lib"))       # the rules of its command lines
     os.makedirs(os.path.join(co, "scripts"), exist_ok=True)
     shutil.copy2(os.path.join(LAB, "scripts", "strictargs.sh"), os.path.join(co, "scripts"))
+    for d in ("coding-agents", os.path.join("lib", "agentkit")):     # the agents' data and steps, which install.sh reads
+        shutil.copytree(os.path.join(LAB, d), os.path.join(co, d), ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copytree(os.path.join(LAB, "skills", "metacomputer"), os.path.join(co, "skills", "metacomputer"))
     shutil.copytree(os.path.join(LAB, ".claude-plugin"), os.path.join(co, ".claude-plugin"))
     shutil.copytree(os.path.join(LAB, "plugin"), os.path.join(co, "plugin"))

@@ -71,6 +71,13 @@ SWITCH=0; ALLOW_DOWNGRADE=0; CODEX=auto; ONLY_CODEX=0; ONLY_AGENTS=0
 OPENCLAW=auto; HERMES=auto; GEMINI=auto; ANTIGRAVITY=auto; ONLY_OPENCLAW=0; ONLY_HERMES=0; ONLY_GEMINI=0; ONLY_ANTIGRAVITY=0
 # The command-line rules every metacomputer program follows (scripts/strictargs.sh): each option once, nothing else.
 . "$ROOT/scripts/strictargs.sh"
+# The coding agents (lib/agentkit/agents.sh, made from their manifests by scripts/gen-agents.py) and each one's own
+# steps (coding-agents/NAME/setup.sh: functions only, ag_FLAG_HOOK), for the registered ones.
+. "$ROOT/lib/agentkit/agents.sh" || { echo "install.sh: couldn't read lib/agentkit/agents.sh: this checkout is incomplete" >&2; exit 1; }
+for mc_d in $MC_AGENTS; do
+  if [ -f "$ROOT/coding-agents/$mc_d/setup.sh" ]; then . "$ROOT/coding-agents/$mc_d/setup.sh"; fi
+done
+unset mc_d
 SA_DEFER=1
 if ! sa_check install.sh "./install.sh [OPTIONS]   (./install.sh --help lists them)" 0 0 "--yes -y --no-chrome --no-build \
        --replace-vm --fresh-sources --no-claude --claude --only-agents --no-plugin --only-claude --uninstall --switch \
@@ -851,16 +858,17 @@ agent_config_mentions() { # NAME: 0 when a file of the agent's configuration may
   # Python, for an uninstall that can't run agent_setup.py
   local f g d
   # Every profile and location (profile folders by */: those it can't look into too, which a glob for the file inside
-  # would leave out), whichever one the agent's CLI uses
+  # would leave out), whichever one the agent's CLI uses: the agent's own list (its setup.sh's ag_NAME_config_files)
+  if declare -F "ag_${1}_config_files" >/dev/null; then
+    AG_CONFIG_FILES=(); "ag_${1}_config_files"; set -- ${AG_CONFIG_FILES[@]+"${AG_CONFIG_FILES[@]}"}
+  else
   case "$1" in
     gemini) set -- "${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json" "$HOME/.gemini/settings.json" ;;
     antigravity) set -- "$HOME/.gemini/config/mcp_config.json" ;;
     hermes) set -- "${HERMES_HOME:-$HOME/.hermes}/config.yaml" "$HOME/.hermes/config.yaml"
             for d in "$HOME"/.hermes/profiles/*/; do set -- "$@" "${d}config.yaml"; done ;;
-    openclaw) set -- "${OPENCLAW_CONFIG_PATH:-${OPENCLAW_STATE_DIR:-${OPENCLAW_HOME:-$HOME}/.openclaw}/openclaw.json}" \
-                     "${OPENCLAW_HOME:-$HOME}/.openclaw/openclaw.json" "$HOME/.openclaw/openclaw.json"
-              for d in "${OPENCLAW_HOME:-$HOME}"/.openclaw-*/ "$HOME"/.openclaw-*/; do set -- "$@" "${d}openclaw.json"; done ;;
   esac
+  fi
   for f in "$@"; do
     if ! [ -e "$f" ] && ! [ -L "$f" ]; then
       # Not there, or behind a folder that can't be searched or listed (a profiles/* pattern left as it was): the

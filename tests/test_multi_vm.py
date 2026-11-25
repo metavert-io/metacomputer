@@ -3124,10 +3124,11 @@ REAP_ALLOWED = {
 
 
 def mac_side_files():
-    """What runs on this Mac: install.sh and every file of bin/, scripts/, lib/ and the providers' folders
-    (providers/<name>/), less what a provider puts into the computer (its guest/, as provisioning/ is left out)."""
+    """What runs on this Mac: install.sh and every file of bin/, scripts/, lib/, the providers' folders
+    (providers/<name>/) and the agents' (coding-agents/<name>/), less what a provider puts into the computer (its
+    guest/, as provisioning/ is left out)."""
     out = []
-    for top in ("bin", "scripts", "lib", "providers"):
+    for top in ("bin", "scripts", "lib", "providers", "coding-agents"):
         for d, _, fs in os.walk(os.path.join(LAB, top)):
             rel_d = os.path.relpath(d, LAB)
             if "__pycache__" in d or (top == "providers" and "guest" in rel_d.split(os.sep)[2:3]):

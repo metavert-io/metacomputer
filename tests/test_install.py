@@ -1293,6 +1293,7 @@ def install_root(b):
               "scripts/strictargs.sh", "lib/strictargs.py", "lib/cloud/providers.sh"):   # every recursive delete goes through it; the rules of its command lines
         os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
         shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
+    copy_agents(root)               # the agents' data and their own steps, which install.sh reads
     write(os.path.join(root, "scripts", "build-vault.sh"), "#!/bin/sh\necho 'vault: skipped by the test'\n", 0o755)
     write(os.path.join(root, "scripts", "build-tools.sh"),
           f'#!/bin/bash\nif [ "$1" = --check ]; then [ -z "${{STUB_TOOLS_STALE:-}}" ]; exit; fi\necho "tools${{*:+ $*}}" >> "{b.t}/tools.log"\n', 0o755)
