@@ -386,7 +386,9 @@ DEFAULT_VM_NAME = "metacomputer"
 # "double-quoted" string (no backslash or backquote, $ only as $NAME or ${NAME}) or one 'single-quoted' string (or
 # several joined by \', as `vm create` writes a quote in a value). Any other line, anywhere in the file, raises Unclear:
 # a command, a $var command, control flow, a function, a here-document, a line continued or chained (\, &&, ||, |, ;,
-# &), a value with anything else in it (;&|<>() or a backquote, $(, a space, a ~ past the start, a backslash). So does
+# &), a value with anything else in it (;&|<>() or a backquote, $(, a space, a ~ past the start, a backslash, a $NAME
+# followed directly by a character that isn't ASCII), a control character other than a tab anywhere (a NUL, a carriage
+# return). So does
 # an assignment to a variable this reader puts into values (EXPANDED: HOME, LAB_ROOT), since bash would use the new
 # value from there on. A setting it can't read is never taken as missing (a default: another computer's folder). A
 # value's $HOME, $LAB_ROOT (and ~ where bash expands it) are read; a folder that uses any other variable, or isn't
@@ -398,11 +400,16 @@ class Unclear(ValueError):
     """A settings file that isn't plain assignments only (computers()): which computer it is can't be told."""
 
 
-_REF = r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
+# A name is all of its letters, as bash takes it (never split into a shorter name and text: the lookahead also keeps a
+# line that doesn't match from taking exponential time to say so). A $NAME followed directly by a character that isn't
+# ASCII matches nothing, so its line refuses: in a UTF-8 locale macOS's bash 3.2 takes that character's first byte as
+# part of the name ("$LAB_ROOT–runs" is $LAB_ROOT\xe2 and the rest), in the C locale it doesn't. ${NAME} is unaffected.
+_REF = r"\$(?:[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_]|[^\x00-\x7f])|\{[A-Za-z_][A-Za-z0-9_]*\})"
 _ASSIGN = re.compile(r"[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)="
                      r"(\"(?:[^\"\\`$\n]|" + _REF + r")*\"|'[^'\n]*'(?:\\''[^'\n]*')*"
                      r"|(?:~(?=/|[ \t]|$))?(?:[A-Za-z0-9_./:@%+,=-]|" + _REF + r")*)(?:[ \t]+(?:#.*)?)?")
 _BLANK = re.compile(r"[ \t]*(?:#.*)?")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")     # any but a tab (a NUL: bash 3.2 stops reading there)
 
 
 def _label(path):
@@ -413,8 +420,8 @@ def _label(path):
 def _parse_strict(path, missing_ok=False):
     """{NAME: its value as written} from the settings file at PATH, read as the notes above say: a file of plain
     assignments only. A missing file is {} when MISSING_OK; one that is there but can't be read raises OSError; any
-    line that isn't blank, a comment or one plain assignment, an assignment to HOME or LAB_ROOT, and text that isn't
-    UTF-8 raise Unclear (a ValueError)."""
+    line that isn't blank, a comment or one plain assignment, an assignment to HOME or LAB_ROOT, a control character
+    other than a tab, and text that isn't UTF-8 raise Unclear (a ValueError)."""
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -428,6 +435,10 @@ def _parse_strict(path, missing_ok=False):
         raise Unclear(f"{_label(path)} isn't UTF-8 text, so its settings can't be told") from None
     vals = {}
     for n, line in enumerate(text.split("\n"), 1):     # a carriage return is part of the line, as bash reads it
+        c = _CONTROL.search(line)
+        if c:
+            raise Unclear(f"{_label(path)} line {n} has a control character ({ord(c.group(0)):#04x}), which bash may stop "
+                          "reading at or read otherwise, so its settings can't be told")
         if _BLANK.fullmatch(line):
             continue
         m = _ASSIGN.fullmatch(line)

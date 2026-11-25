@@ -507,8 +507,9 @@ print(" ".join(out))') "
   fi
   return "$rc"
 }
-vm_q() { # KEY VALUE: KEY='VALUE' for a settings file (quoted for bash)
-  local v="${2//\'/\'\\\'\'}"
+vm_q() { # KEY VALUE: KEY='VALUE' for a settings file (quoted for bash, each ' as '\''; through a variable, as macOS's
+  local q="'\\''" v      # bash 3.2 keeps the backslashes of a quoted replacement and wrote 'it\'\\'\'s')
+  v="${2//\'/$q}"
   printf "%s='%s'\n" "$1" "$v"
 }
 

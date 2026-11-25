@@ -707,24 +707,31 @@ def record_unknown(path, why):
                           "it) and run this again")
 
 
+ABSENT = object()       # read_json_strictly's answer for no file: never a value a file can hold (JSON null is None)
+
+
 def read_json_strictly(path, follow=False):
-    """The JSON a file holds (at most 1 MiB of it); None when there's no file. One that's there and isn't a plain
-    file, can't be read or isn't JSON raises OSError or ValueError. Never through a link unless FOLLOW, and never
-    waiting on a FIFO."""
+    """The JSON a file holds; ABSENT when there's no file (a file holding null is None, a value like any other). One
+    that's there and isn't a plain file, can't be read, is larger than 1 MiB or isn't JSON raises OSError or
+    ValueError. Never through a link unless FOLLOW, and never waiting on a FIFO."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | (0 if follow else os.O_NOFOLLOW))
     except FileNotFoundError:
-        return None
+        return ABSENT
     with os.fdopen(fd, "rb") as fh:
         if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
             raise ValueError("it isn't a file")
-        return json.loads(fh.read(1 << 20))
+        data = fh.read(MIB + 1)
+        if len(data) > MIB:
+            raise ValueError("it's larger than 1 MiB")
+        return json.loads(data)
 
 
 def read_record(path, strict=True):
     """One holder record: the object it holds; None when it isn't there (let go of meanwhile); never through a link.
-    One that's there and can't be read, isn't JSON, or isn't a holder record (an object whose vm and path are text)
-    raises HoldersUnknown when STRICT, never read as none; not strict (shown only, or a holder's own), it's None."""
+    One that's there and can't be read, is larger than 1 MiB, isn't JSON, or isn't a holder record (an object whose vm
+    and path are text: JSON null, a list or a string isn't) raises HoldersUnknown when STRICT, never read as none; not
+    strict (shown only, or a holder's own), it's None."""
     if not strict:
         try:
             return read_record(path)
@@ -736,7 +743,7 @@ def read_record(path, strict=True):
         raise record_unknown(path, e.strerror or e) from None
     except ValueError as e:
         raise record_unknown(path, e) from None
-    if rec is None:
+    if rec is ABSENT:
         return None
     if not isinstance(rec, dict) or not isinstance(rec.get("vm"), str) or not isinstance(rec.get("path"), str):
         raise record_unknown(path, "it isn't a holder record")
@@ -958,6 +965,10 @@ def acquire(items, vm, lab, pid):
         # Every holder record names its process by pid and start time; one without could be read as nobody's.
         raise StorageError(f"can't tell when process {pid} (the holder) started, so its storage can't be locked")
     host = hostname()
+    if not host and any(it["kind"] == "disk" and it.get("lock") for it in items):
+        # A disk's lock file names this computer, and one whose host is empty refuses every start (read_sidecar).
+        raise StorageError("can't tell this computer's name (its hostname is empty), so a disk's lock file couldn't "
+                           "say which computer has it; nothing was locked")
     with GlobalLock():
         # A holder counts until its process is certainly gone (holder_state): one ps can't tell about still holds.
         # Records are read strictly: one that's there and can't be read or parsed refuses (HoldersUnknown), as does a
@@ -1031,17 +1042,18 @@ def release_locks(vm, lab):
 
 def read_sidecar(path):
     """A disk's lock file (beside the disk: which computer has it), read strictly: {} when there's none; one that's
-    there and can't be read or isn't one raises HoldersUnknown."""
+    there and can't be read, is larger than 1 MiB, or isn't one (an object whose host is text that isn't empty, as
+    acquire writes it) raises HoldersUnknown."""
     try:
         side = read_json_strictly(path, follow=True)
     except (OSError, ValueError) as e:
         why = e.strerror if isinstance(e, OSError) and e.strerror else e
         side = None
     else:
-        if side is None:
+        if side is ABSENT:
             return {}
         why = "it isn't a disk's lock file"
-    if not isinstance(side, dict) or not isinstance(side.get("host", ""), str):
+    if not isinstance(side, dict) or not isinstance(side.get("host"), str) or not side["host"]:
         raise HoldersUnknown(f"the disk's lock file {path} can't be read ({why}), so whether another computer has the "
                              "disk can't be told; nothing was changed. If no computer is using that disk, delete that "
                              "file and run this again")

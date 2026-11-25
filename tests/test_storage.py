@@ -248,9 +248,14 @@ def test_held_strictly():
     own = os.path.join(locks, it["lock"] + ".json")      # a running VM's record of this volume
     good = {"kind": "disk", "name": "sv", "path": img, "vm": "running-vm", "lab": "/lab", "pid": os.getpid(),
             "pstart": storage.proc_start(os.getpid()), "since": "then", "state": "running", "lock": it["lock"]}
+    # Codex check r6: JSON null, an empty list or a string is there and isn't a record (never read as no file), and a
+    # file larger than 1 MiB refuses whole (never its first MiB parsed: null, padding to 1 MiB, then not JSON).
     for how, text, mode in (("unreadable", json.dumps(good), 0), ("not JSON", "{", 0o600),
                             ("JSON but not a holder record", "[1]", 0o600),
-                            ("a record whose vm isn't text", json.dumps(dict(good, vm=3)), 0o600)):
+                            ("a record whose vm isn't text", json.dumps(dict(good, vm=3)), 0o600),
+                            ("JSON null", "null", 0o600), ("an empty list", "[]", 0o600),
+                            ("a string", '"text"', 0o600),
+                            ("larger than 1 MiB", "null" + " " * (storage.MIB - 4) + "INVALID", 0o600)):
         with open(own, "w") as f:
             f.write(text)
         os.chmod(own, mode)
@@ -305,6 +310,46 @@ def test_held_strictly():
     finally:
         if os.path.lexists(img + ".lock"):
             os.remove(img + ".lock")
+    # Codex check r6: a disk's lock file that's there says which computer has the disk (a host that's text and not
+    # empty, as acquire writes it), or it refuses: {} and an empty host aren't "nobody", nor is null; nor is one larger
+    # than 1 MiB (never its first MiB parsed). Nothing is taken, the lock file is kept as it was, nothing truncated.
+    for how, text in (("{}", "{}"), ('{"host": ""}', '{"host": ""}'), ("null", "null"),
+                      ('{"host": 3}', '{"host": 3}'),
+                      ("larger than 1 MiB ({}, padding to 1 MiB, then not JSON)", "{}" + " " * (storage.MIB - 2) + "INVALID")):
+        with open(img + ".lock", "w") as f:
+            f.write(text)
+        try:
+            e = refusal(storage.acquire, [it], "vm-s", "/lab", os.getpid())
+            taken = os.path.exists(own)
+            kept = open(img + ".lock").read() == text
+            check(f"the disk's lock file {how}: a start's storage refuses, naming it, nothing taken, the file kept",
+                  e and not e.startswith("CRASH") and img + ".lock" in e and not taken and kept, (e, taken, kept))
+            if e is None:
+                storage.release_locks("vm-s", "/lab")
+            e = refusal(storage.cmd_volume_resize, Args(name="sv", size="32M"))
+            check("...and volume resize refuses, naming it, the image not truncated", e and not e.startswith("CRASH")
+                  and img + ".lock" in e and os.path.getsize(img) == size, (e, os.path.getsize(img)))
+            st = refusal(lambda: print(storage.volume_state(storage.reg_load("volume", "sv"))))
+            check("...while volume list (shown only) still shows the volume", st is None, st)
+        finally:
+            if os.path.lexists(img + ".lock"):
+                os.remove(img + ".lock")
+            for f in os.listdir(locks):     # (an older reader's reservation or start, left behind)
+                if f.endswith(".json") and json.load(open(os.path.join(locks, f))).get("pid") == os.getpid():
+                    os.remove(os.path.join(locks, f))
+    # The only writer of a disk's lock file, acquire, never writes one with an empty host: with no name for this
+    # computer it refuses before anything is written.
+    real_hostname = storage.hostname
+    storage.hostname = lambda: ""
+    try:
+        e = refusal(storage.acquire, [it], "vm-s", "/lab", os.getpid())
+    finally:
+        storage.hostname = real_hostname
+    check("a disk's start with no name for this computer (an empty hostname): refused, no record or lock file written",
+          e and not e.startswith("CRASH") and "hostname" in e and not os.path.exists(own)
+          and not os.path.lexists(img + ".lock"), e)
+    if e is None:
+        storage.release_locks("vm-s", "/lab")
     e = refusal(storage.cmd_volume_resize, Args(name="sv", size="32M"))
     check("...and with every record readable, volume resize goes ahead",
           e is None and os.path.getsize(img) == 32 << 20 and size < 32 << 20, (e, size))
