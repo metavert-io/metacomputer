@@ -1,6 +1,6 @@
 {
   "name": "metacomputer",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Gives your agent a disposable computer of its own: an isolated Ubuntu 24.04 desktop VM on your Mac that it operates like a person, through Cua Driver's MCP tools. Needs macOS on Apple silicon and metacomputer installed.",
   "contextFileName": "agent-plugin/GEMINI.md",
   "mcpServers": {
