@@ -335,6 +335,24 @@ def slug(heading):
     return re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
 
 
+def docs_missing():
+    """Each kind's docs that aren't there: a page that isn't, or a section (#anchor) its page hasn't. Docs with no
+    section (the kind's own README.md, or a whole page: manifests.py allows both) need only their page."""
+    from sinkkit import manifests, registry
+    out = []
+    for k in registry.SINKS:
+        docs = manifests.manifest(k)["docs"]
+        page, _, anchor = docs.partition("#")
+        try:
+            heads = {slug(h) for h in re.findall(r"^#+ (.+)$", open(os.path.join(LAB, page)).read(), re.M)}
+        except OSError:
+            out.append(docs)
+            continue
+        if anchor and anchor not in heads:
+            out.append(docs)
+    return out
+
+
 def sink_packages():
     print("the sinks' folders, their manifests, the generated files, and no kind named in shared code")
     from sinkkit import manifests, registry, vault
@@ -358,16 +376,23 @@ def sink_packages():
             shape.append(f"{k}: accepted goes with request")
     check("each kind's sink.py brings the interface: check_url, and request (accepted too, if it reads answers) or "
           "deliver", not shape, shape)
-    anchors = []
-    for k in registry.SINKS:
-        page, _, anchor = manifests.manifest(k)["docs"].partition("#")
+    missing = docs_missing()
+    check("each kind's docs are a page that's there, and the section they name is in it", not missing, missing)
+    real, probe = registry.data, registry.SINKS[0]
+    tried = {}
+    for docs in (f"sinks/{probe}/README.md", "docs/events.md", "docs/events.md#no-such-section",
+                 "docs/no-such-page.md"):
+        changed = dict(real(probe), docs=docs)
+        registry.data = lambda k, c=changed: c if k == probe else real(k)
         try:
-            heads = {slug(h) for h in re.findall(r"^#+ (.+)$", open(os.path.join(LAB, page)).read(), re.M)}
-        except OSError:
-            heads = set()
-        if anchor not in heads:
-            anchors.append(manifests.manifest(k)["docs"])
-    check("each kind's docs are a section of a page that's there", not anchors, anchors)
+            tried[docs] = (not manifests.check(probe), docs_missing())
+        finally:
+            registry.data = real
+    check("...docs with no section (the kind's README.md, a whole page) pass both the manifest's check and this one; a "
+          "section or a page that isn't there fails this one (codex review of item 5c, P3)",
+          tried[f"sinks/{probe}/README.md"] == (True, []) and tried["docs/events.md"] == (True, [])
+          and tried["docs/events.md#no-such-section"][1] == ["docs/events.md#no-such-section"]
+          and tried["docs/no-such-page.md"][1] == ["docs/no-such-page.md"], tried)
     r = subprocess.run([PY, os.path.join(LAB, "scripts", "gen-sinks.py"), "--check"], capture_output=True, text=True,
                        timeout=60)
     check("the files made from the manifests are current: docs/sinks.md, `metacomputer help`'s line, CODEOWNERS "
