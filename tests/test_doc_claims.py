@@ -4164,8 +4164,8 @@ def code_fallbacks():
     "key")`), the fallback is config/defaults.env's value: a client that runs without the config gets the same
     protections the docs describe."""
     print("the code's fallbacks for the security settings")
-    files = subprocess.run(["git", "ls-files", "lib", "bin", "scripts", "install.sh", "get.sh"], cwd=LAB,
-                           capture_output=True, text=True).stdout.split()
+    files = subprocess.run(["git", "ls-files", "lib", "bin", "scripts", "providers", ":(exclude)providers/*/guest/*",
+                            "install.sh", "get.sh"], cwd=LAB, capture_output=True, text=True).stdout.split()
     seen, wrong = {}, []
     for rel in files:
         try:
@@ -4180,7 +4180,8 @@ def code_fallbacks():
                         seen[k] = seen.get(k, 0) + 1
                         if v != D[k]:
                             wrong.append(f"{rel}:{n}: {k} falls back to {v!r}, config/defaults.env says {D[k]!r}")
-    check("every fallback for a security setting in lib/, bin/, scripts/ and the installers is its default", not wrong, wrong)
+    check("every fallback for a security setting in lib/, bin/, scripts/, the providers' folders and the installers is its "
+          "default", not wrong, wrong)
     check("…and the scan found them (at least one for each of the hardening settings)",
           all(seen.get(k) for k in ("ACTION_LOG", "SSH_AUTH", "DRIVER_MODE", "VM_SHELL", "SHELL_LOG", "COORD_GUARD",
                                     "MCP_HUB")), seen)
