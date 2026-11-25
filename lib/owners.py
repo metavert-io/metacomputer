@@ -102,15 +102,21 @@ def ps_table(strict=False):
     pid=,ppid=,comm=` lists them; where ps can't start (macOS's sandbox runs no setuid program), the same from the
     kernel (lib/procinfo.py), with the processes whose name the kernel can't give exactly as ps would listed as inexact
     (agent_of counts them as UNKNOWN_AGENT). strict: OSError when ps fails or lists nothing, instead of a table that
-    would look like one without agents."""
+    would look like one without agents. A table that lists a pid twice can't be told (one of its rows isn't that
+    process's: a name that carried a row of its own): OSError, strict or not, as when ps can't be read, never the
+    later row (or the first) taken for the process. Rows are ps's lines: split at newlines only (a name may hold
+    any other character)."""
     out, rc, inexact = procinfo.table()
     if strict and (rc != 0 or not out.strip()):
         raise OSError(f"ps failed (exit {rc})")
     table = ProcTable(live=True, inexact=inexact)
-    for line in out.splitlines():
+    for line in out.split("\n"):
         parts = line.split(None, 2)
         if len(parts) >= 2:
-            table[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+            pid = int(parts[0])
+            if pid in table:
+                raise OSError(f"the process table lists pid {pid} twice: it can't be told which row is that process's")
+            table[pid] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
     return table
 
 

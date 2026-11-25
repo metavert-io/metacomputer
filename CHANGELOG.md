@@ -35,11 +35,15 @@ All notable changes to metacomputer are recorded here. The format follows
   watcher, the network allowlist's timer and the hub. Where ps can't start, metacomputer now reads the same facts
   from the kernel (`lib/procinfo.py`: the processes, their parents, start times, names and command lines, as ps prints
   them); ps is still asked first everywhere else. A process whose name the kernel can't give exactly as ps would
-  (another account's, or one beyond ASCII) counts as an unidentified agent session, as when ps can't be read.
+  (another account's, or one beyond ASCII) counts as an unidentified agent session, as when ps can't be read. Every
+  field is escaped as ps escapes it (such a process's own short name too, whatever bytes it holds), so a name with a
+  newline can't add a row, and a process table that lists a pid twice is refused as can't tell.
 - **"The virtual computer is off" when the VM runner couldn't look:** the runner reports a VM as stopped when it can't
   find or signal the VM's process (as in a sandbox). While this VM's own run process is still there, metacomputer now
-  says it can't tell (`status` shows `unknown`) instead of off, and `start` doesn't start it a second time. A VM that
-  is stopped is reported as before.
+  says it can't tell (`status` shows `unknown`) instead of off, and `start` doesn't start it a second time. Nor is it
+  taken for stopped by what deletes, copies or replaces it, or lets its gateway and storage go: `reset`, `restore`,
+  `checkpoint`, `baseline`, `stop`, `build --replace` and `vm delete` (`--force` too) refuse, saying it can't tell,
+  before anything is changed. A VM that is stopped is reported as before.
 - **bench: the `--pass-env` variables (a model key) stay the sessions':** `reset` and `start`, run by bench, got bench's
   whole environment, so the VM runner, the network gateway and the hub they leave running kept the key after the run.
   metacomputer's own commands that bench runs now go without those variables, and the sessions' `metacomputer`

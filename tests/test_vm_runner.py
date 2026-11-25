@@ -13,9 +13,14 @@ a local.env's LUME_SECURE_* pins still count, the new names win; --lume=secure i
 alias; an existing lume-secure is left alone; --uninstall names the runner in use.
 vm_status: the runner's "stopped" while this VM's own run process (RUN_DIR/lume.pid) still runs is "unknown" (the
 runner couldn't look: macOS's sandbox), and `start` then refuses to start it again; a VM that is stopped stays "stopped".
+Nor is "unknown" taken for stopped by what deletes, copies or replaces the VM, or lets its gateway and storage go:
+reset, restore, checkpoint, baseline, stop and start refuse before anything is changed (the real functions from
+bin/metacomputer and scripts/lib.sh, under /bin/bash, with a stand-in runner and the VM's run process alive), and every
+delete or copy of the working VM (bin/metacomputer, build-vm.sh --replace, vm delete) is checked to come after that check.
 """
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -59,6 +64,7 @@ def main():
     try:
         lib_cases(td)
         state_cases(td)
+        lifecycle_cases(td)
         install_cases(td)
     finally:
         shutil.rmtree(td, ignore_errors=True)
@@ -227,6 +233,135 @@ def state_cases(td):
         for p in (vm, other):
             p.kill()
             p.wait()
+
+
+# --- what deletes, copies, replaces or stops the VM: never on "unknown" --------------------------------------------
+def bash_function(src, name):
+    m = re.search(r"^%s\(\) \{.*?^\}\n" % re.escape(name), src, re.S | re.M)
+    return m.group(0) if m else f'{name}() {{ echo "NO FUNCTION {name}" >&2; return 99; }}\n'
+
+
+LIFECYCLE_STUBS = r"""
+# What changes the VM or the Mac's side of it, written down instead of done ($CALLS); the checks the commands make
+# first (locks, owners, handoffs, the expected VM) pass.
+note() { echo "$*" >> "$CALLS"; }
+vm_lock_or_die() { :; }; vm_change_lock() { :; }; expect_guard() { :; }; owners_check() { :; }
+handoff_hold_unless_override() { :; }; handoff_hold_unless_user() { :; }; emit_event() { :; }
+runner_delete() { note "DELETE $1"; }
+sync_or_stop() { note "SYNC $1"; }
+events_watcher_stop() { note "WATCHER-STOP"; }; hub_stop() { note "HUB-STOP"; }; netgw_stop() { note "GATEWAY-STOP"; }
+netgw_alive() { return 0; }
+vm_stop() { note "VM-STOP $*"; }; vm_start() { note "VM-START $*"; }
+storage_release() { note "STORAGE-RELEASE"; }; storage_prepare() { note "STORAGE-PREPARE"; }; storage_started() { :; }
+storage_py() { note "STORAGE $*"; }; storage_abort() { :; }
+do_record() { note "RECORD $*"; }; vm_answer() { return 1; }; gssh() { note "GSSH $*"; return 0; }
+wait_ssh() { note "WAIT-SSH"; return 1; }
+"""
+
+
+def lifecycle_cases(td):
+    """reset, restore, checkpoint, baseline, stop and start with the VM's state unknown (the runner says stopped while its
+    run process runs): each refuses before anything is changed, saying it can't tell; with the VM stopped (no run
+    process) or running, the same harness shows them going ahead, so a refusal is the state's doing."""
+    home = os.path.join(td, "life-home")
+    os.makedirs(home)
+    calls = os.path.join(home, "calls")
+    # A stand-in runner: its VMs (the working one, its baseline and a checkpoint), each status FAKE_STATUS; clone, delete
+    # and stop written down.
+    write(os.path.join(home, ".local", "bin", "mcomp-vm"),
+          "#!/bin/sh\n"
+          "case \"$1\" in\n"
+          "  ls) echo '[{\"name\": \"life-vm\"}, {\"name\": \"life-vm-baseline\"}, {\"name\": \"life-vm-ckpt-c1\"}]' ;;\n"
+          "  get) printf '[{\"name\": \"%s\", \"status\": \"%s\"}]\\n' \"$2\" \"$FAKE_STATUS\" ;;\n"
+          "  run) echo '  --no-share-clipboard --no-share-audio --no-share-rosetta --no-host-sharing' ;;\n"
+          f"  clone|delete|stop) echo \"LUME $*\" >> '{calls}' ;;\n"
+          "  *) exit 1 ;;\n"
+          "esac\n", 0o755)
+    run_dir = os.path.join(home, "run")
+    os.makedirs(run_dir)
+    cfg = os.path.join(home, "test.env")
+    write(cfg, f'VM_NAME=life-vm\nBASELINE_NAME=life-vm-baseline\nRUN_DIR="{run_dir}"\nLOG_DIR="{home}/logs"\n')
+    env = {k: v for k, v in os.environ.items() if k not in ("MCOMP_LUME_NOTICE", "LUME")}
+    env.update(HOME=home, MCOMP_CONFIG=cfg, MCOMP_EVENTS_DIR=os.path.join(home, "events"), CALLS=calls,
+               MCOMP_VM_SETTLE_S="1")
+    cli = open(os.path.join(LAB, "bin", "metacomputer")).read()
+    funcs = "".join(bash_function(cli, f) for f in (
+        "parse_flags", "confirm", "ckpt_name", "unsynced_note", "restore_from", "do_reset", "do_restore",
+        "do_checkpoint", "do_baseline", "do_stop", "do_start"))
+    vm = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", "run", "life-vm", "--display", "none"])
+
+    def run(body, status, pid):
+        pidf = os.path.join(run_dir, "lume.pid")
+        if pid is None:
+            if os.path.exists(pidf):
+                os.remove(pidf)
+        else:
+            write(pidf, f"{pid}\n")
+        if os.path.exists(calls):
+            os.remove(calls)
+        script = "\n".join(["set -Eeuo pipefail", f'. "{LIB}"', LIFECYCLE_STUBS, 'CKPT_PREFIX="$VM_NAME-ckpt-"',
+                            "OVERRIDE=0; ASSUME_YES=0; DISCARD_UNSYNCED=0", funcs, body])
+        r = subprocess.run(["/bin/bash", "-c", script], env=dict(env, FAKE_STATUS=status), capture_output=True,
+                           text=True, timeout=120, stdin=subprocess.DEVNULL)
+        done = open(calls).read().split("\n") if os.path.exists(calls) else []
+        return r, [d for d in done if d]
+
+    changes = ("DELETE", "LUME clone", "LUME delete", "LUME stop", "SYNC", "VM-STOP", "VM-START", "STORAGE",
+               "GATEWAY-STOP", "HUB-STOP", "WATCHER-STOP", "RECORD", "GSSH")
+    cases = (("reset", "do_reset --yes"), ("restore", "do_restore c1 --yes"),
+             ("restore_from (what reset and restore run)", "restore_from life-vm-baseline baseline reset"),
+             ("checkpoint", "do_checkpoint c2"), ("baseline", "do_baseline --yes"), ("stop", "do_stop"),
+             ("start", "do_start"))
+    try:
+        st = subprocess.run(["/bin/bash", "-c", f'. "{LIB}"; vm_status life-vm'], env=dict(env, FAKE_STATUS="stopped"),
+                            capture_output=True, text=True, timeout=60)
+        write(os.path.join(run_dir, "lume.pid"), f"{vm.pid}\n")
+        st = subprocess.run(["/bin/bash", "-c", f'. "{LIB}"; vm_status life-vm'], env=dict(env, FAKE_STATUS="stopped"),
+                            capture_output=True, text=True, timeout=60)
+        check("lifecycle: the runner says stopped while the VM's own run process runs: unknown",
+              st.stdout.strip() == "unknown", (st.stdout, st.stderr[-200:]))
+        for what, body in cases:
+            r, done = run(body, "stopped", vm.pid)
+            changed = [d for d in done if d.startswith(changes)]
+            check(f"{what} with the VM's state unknown: refused before anything is changed, saying it can't tell "
+                  "(never taken for stopped)",
+                  r.returncode != 0 and "can't tell whether the virtual computer is running" in r.stderr
+                  and "Nothing was changed" in r.stderr and not changed, (r.returncode, changed, r.stderr[-300:]))
+        # The same harness, the VM stopped (no run process): they go ahead, so the refusals above are the state's.
+        r, done = run("do_reset --yes", "stopped", None)
+        check("...while a stopped VM is reset: deleted and cloned from its baseline",
+              "DELETE life-vm" in done and "LUME clone life-vm-baseline life-vm" in done, (r.returncode, done, r.stderr[-300:]))
+        r, done = run("do_restore c1 --yes", "stopped", None)
+        check("...and restored from its checkpoint", "DELETE life-vm" in done and "LUME clone life-vm-ckpt-c1 life-vm" in done,
+              (r.returncode, done, r.stderr[-300:]))
+        r, done = run("do_reset --yes", "running", vm.pid)
+        check("...and a running one is synced and stopped first, then replaced",
+              done[:3] == ["SYNC reset", "WATCHER-STOP", "VM-STOP life-vm"] and "DELETE life-vm" in done
+              and "LUME clone life-vm-baseline life-vm" in done, (r.returncode, done, r.stderr[-300:]))
+        r, done = run("do_checkpoint c2", "stopped", None)
+        check("...a stopped one's checkpoint is taken", "LUME clone life-vm life-vm-ckpt-c2" in done, (done, r.stderr[-300:]))
+        r, done = run("do_stop", "stopped", None)
+        check("...and stopping a stopped one lets its gateway go", "GATEWAY-STOP" in done, (done, r.stderr[-300:]))
+    finally:
+        vm.kill()
+        vm.wait()
+
+    # Every delete or copy of the working VM comes after the check, in the same function (or build-vm.sh's loop).
+    sites = []
+    for rel in ("bin/metacomputer", "scripts/build-vm.sh", "scripts/vm-commands.sh"):
+        lines = open(os.path.join(LAB, rel)).read().split("\n")
+        for i, ln in enumerate(lines):
+            code = ln.split("#", 1)[0]
+            if not re.search(r'runner_delete "\$(VM_NAME|vm)"|"\$LUME" clone "\$(VM_NAME|src)"', code):
+                continue
+            j = i
+            while j > 0 and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*\(\) \{", lines[j]) \
+                    and not lines[j].startswith(("for vm in", "# ---")):
+                j -= 1
+            sites.append((rel, i + 1, "vm_known_or_die" in "\n".join(lines[j:i])))
+    check(f"every delete or copy of the working VM ({len(sites)}: reset/restore, checkpoint, baseline, build --replace and "
+          "its baseline, vm delete) comes after the unknown-state check", len(sites) >= 6 and all(ok for _, _, ok in sites),
+          [s for s in sites if not s[2]])
 
 
 def install_cases(td):

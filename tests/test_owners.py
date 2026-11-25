@@ -18,7 +18,9 @@ And where /bin/ps can't start (macOS's sandbox runs no setuid program: here unde
 allows everything, so only that refusal is left), what lib/procinfo.py reads from the kernel instead: the same pid,
 parent, start time, name, command line and executable as ps on this Mac's processes; claims, the process table and
 the gateway check working there; and every process whose name the kernel can't give as ps would counted as an
-unidentified agent (fail closed).
+unidentified agent (fail closed). A name that holds a newline and a row of its own (another account's process, whose
+short name the kernel gives: "\\n300 1 sh\\n") adds no row there, and a table that lists a pid twice is refused (can't
+tell): the agent above a command is found, or it can't be told; never "no agent".
 """
 import json
 import os
@@ -366,6 +368,97 @@ def procinfo_checks():
             p.wait()
 
 
+# --- a name that forges a row ---------------------------------------------------------------------------------------
+def kinfo(procinfo, pid, ppid, uid, comm, start=1):
+    """A process's record as kern.proc.all gives it (struct kinfo_proc), read back by lib/procinfo.py's own parser."""
+    import struct
+    raw = bytearray(procinfo._KINFO_SIZE)
+    struct.pack_into("<qi", raw, 0, start, 0)
+    raw[procinfo._KP_STAT] = 2                                  # SRUN
+    struct.pack_into("<i", raw, procinfo._KP_PID, pid)
+    raw[procinfo._KP_COMM:procinfo._KP_COMM + min(len(comm), 16)] = comm[:16]
+    struct.pack_into("<I", raw, procinfo._KP_UID, uid)
+    struct.pack_into("<ii", raw, procinfo._KP_PPID, ppid, pid)
+    return procinfo._parse_kinfo(bytes(raw))
+
+
+def forged_row_checks():
+    """Another account's process (its arguments unreadable: only setuid-root ps reads them) is named in the kernel's
+    table by its short name, its executable's file name, which may hold a newline: "\\n300 1 sh\\n" would add a row giving
+    the agent's shell (300) another parent. Where ps can't start: written escaped as ps writes it, never a row; and a
+    table that lists a pid twice is refused, never read with one row winning."""
+    sys.path.insert(0, os.path.join(LAB, "lib"))
+    try:
+        import procinfo
+        import owners
+    except ImportError as e:
+        check(f"lib/procinfo.py: forged rows ({e})", False)
+        return
+    me, other = os.getuid(), os.getuid() + 1
+    hostile = b"\n300 1 sh\n"
+    # launchd (root's), an agent session (claude, 200), its shell (300), a command under it (500); the hostile process
+    # either before the shell in pid order (100) or after it (400). Their arguments: this account's, readable.
+    argvs = {200: ["claude"], 300: ["sh"], 500: ["python3", "task.py"]}
+
+    def table_with(hostile_pid):
+        procs = [kinfo(procinfo, 1, 0, 0, b"launchd"), kinfo(procinfo, 200, 1, me, b"claude"),
+                 kinfo(procinfo, 300, 200, me, b"sh"), kinfo(procinfo, hostile_pid, 1, other, hostile),
+                 kinfo(procinfo, 500, 300, me, b"python3")]
+        saved = (procinfo.PS, procinfo.kernel_procs, procinfo.argv)
+        procinfo.PS = "/nonexistent/ps"
+        procinfo.kernel_procs = lambda: procs
+        procinfo.argv = lambda pid: argvs.get(pid)
+        try:
+            out = procinfo.table()
+            try:
+                t = owners.ps_table(strict=True)
+            except OSError as e:
+                return out, None, str(e)
+        finally:
+            procinfo.PS, procinfo.kernel_procs, procinfo.argv = saved
+        # What agent_of reads of each process, given (never this Mac's own processes of those pids).
+        t.exes = {p: None for p in t}
+        t.argvs = {p: argvs.get(p) for p in t}
+        t.cwds = {p: None for p in t}
+        return out, t, None
+
+    for hostile_pid in (400, 100):
+        out, t, refused = table_with(hostile_pid)
+        lines = out[0].split("\n")
+        found = None if t is None else owners.claude_of(500, t)
+        none = t is not None and found is None and owners.ancestry_complete(500, t)
+        check(f"a name holding a newline and a row ('\\n300 1 sh\\n', pid {hostile_pid}): the kernel's table writes it "
+              "escaped as ps does, one line, no row of its own",
+              f"{hostile_pid:5d}     1 (\\012300 1 sh\\012)" in lines and len([x for x in lines if x]) == 5
+              and not any(x.split()[:3] == ["300", "1", "sh"] for x in lines), lines)
+        check(f"...and the agent above a command under that shell is found (pid {hostile_pid}), or it can't be told; "
+              "never no agent", (refused is not None or found == 200) and not none,
+              (found, refused, t and t.get(300)))
+    saved = procinfo.table
+    try:
+        procinfo.table = lambda ps=None: ("    1     0 launchd\n  200     1 claude\n  300   200 sh\n  300     1 sh\n"
+                                          "  500   300 python3\n", 0, frozenset())
+        got = []
+        for strict in (True, False):
+            try:
+                owners.ps_table(strict=strict)
+                got.append(False)
+            except OSError:
+                got.append(True)
+        procinfo.table = lambda ps=None: ("  200     1 claude\n  300   200 sh\x1c  300     1 sh\n", 0, frozenset())
+        t = owners.ps_table(strict=True)
+    finally:
+        procinfo.table = saved
+    check("a table that lists a pid twice is refused as can't tell (OSError, strict or not), never read with a row "
+          "winning", got == [True, True], got)
+    check("...and rows are its lines: split at newlines only, not at other separators a name may hold",
+          sorted(t) == [200, 300] and t[300] == (200, "sh\x1c  300     1 sh"), dict(t))
+    k = kinfo(procinfo, 77, 1, other, bytes(range(0x80, 0x90)) + b"\t\x7f")
+    check("the kernel's short name is kept as its bytes, and written as ps's C locale writes them (M-, M^, \\011, ^?)",
+          k.kname == bytes(range(0x80, 0x90)) and getattr(procinfo, "vis_c", lambda b: None)(b"\x80\xa0\xe9\t\n\x7f")
+          == "M^@\\240M-i\\011\\012^?", (k.kname, getattr(procinfo, "vis_c", None)))
+
+
 def owners_exe(pid):
     sys.path.insert(0, os.path.join(LAB, "lib"))
     try:
@@ -522,6 +615,7 @@ def main():
     check("...nor is no terminal at all", r.returncode == 1, r.returncode)
 
     procinfo_checks()
+    forged_row_checks()
 
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
     return 1 if FAILS else 0

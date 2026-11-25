@@ -602,6 +602,7 @@ vm_delete() { # NAME [--confirm NAME] [--force] [--delete-vault] [--delete-volum
     say "stopping $VM_NAME (forced: it's being deleted)"
     vm_stop "$VM_NAME" --force
   fi
+  [ "$DP_VM" != present ] || vm_known_or_die "$VM_NAME" "deleting it" "Nothing was deleted"   # stopped, and known to be
   netgw_stop
   storage_release --quiet
   local gone=() a
@@ -783,6 +784,9 @@ vm_delete_plan() {
     esac
   done <<< "$facts"
   [ -z "$DP_CKPTS" ] || die "$VM_NAME has checkpoints ($DP_CKPTS); delete them first (metacomputer --vm $VM_NAME checkpoint --delete NAME), or keep the VM. Nothing was deleted"
+  # The runner's "stopped" while this VM's own run process still runs can't be told from running (vm_status "unknown"):
+  # never deleted then, --force or not (its stop below would be skipped, and a running VM deleted).
+  [ "$DP_VM" != present ] || vm_known_or_die "$VM_NAME" "deleting it" "Nothing was deleted"
   if [ "$DP_VM" = absent ] && [ "$DP_BASE" = absent ] && [ "$DP_PREV" = absent ] && [ -z "$settings_file" ]; then
     die "there's no VM $VM_NAME, no baseline $BASELINE_NAME and no settings file of its own to delete"
   fi

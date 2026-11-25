@@ -66,6 +66,8 @@ for vm in "$VM_NAME" "$BASELINE_NAME"; do
   if [ "$st" = present ] && [ $REPLACE -ne 1 ]; then
     BUILD_QUIET_EXIT=1; die "$vm already exists; use '$(mc_cmd) reset' to restore it, or build --replace to rebuild"
   fi
+  # --replace deletes it: never one whose state can't be told (it may be running; vm_status "unknown").
+  [ "$st" != present ] || vm_known_or_die "$vm" "deleting and rebuilding it (--replace)"
 done
 command -v ssh-keygen >/dev/null || die "ssh-keygen not found"
 "$(dirname "$0")/build-tools.sh"
@@ -100,6 +102,7 @@ for vm in "$VM_NAME" "$BASELINE_NAME"; do
     [ $REPLACE -eq 1 ] || die "$vm appeared while this build was getting ready (made by something else); nothing was deleted"
     say "--replace: deleting $vm"
     vm_stop "$vm" --force
+    vm_known_or_die "$vm" "deleting it (--replace)" "Nothing was deleted"   # stopped, and known to be
     runner_delete "$vm" || die "$vm wasn't deleted (above); nothing was replaced"
   fi
 done
@@ -274,6 +277,8 @@ ok "finalized"
 say "stopping and cloning the clean baseline"
 gssh ops 'rm -rf ~/metacomputer-runs/* 2>/dev/null; true'
 vm_stop "$VM_NAME"
+# A copy of a VM that may still run (its run process there 10 s after its stop: vm_status "unknown") is no baseline.
+vm_known_or_die "$VM_NAME" "copying it to the baseline" "The VM is built, but its baseline wasn't made: once it has stopped, run $(mc_cmd) baseline"
 "$LUME" clone "$VM_NAME" "$BASELINE_NAME"
 rm -f "$RUN_DIR/seed.iso"
 ok "baseline $BASELINE_NAME created"

@@ -948,6 +948,8 @@ do_start() { # [--no-volumes]
   # holds already.
   handoff_hold_unless_user
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME' — run: metacomputer build"
+  # A VM whose state can't be told (vm_status "unknown") may be running: not started again, its storage not prepared.
+  vm_known_or_die "$VM_NAME" "starting it"
   say "starting $VM_NAME"
   if vm_running "$VM_NAME" && ! netgw_alive; then
     warn "VM running without its gateway; restarting it cleanly"; vm_stop "$VM_NAME" --force; storage_release --quiet
@@ -1107,8 +1109,8 @@ mcp_probe() { ( export_options; "$PY" "$LAB_ROOT/lib/mcomp_sdk.py" probe ); }   
 # --- the hub (lib/mcp_hub.py): one process per VM holds the connection to the driver -----
 hub_stop() { ( export_options; "$PY" "$LAB_ROOT/lib/mcp_hub.py" stop --quiet ) || true; }
 do_runinfo() { # for lib/update.py: this VM's processes and the programs they run, as JSON (no secrets, no VM contact)
-  local state=off gw="" watcher=""
-  vm_running "$VM_NAME" 2>/dev/null && state=running
+  local state gw="" watcher=""
+  state="$(vm_state_word 2>/dev/null)" || state=off      # running, unknown (it can't be told) or off
   gw="$(netgw_pid)"; [ -n "$gw" ] && ! kill -0 "$gw" 2>/dev/null && gw=""
   watcher="$(events_watcher_pid)"
   local exists=1; vm_exists "$VM_NAME" || exists=0
@@ -1139,6 +1141,8 @@ do_stop() { # [--force] (immediate power-off) [--override] (even if another sess
   local force=""; for a in ${REST[@]+"${REST[@]}"}; do [ "$a" = --force ] && force=--force; done
   expect_guard   # a caller that confirmed which VM (metacomputer update) named it: never another
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
+  # Not running isn't stopped when its state can't be told: its gateway, hub and storage are never let go then.
+  vm_known_or_die "$VM_NAME" "stopping it (or letting its gateway and storage go)"
   if vm_running "$VM_NAME"; then
     owners_check
     handoff_hold_unless_override
@@ -1175,6 +1179,7 @@ do_security() { # [apply] [--json]: the optional hardening (SECURITY.md) as conf
     [ "$apply" = 1 ] && { handoff_hold_unless_user; sync_guest_options all; }   # it changes the guest's settings
     vm_ssh="$(guest_option ssh-auth)"; vm_drv="$(guest_option driver-policy)"
   elif [ "$apply" = 1 ]; then
+    [ "$(vm_status "$VM_NAME")" != unknown ] || die "$(vm_unknown_says "$VM_NAME")"
     die "the virtual computer is off; start it (start applies these settings too)"
   fi
   local req="" req_err=""
@@ -1521,6 +1526,8 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
   local src="$1" label="$2" evtype="${3:-restored}"
   vm_lock_or_die "restoring $VM_NAME"   # held already by its callers (vm_change_lock: the identity rule checked)
   expect_guard
+  # A VM whose state can't be told may be running: never taken for stopped (not synced, deleted while it runs).
+  if vm_exists "$VM_NAME"; then vm_known_or_die "$VM_NAME" "replacing it with $label"; fi
   if [ -s "$RUN_DIR/manual-recording" ]; then
     # A reset often follows a run that went wrong; the recording of it is saved before the VM goes, whether or
     # not the VM is still running (a streamed one is on this Mac either way).
@@ -1534,6 +1541,10 @@ restore_from() { # SOURCE_VM LABEL EVENT_TYPE: replace the working VM with a cop
     storage_release --quiet
   elif vm_exists "$VM_NAME"; then
     warn "the VM is stopped, so recordings still inside it (~/metacomputer-runs) aren't copied before it's replaced"
+  fi
+  # Again, now that it's stopped: a run process still there 10 s after its stop is no stopped VM.
+  if vm_exists "$VM_NAME"; then
+    vm_known_or_die "$VM_NAME" "replacing it with $label" "Nothing was deleted, replaced or rolled back"
   fi
   if [ -n "${RESTORE_VOLUMES:-}" ]; then
     storage_py checkpoint restore "$RESTORE_VOLUMES" || die "the volumes couldn't be rolled back; the VM wasn't replaced"
@@ -1552,6 +1563,7 @@ do_reset() {
   vm_change_lock "metacomputer reset"
   expect_guard
   vm_exists "$BASELINE_NAME" || die "no baseline '$BASELINE_NAME' to restore from"
+  if vm_exists "$VM_NAME"; then vm_known_or_die "$VM_NAME" "replacing it with a fresh copy of $BASELINE_NAME"; fi
   owners_check
   confirm "Replace the working VM '$VM_NAME' with a fresh copy of '$BASELINE_NAME'? (host recordings and results are kept$(unsynced_note))"
   handoff_hold_unless_override
@@ -1583,6 +1595,7 @@ do_checkpoint() { # NAME [--replace] [--with-volumes] | --delete NAME [--yes]
   vm_exists "$VM_NAME" || die "no VM '$VM_NAME'"
   # Its checkpoints change (one replaced, one made): not while the user has the computer, held until it's saved.
   handoff_hold_unless_override
+  vm_known_or_die "$VM_NAME" "taking a checkpoint of it"
   vm_running "$VM_NAME" && die "a checkpoint is taken from the stopped computer: run 'metacomputer stop' first"
   if vm_exists "$CKPT_PREFIX$name"; then
     [ $replace = 1 ] || die "checkpoint '$name' exists (add --replace to overwrite it)"
@@ -1614,6 +1627,7 @@ do_restore() { # NAME [--yes] [--override]
   local name="${REST[0]:-}"; ckpt_name "$name"
   vm_change_lock "metacomputer restore $name"
   vm_exists "$CKPT_PREFIX$name" || die "no checkpoint '$name' (metacomputer checkpoints)"
+  if vm_exists "$VM_NAME"; then vm_known_or_die "$VM_NAME" "replacing it with checkpoint '$name'"; fi
   owners_check
   local vols; vols="$(storage_py checkpoint list "$name" 2>/dev/null)"
   confirm "Replace the working VM '$VM_NAME' with checkpoint '$name'? Its current state is discarded${vols:+, and volumes $vols go back to the checkpoint too} (host recordings and results are kept$(unsynced_note))"
@@ -1624,12 +1638,15 @@ do_restore() { # NAME [--yes] [--override]
 do_baseline() {
   parse_flags "$@"
   vm_change_lock "metacomputer baseline"
+  vm_known_or_die "$VM_NAME" "copying it to the baseline"
   owners_check
   confirm "Replace the baseline '$BASELINE_NAME' with the current state of '$VM_NAME'?"
   handoff_hold_unless_override
   local was_running=0; vm_running "$VM_NAME" && was_running=1
   # The baseline mustn't carry recordings, so they're copied and then deleted in the VM: only once the copy is whole.
   [ $was_running = 1 ] && { sync_or_stop baseline; events_watcher_stop; gssh ops 'rm -rf ~/metacomputer-runs/*' >/dev/null || true; vm_stop "$VM_NAME"; storage_release --quiet; }
+  # Again, now that it's stopped (or after the question): a run process still there is no stopped VM.
+  vm_known_or_die "$VM_NAME" "copying it to the baseline" "The baseline wasn't replaced"
   local keep="$BASELINE_NAME-prev"
   if vm_exists "$BASELINE_NAME"; then
     if vm_exists "$keep"; then runner_delete "$keep" >/dev/null || die "$keep wasn't deleted (above); the baseline wasn't replaced"; fi

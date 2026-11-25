@@ -161,6 +161,7 @@ ok() { echo "OK $*"; }
 say() { echo "SAY $*"; }
 die() { echo "DIE $*" >&2; exit 9; }
 need_running() { :; }
+vm_known_or_die() { :; }   # its state is known here (an unknown one refuses: tests/test_vm_runner.py)
 handoff_hold_unless_user() { HANDOFF_HELD=1; }   # the handoff hold: tests/test_handoff.py
 ssh_base() { SSH_ARGS=(-F /dev/null); }
 export_options() { :; }

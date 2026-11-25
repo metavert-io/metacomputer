@@ -17,7 +17,9 @@ ASCII as ps's locale has it. The kernel's answer stands in for ps's only where i
 be read and are ASCII (or the process is a zombie, which ps shows as <defunct>). Anything else can't be told: another
 account's process, arguments beyond ASCII, a process that ended between two reads. Then the field comes back as None
 (a ps that couldn't say), and table() lists the process as inexact, which lib/owners.py counts as an unidentified agent
-(fail closed, as when ps can't be read). tests/test_owners.py compares the two on this Mac's processes.
+(fail closed, as when ps can't be read). Every field this module prints is escaped as ps escapes it, the kernel's own
+short name of an inexact process too (vis_c: ps's C-locale words, whatever bytes it holds), so no field can hold a
+newline or another row. tests/test_owners.py compares the two on this Mac's processes.
 
 CLI (scripts/lib.sh proc_field, where ps can't start):
   procinfo.py command|comm|pgid|lstart PID   that field from the kernel, as `ps -ww -o FIELD= -p PID` prints it; exit
@@ -43,8 +45,9 @@ _ENOMEM = 12
 
 
 class Proc(tuple):
-    """One process as the kernel lists it: pid, ppid, pgid, uid, zombie, kname (the kernel's own short name, p_comm:
-    at most 16 bytes of its executable's file name) and start (seconds, microseconds)."""
+    """One process as the kernel lists it: pid, ppid, pgid, uid, zombie, kname (the kernel's own short name, p_comm: at
+    most 16 bytes of its executable's file name, as bytes: any byte but NUL, a newline included) and start (seconds,
+    microseconds)."""
     __slots__ = ()
     pid = property(lambda s: s[0])
     ppid = property(lambda s: s[1])
@@ -67,7 +70,7 @@ def _parse_kinfo(raw):
     pid, = struct.unpack_from("<i", raw, _KP_PID)
     uid, = struct.unpack_from("<I", raw, _KP_UID)
     ppid, pgid = struct.unpack_from("<ii", raw, _KP_PPID)
-    kname = raw[_KP_COMM:_KP_COMM + 17].split(b"\0", 1)[0].decode("utf-8", "replace")
+    kname = raw[_KP_COMM:_KP_COMM + 17].split(b"\0", 1)[0]
     return Proc((pid, ppid, pgid, uid, raw[_KP_STAT] == _SZOMB, kname, (sec, usec)))
 
 
@@ -267,6 +270,30 @@ def vis(text):
     return "".join(out)
 
 
+def vis_c(raw):
+    """bytes as ps prints them in the C locale (vis(3) with VIS_TAB | VIS_NL | VIS_NOSLASH: tab and newline as \\011 and
+    \\012, other control characters as ^X, DEL as ^?; a byte beyond ASCII as M- and its low seven bits that way, M^X for a
+    control one, \\240 for 0xA0), whatever the bytes are: never a newline or another control character. For a name the
+    kernel holds that can't be told as ps would print it in its own locale (another account's process)."""
+    out = []
+    for b in bytes(raw):
+        if b == 0xA0:
+            out.append("\\240")
+            continue
+        meta, c = ("M", b & 0x7F) if b & 0x80 else ("", b)
+        if not meta and c == 9:
+            out.append("\\011")
+        elif not meta and c == 10:
+            out.append("\\012")
+        elif c < 0x20:
+            out.append(meta + "^" + chr(c + 0x40))
+        elif c == 0x7F:
+            out.append(meta + "^?")
+        else:
+            out.append(meta + ("-" if meta else "") + chr(c))
+    return "".join(out)
+
+
 def _render(p, field):
     """The kernel's answer for one process's FIELD exactly as ps prints it, or None when it can't be told."""
     if field == "pgid":
@@ -342,7 +369,8 @@ def table(ps=None):
     """`ps -axo pid=,ppid=,comm=`: (its output, its exit code, the pids whose line can't be told exactly). From ps when
     it can run; when it can't be started, the same lines from the kernel (the kernel's own process, pid 0, left out as
     ps leaves it out), with the processes whose name can't be told exactly listed as inexact, their name shown as ps
-    shows one it can't read, "(kernel name)". Exit code 1 and no lines when the kernel can't be read either."""
+    shows one it can't read, "(kernel name)", that name escaped as ps escapes one (vis_c: it can hold any byte, a
+    newline too, and never adds a row). Exit code 1 and no lines when the kernel can't be read either."""
     try:
         r = subprocess.run([ps or PS, "-axo", "pid=,ppid=,comm="], capture_output=True, text=True)
         return r.stdout, r.returncode, frozenset()
@@ -358,7 +386,7 @@ def table(ps=None):
         name = _render(p, "comm")
         if name is None:
             inexact.add(p.pid)
-            name = f"({p.kname})"
+            name = f"({vis_c(p.kname)})"
         lines.append(f"{p.pid:5d} {p.ppid:5d} {name}")
     return "\n".join(lines) + "\n", 0, frozenset(inexact)
 

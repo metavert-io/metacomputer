@@ -707,6 +707,22 @@ vm_running() { [ "$(vm_status "$1")" = "running" ]; }
 vm_unknown_says() {
   printf '%s' "can't tell whether the virtual computer is running: the VM runner says it is stopped, but its run process (pid $(vm_run_pid "$1" || echo '?')) is still there; the runner can't see it from here (macOS's sandbox keeps it from looking at other processes): check with \`metacomputer status\` outside the sandbox"
 }
+# NAME's status for a command about to start, stop, delete, copy or replace it: vm_status, with a run process that is
+# finishing (a stop just now) given 10 s (MCOMP_VM_SETTLE_S) to go; "unknown" while it's still there after that.
+vm_settled_status() {
+  local st i=0 n=20
+  [[ "${MCOMP_VM_SETTLE_S:-}" =~ ^[0-9]{1,3}$ ]] && n=$(( MCOMP_VM_SETTLE_S * 2 ))
+  st="$(vm_status "$1")"
+  while [ "$st" = unknown ] && [ $i -lt $n ]; do sleep 0.5; i=$((i+1)); st="$(vm_status "$1")"; done
+  printf '%s\n' "$st"
+}
+# NAME WHAT [DONE]: refuse (die) while NAME's state can't be told (vm_settled_status "unknown"): it may be running, so it
+# is never taken for stopped (deleted, copied, replaced, or its gateway and storage let go). WHAT says what was about
+# to happen ("replacing it with the baseline"), DONE what had been done (by default: nothing).
+vm_known_or_die() {
+  [ "$(vm_settled_status "$1")" != unknown ] && return 0
+  die "$(vm_unknown_says "$1"). Not $2 while it may be running: stop it where the VM runner can see it (metacomputer stop outside the sandbox), or check the runner, then run this again. ${3:-Nothing was changed}"
+}
 vm_mac() { lume_field "$1" macAddress; }
 
 # --- a computer reached over SSH (MC_REMOTE=1: lib/remote.py, lib/cloud/) -------------------------------------
@@ -1113,10 +1129,8 @@ host_sharing_args() {
 
 STORAGE_RUN_ARGS=()   # extra `lume run` arguments for this VM's storage (bin/metacomputer storage_prepare)
 vm_start() { # NAME [seed.iso]
-  local name="$1" seed="${2:-}" mac st i=0
-  st="$(vm_status "$name")"
-  # Its run process may still be finishing (a stop just now): it gets 10 s to go before it counts.
-  while [ "$st" = unknown ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i+1)); st="$(vm_status "$name")"; done
+  local name="$1" seed="${2:-}" mac st
+  st="$(vm_settled_status "$name")"     # a run process that is finishing (a stop just now) gets 10 s to go
   [ "$st" = running ] && { ok "$name already running"; return 0; }
   [ "$st" != unknown ] || die "$(vm_unknown_says "$name"); not starting it again"
   mac="$(vm_mac "$name")"; [ -n "$mac" ] || die "cannot read $name's MAC address from lume"
