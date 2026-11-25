@@ -2,17 +2,6 @@
 where and what: KIND, databases, read), read for `metacomputer learn` (docs/learn.md; lib/transcripts.py reads the
 agents that keep files) and turned into lib/transcripts.py's Transcript, so the same mining applies.
 
-Where and what (checked with OpenClaw 2026.11.7 and Hermes Agent 0.23.3: their sources, and sessions each made in a
-throwaway home with a stand-in model and a stand-in metacomputer server):
-- Hermes Agent: state.db in its home (HERMES_HOME, else ~/.hermes) and in each profile (<root>/profiles/<name>/, the
-  root being ~/.hermes, or a HERMES_HOME outside it as Hermes Agent resolves it). Tables sessions (id, cwd) and messages
-  (session_id, role, content, tool_calls, tool_call_id, tool_name, timestamp in seconds; ordered by id): an assistant
-  row's tool_calls is the OpenAI list [{"id", "function": {"name", "arguments"}}], and a "tool" row holds a result,
-  wrapped in <untrusted_tool_result source="..."> around {"result": ...} or {"error": ...}. Its MCP tools are named
-  mcp__metacomputer__<tool>. With tool search on (its default) the model calls them through tool_call {"calls":
-  [{"name", "arguments"}]}; Hermes Agent splits a batch into one call each before it keeps it, and the tool row names the
-  tool itself. terminal is its shell.
-
 How: never through the agent, and never a write or a lock on its files. A database is read into memory as it was at its
 last commit: its main file plus the commits in its write-ahead log (the -wal file, where a running agent keeps its
 newest sessions), whose frames are checked as SQLite checks them (the log's salts, the running checksums, commit
@@ -51,7 +40,6 @@ MAX_ROW = 8 << 20               # one row's JSON at most (a larger one is skippe
 MAX_SECONDS = 120.0             # time spent on one database
 MAX_AGENT_DIRS = 200            # OpenClaw agents (and Hermes profiles) looked at per state folder
 WAL_MAGIC = (0x377F0682, 0x377F0683)
-UNTRUSTED_WRAP = re.compile(r'^<untrusted_tool_result source="[^"\n]{0,200}">\n', re.S)
 
 
 class Unreadable(Exception):
@@ -379,21 +367,6 @@ def _listdir(folder):
         return []
 
 
-def hermes_dbs(env):
-    """Hermes Agent's session databases: state.db in HERMES_HOME (when set), in its root (~/.hermes, or a HERMES_HOME
-    outside it: that folder, or the folder above profiles/ when it is a profile) and in each profile under the root, as
-    Places whose root is that home (a profile's: the root)."""
-    native = os.path.join(_home(env), ".hermes")
-    hh = os.path.abspath(os.path.expanduser(env["HERMES_HOME"])) if env.get("HERMES_HOME") else None
-    root = native
-    if hh and not (hh == native or hh.startswith(native.rstrip("/") + "/")):
-        root = os.path.dirname(os.path.dirname(hh)) if os.path.basename(os.path.dirname(hh)) == "profiles" else hh
-    places = [_place(h, "state.db") for h in ([hh] if hh else []) + [root]]
-    places += [_place(root, "profiles", n, "state.db") for n in _listdir(os.path.join(root, "profiles"))[:MAX_AGENT_DIRS]
-               if not n.startswith(".")]
-    return [p for p in _distinct(places) if os.path.lexists(p)]
-
-
 # --- turning rows into calls ----------------------------------------------------------------------------------
 def _new(path, kind, sid, cwd):
     tr = transcripts.Transcript(path)
@@ -460,133 +433,6 @@ def _recent(con, kind, table, column, cutoff, notes):
     return [sid for sid, _ in rows[:MAX_SESSIONS]]
 
 
-# --- Hermes Agent ---------------------------------------------------------------------------------------------
-HE_BRIDGE = "tool_call"
-
-
-def _hermes_result(content):
-    """(error, text) of a Hermes Agent tool row: inside its <untrusted_tool_result> wrapper, the {"result"} or {"error"}
-    JSON its tools answer with (an MCP tool's text, or its error)."""
-    if not isinstance(content, str):
-        return None, ""
-    body = content
-    m = UNTRUSTED_WRAP.match(body)
-    if m:
-        body = body[m.end():]
-        if body.endswith("</untrusted_tool_result>"):
-            body = body[:-len("</untrusted_tool_result>")]
-        i = body.find("\n\n{")                         # after the wrapper's own notice
-        body = body[i + 2:] if i >= 0 else body
-    body = body.strip()
-    try:
-        d = wirelimits.loads(body[:MAX_ROW]) if body.startswith("{") else None
-    except (ValueError, RecursionError):
-        d = None
-    if not isinstance(d, dict):
-        return None, body[:transcripts.TEXT_KEEP_WINDOWS]
-    if "error" in d:
-        v = d["error"]
-        return True, v if isinstance(v, str) else json.dumps(v)[:transcripts.TEXT_KEEP_WINDOWS]
-    if "exit_code" in d and isinstance(d.get("exit_code"), int):         # its terminal tool
-        return d["exit_code"] != 0, ""
-    v = d.get("result", d)
-    return False, (v if isinstance(v, str) else json.dumps(v))[:transcripts.TEXT_KEEP_WINDOWS]
-
-
-def _hermes_calls(tc):
-    """[(id, name, input)] of one OpenAI-style tool call in an assistant row: tool_call's entries one by one (a batch of
-    more than one gets ids of their own, whose results can't be told apart), terminal as Bash."""
-    if not isinstance(tc, dict):
-        return []
-    fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-    name, cid = fn.get("name"), tc.get("id") or tc.get("call_id")
-    if not isinstance(name, str):
-        return []
-    cid = cid[:200] if isinstance(cid, str) else None
-    args = _args(fn.get("arguments"))
-    if name == HE_BRIDGE:
-        entries = args.get("calls")
-        if entries is None and isinstance(args.get("name"), str):
-            entries = [{"name": args["name"], "arguments": args.get("arguments")}]
-        if isinstance(entries, str):
-            try:
-                entries = wirelimits.loads(entries[:MAX_ROW])
-            except (ValueError, RecursionError):
-                entries = []
-        entries = [entries] if isinstance(entries, dict) else entries if isinstance(entries, list) else []
-        out = []
-        for k, e in enumerate(entries[:60]):
-            if isinstance(e, dict) and isinstance(e.get("name"), str):
-                n = e["name"]
-                out.append(((cid if len(entries) == 1 else f"{cid}#{k}") if cid else None,
-                            "Bash" if n == "terminal" else n, _args(e.get("arguments"))))
-        return out
-    return [(cid, "Bash" if name == "terminal" else name, args)]
-
-
-def hermes_session(path, sid, cwd, rows, slim=True):
-    """One Hermes Agent session (its message rows, in order: role, content, tool_calls, tool_call_id, timestamp) as a
-    Transcript."""
-    tr = _new(path, "hermes", sid, cwd)
-    by_id, last_t = {}, None
-    for role, content, tool_calls, tcid, ts in rows:
-        t = _when(ts)
-        _see(tr, t)
-        if role == "user":
-            last_t = t if t is not None else last_t
-        elif role == "assistant" and isinstance(tool_calls, str) and tool_calls.strip():
-            try:
-                tcs = wirelimits.loads(tool_calls[:MAX_ROW])
-            except (ValueError, RecursionError):
-                continue
-            for tc in tcs if isinstance(tcs, list) else []:
-                for cid, name, inp in _hermes_calls(tc):
-                    if len(tr.calls) >= transcripts.MAX_CALLS:
-                        tr.info["truncated"] = "calls"
-                        break
-                    call = _call(tr, cid, name, inp, t, last_t, slim)
-                    if cid:
-                        by_id[cid] = call
-                    tr.calls.append(call)
-            last_t = t if t is not None else last_t
-        elif role == "tool" and isinstance(tcid, str):
-            call = by_id.get(tcid[:200])
-            if call is None or call["error"] is not None:
-                continue
-            err, text = _hermes_result(content)
-            if err is None:
-                err = False
-            _result(call, err, text, 0, t, slim)
-            last_t = t if t is not None else last_t
-    return tr
-
-
-def read_hermes(con, path, cutoff, notes, deadline, slim=True):
-    mcols, scols = _columns(con, "messages"), _columns(con, "sessions")
-    if not {"session_id", "role", "content", "tool_calls", "tool_call_id", "timestamp"} <= mcols:
-        raise Layout()
-    order = "id" if "id" in mcols else "rowid"
-    named = "OR instr(coalesce(tool_name, ''), 'metacomputer') > 0" if "tool_name" in mcols else ""
-    summary = "AND coalesce(_compressed_summary, 0) = 0" if "_compressed_summary" in mcols else ""
-    for sid in _recent(con, "hermes", "messages", "timestamp", cutoff, notes):
-        if time.monotonic() > deadline:
-            notes.add("hermes", SLOW)
-            return
-        if not con.execute(f"SELECT 1 FROM messages WHERE session_id = ? AND (instr(coalesce(tool_calls, ''), "
-                           f"'metacomputer') > 0 {named}) LIMIT 1", (sid,)).fetchone():
-            continue
-        cwd = None
-        if {"id", "cwd"} <= scols:
-            r = con.execute("SELECT cwd FROM sessions WHERE id = ?", (sid,)).fetchone()
-            cwd = transcripts._str(r[0]) if r else None
-        rows = con.execute(
-            f"SELECT role, CASE WHEN length(content) > ? THEN NULL ELSE content END, "
-            f"CASE WHEN length(tool_calls) > ? THEN NULL ELSE tool_calls END, tool_call_id, timestamp FROM messages "
-            f"WHERE session_id = ? {summary} ORDER BY {order} LIMIT ?", (MAX_ROW, MAX_ROW, sid, transcripts.MAX_EVENTS))
-        shown = sid[len("local-"):] if sid.startswith("local-") else sid
-        yield hermes_session(path, shown[:200], cwd, rows, slim)
-
-
 # --- all of them ----------------------------------------------------------------------------------------------
 class Notes:
     """What couldn't be read, per agent, in fixed words with counts: {agent: {words: count}}."""
@@ -605,7 +451,7 @@ class Notes:
 
 def _readers():
     """{kind: (where its databases are, how to read one)} of every agent that keeps its sessions in databases
-    (coding-agents/<name>/sessions.py: KIND, databases, read), in the registry's order; the agents not moved yet after."""
+    (coding-agents/<name>/sessions.py: KIND, databases, read), in the registry's order."""
     from agentkit import manifests, registry
     out = {}
     for n in registry.AGENTS:
@@ -613,7 +459,6 @@ def _readers():
         if ses and ses["source"] == "databases":
             mod = registry.module(n, "sessions")
             out[mod.KIND] = (mod.databases, mod.read)
-    out.update({k: v for k, v in _HERE.items() if k not in out})
     return out
 
 
@@ -628,9 +473,8 @@ def _labels():
     return out
 
 
-_HERE = {"hermes": (hermes_dbs, read_hermes)}      # not in its folder yet
 READERS = _readers()
-LABELS = dict({"hermes": "Hermes Agent"}, **_labels())      # (Hermes Agent's: not in its folder yet)
+LABELS = _labels()
 
 
 def sessions(env, cutoff, slim=True):

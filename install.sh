@@ -865,8 +865,6 @@ agent_config_mentions() { # NAME: 0 when a file of the agent's configuration may
   case "$1" in
     gemini) set -- "${GEMINI_CLI_HOME:-$HOME}/.gemini/settings.json" "$HOME/.gemini/settings.json" ;;
     antigravity) set -- "$HOME/.gemini/config/mcp_config.json" ;;
-    hermes) set -- "${HERMES_HOME:-$HOME/.hermes}/config.yaml" "$HOME/.hermes/config.yaml"
-            for d in "$HOME"/.hermes/profiles/*/; do set -- "$@" "${d}config.yaml"; done ;;
   esac
   fi
   for f in "$@"; do

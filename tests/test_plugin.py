@@ -1957,8 +1957,10 @@ def test_codex_openai():
                     "THIRD_PARTY_NOTICES.md", "gemini-extension.json", "lib/strictargs.py"):   # (their command lines' rules)
             os.makedirs(os.path.dirname(os.path.join(lab, rel)), exist_ok=True)
             shutil.copy2(os.path.join(LAB, rel), os.path.join(lab, rel))
-        for rel in ("plugin", "agent-plugin", ".agents", "skills/metacomputer", ".claude/skills/cua-driver"):
-            shutil.copytree(os.path.join(LAB, rel), os.path.join(lab, rel), symlinks=True)
+        for rel in ("plugin", "agent-plugin", ".agents", "skills/metacomputer", ".claude/skills/cua-driver",
+                    "coding-agents", "lib/agentkit"):       # (the agents' channel files, and the registry that lists them)
+            shutil.copytree(os.path.join(LAB, rel), os.path.join(lab, rel), symlinks=True,
+                            ignore=shutil.ignore_patterns("__pycache__"))
         outside = os.path.join(t, "outside")
         os.makedirs(outside)
 

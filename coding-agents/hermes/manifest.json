@@ -10,5 +10,12 @@
   "tools": "mcp__metacomputer__*",
   "bench": {
     "switch": "hermes"
+  },
+  "sessions": {
+    "source": "databases",
+    "key": "hermes_sessions",
+    "kinds": [
+      "hermes"
+    ]
   }
 }

@@ -3028,7 +3028,7 @@ CLAIMS = [
      and "ORDER BY w DESC LIMIT ?" in function_src("lib/session_dbs.py", "_recent")
      and "(cutoff, MAX_SESSIONS + 1)" in function_src("lib/session_dbs.py", "_recent")
      and "_recent(con, " in function_src("coding-agents/openclaw/sessions.py", "read")
-     and "_recent(con, " in function_src("lib/session_dbs.py", "read_hermes")),
+     and "_recent(con, " in function_src("coding-agents/hermes/sessions.py", "read")),
     # Codex's marketplace and the OpenAI package (scripts/sync-plugin.py, scripts/build-openai-plugin.py)
     ("docs/codex.md", r"It brings the skills, `metacomputer`, `cua-driver` and `learn` \(`\$metacomputer:learn`, or `/skills`\), and no MCP server",
      lambda m: '"skills": ["./skills/", "./.claude/skills/"]' in function_src("scripts/sync-plugin.py", "codex_plugin_json")
@@ -3047,7 +3047,9 @@ CLAIMS = [
      and "out.append((dst_rel, regular_file(src_rel), 0o644))" in function_src("scripts/build-openai-plugin.py", "contents")
      and "if os.path.islink(p):" in function_src("scripts/build-openai-plugin.py", "no_link")
      and "if os.path.islink(src) or not os.path.isdir(src):" in function_src("scripts/build-openai-plugin.py", "regular_files")
-     and 'for top in ("plugin", "agent-plugin", ".agents"):' in function_src("scripts/sync-plugin.py", "differences")
+     and "for top in LINK_TOPS:" in function_src("scripts/sync-plugin.py", "differences")
+     and 'LINK_TOPS = ("agent-plugin",)' in raw("coding-agents/hermes/channel.py")
+     and '(".agents",)' in raw("scripts/sync-plugin.py") and '("plugin",)' in raw("scripts/sync-plugin.py")
      and "if os.path.islink(path):\n        return [path]" in function_src("scripts/sync-plugin.py", "links_in")),
     ("docs/codex.md", r"Nothing is uploaded or\s+submitted from here",
      lambda m: not re.search(r"urllib|http\.client|socket|subprocess|requests", raw("scripts/build-openai-plugin.py").split('"""', 2)[2])),
