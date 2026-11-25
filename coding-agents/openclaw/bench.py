@@ -43,9 +43,16 @@ def isolate(B, sw, work, cfg, home, prog, env):
     return args + (["--model", B.own_model(sw)] if B.own_model(sw) else []), env
 
 
+def _count(u, *keys):
+    """The first of keys that usage has, else None."""
+    return next((u[k] for k in keys if k in u), None)
+
+
 def envelope_events(env_obj, state):
     """`openclaw agent exec --json`'s one envelope as stream-json events: init and the result (tokens, no cost). It
-    reports a summary of the tool calls, not each one, so the per-call metrics of these runs are empty."""
+    reports a summary of the tool calls, not each one, so the per-call metrics of these runs are empty. OpenClaw counts
+    the prompt tokens read from and written to the provider's cache apart from `input` (cacheRead, cacheWrite): they
+    are the result's cache_read_input_tokens and cache_creation_input_tokens, which bench's input tokens add up."""
     if not isinstance(env_obj, dict):
         return []
     u = env_obj.get("usage") if isinstance(env_obj.get("usage"), dict) else {}
@@ -56,5 +63,7 @@ def envelope_events(env_obj, state):
             {"type": "result", "subtype": "success" if ok else "error", "is_error": not ok,
              "num_turns": env_obj.get("assistantTurns"), "total_cost_usd": None, "session_id": env_obj.get("sessionId"),
              "tool_summary_calls": summary.get("calls"),
-             "usage": {"input_tokens": u.get("input") if "input" in u else u.get("inputTokens"),
-                       "output_tokens": u.get("output") if "output" in u else u.get("outputTokens")}}]
+             "usage": {"input_tokens": _count(u, "input", "inputTokens"),
+                       "output_tokens": _count(u, "output", "outputTokens"),
+                       "cache_read_input_tokens": _count(u, "cacheRead"),
+                       "cache_creation_input_tokens": _count(u, "cacheWrite")}}]

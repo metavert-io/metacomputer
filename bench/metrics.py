@@ -6,6 +6,7 @@ Metrics follow HCU's: steps (turns), tokens, time, cost, the tool-call mix
 that were refused or rejected for malformed arguments.
 """
 import json
+import os
 import re
 
 # The metacomputer tools: from a user-scope or --mcp-config server named metacomputer, or from an older copy of the
@@ -23,6 +24,14 @@ APP = {"launch_app", "kill_app", "bring_to_front", "set_window_frame"}
 AX_TARGET_KEYS = ("element_token", "target", "role", "name", "element", "element_index", "selector", "label")
 CLI_RE = re.compile(r"(?:^|[\s/;&|(])(?:metacomputer|mcomp)\s+([a-z][a-z-]*)")
 SHELL_SUBCMDS = {"ssh", "sh"}
+CLI_NAMES = ("metacomputer", "mcomp")
+CLI_OPTIONS = ("--vm", "--on")          # bin/metacomputer's options before the command that take a value
+SUBCOMMAND = re.compile(r"[a-z][a-z-]*")
+ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.S)
+VAR = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
+# Words before a command that run it (or start a list): env, command, exec, nohup, time, nice and timeout with their
+# options; a list's keywords.
+KEYWORDS = {"!", "{", "}", "then", "do", "else", "elif", "if", "while", "until", "time"}
 
 BRIDGE_REFUSED = re.compile(r"Refused by the metacomputer bridge|in use by another controller|"
                             r"bounded session has ended", re.I)
@@ -152,6 +161,115 @@ def steps_of(args):
     return out
 
 
+def _segments(cmd):
+    """A shell command's simple commands, as text: split at unquoted ; & | newline ( ) and backquotes, a here-document's
+    lines left out. Quotes and backslashes are kept for shlex."""
+    out, cur, i, n, q, heredocs = [], [], 0, len(cmd), None, []
+    while i < n:
+        c = cmd[i]
+        if q:
+            cur.append(c)
+            if c == "\\" and q == '"' and i + 1 < n:
+                cur.append(cmd[i + 1])
+                i += 1
+            elif c == q:
+                q = None
+        elif c in "'\"":
+            q = c
+            cur.append(c)
+        elif c == "\\" and i + 1 < n:
+            cur.append(cmd[i:i + 2])
+            i += 1
+        elif c == "<" and cmd.startswith("<<", i) and not cmd.startswith("<<<", i):
+            m = re.match(r"<<-?\s*(['\"]?)([A-Za-z0-9_.-]+)\1", cmd[i:])
+            if m:
+                heredocs.append(m.group(2))
+                i += m.end()
+                continue
+            cur.append(c)
+        elif c in ";&|()`\n":
+            out.append("".join(cur))
+            cur = []
+            if c == "\n" and heredocs:                    # the here-documents' bodies, each to its own last line
+                for word in heredocs:
+                    j = i + 1
+                    while j <= n:
+                        k = cmd.find("\n", j)
+                        k = n if k < 0 else k
+                        line = cmd[j:k]
+                        j = k + 1
+                        if line.lstrip("\t") == word:
+                            break
+                    i = j - 1
+                heredocs = []
+        else:
+            cur.append(c)
+        i += 1
+    out.append("".join(cur))
+    return [x for x in out if x.strip()]
+
+
+def cli_subcommands(cmd, names=None, depth=0):
+    """The metacomputer commands a shell command runs, in order (call, sh, who...): its program metacomputer or mcomp
+    (by any path, quoted or not, or a variable it was put in: M=.../metacomputer; $M call), in any simple command
+    (after cd ... &&, in a pipeline), after assignments and env/command/exec/nohup/time/nice/timeout, past its --vm and
+    --on options; and inside sh/bash/zsh -c."""
+    import shlex
+    names = dict(names or {})
+    subs = []
+    for seg in _segments(cmd):
+        try:
+            words = shlex.split(seg, posix=True)
+        except ValueError:
+            words = seg.split()
+        i, local = 0, {}
+        while i < len(words) and ASSIGN.fullmatch(words[i]):
+            k, v = ASSIGN.fullmatch(words[i]).groups()
+            local[k] = v
+            i += 1
+        if i == len(words):
+            names.update(local)                            # M=...; on its own: kept for what follows
+            continue
+        while i < len(words):
+            w = words[i]
+            if w in KEYWORDS:
+                i += 1
+            elif w == "env":
+                i += 1
+                while i < len(words) and (words[i].startswith("-") or ASSIGN.fullmatch(words[i])):
+                    i += 2 if words[i] in ("-u", "-P", "-S", "-C") else 1
+            elif w in ("command", "exec", "nohup", "builtin"):
+                i += 1
+                while i < len(words) and words[i].startswith("-"):
+                    i += 1
+            elif w == "nice":
+                i += 1
+                while i < len(words) and words[i].startswith("-"):
+                    i += 2 if words[i] == "-n" else 1
+            elif w == "timeout":
+                i += 1
+                while i < len(words) and words[i].startswith("-"):
+                    i += 2 if words[i] in ("-s", "-k", "--signal", "--kill-after") else 1
+                i += 1                                     # its duration
+            else:
+                break
+        if i >= len(words):
+            continue
+        prog = VAR.sub(lambda m: names.get(m.group(1) or m.group(2), m.group(0)), words[i])
+        base = os.path.basename(prog)
+        rest = words[i + 1:]
+        if base in CLI_NAMES:
+            while rest and (rest[0] in CLI_OPTIONS or rest[0].split("=", 1)[0] in CLI_OPTIONS):
+                rest = rest[2:] if rest[0] in CLI_OPTIONS else rest[1:]
+            if rest and SUBCOMMAND.fullmatch(rest[0]):
+                subs.append(rest[0])
+        elif base in ("sh", "bash", "zsh") and "-c" in rest and depth < 3:
+            j = rest.index("-c")
+            if j + 1 < len(rest):
+                subs += cli_subcommands(rest[j + 1], names, depth + 1)
+    return subs
+
+
 def result_text(res):
     items = res.get("content") or []
     return " ".join(x.get("text", "") for x in items if isinstance(x, dict) and x.get("type") == "text")
@@ -225,7 +343,7 @@ def analyze(events, times=None):
                 m["actions"][action_route(tool, args)] += 1
         elif name == "Bash":
             cmd = args.get("command") or ""
-            subs = CLI_RE.findall(cmd)
+            subs = cli_subcommands(cmd) or CLI_RE.findall(cmd)     # the regex: what it always counted
             if any(s in SHELL_SUBCMDS for s in subs):
                 m["shell_calls"] += 1
             elif subs:
