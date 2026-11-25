@@ -6,7 +6,7 @@ matters, through sinks they choose. Off by default: with no sink configured
 nothing leaves this Mac, and every command behaves as before. Every event is also
 appended to this VM's local log ($LOG_DIR/events.jsonl).
 
-  events.py sink add NAME --kind webhook|otlp|syslog|ntfy --url URL [--header 'Name: value' ...]
+  events.py sink add NAME --kind KIND --url URL [--header 'Name: value' ...]
                  [--header-env 'Name=VAR' ...] [--ca FILE] [--families F1,F2|all] [--min-severity info|warn|error]
                  [--replace] [--yes]                 (add and remove: only from a terminal; announced to the sinks)
   events.py sink list [--json] | show NAME [--key] [--json] | test NAME | remove NAME [--yes]
@@ -21,11 +21,8 @@ appended to this VM's local log ($LOG_DIR/events.jsonl).
   events.py has-sinks                                exit 0 when a sink is configured
   events.py needs-watcher                            exit 0 when a watcher is wanted (sinks, or announcements to deliver)
 
-Kinds (the same formats as the secrets vault's audit sinks):
-  webhook  CloudEvents 1.0 structured JSON, signed: X-Metacomputer-Signature: sha256=HMAC(body)
-  otlp     OpenTelemetry logs, OTLP/HTTP JSON (POST URL/v1/logs)
-  syslog   RFC 5424 over TLS with octet counting (RFC 5425), syslog+tls://host:port
-  ntfy     one short human message per event (https; http only to this Mac's loopback)
+Kinds: each is a folder, sinks/<kind>/ (its manifest, its URL's rules, its format and how it's delivered: sink.py),
+listed in lib/sinkkit/registry.py; docs/sinks.md says what each sends. The vault's audit sinks send the same formats.
 
 Delivery is best effort and at least once: synchronous with a 3 s timeout per sink
 at the point of emission, then an on-disk backlog per sink retried with backoff by
@@ -112,7 +109,8 @@ NETGW_POLL_S = 2          # between its cycles, the watcher looks at the gateway
 DEBOUNCE_S = 300
 EMIT_DUP_S = 60           # `events emit`: the same event again within a minute is dropped
 RATE_CAP, RATE_WINDOW = 10, 600   # per family: at most 10 events in any 10 minutes reach the sinks
-# Per phone (ntfy) sink, whatever the family, tests and summaries included: at most 10 in any 10 minutes
+# Per phone sink (a kind whose manifest says "phone"), whatever the family, tests and summaries included: at most 10 in
+# any 10 minutes
 # and 30 in any hour.
 PHONE_LIMITS = ((10, 600), (30, 3600))
 ADMIN_MAX_ATTEMPTS = 20           # a sink-change announcement is retried this often (with backoff), then given up
@@ -758,7 +756,7 @@ def _queue(ev, cfg, only_sinks):
 
 
 def phone_slot(name, now=None):
-    """Right before a network attempt to a phone (ntfy) sink: is there room under PHONE_LIMITS? If so the
+    """Right before a network attempt to a phone sink: is there room under PHONE_LIMITS? If so the
     attempt takes a slot (retries too). Returns (ok, when the next slot frees). Takes the global lock."""
     now = now or time.time()
     with global_lock():
@@ -1161,8 +1159,8 @@ def http_post(url, body, headers, ca_pem, timeout, track=None):
 
 def deliver(sink, batch, timeout):
     """Send events to one sink within `timeout` seconds of wall-clock time. Returns (ok, error, permanent,
-    rejected): permanent = this batch will never be accepted; rejected = how many of its events an OTLP
-    collector refused in a 2xx answer (partial success: delivered, but those are dropped, not retried).
+    rejected): permanent = this batch will never be accepted; rejected = how many of its events the receiver
+    refused in a 2xx answer (a partial success: delivered, but those are dropped, not retried).
 
     Socket timeouts apply to each read, so a server that sends a byte every second could hold a
     connection for ever. The exchange runs in a daemon thread: past the deadline its sockets are shut
@@ -1329,7 +1327,7 @@ def flush_sink(name, sink, budget=EMIT_BUDGET, force=False, wait_lock=1.0):
             if ok:
                 st.update(sent_seq=batch[-1]["seq"], delivered=st["delivered"] + len(batch) - rejected, failures=0,
                           next_retry=0, last_ok_at=time.time(), head_attempts=0)
-                if rejected:      # OTLP partial success: those events weren't stored, and aren't retried
+                if rejected:      # a partial success: those events weren't stored, and aren't retried
                     st.update(dropped=st["dropped"] + rejected, rejected=int(st.get("rejected") or 0) + rejected,
                               last_error=err, last_error_at=time.time(), last_rejection_at=time.time())
                 i += len(batch)
@@ -1547,8 +1545,8 @@ def flush_admin(budget=EMIT_BUDGET, force=False):
                     changed.add(p)
                     ev = recs[p]["event"]
                     if ok and rejected:
-                        # An OTLP collector took the request but refused the announcement (partial success):
-                        # it isn't stored there, and OTLP says not to retry it.
+                        # The receiver took the request but refused the announcement (a partial success): it
+                        # isn't stored there, and isn't retried.
                         t["state"], t["error"] = "abandoned", err
                         admin_log(f"{ev.get('type')} {ev.get('seq')}: refused by {name} ({err})")
                         note_error(f"sink-change announcement {ev.get('seq')} to {name} refused ({err})")
@@ -2383,8 +2381,8 @@ NOTIFY_DUP_S = 300
 
 
 def mask_url(url):
-    """A URL to show: scheme, host and port, and only path parts that can't be secrets (webhook URLs and
-    ntfy topics often are)."""
+    """A URL to show: scheme, host and port, and only path parts that can't be secrets (a sink's URL path often
+    holds one)."""
     try:
         u = urlsplit(url)
         host = u.hostname or ""
@@ -2490,7 +2488,7 @@ def sink_summary(name, sink):
             "signed": sink["kind"] in sinkkit.manifests.signed(), "created": sink.get("created"), "backlog": waiting,
             "delivered": st["delivered"], "dropped": st["dropped"], "last_ok_at": st["last_ok_at"],
             "rejected": int(st.get("rejected") or 0),
-            # a failure, a backlog, or a receiver's refusal (OTLP partial success) since its last full success
+            # a failure, a backlog, or a receiver's refusal (a partial success) since its last full success
             "last_error": st["last_error"] if st["failures"] or waiting or (
                 st.get("last_rejection_at") and (st["last_error_at"] or 0) >= (st["last_ok_at"] or 0)) else None,
             "last_error_at": st["last_error_at"], "next_retry_in": max(0, int(st["next_retry"] - time.time()))}
@@ -2800,7 +2798,7 @@ def status_info():
         if b and st["last_error"]:
             out["failing"].append({"sink": n, "error": st["last_error"], "backlog": b})
         elif st.get("last_rejection_at") and time.time() - float(st["last_rejection_at"]) < 86400:
-            # Delivered, but the receiver refused some of it (OTLP partial success): those were dropped.
+            # Delivered, but the receiver refused some of it (a partial success): those were dropped.
             out.setdefault("rejected", []).append({"sink": n, "error": st["last_error"], "count": int(st.get("rejected") or 0)})
     pid = watcher_pid()
     out["watcher"] = {"running": bool(pid), "pid": pid}
@@ -2880,7 +2878,8 @@ def main(argv):
     p.add_argument("--json", action="store_true")
     p = sk.add_parser("show")
     p.add_argument("name")
-    p.add_argument("--key", action="store_true", help="also print a webhook sink's signing key")
+    p.add_argument("--key", action="store_true",
+                   help=f"also print a {sinkkit.manifests.in_words(sinkkit.manifests.signed(), 'or')} sink's signing key")
     p.add_argument("--json", action="store_true")
     sk.add_parser("test").add_argument("name")
     p = sk.add_parser("remove", help="needs your own terminal")
