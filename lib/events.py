@@ -39,7 +39,6 @@ import base64
 import calendar
 import fcntl
 import hashlib
-import hmac
 import http.client
 import json
 import os
@@ -121,7 +120,6 @@ MAX_BACKLOG = 10000
 LOG_MAX = 10 * 2**20
 SPOOL_MAX_BYTES = 64 * 1024
 
-CE_PREFIX = "io.metavert.metacomputer"
 SIGNATURE_HEADER = sinkkit.SIGNATURE_HEADER
 SD_ID = "metacomputer@32473"     # 32473: the documentation enterprise number (RFC 5612)
 SYSLOG_FACILITY = 1              # user-level
@@ -1084,16 +1082,6 @@ def dumps(obj):
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
-def cloudevent(ev):
-    return {"specversion": "1.0", "id": ev["id"], "source": f"metacomputer/{ev['host']}",
-            "type": f"{CE_PREFIX}.{ev['family']}.{ev['type']}", "time": ev["time"], "subject": ev["vm"],
-            "datacontenttype": "application/json", "data": ev}
-
-
-def signature(key_b64, body):
-    return "sha256=" + hmac.new(base64.b64decode(key_b64), body, hashlib.sha256).hexdigest()
-
-
 _version = {}
 
 
@@ -1335,12 +1323,6 @@ def _deliver(sink, batch, timeout, track):
             return False, short_error(e), False, 0
     if hasattr(mod, "request"):                 # an HTTP POST (sinks/<kind>/sink.py)
         target, body, headers = mod.request(sys.modules[__name__], sink, batch, extra)
-    elif kind == "webhook":
-        ev = batch[0]
-        body = dumps(cloudevent(ev)).encode()
-        headers = {**extra, "Content-Type": "application/cloudevents+json; charset=utf-8", "User-Agent": USER_AGENT,
-                   SIGNATURE_HEADER: signature(sink["hmac_key"], body)}
-        target = url
     elif kind == "otlp":
         body = dumps(otlp_body(batch)).encode()
         headers = {**extra, "Content-Type": "application/json", "User-Agent": USER_AGENT}
