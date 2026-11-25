@@ -14,5 +14,12 @@
   },
   "bench": {
     "switch": "codex"
+  },
+  "sessions": {
+    "source": "files",
+    "key": "codex_sessions",
+    "kinds": [
+      "codex"
+    ]
   }
 }

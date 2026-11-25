@@ -159,6 +159,13 @@ LIB="$(dirname "$SELF")/../scripts/lib.sh"
 . "$(dirname "$SELF")/../scripts/strictargs.sh"
 # The providers' data (their manifests', made into bash by scripts/gen-providers.py): their own options, below.
 . "$(dirname "$SELF")/../lib/cloud/providers.sh" || exit 1
+# The coding agents' data (lib/agentkit/agents.sh, made by scripts/gen-agents.py) and each one's own part of this
+# command (coding-agents/NAME/cli.sh: functions only, ag_FLAG_cli_HOOK).
+. "$(dirname "$SELF")/../lib/agentkit/agents.sh" || exit 1
+for mc_d in $MC_AGENTS; do
+  if [ -f "$(dirname "$SELF")/../coding-agents/$mc_d/cli.sh" ]; then . "$(dirname "$SELF")/../coding-agents/$mc_d/cli.sh"; fi
+done
+unset mc_d
 # --vm NAME before the command picks the VM (scripts/lib.sh: config/vms/NAME.env; MCOMP_VM=NAME does the same);
 # --on PLACE picks it by where it is (lib/placement.py, below, once the settings are read).
 # Each is given once, and its value is a name or a place, never an option or a request for usage (no VM name or place
@@ -518,19 +525,12 @@ if [ -n "${MCOMP_PARSE_ONLY:-}" ]; then
   echo "metacomputer: MCOMP_PARSE_ONLY is set (the tests' switch): parse only, nothing was done; unset it" >&2
   exit 99
 fi
-# Inside Codex's sandbox (Codex sets CODEX_SANDBOX for every command it sandboxes), what metacomputer needs on this
-# Mac is blocked: its state folders, the VM's SSH port, the hub's and the vault's sockets. Commands would fail in
-# confusing ways (`status` would call a running VM not ready), so they stop here and say how to run outside it
-# (docs/codex.md). The MCP tools aren't affected: Codex starts its MCP servers outside the sandbox. A Codex setup that
-# grants all of that anyway can set MCOMP_CODEX_SANDBOX=allow.
-if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then
-  case "${1:-help}" in
-    help|-h|--help) ;;
-    *) printf '%s\n' "metacomputer: this command is running inside Codex's sandbox ($CODEX_SANDBOX), which blocks what metacomputer needs on this Mac (its state folders, the VM's SSH port, the hub's and the vault's sockets). Nothing was run." \
-         "Run it outside the sandbox: ask for escalated permissions for this command, or add metacomputer's Codex rules (install.sh does it; docs/codex.md) so everyday metacomputer commands run outside it. The metacomputer MCP tools aren't affected." >&2
-       exit 77 ;;
-  esac
-fi
+# Each agent's check before any command runs (its cli.sh's ag_FLAG_cli_start: inside Codex's sandbox, say, what
+# metacomputer needs on this Mac is blocked, so a command stops here and says how to run it outside).
+for mc_f in $MC_AGENT_FLAGS; do
+  if declare -F "ag_${mc_f}_cli_start" >/dev/null; then "ag_${mc_f}_cli_start" "$@"; fi
+done
+unset mc_f
 MC_VM_SAID="$MCOMP_VM_ARG"; MC_ENV_VM="${MCOMP_VM:-}"; MC_ENV_CONFIG="${MCOMP_CONFIG:-}"; MC_ENV_NODEF="${MCOMP_NO_DEFAULT_VM:-}"
 MC_ENV_SAID="$MC_ENV_VM$MC_ENV_CONFIG"
 # The default computer (config/default-vm) is read by scripts/lib.sh as the VM a command acts on when none is named.

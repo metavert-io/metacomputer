@@ -42,10 +42,6 @@ import zipfile
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "scripts"))
 ROOT = "metacomputer"
-SKILLS = [("plugin/skills/metacomputer", "skills/metacomputer"), ("plugin/skills/learn", "skills/learn"),
-          ("plugin/.claude/skills/cua-driver", "skills/cua-driver")]
-FILES = [("plugin/icon.png", "assets/icon.png"), ("plugin/LICENSE", "LICENSE"),
-         ("plugin/THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")]
 DRIVER_LINK, PACKAGE_DRIVER_LINK = "../../../skills/metacomputer/", "../metacomputer/"
 DATE = (1980, 1, 1, 0, 0, 0)
 MAX_ENTRIES, MAX_BYTES, MAX_DESCRIPTION, MAX_SKILL_NAME, MAX_LABEL = 5000, 100 << 20, 1024, 64, 30
@@ -54,6 +50,20 @@ LINK = re.compile(r"\]\(([^)\s#]+)(?:#[^)]*)?\)")
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
 import strictargs  # noqa: E402  (argparse that refuses what a command wouldn't use)
+
+
+def _package():
+    """The package's description, an agent's channel's OPENAI (coding-agents/<name>/channel.py): its manifest's path in
+    the package and the channel file it's made from, its skills and its other files, (source, path in the package)."""
+    from agentkit import registry
+    for n in registry.AGENTS:
+        if registry.has(n, "channel.py") and getattr(registry.module(n, "channel"), "OPENAI", None):
+            return registry.module(n, "channel").OPENAI
+    raise SystemExit("build-openai-plugin: no agent's channel describes the package")
+
+
+PACKAGE = _package()
+SKILLS, FILES, MANIFEST = PACKAGE["skills"], PACKAGE["files"], PACKAGE["manifest"]
 
 
 def sync_plugin():
@@ -115,8 +125,9 @@ def regular_files(src):
 
 
 def manifest(version):
-    """The package's .codex-plugin/plugin.json: Codex's manifest (sync-plugin.py's) for the directory."""
-    d = json.loads(sync_plugin().codex_plugin_json())
+    """The package's manifest (MANIFEST): the channel file it's made from (sync-plugin.py writes it) for the
+    directory."""
+    d = json.loads(dict(sync_plugin().WRITTEN)[PACKAGE["from"]]())
     d["version"] = version
     d["skills"] = "./skills/"
     d["requires_local_executor"] = True
@@ -128,7 +139,7 @@ def manifest(version):
 
 def contents(version):
     """[(path in the package, bytes, mode)] in order: the manifest, the skills, the other files."""
-    out = [(".codex-plugin/plugin.json", manifest(version), 0o644)]
+    out = [(MANIFEST, manifest(version), 0o644)]
     for src_rel, dst_rel in SKILLS:
         for rel, path in regular_files(no_link(src_rel)):
             data = regular_file(os.path.relpath(path, LAB))
@@ -203,9 +214,9 @@ def problems(zbytes):
             out.append(f"not a regular file: {n}")
         files[n.split("/", 1)[1]] = z.read(i)
     try:
-        m = json.loads(files[".codex-plugin/plugin.json"])
+        m = json.loads(files[MANIFEST])
     except (KeyError, ValueError):
-        return out + ["no readable .codex-plugin/plugin.json"]
+        return out + [f"no readable {MANIFEST}"]
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", m.get("name") or ""):
         out.append("the plugin's name isn't 1-64 letters, digits, - or _")
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", str(m.get("version") or "")):

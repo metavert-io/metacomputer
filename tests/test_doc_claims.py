@@ -799,15 +799,16 @@ CLAIMS = [
      and 'recognition="$(python3 "$ROOT/lib/agentkit/recognition.py" swift)"' in raw("scripts/build-vault.sh")
      and "return interpreterAgent(a, cwd: cwd, kind: kind)" in raw("vault/Util.swift")),
     ("docs/codex.md", r"a `metacomputer` command stops at once\s+with exit status (77)",
-     lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("bin/metacomputer")
-     and f"exit {m[1]} ;;" in raw("bin/metacomputer")),
-    ("docs/codex.md", r"with `tool_timeout_sec = (\d+)`", lambda m: f"CODEX_TOOL_TIMEOUT={m[1]}" in raw("install.sh")),
+     lambda m: 'if [ -n "${CODEX_SANDBOX:-}" ] && [ "${MCOMP_CODEX_SANDBOX:-}" != allow ]; then' in raw("coding-agents/codex/cli.sh")
+     and 'if declare -F "ag_${mc_f}_cli_start" >/dev/null; then "ag_${mc_f}_cli_start" "$@"; fi' in raw("bin/metacomputer")
+     and f"exit {m[1]} ;;" in raw("coding-agents/codex/cli.sh")),
+    ("docs/codex.md", r"with `tool_timeout_sec = (\d+)`", lambda m: f"CODEX_TOOL_TIMEOUT={m[1]}" in raw("coding-agents/codex/setup.sh")),
     # --help and -h: the usage, before the settings are read or anything runs (tests/test_help.py runs every form)
     ("docs/commands.md", r"`--help` or `-h` anywhere in a command \(after it, its subcommand or its arguments, before a "
                          r"`--`\) prints that command's usage and exits 0 without doing anything: no settings are read",
      lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"') < raw("bin/metacomputer").index('. "$LIB"')
      and raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
-     < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')
+     < raw("bin/metacomputer").index('for mc_f in $MC_AGENT_FLAGS; do')
      and 'case "$a" in --) return 1 ;; -h|--help) return 0 ;; esac' in raw("bin/metacomputer")
      and "test_help" in raw("scripts/release.sh")),
     ("docs/commands.md", r"Right after an option that takes a value it isn't a request for usage, and the command refuses it "
@@ -871,7 +872,7 @@ CLAIMS = [
      and "an option as --{v}'s value (--{v}=--bogus)" in raw("tests/test_vault_ops.py")),
     ("docs/codex.md", r"one that only asks for its usage \(`--help` or `-h`\) prints it, since it runs nothing",
      lambda m: raw("bin/metacomputer").index('mc_help_asked "$@" && mc_help "$@"')
-     < raw("bin/metacomputer").index('if [ -n "${CODEX_SANDBOX:-}" ]')),
+     < raw("bin/metacomputer").index('for mc_f in $MC_AGENT_FLAGS; do')),
     # metacomputer sh's log: keyed hashes only (an unkeyed SHA-256 of a short output can be reversed by guessing)
     ("SECURITY.md", r"A keyed hash is an HMAC-SHA256 of the text's SHA-256 under a per-install secret beside the log's "
                     r"signing key \(`action-log.results-hmac`, 0600",
@@ -2535,7 +2536,7 @@ CLAIMS = [
      and 'if ! entry_unchanged "$old" "$sum"; then' in raw("install.sh")
      and 'if [ "$srv_ours" = 1 ] && ! entry_unchanged metacomputer "$srv_sum"; then' in raw("install.sh")
      and "if not isinstance(e, dict) or not want or digest(e) != want:" in raw("lib/claude_mcp.py")
-     and 'json.dumps(entry, sort_keys=True' in raw("lib/claude_mcp.py")),
+     and 'json.dumps(entry, sort_keys=True' in raw("lib/agentkit/mcp_entry.py")),
     ("docs/commands.md", r"Once it's removed, the new one is always added and read back; when that doesn't work, the install says the server is missing \(or that it can't tell\) and the exact command that adds it",
      lambda m: (lambda reg: 'absent|error) removed=' in reg
                 and reg.index("claude mcp remove metacomputer -s user >/dev/null") < reg.index('claude mcp add -s user metacomputer "$CMD_LINK" mcp-lazy >/dev/null 2>&1 || warn')
@@ -2561,21 +2562,21 @@ CLAIMS = [
          [ln for ln in raw("install.sh").splitlines() if re.search(r"claude mcp (add|add-json|remove)", ln) and ">/dev/null" in ln])
      and "cwd=td" in raw("lib/claude_mcp.py") and 'startswith("User config")' in raw("lib/claude_mcp.py")),
     ("docs/commands.md", r"That includes `~/.local/bin/metacomputer` with other arguments \(a space more or less too\), an interpreter or another file inside the checkout, a path that only starts with the checkout's, a launcher that doesn't exist",
-     lambda m: 'MCP_ARGS = ["mcp-lazy"]' in raw("lib/claude_mcp.py")
+     lambda m: 'MCP_ARGS = ["mcp-lazy"]' in raw("lib/agentkit/mcp_entry.py")
      and re.search(r'if args != MCP_ARGS:\n\s+return "foreign"\n\s+if cmd == link:\n\s+return "ok"', raw("lib/claude_mcp.py")) is not None
      and re.search(r'if not os\.path\.exists\(cmd\):\n\s+return "foreign"\n\s+real = os\.path\.realpath\(cmd\)', raw("lib/claude_mcp.py")) is not None
      and '"ours" if d == os.path.realpath(root) else "checkout"' in raw("lib/claude_mcp.py")),
     ("docs/commands.md", r"name such a registration by its program and how many arguments it has, or its transport: its arguments, variables' values and URL are never printed",
      lambda m: (lambda w: '"url"' not in w and "env.items" not in w and 'e["env"]' not in w and "for a in e" not in w
                 and 'len(e.get("args") or [])' in w and "program_name(" in w and "shlex.quote(a) for a in MCP_ARGS" in w)(
-         raw("lib/claude_mcp.py").split("def words(", 1)[1].split("\ndef ", 1)[0])
+         raw("lib/agentkit/mcp_entry.py").split("def words(", 1)[1].split("\ndef ", 1)[0])
      and "claude_mcp.words(res, env, own)" in raw("lib/agents.py") and 'what="it runs $(prog_name "$cmd")"' in raw("install.sh")),
     ("docs/commands.md", r"from the file Claude Code itself uses",
      lambda m: 'encoding="utf-8-sig"' in raw("lib/claude_mcp.py") and "again, why = read_servers(env)" in raw("lib/claude_mcp.py")
      and "if not stat.S_ISREG(ls.st_mode) or (ls.st_size == 0 and not ls.st_mode & 0o222):" in raw("lib/claude_mcp.py")),
     ("docs/commands.md", r"right after that step \(`--only-claude` and `--only-agents` too; a run that finishes it clears that, and a run that doesn't set Claude Code up leaves it\)",
      lambda m: re.search(r'\n  fi\n  agent_record claude "\$CLAUDE_TRIED" "\$CLAUDE_FAILED"\n}\n', sh_function("install.sh", "claude_step")) is not None
-     and re.search(r'\n  esac\n  agent_record codex "\$CODEX_TRIED" "\$CODEX_FAILED"\n}\n', sh_function("install.sh", "codex_step")) is not None
+     and re.search(r'\n  esac\n  agent_record codex "\$CODEX_TRIED" "\$CODEX_FAILED"\n}\n', sh_function("coding-agents/codex/setup.sh", "ag_codex_step")) is not None
      and "if has_claude; then CLAUDE_TRIED=1; fi" in sh_function("install.sh", "claude_step")
      and '[ "$2" = 1 ] || return 0' in sh_function("install.sh", "agent_record")
      and 'now = [x for x in was if x != name] + ([name] if how == "failed" else [])' in raw("install.sh")
@@ -2586,36 +2587,36 @@ CLAIMS = [
                    sh_function("install.sh", "agent_step")) is not None
      and 'eval "${up}_TRIED=1"' in sh_function("install.sh", "agent_step")
      and '[ "$(agent_var "${up}_TRIED")" = 0 ] && stamp_incomplete "$a"; }' in sh_function("install.sh", "install_incomplete")
-     and len(re.findall(r"^\s*agent_record ", raw("install.sh"), re.M)) == 3),
+     and len(re.findall(r"^\s*agent_record ", install_steps(), re.M)) == 3),
     ("docs/commands.md", r"`--uninstall` removes metacomputer's server before the command it runs, and keeps the command \(`~/\.local/bin/metacomputer` and `mcomp`\) while any MCP server that stays, any agent's \(Claude Code's, Codex's, OpenClaw's, Hermes Agent's, Gemini CLI's or Antigravity CLI's\), metacomputer's or not, runs it, or\s+may: an agent's configuration that can't be read \(its CLI missing, or no Python to read it\) keeps them too",
      lambda m: raw("install.sh").index('if [ "$srv_ours" = 1 ] && ! entry_unchanged metacomputer "$srv_sum"; then')
-     < raw("install.sh").index("  codex_server_remove\n") < raw("install.sh").index('  for a in $MORE_AGENTS; do agent_uninstall "$a"; done\n')
+     < raw("install.sh").index("  ag_codex_uninstall_server\n") < raw("install.sh").index('  for a in $MORE_AGENTS; do agent_uninstall "$a"; done\n')
      < raw("install.sh").index('  for l in "$CMD_LINK" "$ALIAS_LINK"; do')
      and 'keep) keep_cmd_for "$text" ;;' in sh_function("install.sh", "agent_lines")
      and 'out("keep", f"{agent.label}\'s")' in function_src("lib/agent_setup.py", "uninstall")
      and function_src("lib/agent_setup.py", "_unregister").count('out("keep", f"{agent.label}\'s")') == 6
-     and "if claude_mcp.linked(res, link):" in function_src("lib/agent_setup.py", "_unregister")
+     and "if mcp_entry.linked(res, link):" in function_src("lib/agent_setup.py", "_unregister")
      and "if prog is None and not agent.reads_files:" in function_src("lib/agent_setup.py", "_unregister")
      and 'keep_cmd_for "$label\'s"; UNINSTALL_FAILED=1' in sh_function("install.sh", "agent_uninstall")
      and raw("install.sh").count('UNINSTALL_FAILED=1; keep_cmd_for "Claude Code\'s"') == 2
      and '[ "$srv_linked" != link ] || { keep_cmd_for "Claude Code\'s"; }' in raw("install.sh")
-     and '[ "$lnk" != link ] || { keep_cmd_for "Codex\'s"; }' in raw("install.sh")
+     and '[ "$lnk" != link ] || { keep_cmd_for "Codex\'s"; }' in install_steps()
      and 'elif [ "$KEEP_CMD" = 1 ]; then warn "kept $l:' in raw("install.sh")
-     and "def linked(res, link):" in raw("lib/claude_mcp.py")),
+     and "def linked(res, link):" in raw("lib/agentkit/mcp_entry.py")),
     ("docs/commands.md", r"When the registration doesn't work and the plugin brings no server of its own \(the checkout it loads from no longer declares one\), the install says plainly that new Claude Code sessions have no metacomputer tools until that's fixed, gives the line that fixes it, and says that `metacomputer update` tries again",
      lambda m: raw("install.sh").count("tools_missing_note") == 5
      and "metacomputer's tools are missing in new Claude Code sessions until this is fixed" in sh_function("install.sh", "tools_missing_note")
      and "(metacomputer update tries this step again)" in sh_function("install.sh", "tools_missing_note")
      and '[ "$plug" != present ] || return 0' in sh_function("install.sh", "tools_missing_note")),
     ("docs/codex.md", r"The install changes Codex's MCP server `metacomputer` only when it's metacomputer's own, by the rule it uses for Claude Code's",
-     lambda m: (lambda f: 'if kind == "stdio" and args == claude_mcp.MCP_ARGS:' in f
+     lambda m: (lambda f: 'if kind == "stdio" and args == mcp_entry.MCP_ARGS:' in f
                 and 'if cmd in (os.path.join(root, "bin", "metacomputer"), link):' in f
-                and "for n in claude_mcp.LEGACY_NAMES}" in f and "claude_mcp.digest(d)" in f)(function_src("lib/agents.py", "codex_entry"))
-     and "old_target \"$cmd\"" not in raw("install.sh")
-     and 'if ! codex_unchanged "$sum"; then' in sh_function("install.sh", "codex_step")
-     and 'if ! codex_unchanged "$sum"; then' in sh_function("install.sh", "codex_server_remove")
-     and 'if srv.get("command") != old or srv.get("args") != ["mcp-lazy"]:' in raw("install.sh")
-     and re.search(r"\n    foreign\)\n(\s+warn [^\n]*\n)+\s+CODEX_FAILED=1 ;;\n", sh_function("install.sh", "codex_step")) is not None),
+                and "for n in mcp_entry.LEGACY_NAMES}" in f and "mcp_entry.digest(d)" in f)(function_src("coding-agents/codex/setup.py", "codex_entry"))
+     and "old_target \"$cmd\"" not in install_steps()
+     and 'if ! codex_unchanged "$sum"; then' in sh_function("coding-agents/codex/setup.sh", "ag_codex_step")
+     and 'if ! codex_unchanged "$sum"; then' in sh_function("coding-agents/codex/setup.sh", "ag_codex_uninstall_server")
+     and 'if srv.get("command") != old or srv.get("args") != ["mcp-lazy"]:' in raw("coding-agents/codex/setup.sh")
+     and re.search(r"\n    foreign\)\n(\s+warn [^\n]*\n)+\s+CODEX_FAILED=1 ;;\n", sh_function("coding-agents/codex/setup.sh", "ag_codex_step")) is not None),
     ("docs/commands.md", r"so the next `metacomputer update` runs the install again even when the\s+checkout is already at the release",
      lambda m: 'installed_here = (stamp.get("commit") == tcommit and not stamp.get("incomplete") and' in raw("lib/update.py")
      and 'MCOMP_INSTALL_INCOMPLETE="$incomplete" "$PY311" "$ROOT/lib/update.py" _after-install' in raw("install.sh")),
@@ -3038,15 +3039,15 @@ CLAIMS = [
      and "_recent(con, " in function_src("coding-agents/hermes/sessions.py", "read")),
     # Codex's marketplace and the OpenAI package (scripts/sync-plugin.py, scripts/build-openai-plugin.py)
     ("docs/codex.md", r"It brings the skills, `metacomputer`, `cua-driver` and `learn` \(`\$metacomputer:learn`, or `/skills`\), and no MCP server",
-     lambda m: '"skills": ["./skills/", "./.claude/skills/"]' in function_src("scripts/sync-plugin.py", "codex_plugin_json")
-     and "mcpServers" not in function_src("scripts/sync-plugin.py", "codex_plugin_json")
-     and '"source": {"source": "local", "path": "./plugin"}' in function_src("scripts/sync-plugin.py", "codex_marketplace_json")),
+     lambda m: '"skills": ["./skills/", "./.claude/skills/"]' in function_src("coding-agents/codex/channel.py", "codex_plugin_json")
+     and "mcpServers" not in function_src("coding-agents/codex/channel.py", "codex_plugin_json")
+     and '"source": {"source": "local", "path": "./plugin"}' in function_src("coding-agents/codex/channel.py", "codex_marketplace_json")),
     ("docs/codex.md", r"a manifest \(`\.codex-plugin/plugin\.json`:.*?\) with the release's version and `\"requires_local_executor\": true`, which "
                       r"makes it \"Desktop only\".*?It\s+carries no MCP server, launcher or script",
      lambda m: 'd["requires_local_executor"] = True' in function_src("scripts/build-openai-plugin.py", "manifest")
      and 'json.load(open(os.path.join(LAB, manifests.release_file()), encoding="utf-8"))["version"]' in raw("scripts/build-openai-plugin.py")
      and '"release_file": "gemini-extension.json"' in raw("coding-agents/gemini/manifest.json")
-     and not re.search(r"bin/metacomputer|get\.sh", raw("scripts/build-openai-plugin.py").split("SKILLS = ", 1)[1].split("DATE =", 1)[0])
+     and not re.search(r"bin/metacomputer|get\.sh", raw("coding-agents/codex/channel.py").split("OPENAI = ", 1)[1])
      and 'for k in ("mcpServers", "apps", "hooks", "commands"):' in function_src("scripts/build-openai-plugin.py", "problems")),
     ("docs/codex.md", r"Its sources are regular\s+files only: a skill folder, the icon, the license or the notices that is a link, or sits "
                       r"in a linked folder, stops the\s+build.*?`scripts/sync-plugin.py --check` refuses any link in `plugin/`,\s+"
@@ -3057,14 +3058,14 @@ CLAIMS = [
      and "if os.path.islink(src) or not os.path.isdir(src):" in function_src("scripts/build-openai-plugin.py", "regular_files")
      and "for top in LINK_TOPS:" in function_src("scripts/sync-plugin.py", "differences")
      and 'LINK_TOPS = ("agent-plugin",)' in raw("coding-agents/hermes/channel.py")
-     and '(".agents",)' in raw("scripts/sync-plugin.py") and '("plugin",)' in raw("scripts/sync-plugin.py")
+     and 'LINK_TOPS = (".agents",)' in raw("coding-agents/codex/channel.py") and '("plugin",)' in raw("scripts/sync-plugin.py")
      and "if os.path.islink(path):\n        return [path]" in function_src("scripts/sync-plugin.py", "links_in")),
     ("docs/codex.md", r"Nothing is uploaded or\s+submitted from here",
      lambda m: not re.search(r"urllib|http\.client|socket|subprocess|requests", raw("scripts/build-openai-plugin.py").split('"""', 2)[2])),
     # Antigravity CLI (docs/antigravity.md; lib/agent_setup.py Antigravity, lib/owners.py, vault/Util.swift)
     ("docs/antigravity.md", r"It changes Antigravity CLI's MCP server `metacomputer` only when\s+there's none, by the rule it uses for the "
                             r"other agents.*?Anything else is never changed or removed",
-     lambda m: 'return [prog, "mcp", "add", NAME, link, *claude_mcp.MCP_ARGS]' in function_src("coding-agents/antigravity/setup.py", "Antigravity.add_argv")
+     lambda m: 'return [prog, "mcp", "add", NAME, link, *mcp_entry.MCP_ARGS]' in function_src("coding-agents/antigravity/setup.py", "Antigravity.add_argv")
      and 'if classify(agent.read(prog, env), root, link) != "absent":' in function_src("lib/agent_setup.py", "_register")
      and "for n in manifests.generic():" in function_src("lib/agent_setup.py", "_agents")
      and '"antigravity",' in raw("lib/agentkit/registry.py")),

@@ -3,7 +3,7 @@ MCP server and skills). install.sh runs them through lib/agent_setup.py install|
 import json
 import os
 
-import claude_mcp      # MCP_ARGS: the arguments metacomputer's server is registered with
+from agentkit import mcp_entry   # MCP_ARGS: the arguments metacomputer's server is registered with
 from agent_setup import Agent, manifest_words, NAME, TOOL_TIMEOUT, SKILLS, _distinct, entries, home, _entry_res  # the framework
 
 
@@ -54,7 +54,7 @@ class OpenClaw(Agent):
         return res
 
     def add_argv(self, prog, link):
-        return [prog, "mcp", "add", NAME, "--command", link, *[x for a in claude_mcp.MCP_ARGS for x in ("--arg", a)],
+        return [prog, "mcp", "add", NAME, "--command", link, *[x for a in mcp_entry.MCP_ARGS for x in ("--arg", a)],
                 "--timeout", str(TOOL_TIMEOUT), "--no-probe"]
 
     def remove_argv(self, prog):

@@ -4,7 +4,7 @@ install|uninstall|status antigravity."""
 import json
 import os
 
-import claude_mcp      # MCP_ARGS: the arguments metacomputer's server is registered with
+from agentkit import mcp_entry   # MCP_ARGS: the arguments metacomputer's server is registered with
 from agent_setup import (Agent, manifest_words, NAME, TOOL_TIMEOUT, SETTINGS_CAP, home, _entry_res,  # the framework
                          jsonc_loads, classify, replace_if_unchanged, _nofollow)
 
@@ -87,7 +87,7 @@ class Antigravity(Agent):
         return res
 
     def add_argv(self, prog, link):
-        return [prog, "mcp", "add", NAME, link, *claude_mcp.MCP_ARGS]
+        return [prog, "mcp", "add", NAME, link, *mcp_entry.MCP_ARGS]
 
     def remove_argv(self, prog):
         return [prog, "mcp", "remove", NAME]

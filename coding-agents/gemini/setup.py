@@ -3,7 +3,7 @@ MCP server, read from its settings.json, and its skills). install.sh runs them t
 install|uninstall|status gemini."""
 import os
 
-import claude_mcp      # MCP_ARGS: the arguments metacomputer's server is registered with
+from agentkit import mcp_entry   # MCP_ARGS: the arguments metacomputer's server is registered with
 from agent_setup import Agent, manifest_words, NAME, SETTINGS_CAP, _distinct, home, _entry_res, jsonc_loads  # the framework
 
 
@@ -62,7 +62,7 @@ class Gemini(Agent):
         return res
 
     def add_argv(self, prog, link):
-        return [prog, "mcp", "add", "-s", "user", "--trust", NAME, link, *claude_mcp.MCP_ARGS]
+        return [prog, "mcp", "add", "-s", "user", "--trust", NAME, link, *mcp_entry.MCP_ARGS]
 
     def remove_argv(self, prog):
         return [prog, "mcp", "remove", "-s", "user", NAME]

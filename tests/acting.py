@@ -98,6 +98,7 @@ PROGRAMS = {
     "lib/agentkit/recognition.py": NONE,                  # the agents' recognition tables, printed
     "lib/agent_setup.py": NONE,
     "lib/agents.py": NONE,
+    "coding-agents/codex/setup.py": NONE,                 # Codex's MCP server, read (codex mcp get)
     "lib/botcheck.py": NONE,
     # the hub, metacomputer sh, ssh, task, get, and its cleanup under owners.acting()
     "lib/browser_tools.py": {k: THROUGH for k in ("compare", "responsive", "a11y", "open-untrusted", "gpu", "debug",

@@ -4,7 +4,7 @@ hermes."""
 import json
 import os
 
-import claude_mcp      # MCP_ARGS: the arguments metacomputer's server is registered with
+from agentkit import mcp_entry   # MCP_ARGS: the arguments metacomputer's server is registered with
 from agent_setup import Agent, manifest_words, NAME, TOOL_TIMEOUT, _distinct, entries, home, _entry_res  # the framework
 
 
@@ -67,7 +67,7 @@ class Hermes(Agent):
         return res
 
     def add_argv(self, prog, link):
-        value = {"command": link, "args": list(claude_mcp.MCP_ARGS), "timeout": TOOL_TIMEOUT}
+        value = {"command": link, "args": list(mcp_entry.MCP_ARGS), "timeout": TOOL_TIMEOUT}
         return [prog, "config", "set", f"mcp_servers.{NAME}", json.dumps(value)]
 
     def remove_argv(self, prog):

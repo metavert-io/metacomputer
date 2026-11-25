@@ -15,8 +15,8 @@ reads too; Hermes Agent: $HERMES_HOME/skills; Antigravity CLI: ~/.gemini/antigra
 also gets a tool timeout of 600 s, and its settings.json metacomputer's permission rule when the server is added (taken
 out by --uninstall), written by this step because its CLI has no option for either (Antigravity.settle, added, removed).
 
-The MCP server named metacomputer follows the rule Claude Code's and Codex's do (lib/claude_mcp.py, lib/agents.py
-codex_entry): it is metacomputer's own ("ok") only as a local command that is exactly the checkout's bin/metacomputer or
+The MCP server named metacomputer follows the rule Claude Code's and Codex's do (lib/agentkit/mcp_entry.py; their steps
+are in coding-agents/): it is metacomputer's own ("ok") only as a local command that is exactly the checkout's bin/metacomputer or
 ~/.local/bin/metacomputer, with exactly the argument mcp-lazy. Anything else ("foreign") is never changed or removed: the
 run names it by its program and how many arguments it has, or its transport (never an argument, a variable or a URL),
 says how to remove it yourself, and the step is unfinished. An entry that can't be read ("error") is never taken for a
@@ -57,7 +57,7 @@ if __name__ == "__main__":         # the agents' setup.py import this module by 
 LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(LAB, "lib"))
 import agents        # noqa: E402  (trusted, run, version, link_target, choices)
-import claude_mcp    # noqa: E402  (words, digest, linked, MCP_ARGS)
+from agentkit import mcp_entry  # noqa: E402  (words, digest, linked, MCP_ARGS)
 import flockwait     # noqa: E402  (the lock's wait)
 
 NAME = "metacomputer"
@@ -132,7 +132,7 @@ def jsonc_loads(text, trailing_commas=False):
 
 # --- the agents --------------------------------------------------------------------------------------------------
 def _entry_res(d):
-    """An MCP server entry (a dict, as the agent keeps it) as claude_mcp's result: {"kind", "entry"}; a local command
+    """An MCP server entry (a dict, as the agent keeps it) as mcp_entry.words reads it: {"kind", "entry"}; a local command
     is "stdio" with its command, arguments and variables; an error when its parts have the wrong types."""
     if not isinstance(d, dict):
         return {"kind": "error", "why": "its entry has an unexpected shape"}
@@ -250,18 +250,18 @@ def classify(res, root, link):
     if res["kind"] in ("absent", "error"):
         return res["kind"]
     e = res["entry"]
-    if (res["kind"] == "stdio" and e.get("args") == claude_mcp.MCP_ARGS
+    if (res["kind"] == "stdio" and e.get("args") == mcp_entry.MCP_ARGS
             and e.get("command") in (os.path.join(root, "bin", "metacomputer"), link)):
         return "ok"
     return "foreign"
 
 
 def digest(res):
-    return "" if res["kind"] == "absent" else claude_mcp.digest(res.get("raw"))
+    return "" if res["kind"] == "absent" else mcp_entry.digest(res.get("raw"))
 
 
 def describe(res, own, env):
-    return claude_mcp.words(res, env, own)
+    return mcp_entry.words(res, env, own)
 
 
 def points_here(link, root):
@@ -604,7 +604,7 @@ def _unregister(agent, prog, root, link, env, out):
     if not here:
         out("say", f"{agent.label}'s MCP server {NAME} stays: it runs {describe(res, own, env)}, which isn't this "
                    "checkout's")
-        if claude_mcp.linked(res, link):
+        if mcp_entry.linked(res, link):
             out("keep", f"{agent.label}'s")
         return True
     if prog is None:
@@ -682,7 +682,7 @@ def uninstall(agent, root, link, env, out):
 
 
 def status(agent, root, link, env):
-    """What `metacomputer agents` reports for one agent (no secrets: the server only in claude_mcp's words)."""
+    """What `metacomputer agents` reports for one agent (no secrets: the server only in mcp_entry's words)."""
     prog, why = agents.trusted(agent.prog)
     st = {"installed": bool(prog or why), "version": agents.version(prog, env=agent.env(env)) if prog else None,
           "choice": agents.choices().get(agent.name)}
