@@ -121,9 +121,6 @@ LOG_MAX = 10 * 2**20
 SPOOL_MAX_BYTES = 64 * 1024
 
 SIGNATURE_HEADER = sinkkit.SIGNATURE_HEADER
-SD_ID = "metacomputer@32473"     # 32473: the documentation enterprise number (RFC 5612)
-SYSLOG_FACILITY = 1              # user-level
-SYSLOG_SEV = {"info": 6, "warn": 4, "error": 3}
 USER_AGENT = "metacomputer-events/1"
 
 
@@ -1097,24 +1094,6 @@ def service_version():
     return _version["v"]
 
 
-def _sd_value(v):
-    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("]", "\\]")
-
-
-def _ascii(s, limit):
-    s = "".join(c for c in str(s) if 33 <= ord(c) <= 126)
-    return s[:limit] or "-"
-
-
-def syslog_frame(ev):
-    pri = SYSLOG_FACILITY * 8 + SYSLOG_SEV[ev["severity"]]
-    sd = (f'[{SD_ID} seq="{ev["seq"]}" family="{ev["family"]}" origin="{_sd_value(ev.get("origin") or "cli")}" '
-          f'vm="{_sd_value(ev["vm"])}" id="{ev["id"]}"]')
-    msg = (f"<{pri}>1 {ev['time']} {_ascii(ev['host'], 255)} metacomputer - {_ascii(ev['type'], 32)} {sd} "
-           + dumps(ev)).encode("utf-8")
-    return str(len(msg)).encode() + b" " + msg
-
-
 FAMILY_LABEL = {"needs_you": "needs you", "task": "task", "security": "security", "lifecycle": "lifecycle",
                 "actions": "action"}
 NTFY_TAGS = {"needs_you": "raising_hand", "task": "white_check_mark", "security": "shield", "lifecycle": "computer",
@@ -1241,30 +1220,6 @@ def _deliver(sink, batch, timeout, track):
     mod = sinkkit.registry.hooks(kind)
     if hasattr(mod, "deliver"):                 # a transport of its own (sinks/<kind>/sink.py)
         return mod.deliver(sys.modules[__name__], sink, batch, timeout, track)
-    if kind == "syslog":
-        # Syslog over TCP has no acknowledgement: success means TLS took every byte and the connection
-        # closed without a transport or TLS error (no close_notify back, or the server just closing, is
-        # fine). A server that drops messages after that isn't noticed (best effort).
-        u = urlsplit(url)
-        try:
-            raw = socket.create_connection((u.hostname, u.port or 6514), timeout=timeout)
-            track.append(raw.dup())              # a second descriptor: shutting it down cuts the connection, TLS or not
-            try:
-                tls = tls_context(sink.get("ca_pem")).wrap_socket(raw, server_hostname=u.hostname)
-                tls.sendall(b"".join(syslog_frame(ev) for ev in batch))
-                try:
-                    tls.settimeout(0.5)
-                    tls.unwrap()                 # close_notify, so the server sees a clean end
-                except (socket.timeout, ssl.SSLZeroReturnError, ssl.SSLEOFError):
-                    pass
-                except (OSError, ssl.SSLError) as e:    # a reset or a TLS alert: it wasn't taken cleanly
-                    return False, short_error(e), False, 0
-                tls.close()
-            finally:
-                raw.close()
-            return True, None, False, 0
-        except (OSError, ssl.SSLError, ValueError) as e:
-            return False, short_error(e), False, 0
     if hasattr(mod, "request"):                 # an HTTP POST (sinks/<kind>/sink.py)
         target, body, headers = mod.request(sys.modules[__name__], sink, batch, extra)
     elif kind == "ntfy":
@@ -2483,12 +2438,6 @@ def check_url(kind, url):
     mod = sinkkit.registry.hooks(kind)
     if hasattr(mod, "check_url"):           # the kind's own rules (sinks/<kind>/sink.py)
         mod.check_url(sys.modules[__name__], u)
-        return
-    if kind == "syslog":
-        if u.scheme != "syslog+tls" or not u.hostname:
-            raise EventsError("syslog sinks are TLS only: syslog+tls://HOST:PORT (RFC 5425; port 6514 by default)")
-        if u.path not in ("", "/") or u.query:
-            raise EventsError("a syslog URL is just syslog+tls://HOST:PORT")
         return
     require_https(u)
     if kind == "ntfy" and not u.path.strip("/"):
