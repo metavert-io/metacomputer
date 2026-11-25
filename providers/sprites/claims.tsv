@@ -1,0 +1,10 @@
+# This provider's promises in the docs, pinned to its own files (tests/test_doc_claims.py reads every registered
+# provider's). One condition a line, tab-separated: the document, a phrase it must contain (a regular expression,
+# matched with the document's whitespace folded), a file in this folder, and text that file contains (a leading !:
+# must not contain; \n and \t as escapes). Lines with the same document and phrase are one promise: all must hold.
+# Promises whose check reads shared code too stay in tests/test_doc_claims.py.
+SECURITY.md	no process outside the session is\s+visible, so another process's `/proc/PID/root` \(whose `/\.sprite` would be the real one\) can't be used	guest/rootfs/opt/metacomputer/sprite/svc-session	--pid --fork
+SECURITY.md	no process outside the session is\s+visible, so another process's `/proc/PID/root` \(whose `/\.sprite` would be the real one\) can't be used	guest/rootfs/opt/metacomputer/sprite/svc-session	--mount-proc
+SECURITY.md	no process outside the session is\s+visible, so another process's `/proc/PID/root` \(whose `/\.sprite` would be the real one\) can't be used	guest/rootfs/opt/metacomputer/sprite/in-session	"$(readlink "/proc/$c/ns/pid")" != "$(readlink /proc/self/ns/pid)"
+SECURITY.md	Fly refuses raw IP addresses \(an address is let through only after an allowed name resolved to it\), private ranges, the metadata service and Fly's own private network	manifest.py	!"outside_egress": {"enforced": True, "private_ranges": True, "metadata": True, "off": True}
+SECURITY.md	Fly refuses raw IP addresses \(an address is let through only after an allowed name resolved to it\), private ranges, the metadata service and Fly's own private network	manifest.py	outside_egress={"enforced": True, "private_ranges": True, "metadata": True, "off": True}

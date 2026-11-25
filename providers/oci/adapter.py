@@ -542,6 +542,11 @@ class OCI(RemoteVM):
     # Its security groups are acted on only as the computer's record names them: by the ids recorded from their create
     # answers, and by the marks of the operations recorded for it, each read by its id and checked (lib/remote.py)
     groups_by_record = True
+    # ...and one no record names is deleted by hand, there (lib/remote.py cloud teardown says where)
+    GROUPS_IN_CONSOLE = "Networking > Virtual cloud networks > metacomputer > Network security groups"
+    # Its console shows a guest that powered itself off, which it still counts as running: start reads it, and
+    # status says so (lib/remote.py)
+    CONSOLE_POWEROFF = True
     # `cloud setup` and every create (make_network) rewrite the shared VCN's route table and security list, which every
     # computer of it here uses: every one of them waits during a handoff (lib/remote.py, lib/handoff_gate.py).
     SHARED_NETWORK_CHANGES = True

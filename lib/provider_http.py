@@ -1,17 +1,19 @@
-"""The one HTTPS call a provider's REST API needs (Hetzner Cloud, DigitalOcean, Vultr: lib/cloud/vps.py), kept out of
-lib/cloud, which imports nothing that reaches the network: lib/remote.py hands send() to the adapter it makes, and
-tests hand in a stand-in.
+"""The one HTTPS call a provider's REST API needs (the providers on lib/cloud/vps.py), kept out of lib/cloud and the
+providers' adapters, which import nothing that reaches the network: lib/remote.py hands send() to the adapter it
+makes, and tests hand in a stand-in.
 
     send(method, url, headers, body, timeout) -> (status, headers, body bytes)
 
-Only https URLs on the providers' own API hosts are sent, redirects are never followed (a redirect would carry the
-token's Authorization header to wherever it points), answers are read to a cap, and an HTTP error status is returned
-like any other (the adapter says what it means). A connection that fails raises OSError, its text without the
-request (no header, so no token, is ever in it)."""
+Only https URLs on the providers' own API hosts (each one's manifest names its own: api_host) are sent, redirects are
+never followed (a redirect would carry the token's Authorization header to wherever it points), answers are read to a
+cap, and an HTTP error status is returned like any other (the adapter says what it means). A connection that fails
+raises OSError, its text without the request (no header, so no token, is ever in it)."""
 import urllib.error
 import urllib.request
 
-HOSTS = ("api.hetzner.cloud", "api.digitalocean.com", "api.vultr.com")
+from cloud import manifests
+
+HOSTS = manifests.api_hosts()
 MAX_ANSWER = 8 * 1024 * 1024
 
 

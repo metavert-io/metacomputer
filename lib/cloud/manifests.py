@@ -4,7 +4,7 @@ its messages use. Each provider's capabilities are its MANIFEST (lib/cloud/capab
 
 A provider's CLI is a dict, checked by check_cli():
     owners             who reviews its folder (.github/CODEOWNERS)
-    place_words        how `--on` names it in a list of places ("oci (Oracle Cloud)"; default: its place)
+    place_words        how `--on` names it in a list of places ("PLACE (ITS LABEL)"; default: its place)
     docs               its page for people (default docs/remote.md)
     credentials        the environment variables its credentials come in: taken off every program's environment but
                        lib/remote.py's (none: it keeps its own sign-in)
@@ -175,7 +175,8 @@ def labels_where(test):
 def shell_words(name):
     """(KEY, VALUE) pairs of provider `name` for lib/cloud/providers.sh's mc_pv."""
     m, c = manifest(name), cli(name)
-    out = [("label", m["label"]), ("place", m["place"]), ("place_words", c["place_words"]), ("docs", c["docs"]),
+    out = [("label", m["label"]), ("place", m["place"]), ("place_words", c["place_words"]),
+           ("label_place", f"{m['label']} ({m['place']})"), ("docs", c["docs"]),
            ("credential_words", c["credential_words"]), ("ask_needs", " ".join(c["ask_needs"])),
            ("background_input", "on" if m["input"]["background"] else "off"),
            ("teardown", "yes" if c["teardown"] else "no")]

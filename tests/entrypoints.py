@@ -69,6 +69,7 @@ PROGRAMS = {
     "scripts/remote-build.sh": P("bash", [[], ["--keep-on-failure"]]),
     "scripts/safe-rmtree.sh": P("bash", [[BOX + "/victim"], ["--quiet", BOX + "/victim", BOX + "/victim2"]]),
     "scripts/sync-plugin.py": P("py", [[], ["--check"]], synth=True),
+    "scripts/gen-providers.py": P("py", [[], ["--check"]], synth=True, by="person"),
     "scripts/build-openai-plugin.py": P("py", [["--check"], ["--version", "1.2.3", "--out", "x.zip"]], synth=True),
     "scripts/vendor-driver-skill.py": P("py", [["src"]], synth=True, by="person"),
     "scripts/verify-audit.py": P("py", [["f.jsonl"], ["--key", "k", "--expect-start", "1", "f.jsonl"]], synth=True),

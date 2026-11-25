@@ -727,10 +727,10 @@ def build_root(t):
     """A copy of what scripts/build-vm.sh reads, with stand-ins for its downloads and tools, and a runner whose
     VMs live in a state file (its calls logged)."""
     root = os.path.join(t, "lab")
-    for d in ("scripts", "config", "lib"):
+    for d in ("scripts", "config", "lib", "lib/cloud"):
         os.makedirs(os.path.join(root, d))
     for f in ("scripts/lib.sh", "scripts/build-vm.sh", "config/defaults.env", "scripts/safe-rmtree.sh",
-              "scripts/strictargs.sh"):
+              "scripts/strictargs.sh", "lib/cloud/providers.sh"):
         shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
     # The Python helpers (vms.py, safedelete.py; handoff.py, owners.py and sessionvm.py: the checks a build run on its
     # own makes, as bin/metacomputer does before it)
@@ -988,7 +988,7 @@ def test_build_tools_stamps():
         patches = sorted(f"patches/netgw/{n}" for n in os.listdir(os.path.join(LAB, "patches", "netgw")) if n.endswith(".patch"))
         for f in ("scripts/build-tools.sh", "scripts/lib.sh", "config/defaults.env", "tools/qcow2raw/go.mod", "tools/qcow2raw/go.sum",
                   "tools/qcow2raw/main.go", "scripts/safe-rmtree.sh", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py",
-                  "scripts/strictargs.sh", "lib/strictargs.py", *patches):
+                  "scripts/strictargs.sh", "lib/strictargs.py", "lib/cloud/providers.sh", *patches):
             os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
             shutil.copy(os.path.join(LAB, f), os.path.join(root, f))
         stubs = os.path.join(t, "stubs")
@@ -1282,7 +1282,7 @@ def install_root(b):
     for f in ("defaults.env", "local.env.example"):
         shutil.copy(os.path.join(LAB, "config", f), os.path.join(root, "config"))
     for f in ("scripts/safe-rmtree.sh", "scripts/lib.sh", "config/defaults.env", "lib/safedelete.py", "lib/vms.py", "lib/termsafe.py",
-              "scripts/strictargs.sh", "lib/strictargs.py"):   # every recursive delete goes through it; the rules of its command lines
+              "scripts/strictargs.sh", "lib/strictargs.py", "lib/cloud/providers.sh"):   # every recursive delete goes through it; the rules of its command lines
         os.makedirs(os.path.dirname(os.path.join(root, f)), exist_ok=True)
         shutil.copy2(os.path.join(LAB, f), os.path.join(root, f))
     write(os.path.join(root, "scripts", "build-vault.sh"), "#!/bin/sh\necho 'vault: skipped by the test'\n", 0o755)

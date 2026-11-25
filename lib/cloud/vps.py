@@ -1,6 +1,6 @@
-"""Servers a provider makes and bills by the hour, through its REST API: Hetzner Cloud (hetzner.py), DigitalOcean
-(digitalocean.py) and Vultr (vultr.py). What the three share is here; each driver adds its API's calls, its sizes,
-its prices and what its firewall enforces. Everything else is the generic Ubuntu VM's (lib/cloud/ubuntu_vm.py).
+"""Servers a provider makes and bills by the hour, through its REST API: each such provider's driver
+(providers/<name>/adapter.py) is a thin one on this base. What they share is here; each driver adds its API's calls,
+its sizes, its prices and what its firewall enforces. Everything else is the generic Ubuntu VM's (lib/cloud/ubuntu_vm.py).
 
 Credentials come only from the environment (one API token per provider, named by its driver), so a secrets manager
 can hand them over for one command; nothing writes them to disk and no value is printed. Each computer gets, at its
@@ -20,7 +20,7 @@ opens a connection. A call that makes something (a server, a firewall, a key) or
 retried: a second try after a lost answer could make a second one. Reads and deletes are tried again on throttling
 and the provider's passing errors.
 
-The facade's method names are the ones lib/remote.py uses for every provider, Oracle Cloud's first: `nsg` is the
+The facade's method names are the ones lib/remote.py uses for every provider, the first one's (an SDK's): `nsg` is the
 computer's own firewall at the provider, and these providers have no shared network (network() is None)."""
 import contextlib
 import functools
@@ -189,7 +189,7 @@ class API:
         return api.scrub
 
     def preflight(self):
-        """What a create needs that can be checked before anything is made (DigitalOcean: its token's vpc:read)."""
+        """What a create needs that can be checked before anything is made (a token's scope, say)."""
 
     # --- HTTP ---------------------------------------------------------------------------------------------
     def call(self, method, path, body=None, query=None, missing_ok=False, what=""):
@@ -294,7 +294,7 @@ class API:
         return None
 
     def attach_firewall(self, fw, iid):
-        """A provider that can't name the firewall when the server is made applies it right after (DigitalOcean)."""
+        """A provider that can't name the firewall when the server is made applies it right after."""
 
     def inventory(self):
         """What metacomputer has at this provider besides servers (cloud status): firewalls and keys, by name."""
@@ -346,16 +346,17 @@ class VPS(RemoteVM):
     DEFAULT_SIZE = ""
     DEFAULT_REGION = ""
     REGION = re.compile(r"[a-z]{2,8}[0-9]{0,2}")
-    EXTRA_PER_HOUR = 0.0        # billed beside the server, stopped or not (Hetzner's IPv4 address)
+    EXTRA_PER_HOUR = 0.0        # billed beside the server, stopped or not (an IPv4 address, say)
     PRICES_READ = "2026-11-23"
     # How a stop asks the guest to shut down: "api" (the provider presses its power button, ACPI) or "guest" (the
     # provider has no such call: metacomputer stop asks the guest over SSH first, then this waits for the provider to
     # see it off). Never a hard power-off unless asked (stop --force).
     SOFT_STOP = "api"
-    SEES_GUEST_POWEROFF = True  # the provider's state says stopped once the guest powers itself off (Vultr's doesn't)
+    SEES_GUEST_POWEROFF = True  # the provider's state says stopped once the guest powers itself off (not every one's)
     STOP_WAIT_S = 360
     takes_key = True            # create() wants the computer's admin public key (lib/remote.py passes it)
-    RESOLVER_EXCEPTION = False  # its resolver is on the provider's private network (DigitalOcean): set_resolvers
+    RESOLVER_EXCEPTION = False  # its resolver is on the provider's private network: set_resolvers
+    REST_API = True             # lib/remote.py hands it lib/provider_http.py's send for its REST API
     thing = "server"
 
     def __init__(self, computers=None, states=None, api=None, env=None, http=None, network_lock=None):
@@ -433,7 +434,7 @@ class VPS(RemoteVM):
             raise AdapterError("an operation id is 32 hex digits")
         made = made or (lambda what, rid: None)
         api = self.api
-        api.preflight()                      # before anything is made (DigitalOcean: vpc:read)
+        api.preflight()                      # before anything is made (a token's scope, say)
         if api.instances(name):
             raise AdapterError(f"{self.manifest['label']} has a server for {name} already (metacomputer cloud status "
                                f"{self.name})")
@@ -478,8 +479,8 @@ class VPS(RemoteVM):
         if cur is None:
             raise AdapterError(f"{name}'s server is gone from {self.manifest['label']}")
         if cur["state"] == "RUNNING" and guest_up is False:
-            # Never stopped or started on a guess: a start of a guest that runs restarts it at some providers (Vultr's,
-            # found live).
+            # Never stopped or started on a guess: a start of a guest that runs restarts it at some providers (found
+            # live).
             why = ("it may be starting, busy or cut off" if self.SEES_GUEST_POWEROFF else
                    f"{self.manifest['label']} doesn't see a guest that powered itself off (the idle stop does that), so "
                    "it may be off, or busy or cut off")
@@ -534,8 +535,8 @@ class VPS(RemoteVM):
         if self.api.instance(st["instance"]) is not None:
             self.api.terminate(st["instance"])
             self.api.wait_state(st["instance"], "TERMINATED", timeout=900)
-        # By the ids recorded when they were made first (a provider's listings can lag behind: DigitalOcean's do,
-        # found live), then whatever else is listed under its name.
+        # By the ids recorded when they were made first (a provider's listings can lag behind: one's did, found live),
+        # then whatever else is listed under its name.
         if st.get("nsg"):
             self.api.delete_nsg_by_id(st["nsg"], name)
         if st.get("key"):

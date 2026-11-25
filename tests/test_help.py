@@ -472,6 +472,13 @@ def run_forms(td, items, tag):
 # The word after one of these is its value, never a request for usage (`sh --file --help` reads the file named --help,
 # as before); every other -h or --help before `--` is. The table must say what each command's own parser does.
 
+def provider_manifests():
+    """lib/cloud/manifests.py: the providers' command-line data."""
+    sys.path.insert(0, os.path.join(LAB, "lib"))
+    from cloud import manifests
+    return manifests
+
+
 def bash_tables():
     """mc_value_options and mc_help_subcommands for every command, as bin/metacomputer has them."""
     src = open(os.path.join(LAB, "bin", "metacomputer")).read()
@@ -479,6 +486,8 @@ def bash_tables():
                                                                            "mc_help_asked")]
     fns = "\n".join(m.group(0) if m else f"{n}() {{ :; }}"     # a checkout without one: an empty table
                     for m, n in zip(found, ("mc_value_options", "mc_help_subcommands", "mc_help_asked")))
+    # The providers' own options are their manifests' (lib/cloud/providers.sh, which bin/metacomputer reads first).
+    fns = f'. "{os.path.join(LAB, "lib", "cloud", "providers.sh")}"\n' + fns
     cmds = sorted(dispatch_commands())
     script = fns + '\nfor c in "$@"; do printf "%s\\t%s\\t%s\\n" "$c" "$(mc_value_options "$c" | tr -s " \\n" " ")" ' \
                    '"$(mc_help_subcommands "$c")"; done'
@@ -615,9 +624,12 @@ def real_value_options():
         "put": hand_parsed("lib/guest_put.py", r"rest\[i \+ 1\]"),
         "each": forms_values("lib/each.py"),
         "secrets": vault_values(),
-        # bin/metacomputer's and scripts/vm-commands.sh's own parsers: an option whose branch reads the next word ($2)
+        # bin/metacomputer's and scripts/vm-commands.sh's own parsers: an option whose branch reads the next word ($2);
+        # vm create's providers' own options (their manifests') each read it in vm_create's one branch for them
         "vm": set(re.findall(r'^\s*(--[a-z-]+)\) (?:vc_once [^;]*; )?\[ \$# -ge 2 \][^\n]*"\$2"',
-                             open(os.path.join(LAB, "scripts", "vm-commands.sh")).read(), re.M)),
+                             open(os.path.join(LAB, "scripts", "vm-commands.sh")).read(), re.M))
+              | ({o[0] for o in provider_manifests().create_options()}
+                 if 'printf -v "${ov//-/_}" \'%s\' "$2"' in bash_fn("scripts/vm-commands.sh", "vm_create") else set()),
         "list": set(re.findall(r'^\s*(--[a-z-]+)\)[^\n]*"\$2"', bash_fn("scripts/vm-commands.sh", "vm_list"), re.M)),
         "inspect": {o for g in re.findall(r'^\s*((?:--[a-z-]+\|?)+)\)[^\n]*"\$\{?2', bash_fn("bin/metacomputer", "do_inspect"),
                                           re.M) for o in g.split("|")},

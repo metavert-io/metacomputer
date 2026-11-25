@@ -47,7 +47,7 @@ def adapter(name, **kw):
 
 
 def by_place(place):
-    """The adapter class whose computers are at `place` (mac, server, oci, ...); KeyError for none."""
+    """The adapter class whose computers are at `place` (mac, server, a provider's place); KeyError for none."""
     for cls in ADAPTERS.values():
         if cls.manifest["place"] == place and not cls.test_only:
             return cls

@@ -81,6 +81,7 @@ PROGRAMS = {
     "scripts/remote-build.sh": ACTS,                        # script_handoff_hold, for the whole build
     "scripts/safe-rmtree.sh": NONE,                         # this Mac's folders (never a VM's)
     "scripts/sync-plugin.py": NONE,
+    "scripts/gen-providers.py": NONE,                      # files of this checkout, made from the manifests
     "scripts/build-openai-plugin.py": NONE,
     "scripts/vendor-driver-skill.py": NONE,
     "scripts/verify-audit.py": NONE,

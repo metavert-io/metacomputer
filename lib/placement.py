@@ -3,9 +3,9 @@
 listings and anything else that has to turn "the one on my Mac" into a computer.
 
 Every computer has a name and a place. The places: `mac`, this Mac, and the providers' places, which `cloud` stands
-for as a group: `server` (your own server), `oci` (Oracle Cloud), `hetzner`, `digitalocean` and `vultr`, from the
-adapters lib/cloud/ registers. A
-computer's place is its settings' PLACE (config/vms/NAME.env; mac unless it says otherwise).
+for as a group: `server` (your own server) and each provider's place, from the adapters lib/cloud/ registers
+(docs/providers.md lists them). A computer's place is its settings' PLACE (config/vms/NAME.env; mac unless it says
+otherwise).
 
 resolve(names_and_places, said, default) picks a computer from (name, place) pairs, in this order:
   1. a computer's name: that computer;

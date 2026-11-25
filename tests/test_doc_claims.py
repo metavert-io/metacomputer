@@ -2174,7 +2174,8 @@ CLAIMS = [
      lambda m: 'if [ -z "$OWNER" ]; then\n  rm -f /root/.ssh/authorized_keys /root/.ssh/authorized_keys2\n  passwd -l root' in raw(
          "provisioning/remote/bootstrap.sh") and '"disable_root: true"' in raw("lib/cloud/guest.py")),
     ("SECURITY.md", r"The REST calls to those three go only to their API\s+addresses, over HTTPS, and never follow a redirect",
-     lambda m: 'HOSTS = ("api.hetzner.cloud", "api.digitalocean.com", "api.vultr.com")' in raw("lib/provider_http.py")
+     lambda m: "HOSTS = manifests.api_hosts()" in raw("lib/provider_http.py")
+     and set(__import__("provider_http").HOSTS) == {"api.hetzner.cloud", "api.digitalocean.com", "api.vultr.com"}
      and 'if not url.startswith("https://") or host not in HOSTS:' in raw("lib/provider_http.py")
      and "return None             # the 3xx comes back as an HTTPError" in raw("lib/provider_http.py")
      and "_OPENER = urllib.request.build_opener(_NoRedirect)" in raw("lib/provider_http.py")),
@@ -2182,12 +2183,8 @@ CLAIMS = [
      lambda m: all(all(k in line for k in ("OCI_API_KEY_PEM", "HCLOUD_TOKEN", "DIGITALOCEAN_TOKEN", "VULTR_API_KEY"))
                    for line in (next(ln for ln in raw(f).splitlines() if 'do export -n "$mc_k"; done' in ln)
                                 for f in ("bin/metacomputer", "scripts/lib.sh", "scripts/remote-build.sh")))
-     and all(k in raw("lib/remote.py").split("PROVIDER_ENV = (", 1)[1].split(")", 1)[0]
-             for k in ("HCLOUD_TOKEN", "DIGITALOCEAN_TOKEN", "VULTR_API_KEY"))),
-    ("docs/remote.md", r"one outbound rule that reaches no one \(ICMP to 192\.0\.2\.1, a documentation address\)",
-     lambda m: '"destination_ips": ["192.0.2.1/32"]' in raw("providers/hetzner/adapter.py")
-     and "return inbound + [dict(OFF_RULE)]" in raw("providers/hetzner/adapter.py")
-     and "return egress_from(rules_, off=[normal(OFF_RULE)])" in raw("providers/hetzner/adapter.py")),
+     and "PROVIDER_ENV = manifests.credentials()" in raw("lib/remote.py")
+     and all(k in __import__("remote").PROVIDER_ENV for k in ("OCI_API_KEY_PEM", "HCLOUD_TOKEN", "DIGITALOCEAN_TOKEN", "VULTR_API_KEY"))),
     ("docs/remote.md", r"a Droplet it can't be applied to is deleted at once",
      lambda m: "api.attach_firewall(fw, iid)\n        except Exception:" in vps_class()
      and "api.terminate(iid)" in vps_class().split("api.attach_firewall(fw, iid)", 1)[1][:400]),
@@ -2255,10 +2252,6 @@ CLAIMS = [
      and raw("scripts/remote-build.sh").count("resolv.conf") == 1
      and 'got["udp"] != want' in raw("providers/digitalocean/adapter.py") and "_vpc_ranges(f.get(" not in raw("providers/digitalocean/adapter.py")
      and 'return str(net) if net.version == 4 and net.prefixlen == 32 and private(str(net)) else None' in raw("providers/digitalocean/adapter.py")),
-    ("SECURITY.md", r"an\s+error inside a successful answer \(Hetzner's failed actions\) too",
-     lambda m: "raise self._scrubbed(ProviderError(self.label, \"action\"" in raw("providers/hetzner/adapter.py")),
-    ("docs/remote.md", r"tries each of\s+the region's other domains once and then stops",
-     lambda m: "Every availability domain was tried once" in raw("providers/oci/adapter.py") and "for ad in ads:" in raw("providers/oci/adapter.py")),
     ("SECURITY.md", r"`SSH_AUTH=cert` \(refused: its certificates name the Mac's gateway address\)",
      lambda m: "SSH_AUTH=cert isn't available for a computer reached over SSH" in raw("scripts/lib.sh")),
     ("SECURITY.md", r"Its name, baseline \(always `NAME-baseline`\), previous baseline and checkpoint names may not be another VM's",
@@ -2631,26 +2624,26 @@ CLAIMS = [
      and "xauth" in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/xvfb-inner")
      and 'exec nsenter --target "$c" --mount --pid -- "$@"' in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/in-session")
      and '/opt/metacomputer/sprite/services sshd' in raw("providers/sprites/guest/bootstrap.sh")),
-    ("SECURITY.md", r"no process outside the session is\s+visible, so another process's `/proc/PID/root` \(whose `/\.sprite` would be the real one\) can't be used",
-     lambda m: "--pid --fork" in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/svc-session")
-     and "--mount-proc" in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/svc-session")
-     and '"$(readlink "/proc/$c/ns/pid")" != "$(readlink /proc/self/ns/pid)"' in raw("providers/sprites/guest/rootfs/opt/metacomputer/sprite/in-session")),
     ("SECURITY.md", r"A change\s+whose resulting policy lets out anything the one in force doesn't runs only at your own terminal, judged on where it\s+ends, never on the step",
-     lambda m: "if not cloud_sprites.widens(cur.get(\"outside\"), cur.get(\"allow\") or [], new_rules):" in raw("lib/remote.py")
-     and raw("lib/remote.py").count("require_narrowing(s, a, st,") >= 3 and "if st.get(\"setup_done\"):" in raw("lib/remote.py")
-     and 'remote_py setup-done --vm "$VM_NAME"' in raw("scripts/remote-build.sh")),
+     lambda m: "if not cloud_sprites.widens(cur.get(\"outside\"), cur.get(\"allow\") or [], new_rules):" in raw("providers/sprites/remote.py")
+     and raw("providers/sprites/remote.py").count("require_narrowing(R, s, a, st,") >= 3
+     and "if st.get(\"setup_done\"):" in raw("providers/sprites/remote.py")
+     and "h.egress_check(sys.modules[__name__], s, a, st, args)" in raw("lib/remote.py")
+     and 'remote_py setup-done --vm "$VM_NAME"' in raw("providers/sprites/build.sh")
+     and "pv_build finish" in raw("scripts/remote-build.sh")),
     ("SECURITY.md", r"Every operation \(the network policy, checkpoints,\s+restore, `sprite exec`, each SSH connection, the vault's binding\) checks against Fly's API that the Sprite of that\s+name has that id",
-     lambda m: raw("providers/sprites/adapter.py").count("self._live(name)") >= 6 and "check_sprite(args, ep)" in raw("lib/remote.py")
+     lambda m: raw("providers/sprites/adapter.py").count("self._live(name)") >= 6
+     and "check_sprite(R, args, ep)" in raw("providers/sprites/remote.py")
      and "if let problem = providerProblem(t.binding) { return problem }" in raw("vault/Guest.swift")
      and 'body["labels"] = list(labels)' in raw("providers/sprites/cli.py") and "if OP_LABEL + op in labels" in raw("providers/sprites/adapter.py")),
     ("SECURITY.md", r"it's read with a byte cap on each stream \(4 MB of\s+output, 1 MB for `exec`, 64 KB of errors\)",
      lambda m: "MAX_STDOUT = 4 << 20" in raw("providers/sprites/cli.py") and "MAX_STDERR = 64 << 10" in raw("providers/sprites/cli.py")
      and 'p.add_argument("--max-output", type=int, default=1 << 20' in raw("lib/remote.py") and "capture_output" not in raw("providers/sprites/cli.py")),
     ("SECURITY.md", r"`stop` closes the hub's, the live view's and the vault's connections",
-     lambda m: "    vault_disconnect\n" in raw("bin/metacomputer") and '"$VAULT_BIN" disconnect --vm "$VM_NAME"' in raw("bin/metacomputer")
+     lambda m: "  vault_disconnect\n" in raw("providers/sprites/cli.sh") and '"$VAULT_BIN" disconnect --vm "$VM_NAME"' in raw("bin/metacomputer")
      and 'case "disconnect": res = opDisconnect(req, who)' in raw("vault/Server.swift")),
     ("SECURITY.md", r"With no rules Fly enforces nothing, so metacomputer always sets one",
-     lambda m: 'kind, _ = a.set_policy(s["VM_NAME"], cloud_sprites.rules_for("internet"))' in raw("lib/remote.py")
+     lambda m: 'kind, _ = a.set_policy(s["VM_NAME"], cloud_sprites.rules_for("internet"))' in raw("providers/sprites/remote.py")
      and 'remote_py egress --vm "$VM_NAME" --set "$want_egress"' in raw("scripts/remote-build.sh")
      and 'return [{"domain": "*", "action": "deny"}]' in raw("providers/sprites/adapter.py")
      and "if not names or len(names) > MAX_NAMES" in raw("providers/sprites/adapter.py")),
@@ -2663,7 +2656,8 @@ CLAIMS = [
      and "if parent <= 1 or os.getppid() != parent or stop:" in raw("lib/proxywrap.py")
      and "_ = setsid()" in raw("vault/Guest.swift") and "WRAPPER = (sys.executable, os.path.join(LIB, \"proxywrap.py\"))" in raw("lib/remote.py")),
     ("SECURITY.md", r"An SSH connection asks in its\s+own ProxyCommand, right before its tunnel starts \(`lib/proxywrap.py --id`\)",
-     lambda m: 'wrapper = (*WRAPPER, "--id", st["instance"], "--check", str(len(chk)), *chk)' in raw("lib/remote.py")
+     lambda m: 'return ("--id", st["instance"], "--check", str(len(chk)), *chk)' in raw("providers/sprites/remote.py")
+     and "wrapper = (*WRAPPER, *h.connect_wrapper(sys.modules[__name__], args, ep))" in raw("lib/remote.py")
      and raw("lib/proxywrap.py").index("why = provider_says(check, want, stop)") < raw("lib/proxywrap.py").index("child = subprocess.Popen(argv")
      and "if have != want:" in raw("lib/proxywrap.py")),
     ("SECURITY.md", r"`secrets bind` gets the tunnel, its arguments, the id and how to ask Fly about it\s+from one call whose failure binds nothing",
@@ -2676,7 +2670,7 @@ CLAIMS = [
      and "if let problem = providerProblem(t.binding) {" in raw("vault/Proxy.swift").split("func startTunnel(", 1)[1].split("posix_spawn(", 1)[0]),
     ("SECURITY.md", r"so do a Fly Sprite's `checkpoint NAME` and\s+`checkpoint --delete`",
      lambda m: all(
-         g in raw("bin/metacomputer").split("do_snap_sprite() {", 1)[1].split(call, 1)[0].rsplit(start, 1)[1]
+         g in raw("providers/sprites/cli.sh").split("pv_sprites_snapshot() {", 1)[1].split(call, 1)[0].rsplit(start, 1)[1]
          for call, start in (('remote_py checkpoint --vm "$VM_NAME" delete "$2"', "    checkpoint)\n"),
                              ('remote_py checkpoint --vm "$VM_NAME" create "$name"', 'ckpt_name "$name"'))
          for g in ("owners_check", "handoff_hold_unless_override"))),
@@ -2687,7 +2681,7 @@ CLAIMS = [
      and "guard let have = fileSHA256(prog), have == want else {" in raw("vault/Guest.swift").split("func runTunnel", 1)[1]
      and 'tunnel_program: tunnelProgram, tunnel_sha256: tunnelSHA, tunnel_args: tunnelArgs' in raw("vault/Commands.swift")),
     ("docs/sprites.md", r"A change whose resulting policy lets out anything the one in force doesn't \(adding names, a list where nothing goes out, every name where a list or nothing is in force\) runs only at your own terminal, however it's split into steps",
-     lambda m: "if not owners.at_user_terminal((0, 2)):" in raw("lib/remote.py").split("def require_narrowing", 1)[1]
+     lambda m: "if not owners.at_user_terminal((0, 2)):" in raw("providers/sprites/remote.py").split("def require_narrowing", 1)[1]
      and cloud_provider("sprites").widens("off", [], cloud_provider("sprites").rules_for("internet"))),
     ("docs/sprites.md", r"Addresses can't be listed: only names",
      lambda m: not cloud_provider("sprites").DOMAIN.fullmatch("10.0.0.1")
@@ -2702,13 +2696,13 @@ CLAIMS = [
     ("docs/sprites.md", r"one that exists already in the organization is refused \(metacomputer never takes over a Sprite it didn't make\)",
      lambda m: 'if self.cli.info(org, sprite) is not None:' in raw("providers/sprites/adapter.py")
      and 'if cur is not None and cur.get("id") != st["instance"]:' in raw("providers/sprites/adapter.py")
-     and "return a.owned_lost(s[\"VM_NAME\"], st[\"launching\"])" in raw("lib/remote.py") and "launch_t" not in raw("lib/remote.py").split("def lost_sprite", 1)[1].split("\ndef ", 1)[0]),
-    ("SECURITY.md", r"Fly refuses raw IP addresses \(an address is let through only after an allowed name resolved to it\), private ranges, the metadata service and Fly's own private network",
-     lambda m: '"outside_egress": {"enforced": True, "private_ranges": True, "metadata": True, "off": True}' not in raw("providers/sprites/manifest.py")
-     and 'outside_egress={"enforced": True, "private_ranges": True, "metadata": True, "off": True}' in raw("providers/sprites/manifest.py")),
+     and "return a.owned_lost(s[\"VM_NAME\"], st[\"launching\"])" in raw("providers/sprites/remote.py")
+     and "launch_t" not in raw("providers/sprites/remote.py").split("def lost_sprite", 1)[1].split("\ndef ", 1)[0]),
     ("docs/sprites.md", r"The hub sends keys, typing and pixel clicks in the foreground \(the desktop's own pointer and keyboard, XTEST\) and says so in the result, keys and typing aimed at an element too; clicks on an element \(`element_token`\) still go through accessibility",
      lambda m: 'return t in KEY_TOOLS or not a.get("element_token")' in raw("lib/mcp_hub.py") and 'self.foreground_only = self.env.get("MCOMP_BACKGROUND_INPUT", "on") == "off"' in raw("lib/mcp_hub.py")
-     and "sprites) printf off" in raw("scripts/lib.sh") and 'input={"background": False' in raw("providers/sprites/manifest.py")),
+     and 'mc_background_input() { mc_pv "${PROVIDER:-local-lume}" background_input || printf on; }' in raw("scripts/lib.sh")
+     and "sprites:background_input) printf '%s' 'off'" in raw("lib/cloud/providers.sh")
+     and 'input={"background": False' in raw("providers/sprites/manifest.py")),
     # Paying for things (vault/Payments.swift, PaymentServer.swift, Merchant.swift, AP2.swift; lib/cardmask.py, lib/mcp_hub.py,
     # lib/actionlog.py, lib/wirelimits.py; the guest's secret-fill)
     ("SECURITY.md", r"No grant or unattended rule covers a card \(`rule add --secret` refuses one\), and a `session` or `unlock` answer doesn't widen it",
@@ -4067,6 +4061,31 @@ def share_flags_match(doc_flags):
     per_setting = dict(re.findall(r'\$\{(SHARE_[A-Z]+):-off\}" = on \] \|\| a="\$a (--no-share-[a-z]+)"', body))
     want = {"SHARE_CLIPBOARD": "--no-share-clipboard", "SHARE_AUDIO": "--no-share-audio", "SHARE_ROSETTA": "--no-share-rosetta"}
     return set(doc_flags) == code_flags and per_setting == want, (sorted(doc_flags), sorted(code_flags), per_setting)
+
+
+def provider_claims():
+    """Each registered provider's promises (providers/<name>/claims.tsv): rows of CLAIMS, its conditions against files in
+    its own folder."""
+    import cloud
+    promises = {}
+    for name in cloud.registry.PROVIDERS:
+        rel = os.path.join("providers", name, "claims.tsv")
+        for i, line in enumerate(raw(rel).splitlines(), 1):
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) != 4:
+                raise ValueError(f"{rel}:{i}: a document, a phrase, a file and its text, tab-separated")
+            d, phrase, f, text = parts
+            promises.setdefault((d, phrase), []).append((os.path.join("providers", name, f),
+                                                         text.replace("\\n", "\n").replace("\\t", "\t")))
+
+    def holds(conds):
+        return lambda m: all((t[1:] not in raw(f)) if t.startswith("!") else (t in raw(f)) for f, t in conds)
+    return [(d, phrase, holds(conds)) for (d, phrase), conds in promises.items()]
+
+
+CLAIMS += provider_claims()
 
 
 def run_claims():
