@@ -5,7 +5,8 @@ A manifest is a JSON object, checked by check():
     label      its name in docs and messages ("OTLP")
     help       how `metacomputer help` lists it (default: label)
     about      what it sends, in a line (docs/sinks.md)
-    docs       its section for people (docs/<page>.md#<section>)
+    docs       its section for people (docs/<page>.md#<section>, or its folder's README.md for a kind whose people's
+               docs live there)
     owners     who reviews its folder (.github/CODEOWNERS)
     batch      at most this many events in one request (default 1)
     headers    whether it takes --header and --header-env (default true)
@@ -110,8 +111,9 @@ def check(kind):
     words = raw.get("url_words", [])
     if not isinstance(words, list) or not all(isinstance(w, str) and WORD.fullmatch(w) for w in words):
         bad.append("'url_words' isn't a list of lowercase path segments")
-    if isinstance(raw.get("docs"), str) and not re.fullmatch(r"docs/[a-z0-9_-]+\.md(#[a-z0-9-]+)?", raw["docs"]):
-        bad.append("its docs aren't a page under docs/ (and a section of it)")
+    if isinstance(raw.get("docs"), str) and not re.fullmatch(rf"(docs/[a-z0-9_-]+|sinks/{re.escape(kind)}/README)\.md"
+                                                             r"(#[a-z0-9-]+)?", raw["docs"]):
+        bad.append(f"its docs aren't a page under docs/ or sinks/{kind}/README.md (and a section of it)")
     if not isinstance(raw.get("format", {}), dict):
         bad.append("'format' isn't an object")
     v = raw.get("vault")

@@ -12,13 +12,15 @@ How the event stream works, and each kind's format for the people who receive it
 ```
 sinks/<kind>/
   manifest.json        its words and settings (lib/sinkkit/manifests.py): label, help (how `metacomputer help` lists it),
-                       about (what it sends, in a line), docs (its section for people), owners (CODEOWNERS); batch (events
-                       a request), headers (takes --header), signed (each sink gets a signing key), phone (a phone's cap
-                       applies), url_words (path segments of its URLs that are never secret), partial (its words for a
-                       request accepted with some events refused); format (what the vault's audit sinks send alike: the
-                       vault's build compiles it in); vault (present when the vault's audit sinks have the kind too)
+                       about (what it sends, in a line), docs (its section for people: in a page under docs/, or in its
+                       own README.md), owners (CODEOWNERS); batch (events a request), headers (takes --header), signed
+                       (each sink gets a signing key), phone (a phone's cap applies), url_words (path segments of its
+                       URLs that are never secret), partial (its words for a request accepted with some events
+                       refused); format (what the vault's audit sinks send alike: the vault's build compiles it in);
+                       vault (present when the vault's audit sinks have the kind too)
   sink.py              its code, which lib/events.py calls, passing itself as E (see The interface)
-  README.md            its page for contributors: what's where, its tests (people's docs stay in docs/events.md)
+  README.md            its page for contributors: what's where, its tests (people's docs for the first four stay in
+                       docs/events.md, which their messages and the docs name)
   tests/vault_cases.json   optional: cases for the rules it shares with the vault's audit sinks, which both are checked
                        against (tests/sink_cases.py), with any difference the vault keeps and why
 ```
