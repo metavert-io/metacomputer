@@ -114,25 +114,74 @@ def stop_broker(R, s):
 
 
 # --- lifecycle -------------------------------------------------------------------------------------------------------
-def lost_sandbox(a, s, st):
-    """The sandbox a launch journaled in `st` made though its answer was lost: only one tagged with that launch's
-    operation (adapter.owned_lost). A name alone is never enough."""
-    if not st.get("launching"):
+# A launch whose answer was lost may show at Vercel only later (its create may still be in flight, or its listing lag
+# behind): it's looked for again and again, LOST_GAP_S apart, until VISIBILITY_WINDOW_S have passed since it was sent,
+# twice the create call's own 60 s timeout. Until then nothing says "nothing was made", and the journal stays.
+LOST_GAP_S = 10
+VISIBILITY_WINDOW_S = 120
+
+
+def resolve_lost(R, a, s, st):
+    """The sandbox a launch journaled in `st` (launching, launch_t) made though its answer was lost: only one tagged
+    with that launch's operation (adapter.owned_lost; a name alone is never enough). It's looked for until it shows,
+    or until VISIBILITY_WINDOW_S after the launch was sent, LOST_GAP_S apart: None only then. A lookup that fails, or a
+    sandbox of that name without the tag, raises: the journal is left as it is."""
+    op = st.get("launching")
+    if not op:
         return None
-    return a.owned_lost(s["VM_NAME"], st["launching"])
+    sent = st.get("launch_t") if isinstance(st.get("launch_t"), (int, float)) else time.time()
+    while True:
+        found = a.owned_lost(s["VM_NAME"], op)
+        if found:
+            return found
+        if time.time() >= sent + VISIBILITY_WINDOW_S:
+            return None
+        print(f"metacomputer: {s['VM_NAME']}'s launch got no answer and its sandbox doesn't show yet: looking again until "
+              f"{VISIBILITY_WINDOW_S} s after it was sent", file=sys.stderr)
+        time.sleep(min(LOST_GAP_S, max(0.0, sent + VISIBILITY_WINDOW_S - time.time())) or LOST_GAP_S)
+
+
+def delete_everything(R, s, a, rd, st):
+    """The computer's sandbox and every snapshot of it (adapter.delete), its snapshots journaled in the record
+    (snapshots_to_delete, durably) before anything is deleted, so a try that's cut off is finished by the next from the
+    journal. The journal goes only once each of them reads deleted; while one doesn't, Refused, naming it."""
+    def journal(ids):
+        cur = R.read_state(rd)
+        R.write_state(rd, dict(cur, snapshots_to_delete=sorted(set(cur.get("snapshots_to_delete") or []) | set(ids))))
+    a.states[s["VM_NAME"]] = dict(st, snapshots_to_delete=R.read_state(rd).get("snapshots_to_delete") or [])
+    out = a.delete(s["VM_NAME"], journal=journal)
+    left = out.get("snapshots_left") or []
+    cur = R.read_state(rd)
+    if left:
+        R.write_state(rd, dict(cur, snapshots_to_delete=sorted(left)))
+        raise R.Refused(f"{len(left)} snapshot(s) of {s['VM_NAME']}'s sandbox still read created at Vercel "
+                        f"({', '.join(left)}): its record stays; metacomputer vm delete {s['VM_NAME']} again deletes them")
+    R.write_state(rd, {k: v for k, v in cur.items() if k != "snapshots_to_delete"})
+    return out
+
+
+def adopt_lost(R, s, a, rd, st, lost):
+    """A lost launch found: recorded as the computer's own (its identity and operation), so it's deleted as any is."""
+    sandbox = vc.sandbox_of(s)
+    st = dict({k: v for k, v in st.items() if k != "launching"},
+              instance=vc.instance_id(sandbox, lost.get("createdAt")), sandbox=sandbox, op=st["launching"])
+    R.write_state(rd, st)
+    a.states[s["VM_NAME"]] = st
+    return st
 
 
 def create(R, s, a, rd, st, op):
-    """The computer's sandbox, journaled like any launch (a lost answer is found by its name and its operation's tag),
-    its network policy EGRESS=internet for the setup's downloads (the build sets EGRESS when it ends); then its
-    broker, so the setup's SSH can start."""
-    lost = lost_sandbox(a, s, st)
+    """The computer's sandbox, journaled like any launch (a lost answer is found by its name and its operation's tag,
+    looked for over Vercel's visibility delay), its network policy EGRESS=internet for the setup's downloads (the
+    build sets EGRESS when it ends); then its broker, so the setup's SSH can start."""
+    lost = resolve_lost(R, a, s, st)
     if lost:
         print(f"metacomputer: an earlier launch of {s['VM_NAME']} made a sandbox it never recorded (its tag shows it): "
               "deleting it", file=sys.stderr)
-        a.api.delete(vc.sandbox_of(s))
+        delete_everything(R, s, a, rd, adopt_lost(R, s, a, rd, st, lost))
+        st = R.read_state(rd)
     t0 = time.time()
-    st = {k: v for k, v in st.items() if k not in ("kept", "aborted", "deleted")}
+    st = {k: v for k, v in st.items() if k not in ("kept", "aborted", "deleted", "instance", "launching", "op")}
     try:
         R.write_state(rd, dict(st, provider=a.name, launching=op, launch_t=t0))
     except OSError as e:
@@ -159,14 +208,12 @@ def create(R, s, a, rd, st, op):
 
 def abort(R, s, a, rd, st, op, keep):
     """A failed build's clean-up at Vercel: the sandbox this operation made (recorded, or a lost launch found by its
-    tag) is deleted with every snapshot of it; --keep stops it instead (stopped, it bills its snapshot only)."""
-    sandbox = vc.sandbox_of(s)
+    tag over Vercel's visibility delay) is deleted with every snapshot of it; --keep stops it instead (stopped, it
+    bills its snapshot only). "Nothing was made" only once the whole window has passed with nothing found."""
     if not st.get("instance") and st.get("launching") == op:
-        lost = lost_sandbox(a, s, st)
+        lost = resolve_lost(R, a, s, st)
         if lost:
-            st = dict({k: v for k, v in st.items() if k != "launching"},
-                      instance=vc.instance_id(sandbox, lost.get("createdAt")), sandbox=sandbox, op=op)
-            R.write_state(rd, st)
+            st = adopt_lost(R, s, a, rd, st, lost)
     if not st.get("instance"):
         st = {k: v for k, v in st.items() if k != "launching"}
         R.write_state(rd, dict(st, aborted=R.now()))
@@ -181,13 +228,12 @@ def abort(R, s, a, rd, st, op, keep):
         print("stopped")
         return 0
     stop_broker(R, s)
-    out = a.delete(s["VM_NAME"])
-    st = {k: v for k, v in st.items() if k not in ("instance", "launching", "op", "checkpoints", "checkpoint_times")}
+    delete_everything(R, s, a, rd, st)
+    st = {k: v for k, v in R.read_state(rd).items()
+          if k not in ("instance", "launching", "op", "checkpoints", "checkpoint_times")}
     R.write_state(rd, dict(st, aborted=R.now()))
-    left = out.get("snapshots_left") or []
-    print(f"deleted the sandbox this build made and its snapshots ({a.manifest['label']})"
-          + (f"; {len(left)} snapshot(s) still listed: metacomputer cloud status vercel" if left else ""), file=sys.stderr)
-    return 1 if left else 0
+    print(f"deleted the sandbox this build made and its snapshots ({a.manifest['label']})", file=sys.stderr)
+    return 0
 
 
 def wake(R, s, a, rd, st):
@@ -213,25 +259,21 @@ def wake(R, s, a, rd, st):
 
 
 def delete(R, s, a, rd, st, args):
-    """vm delete at Vercel: the recorded sandbox with its sessions and every snapshot (checkpoints too), or one a lost
-    launch made (its tag); then a look that nothing of it is left."""
+    """vm delete at Vercel: the recorded sandbox with its sessions and every snapshot (checkpoints too: journaled
+    first, each read back until deleted), or one a lost launch made (its tag, looked for over Vercel's visibility
+    delay). The record goes only when nothing of it is left."""
     stop_broker(R, s)
-    left = []
+    if not st.get("instance") and st.get("launching"):
+        lost = resolve_lost(R, a, s, st)
+        if lost:
+            print("deleting a sandbox launched for it that this Mac had no record of (its tag shows it)", file=sys.stderr)
+            st = adopt_lost(R, s, a, rd, st, lost)
     if st.get("instance"):
-        out = a.delete(s["VM_NAME"])
-        left = out.get("snapshots_left") or []
+        out = delete_everything(R, s, a, rd, st)
         print(("deleted the sandbox and its " if out["deleted"] else "its sandbox was gone already; deleted its ")
               + f"{len(out.get('snapshots_deleted') or [])} remaining snapshot(s)", file=sys.stderr)
-    else:
-        lost = lost_sandbox(a, s, st)
-        if lost:
-            a.api.delete(vc.sandbox_of(s))
-            print("deleted a sandbox launched for it that this Mac had no record of (its tag shows it)", file=sys.stderr)
-    if left:
-        R.write_state(rd, dict(st, snapshots_left=left))
-        raise R.Refused(f"{len(left)} snapshot(s) of {s['VM_NAME']}'s sandbox are still listed at Vercel ({', '.join(left)}): "
-                        "its record stays; metacomputer vm delete again deletes them")
-    st = {k: v for k, v in st.items() if k not in ("instance", "launching", "checkpoints", "checkpoint_times")}
+    st = {k: v for k, v in R.read_state(rd).items()
+          if k not in ("instance", "launching", "checkpoints", "checkpoint_times", "snapshots_to_delete")}
     R.write_state(rd, dict(st, deleted=R.now()))
     return 0
 

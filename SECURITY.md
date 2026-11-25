@@ -2011,7 +2011,11 @@ the first connection, read over Vercel's authenticated API), with these differen
   metadata service, act on other sandboxes or reach your Mac, but what it serves isn't documented, so metacomputer
   treats it as it treats Fly's `/.sprite/api.sock`: refused by an nftables rule by uid (`tcp dport 23456 meta skuid != 0
   reject with tcp reset`) that the boot script puts back at every start (a stop boots a fresh kernel, which clears it),
-  before sshd or anything of the desktop's runs, and stops the boot when it isn't in force. Checked live: the desktop's
+  before sshd or anything of the desktop's runs. The table is replaced in one nft transaction (declared, deleted and
+  made again in one script, which nft applies whole or not at all), so a boot run again while the desktop runs
+  (`desktop-restart`) never leaves a moment without the rule (found by review: it was deleted, then made again); if no
+  rule can be put in force, every process of every account but root's and Vercel's own is ended, sshd too, and the
+  boot stops. Checked live: the desktop's
   account, Vercel's `ubuntu` account and an account in a user namespace of its own get a refused connection on every
   address; root still gets its 404; no account but root can remove the rule (EPERM, from a user namespace too); Vercel's
   command API, policy changes and snapshots work with it in force.
@@ -2038,12 +2042,15 @@ the first connection, read over Vercel's authenticated API), with these differen
   operation, and the time Vercel made it is recorded. Every operation (the network policy, snapshots, restore, a
   command, delete, each SSH connection right before its relay starts, and the broker again before it runs the relay)
   checks that the sandbox of that name was made at that time and carries those tags, and does nothing otherwise. A
-  build whose answer was lost deletes only a sandbox carrying its operation's tag.
+  build whose answer was lost deletes only a sandbox carrying its operation's tag, and says nothing was made only
+  after looking again over Vercel's visibility delay (two minutes from the launch, found by review: one look could miss
+  a create that completed later); until then its journal stays.
 - **Every snapshot is deleted with the computer.** Vercel keeps a sandbox's snapshots when the sandbox is deleted
   unless they're orphans, deletes those later, and lists none of them by the sandbox's name once it's gone (all found
-  live), and snapshots bill: `vm delete` deletes each one (its checkpoints, recorded on the Mac, and those listed for
-  it before the sandbox goes), reads each again by its ID until Vercel says it's deleted, and keeps the computer's
-  record while one isn't.
+  live), and snapshots bill: `vm delete` journals each one in the computer's record (its checkpoints, and those
+  listed for it) before anything is deleted, deletes them, reads each again by its ID until Vercel says it's deleted,
+  and keeps the record and that journal while one isn't: a delete cut off is finished by the next try (found by
+  review: the list was only in memory).
 - **A stop is a power cut for programs.** Files are kept; every program closes, and the next session starts from the
   snapshot with a new hostname: the boot script clears what the old session left (X, LibreOffice and Firefox locks,
   the session's runtime folder, which is on the disk there) and starts the desktop again. A session also ends at its

@@ -89,6 +89,10 @@ class Stand:
         self.lose_create = False
         self.boot_rc = 0
         self.gone = set()
+        self.fail_calls = {}         # (method, path prefix) -> how many calls fail with no answer (OSError)
+        self.hidden = {}             # sandbox name -> lookups that answer 404 although it exists (Vercel's delay)
+        self.orphans = True          # Vercel deletes the snapshot a deleted sandbox's session started from, later
+        self.stuck = set()           # snapshots whose DELETE is answered but which stay created
 
     def _id(self, kind):
         self.n += 1
@@ -112,6 +116,10 @@ class Stand:
             if m == method and path.startswith(pre):
                 del self.fail_next[(m, pre)]
                 return ans[0], {}, json.dumps(ans[1]).encode()
+        for (m, pre), n in list(self.fail_calls.items()):
+            if m == method and path.startswith(pre) and n > 0:
+                self.fail_calls[(m, pre)] = n - 1
+                raise OSError("connection reset by peer")
         status, obj = self.route(method, path, q, data)
         return status, {}, (json.dumps(obj).encode() if obj is not None else b"")
 
@@ -152,6 +160,9 @@ class Stand:
             sb = self.sandboxes.get(name)
             if sb is None:
                 return nf
+            if method == "GET" and self.hidden.get(name):
+                self.hidden[name] -= 1
+                return nf
             if method == "GET":
                 if q.get("resume") == "true" and sb["session"]["status"] != "running":
                     sb["session"] = self._session(name, sb["sandbox"].get("currentSnapshotId"))
@@ -171,7 +182,7 @@ class Stand:
                 # As Vercel: the snapshot its session started from is deleted later (an orphan), and the listing by name
                 # shows none of the sandbox's snapshots once it's gone (found live)
                 cur = sb["sandbox"].get("currentSnapshotId")
-                if q.get("deleteOrphanSnapshots") == "true" and cur in self.snapshots:
+                if self.orphans and q.get("deleteOrphanSnapshots") == "true" and cur in self.snapshots:
                     self.snapshots[cur]["status"] = "deleting"
                 self.gone.add(name)
                 return 200, {"sandbox": dict(sb["sandbox"])}
@@ -192,7 +203,7 @@ class Stand:
                     return 400, {"error": {"code": "bad_request", "message": "Snapshot expired or deleted."}}
                 s["status"] = "deleted"         # read once more: done
                 return 200, {"snapshot": dict(s, status="created")}
-            if method == "DELETE":
+            if method == "DELETE" and s["id"] not in self.stuck:
                 s["status"] = "deleted"
             return 200, {"snapshot": dict(s)}
         m = re.fullmatch(r"/v2/sandboxes/sessions/(sbx_[0-9]+)(/.*)?", path)
@@ -746,11 +757,307 @@ def broker():
         check("quit", bk.ask(sock, {"op": "quit"}) == {"ok": True})
         th.join(5)
         check("...it ended, its socket removed", not th.is_alive() and not os.path.exists(sock))
-        check("a peer's uid is read (this account's)", True)
     finally:
         b.stopping.set()
         shutil.rmtree(d, ignore_errors=True)
 
+
+# --- the review's findings (audits/codex-vercel.md): each scenario is a behaviour, never a string ------------------
+NFT_STANDIN = r"""#!PY
+# A stand-in for nft: the inet tables in a JSON file, each a list of its rules; `nft -f` applies its whole script or
+# nothing (a transaction), and every call is logged with whether the agent port's rule is in force after it.
+import json, os, re, sys
+st_f, log_f = os.environ["NFT_STATE"], os.environ["NFT_LOG"]
+st = json.load(open(st_f)) if os.path.exists(st_f) else {}
+RULE = "tcp dport 23456 meta skuid != 0"
+def in_force(t):
+    rules = t.get("inet metacomputer_vercel")
+    return rules is not None and sum(1 for r in rules if RULE in r and "reject" in r) >= 1
+def log(argv, rc):
+    with open(log_f, "a") as f:
+        f.write(json.dumps({"argv": argv, "rc": rc, "in_force": in_force(st),
+                            "rules": len(st.get("inet metacomputer_vercel") or [])}) + "\n")
+argv = sys.argv[1:]
+def done(rc):
+    log(argv, rc); sys.exit(rc)
+if argv[:1] == ["-f"]:
+    text = sys.stdin.read() if argv[1:] == ["-"] else open(argv[1]).read()
+    if os.environ.get("NFT_FAIL") == "1":
+        print("Error: Could not process rule: Operation not supported", file=sys.stderr); done(1)
+    work = json.loads(json.dumps(st)); i = 0
+    toks = re.finditer(r"(delete|flush)\s+table\s+inet\s+(\S+)|(?:add\s+)?table\s+inet\s+([A-Za-z0-9_]+)\s*(\{)?", text)
+    pos = 0
+    while True:
+        m = re.compile(r"(delete|flush)\s+table\s+inet\s+(\S+)|(?:add\s+)?table\s+inet\s+([A-Za-z0-9_]+)\s*(\{)?").search(text, pos)
+        if not m:
+            break
+        if m.group(1):
+            key = "inet " + m.group(2)
+            if key not in work:
+                print("Error: No such file or directory", file=sys.stderr); done(1)
+            if m.group(1) == "delete":
+                del work[key]
+            else:
+                work[key] = []
+            pos = m.end(); continue
+        key = "inet " + m.group(3)
+        work.setdefault(key, [])
+        if m.group(4):
+            depth, j = 1, m.end()
+            while depth and j < len(text):
+                depth += {"{": 1, "}": -1}.get(text[j], 0); j += 1
+            body = text[m.end():j - 1]
+            work[key] += [ln.strip() for ln in body.splitlines() if "dport" in ln]   # chains merge; rules append
+            pos = j
+        else:
+            pos = m.end()
+    st.clear(); st.update(work)
+    json.dump(st, open(st_f, "w")); done(0)
+if argv[:2] == ["delete", "table"]:
+    key = " ".join(argv[2:4])
+    if key not in st:
+        done(1)
+    del st[key]; json.dump(st, open(st_f, "w")); done(0)
+if argv[:2] == ["list", "table"]:
+    key = " ".join(argv[2:4])
+    if key not in st:
+        done(1)
+    print("table %s {\n\tchain output {\n\t\ttype filter hook output priority filter; policy accept;" % key)
+    for r in st[key]:
+        print("\t\t" + r.replace(" counter ", " counter packets 0 bytes 0 "))
+    print("\t}\n}"); done(0)
+done(0)
+"""
+PROC_STANDIN = r"""#!/bin/bash
+# pkill / pgrep stand-ins: each call logged; pgrep finds the desktop's account running (the desktop-restart case).
+echo "$(basename "$0") $*" >> "$PROC_LOG"
+case "$(basename "$0")" in pgrep) exit 0 ;; *) exit 0 ;; esac
+"""
+GETENT_STANDIN = r"""#!/bin/bash
+[ "$1" = passwd ] || exit 2
+printf '%s\n' root:x:0:0::/root:/bin/bash ubuntu:x:1000:1000::/vercel:/bin/bash cua:x:1001:1001::/nonexistent:/bin/bash \
+  cuaadmin:x:1002:1002::/nonexistent:/bin/bash mcfill:x:1003:1003::/nonexistent:/bin/bash nobody:x:65534:65534::/:/sbin/nologin
+"""
+
+
+def boot_firewall_part():
+    """The boot script's first part (its agent-port block), from "# 1." to "# 2.": what runs before anything else."""
+    text = open(os.path.join(GUEST, "rootfs/opt/metacomputer/vercel/boot")).read()
+    a = text.index("# 1. Vercel's agent port")
+    b = text.index("# 2. The hostname")
+    return text[a:b]
+
+
+def run_firewall(td, fail=False):
+    """The boot's firewall part under stand-ins: (exit code, output, nft's log entries, the process calls)."""
+    bin_ = os.path.join(td, "bin")
+    os.makedirs(bin_, exist_ok=True)
+    for name, body in (("nft", NFT_STANDIN.replace("#!PY", "#!" + sys.executable, 1)), ("pkill", PROC_STANDIN),
+                       ("pgrep", PROC_STANDIN), ("getent", GETENT_STANDIN)):
+        with open(os.path.join(bin_, name), "w") as f:
+            f.write(body)
+        os.chmod(os.path.join(bin_, name), 0o755)
+    script = 'say() { echo "SAY $*"; }\nfail() { echo "FAIL $*"; exit 1; }\nset -u\n' + boot_firewall_part() + '\necho PART-DONE\n'
+    env = {"PATH": bin_ + ":/usr/bin:/bin", "NFT_STATE": os.path.join(td, "nft.json"), "NFT_LOG": os.path.join(td, "nft.log"),
+           "PROC_LOG": os.path.join(td, "proc.log"), "NFT_FAIL": "1" if fail else "0", "HOME": td}
+    for f in ("nft.log", "proc.log"):
+        open(os.path.join(td, f), "w").close()
+    r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+    nlog = [json.loads(x) for x in open(env["NFT_LOG"]) if x.strip()]
+    plog = [x.strip() for x in open(env["PROC_LOG"]) if x.strip()]
+    return r.returncode, r.stdout + r.stderr, nlog, plog
+
+
+def review_firewall(td):
+    print("\nthe agent port's rule, run as the boot runs it, under a stand-in nft (review B)")
+    d = os.path.join(td, "fw")
+    os.makedirs(d)
+    rc, out, nlog, plog = run_firewall(d)
+    check("a first boot: the rule in force, once, and the boot goes on", rc == 0 and "PART-DONE" in out and nlog
+          and nlog[-1]["in_force"] and nlog[-1]["rules"] == 1, (rc, out[-300:], nlog))
+    lapses = []
+    for i in range(3):
+        rc, out, nlog, plog = run_firewall(d)
+        lapses += [x for x in nlog if not x["in_force"]]
+        ok = rc == 0 and nlog and nlog[-1]["in_force"] and nlog[-1]["rules"] == 1
+    check("boot again (desktop-restart, a second start): the rule in force before, during and after every nft call "
+          "(replaced in one transaction, never deleted first), and still one rule", not lapses and ok, (lapses, nlog))
+    rc, out, nlog, plog = run_firewall(d, fail=True)
+    check("nft refusing the new rule while one is in force: the one in force stays, at every step",
+          all(x["in_force"] for x in nlog) and nlog and nlog[-1]["in_force"], nlog)
+    d2 = os.path.join(td, "fw2")
+    os.makedirs(d2)
+    rc, out, nlog, plog = run_firewall(d2, fail=True)
+    killed = {x.split()[-1] for x in plog if x.startswith("pkill") and " -u " in x}
+    check("nft refusing it with none in force: the boot stops, and every process of every account but root and "
+          "Vercel's own is ended (the desktop's, the maintenance account's, the vault's), and sshd",
+          rc != 0 and "PART-DONE" not in out and {"cua", "cuaadmin", "mcfill"} <= killed and "ubuntu" not in killed
+          and "root" not in killed and any(x.startswith("pkill") and "sshd" in x for x in plog), (rc, plog, out[-200:]))
+
+
+def review_cleanup():
+    print("\ndelete, interrupted and tried again (review C, snapshots)")
+    st = Stand()
+    st.orphans = False                  # the worst case: Vercel deletes nothing of it by itself
+    with tempfile.TemporaryDirectory(prefix="mcvt.") as td:
+        box = Box(td)
+        a, made_out = made(st)
+        a.computers["box"] = box.s
+        rec = {"instance": made_out["instance"], "op": OP, "provider": "vercel"}
+        remote.write_state(box.rd, rec)
+        a.states["box"] = rec
+        a.sleep("box")
+        a.wake("box")
+        ck = a.snapshot("box", "ck")
+        rec = dict(remote.read_state(box.rd), checkpoints={"ck": [ck["version"]]})
+        remote.write_state(box.rd, rec)
+        a.states["box"] = rec
+        a.wake("box")
+        a.sleep("box")
+        made_snaps = {k for k, v in st.snapshots.items() if v["status"] == "created"}
+        st.fail_calls[("DELETE", "/v2/sandboxes/snapshots/")] = 5      # every try of the first snapshot's delete
+        hooks.API_FACTORY = lambda creds: api_on(st)
+        try:
+            e = raises(hooks.delete, remote, box.s, a, box.rd, remote.read_state(box.rd), None)
+            check("the first delete is cut off after the sandbox went (a snapshot's delete never answered): it fails, "
+                  "and the record stays", e is not None and "box" not in st.sandboxes
+                  and remote.read_state(box.rd).get("instance"), e)
+            rec2 = remote.read_state(box.rd)
+            a.states["box"] = rec2
+            e2 = raises(hooks.delete, remote, box.s, a, box.rd, rec2, None)
+            left = {k for k in made_snaps if st.snapshots[k]["status"] == "created"}
+            check("tried again: every snapshot it had is deleted (journaled in the record before anything was deleted; "
+                  "Vercel's listing shows none once the sandbox is gone)", e2 is None and not left
+                  and remote.read_state(box.rd).get("deleted"), (e2, left))
+        finally:
+            hooks.API_FACTORY = None
+    st = Stand()
+    st.orphans = False
+    with tempfile.TemporaryDirectory(prefix="mcvt.") as td:
+        box = Box(td)
+        a, made_out = made(st)
+        a.computers["box"] = box.s
+        a.SNAPSHOT_GONE_S = 0
+        rec = {"instance": made_out["instance"], "op": OP, "provider": "vercel"}
+        remote.write_state(box.rd, rec)
+        a.states["box"] = rec
+        a.sleep("box")
+        a.wake("box")
+        a.sleep("box")
+        stuck = st.sandboxes["box"]["sandbox"]["currentSnapshotId"]
+        st.stuck.add(stuck)
+        e = raises(hooks.delete, remote, box.s, a, box.rd, remote.read_state(box.rd), None)
+        check("a snapshot that stays created after its delete: refused, naming it", e is not None and stuck in e, e)
+        for _ in range(2):
+            rec2 = remote.read_state(box.rd)
+            a.states["box"] = rec2
+            e2 = raises(hooks.delete, remote, box.s, a, box.rd, rec2, None)
+        check("...and every try after says so (never 'nothing left' while it's there), the record kept",
+              e2 is not None and stuck in e2 and not remote.read_state(box.rd).get("deleted"), e2)
+        st.stuck.clear()
+        rec2 = remote.read_state(box.rd)
+        a.states["box"] = rec2
+        e3 = raises(hooks.delete, remote, box.s, a, box.rd, rec2, None)
+        check("...once Vercel deletes it, the next try ends it all", e3 is None and st.snapshots[stuck]["status"] == "deleted"
+              and remote.read_state(box.rd).get("deleted"), e3)
+
+
+def review_lost_launch():
+    print("\na launch whose answer was lost, not visible at once (review C, launches)")
+    for hk in ("abort", "delete"):
+        st = Stand()
+        with tempfile.TemporaryDirectory(prefix="mcvt.") as td:
+            box = Box(td)
+            a = vc.Vercel({"box": box.s}, {}, api=api_on(st))
+            hooks.LOST_GAP_S = 0.01
+            hooks.VISIBILITY_WINDOW_S = 0.2
+            st.lose_create = True
+            raises(hooks.create, remote, box.s, a, box.rd, {}, OP)
+            st.lose_create = False
+            st.hidden["box"] = 3            # the next three lookups don't show it yet
+            rec = remote.read_state(box.rd)
+            if hk == "abort":
+                e = raises(hooks.abort, remote, box.s, a, box.rd, rec, OP, False)
+            else:
+                e = raises(hooks.delete, remote, box.s, a, box.rd, rec, None)
+            check(f"{hk}: looks again until it shows (within Vercel's delay), then deletes it: never 'nothing was made' "
+                  "while it may still appear", e is None and "box" not in st.sandboxes, (e, list(st.sandboxes)))
+    st = Stand()
+    with tempfile.TemporaryDirectory(prefix="mcvt.") as td:
+        box = Box(td)
+        a = vc.Vercel({"box": box.s}, {}, api=api_on(st))
+        remote.write_state(box.rd, {"provider": "vercel", "launching": OP, "launch_t": time.time()})
+        st.fail_calls[("GET", "/v2/sandboxes/box")] = 99
+        e = raises(hooks.abort, remote, box.s, a, box.rd, remote.read_state(box.rd), OP, False)
+        check("...Vercel not answering the lookups: refused, the journal kept (never success)", e is not None
+              and remote.read_state(box.rd).get("launching") == OP, e)
+        st.fail_calls.clear()
+        e = raises(hooks.abort, remote, box.s, a, box.rd, remote.read_state(box.rd), OP, False)
+        check("...a launch that never shows over the whole window: then nothing was made, and said so", e is None
+              and not remote.read_state(box.rd).get("launching") and remote.read_state(box.rd).get("aborted"), e)
+
+
+def review_delete_owner():
+    print("\ndelete owns only what _live owns (review C, the operation's tag)")
+    st = Stand()
+    a, out = made(st)
+    st.sandboxes["box"]["sandbox"]["tags"]["mcop"] = "f" * 32
+    e = raises(a.delete, "box")
+    check("a sandbox of that name and time with another operation's tag: delete refuses, as wake does, and it stays",
+          e is not None and "box" in st.sandboxes and raises(a.wake, "box") is not None, e)
+    st.sandboxes["box"]["sandbox"]["tags"]["mcop"] = OP
+    st.sandboxes["box"]["sandbox"]["tags"]["metacomputer"] = "other"
+    check("...another computer's tag: refused too", raises(a.delete, "box") is not None and "box" in st.sandboxes)
+
+
+def review_idle():
+    print("\nthe idle stop at its smallest (review: IDLE_STOP=1)")
+    for left_s, want in ((1, True), (25, True), (50, False)):
+        api = RelayAPI()
+        api.session["timeout"] = 60000
+        api.session["startedAt"] = int(time.time() * 1000) - 60000 + left_s * 1000
+        b = bk.Broker(api, {"vm": "box", "sandbox": "box", "iid": f"box-{api.created}", "op": OP, "sock": "/tmp/x.sock",
+                            "idle_min": 1, "cap_min": 45})
+        b.relays[1] = ("s", "c")
+        b.tick()
+        check(f"IDLE_STOP=1, a connection open, {left_s} s left: " + ("extended to a minute ahead or more" if want
+                                                                          else "not yet (more than half of it left)"),
+              bool(api.extended) == want and (not want or left_s * 1000 + api.extended[0] >= 60000), api.extended)
+    for idle in (1, 2, 15, 999):
+        api = RelayAPI()
+        api.session["timeout"] = idle * 60000
+        api.session["startedAt"] = int(time.time() * 1000) - idle * 60000 + 5000      # 5 s left
+        b = bk.Broker(api, {"vm": "box", "sandbox": "box", "iid": f"box-{api.created}", "op": OP, "sock": "/tmp/x.sock",
+                            "idle_min": idle, "cap_min": None})
+        b.relays[1] = ("s", "c")
+        b.tick()
+        check(f"IDLE_STOP={idle}: 5 s left with a connection open: renewed", bool(api.extended), api.extended)
+    check("...and the broker looks often enough for the smallest: at least twice within its renewal margin",
+          getattr(bk, "tick_s", lambda ms: bk.TICK_S)(60000) * 2 <= 30, getattr(bk, "TICK_S", None))
+
+
+def review_peer():
+    print("\nthe broker's peer check (review F)")
+    a_, b_ = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        check("a real connection's peer uid is read: this account's", bk.peer_uid(a_) == os.getuid(), bk.peer_uid(a_))
+    finally:
+        a_.close(); b_.close()
+    api = RelayAPI()
+    b = bk.Broker(api, {"vm": "box", "sandbox": "box", "iid": f"box-{api.created}", "op": OP, "sock": "/tmp/x.sock",
+                        "idle_min": 15, "cap_min": 45})
+    real = bk.peer_uid
+    bk.peer_uid = lambda conn: os.getuid() + 1
+    try:
+        c1, c2 = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        c2.sendall(b'{"op": "relay", "sandbox": "box"}\n')
+        b.handle(c1)
+        ans = c2.recv(4096)
+        c2.close()
+        check("a peer of another uid: refused before its request is read, no relay run",
+              b"another account" in ans and not api.cmds, ans)
+    finally:
+        bk.peer_uid = real
 
 def credentials_off_env():
     print("\nthe credentials, off every other program's environment")
@@ -772,13 +1079,10 @@ def credentials_off_env():
 def guest():
     print("\nthe guest")
     boot = open(os.path.join(GUEST, "rootfs/opt/metacomputer/vercel/boot")).read()
-    i_block, i_sshd = boot.index("block_agent_port ||"), boot.index("/usr/sbin/sshd <")
+    i_part, i_sshd = boot.index(boot_firewall_part()), boot.index("/usr/sbin/sshd <")
     i_desk = boot.index("/usr/bin/Xvfb")
-    check("boot: Vercel's agent port refused to every account but root, before sshd and the desktop start",
-          "tcp dport $PORT meta skuid != 0 counter reject with tcp reset" in boot and "PORT=23456" in boot
-          and i_block < i_sshd < i_desk)
-    check("...it stops when the rule isn't in force (read back)", "nft list table inet metacomputer_vercel" in boot
-          and "isn't in force: nothing else was started" in boot)
+    check("boot: its agent-port part (run as itself under a stand-in nft above) comes before sshd and the desktop start",
+          i_part < i_sshd < i_desk and boot.index("flock -w 120 9") < i_part)
     check("...what the stop left cleared (X lock, the runtime folder on the disk, LibreOffice's and Firefox's locks), a "
           "new X cookie, the new hostname", all(x in boot for x in ('rm -f "/tmp/.X$D-lock"', 'rm -rf --one-file-system "$RUN"',
                                                                      ".config/libreoffice/4/.lock", ".parentlock",
@@ -821,6 +1125,13 @@ def main():
         adapter()
         journal(td)
         broker()
+        for part in (lambda: review_firewall(td), review_cleanup, review_lost_launch, review_delete_owner, review_idle,
+                     review_peer):
+            try:
+                part()
+            except Exception as e:      # noqa: BLE001  (a scenario that can't run is a failure, never a crash)
+                check(f"a review scenario ran to its end ({getattr(part, '__name__', 'firewall')})", False,
+                      f"{type(e).__name__}: {e}")
         credentials_off_env()
         guest()
     finally:

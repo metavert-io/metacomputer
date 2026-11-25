@@ -49,7 +49,8 @@ The build (`metacomputer --vm work build`, about 6 minutes):
 
 1. **The sandbox**, through Vercel's API, journaled first and tagged with the computer and the build's operation: a
    build that fails or is interrupted deletes what it made and nothing else (a launch whose answer was lost is found by
-   its name and that tag; a sandbox of that name without it is never touched). `build --keep-on-failure` keeps it
+   its name and that tag, looked for again until two minutes after the launch, Vercel's visibility delay; a sandbox
+   of that name without it is never touched). `build --keep-on-failure` keeps it
    instead (stopped). Its network policy is `internet` while it's set up, then `EGRESS`, read back. Its snapshots never
    expire by themselves (`snapshotExpiration` 0).
 2. **Its broker** starts on your Mac (below), and the first step goes through Vercel's own command API, as root:
@@ -78,7 +79,8 @@ Everything works as on any computer: `metacomputer --vm work status`, the MCP to
   (LibreOffice and Firefox start clean: the boot script clears the locks they left; Firefox offers to restore its
   tabs), and the sandbox's hostname changes. `start` says so.
 - **The idle stop is the session's timeout.** Vercel ends a session at its timeout, whatever's running. metacomputer
-  keeps it `IDLE_STOP` minutes (15) ahead while anything of yours is connected (the hub, a command, the live view): the
+  keeps it `IDLE_STOP` minutes (15) ahead while anything of yours is connected (the hub, a command, the live view),
+  renewing it once a minute of it is used (half of it for `IDLE_STOP=1`): the
   hub lets go after `HUB_IDLE` (10 minutes) with no client, and the session ends at most `IDLE_STOP` minutes later,
   even if your Mac is off. `IDLE_STOP=off` keeps it to the plan's cap. Nothing extends it past the cap: on Hobby, 45
   minutes after it started the computer stops, apps and all; `status` says when the session ends.
@@ -157,8 +159,10 @@ the one layer, and the manifest's `outside_egress` says so.
   even root without Vercel's signature. Nothing found lets an account in the sandbox use the port to change the policy,
   read credentials, act on other sandboxes or reach your Mac, but what it serves isn't documented, so metacomputer
   refuses it to every account but root: an nftables rule by uid (`tcp dport 23456 meta skuid != 0 reject`), put back
-  by the boot script at every start (a stop clears it) before anything of the desktop's runs; the boot stops if it isn't
-  in force. Checked live: the desktop's account, Vercel's `ubuntu` account and an account in a user namespace of its own
+  by the boot script at every start (a stop clears it) before anything of the desktop's runs, replaced in one
+  transaction so it never lapses (`desktop-restart` runs the boot script with the desktop still up); if no rule can be
+  put in force, the processes of every account but root's and Vercel's own are ended, sshd too, and the boot stops.
+  Checked live: the desktop's account, Vercel's `ubuntu` account and an account in a user namespace of its own
   are refused, root still gets its 404, and no account but root can remove the rule.
 - **SSH only through Vercel's API.** sshd listens on the sandbox's own loopback, reached from your Mac only through the
   broker (Vercel's token, then metacomputer's own keys and the pinned host key). metacomputer publishes no port (a

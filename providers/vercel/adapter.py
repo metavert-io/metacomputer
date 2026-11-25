@@ -278,12 +278,19 @@ class Vercel(RemoteVM):
         if cur is None:
             raise AdapterError(f"{name}'s sandbox ({sandbox}) is gone from Vercel: nothing was done (metacomputer vm "
                                f"delete {name} forgets it)")
-        sb = cur["sandbox"]
-        tags = sb.get("tags") if isinstance(sb.get("tags"), dict) else {}
-        if sb.get("createdAt") != created or tags.get(TAG) != name or (st.get("op") and tags.get(OP_TAG) != st["op"]):
+        if not self.owns(name, cur["sandbox"], st):
             raise AdapterError(f"the sandbox named {sandbox} isn't the one {name} was made as (made at another time, or "
                                "not by its build): metacomputer leaves it alone, and nothing was done")
         return sandbox, cur, st
+
+    @staticmethod
+    def owns(name, sb, st):
+        """THE ownership check, for every operation (_live) and for delete: the sandbox was made when the computer's
+        record says, and carries the computer's tag and the tag of the operation the record names."""
+        _rec, created = parse_instance(st.get("instance"))
+        tags = sb.get("tags") if isinstance(sb.get("tags"), dict) else {}
+        return (created is not None and sb.get("createdAt") == created and tags.get(TAG) == name
+                and (not st.get("op") or tags.get(OP_TAG) == st["op"]))
 
     def idle_min(self, name, cap=None):
         """IDLE_STOP in minutes: how long a session runs on past its last use (off: the plan's cap)."""
@@ -457,41 +464,43 @@ class Vercel(RemoteVM):
         return self.api.run(sid, list(argv), sudo=sudo, stdin=input,
                             timeout_ms=int((timeout or 3600) * 1000), max_output=max_output or (1 << 20))
 
-    def delete(self, name):
+    def delete(self, name, journal=None):
         """The sandbox, its sessions and every snapshot of it (its checkpoints too): nothing is left at Vercel. Never a
-        sandbox of that name this computer didn't make."""
+        sandbox of that name this computer didn't make (owns: the same check as every other operation's).
+
+        Its snapshots are known before anything is deleted (those its record names, those journaled by an earlier try,
+        and those Vercel lists for it: its listing by name shows none once the sandbox is gone, found live), and handed
+        to `journal` (lib/remote.py's hook writes them into the computer's record, durably) before the sandbox goes. A
+        try that's cut off is tried again from that journal: each snapshot is deleted and read again by its ID until
+        Vercel says it's deleted. {"deleted", "snapshots_deleted", "snapshots_left"}: left is what's still there."""
         sandbox = self._sandbox(name)
         st = self._state(name)
-        rec_sb, created = parse_instance(st["instance"])
+        rec_sb, _created = parse_instance(st["instance"])
         if rec_sb != sandbox:
             raise AdapterError(f"{name}'s settings name the sandbox {sandbox}, but it was made as {rec_sb}: nothing was "
                                "deleted")
         cur = self.api.sandbox(sandbox)
-        # Its snapshots are listed before the sandbox goes: Vercel's listing by name shows none of them afterwards
-        # (found live), even one it's still deleting.
-        listed = set()
+        if cur is not None and not self.owns(name, cur["sandbox"], st):
+            raise AdapterError(f"the sandbox named {sandbox} isn't the one this computer made (made at another time, or "
+                               "not by its build): metacomputer leaves it alone, and nothing was deleted")
+        ids = set(self.kept_snapshots(name)) | {i for i in st.get("snapshots_to_delete") or [] if isinstance(i, str)}
         if cur is not None:
-            sb = cur["sandbox"]
-            tags = sb.get("tags") if isinstance(sb.get("tags"), dict) else {}
-            if sb.get("createdAt") != created or tags.get(TAG) != name:
-                raise AdapterError(f"the sandbox named {sandbox} isn't the one this computer made: metacomputer leaves "
-                                   "it alone")
-            listed = {x.get("id") for x in self.api.snapshots(sandbox) if x.get("status") == "created" and x.get("id")}
+            ids |= {x.get("id") for x in self.api.snapshots(sandbox) if x.get("status") == "created" and x.get("id")}
+        ids = sorted(i for i in ids if isinstance(i, str))
+        if journal is not None:
+            journal(ids)                # in the record before anything is deleted
+        if cur is not None:
             self.api.delete(sandbox)
-        return dict(self.delete_snapshots_of(name, sandbox, listed), deleted=cur is not None)
+        return dict(self.delete_snapshots(ids), deleted=cur is not None)
 
     SNAPSHOT_GONE_S = 60
 
-    def delete_snapshots_of(self, name, sandbox, listed=()):
-        """Every snapshot of the sandbox (its checkpoints, recorded here, those listed for it before it went, and any
-        listed now): deleted, then each read again by its ID until Vercel says it's deleted (one it was deleting
-        already answers "expired or deleted", and is listed as created a little longer: found live).
-        {"snapshots_deleted": [...], "snapshots_left": [...]}."""
+    def delete_snapshots(self, ids):
+        """Each snapshot of `ids` deleted, then read again by its ID until Vercel says it's deleted (one it was deleting
+        already answers "expired or deleted", and reads created a little longer: found live). {"snapshots_deleted",
+        "snapshots_left"}: left is what still reads created, never assumed gone."""
         from .api import VercelError
         gone = []
-        ids = set(self.kept_snapshots(name)) | set(listed)
-        ids |= {x.get("id") for x in self.api.snapshots(sandbox) if x.get("status") == "created" and x.get("id")}
-        ids = sorted(i for i in ids if isinstance(i, str))
         for sid in ids:
             snap = self.api.get_snapshot(sid)
             if snap is None or snap.get("status") != "created":

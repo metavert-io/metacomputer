@@ -41,6 +41,17 @@ LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 RELAY = "/opt/metacomputer/vercel/relay"
 MAX_REQUEST = 4096
 TICK_S = 20
+
+
+def renew_margin(idle_ms):
+    """How far below IDLE_STOP the session's time left may fall before it's renewed: a minute, or half of IDLE_STOP when
+    that's less (IDLE_STOP=1 renews with 30 s left, never "never": review of item 6)."""
+    return min(60000, idle_ms // 2)
+
+
+def tick_s(idle_ms):
+    """How often the broker looks: often enough that two looks fall within the renewal margin, whatever IDLE_STOP."""
+    return max(1.0, min(TICK_S, renew_margin(idle_ms) / 2000.0))
 CHECK_CACHE_S = 3.0
 UP_CHUNK = 512 * 1024
 MAX_WRITE = 600 * 1024        # raw bytes a write carries: as base64 in JSON it stays under Vercel's 1 MB body limit
@@ -350,7 +361,7 @@ class Broker:
         if not isinstance(start, (int, float)) or not isinstance(timeout, (int, float)):
             return True
         left = start + timeout - self.clock() * 1000
-        if left >= self.idle_ms - 60000:
+        if left >= self.idle_ms - renew_margin(self.idle_ms):
             return True
         want = int(self.idle_ms - left)
         want = ((want + 59999) // 60000) * 60000
@@ -395,7 +406,7 @@ class Broker:
         self.log(f"serving {self.vm} (sandbox {self.sandbox}), pid {os.getpid()}")
 
         def ticker():
-            while not self.stopping.wait(TICK_S):
+            while not self.stopping.wait(tick_s(self.idle_ms)):
                 if not self.tick():
                     self.stopping.set()
         threading.Thread(target=ticker, daemon=True).start()

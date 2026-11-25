@@ -31,11 +31,16 @@ fail() { say "FAILED: $*"; exit 1; }
 exec 9> /run/metacomputer-vercel-boot.lock
 flock -w 120 9 || fail "another boot is running"
 
-# 1. Vercel's agent port, for root only.
+# 1. Vercel's agent port, for root only. The table is replaced in one nft transaction (declared, deleted and made
+#    again in one script, which nft applies whole or not at all), so a rule is in force at every moment: a boot run
+#    again while the desktop runs (desktop-restart, a second start) never leaves it unprotected, not even briefly.
+#    If no rule can be put in force, nothing of any account but root's and Vercel's own (`ubuntu`, its API) may run:
+#    their processes are ended, and sshd with them, so no new session starts unprotected; the boot stops.
 PORT=23456
-block_agent_port() {
-  nft delete table inet metacomputer_vercel 2>/dev/null
-  nft -f - <<NFT
+rule_in_force() { nft list table inet metacomputer_vercel 2>/dev/null | grep -q "tcp dport $PORT meta skuid != 0 .*reject"; }
+nft -f - <<NFT || say "nft didn't take the rule (the one in force, if any, is unchanged)"
+table inet metacomputer_vercel
+delete table inet metacomputer_vercel
 table inet metacomputer_vercel {
   chain output {
     type filter hook output priority 0; policy accept;
@@ -43,10 +48,13 @@ table inet metacomputer_vercel {
   }
 }
 NFT
-}
-block_agent_port || fail "nftables didn't take the rule keeping Vercel's agent port from the desktop: nothing else was started"
-nft list table inet metacomputer_vercel 2>/dev/null | grep -q "tcp dport $PORT meta skuid != 0 .*reject" \
-  || fail "the rule keeping Vercel's agent port from the desktop isn't in force: nothing else was started"
+if ! rule_in_force; then
+  pkill -KILL -x sshd 2>/dev/null
+  for u in $(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "ubuntu" { print $1 }'); do
+    pkill -KILL -u "$u" 2>/dev/null
+  done
+  fail "the rule keeping Vercel's agent port from the desktop isn't in force: the desktop's processes and sshd were ended, nothing else was started"
+fi
 say "Vercel's agent port ($PORT) refused to every account but root"
 
 # 2. The hostname this session has.
