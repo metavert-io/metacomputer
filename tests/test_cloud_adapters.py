@@ -13,9 +13,13 @@
 - The feature map: every feature gives None or a plain reason for every adapter.
 - The resolver: names, providers, places and the default, in that order; refusals when it's unclear or empty;
   --vm and --on together; --on cloud (or any provider's name) says this metacomputer has no cloud computers.
-- The registered providers (your own server, Oracle Cloud, Fly Sprites) make up `cloud`; their adapters pass the same
-  contract with no credentials and no network (tests/test_remote.py covers their transport, guest setup and the OCI
-  driver; tests/test_sprites.py the Sprites adapter against a stand-in `sprite` command).
+- The registered providers (your own server, and each provider's folder, providers/<name>/) make up `cloud`; their
+  adapters pass the same contract with no credentials and no network (tests/test_remote.py covers their transport,
+  guest setup and the drivers on stand-in APIs; tests/test_sprites.py the Sprites adapter against a stand-in `sprite`
+  command).
+- Provider packages (providers/README.md): each registered folder has what a provider's folder holds and a sound
+  command-line manifest (CLI); what's made from the manifests is current (scripts/gen-providers.py --check); and no
+  shared code names a provider (PROVIDER_WORDS, against the lines of LINT_ALLOW, each allowed for its reason).
 """
 import ast
 import copy
@@ -451,6 +455,190 @@ def resolver():
     check("placement.py resolve --on mac: the default's name", r.returncode == 0 and r.stdout.strip() == "demo", r)
 
 
+# --- provider packages: their folders, their CLI manifests, what's made from them, and shared code that names none ----
+# Where shared code is: everything the CLI, the scripts and the helpers run, lib/cloud's framework included. Not in it:
+# the providers' folders, tests (each provider's checks name it), docs and config (people's pages), the guest's side
+# (provisioning/: what runs inside a computer, which this lint leaves to the guest packages), and the vault (vault/,
+# Swift: unchanged by the provider packages).
+SHARED = ("bin", "scripts", "lib", "install.sh", "get.sh")
+# Whole files allowed: the registry (the one list) and what scripts/gen-providers.py makes (checked current below).
+LINT_FILES = {"lib/cloud/registry.py": "the registry: the explicit list of providers",
+              "lib/cloud/providers.sh": "made from the manifests by scripts/gen-providers.py (checked current here)"}
+# Lines allowed, by file and a piece of the line, each for its reason. An entry that matches nothing fails, so a line
+# that's gone doesn't keep its permission.
+LINT_ALLOW = [
+    ("bin/metacomputer", "#                                  there), server (your own server), oci (Oracle Cloud), sprites (Fly Sprites),",
+     "usage text (`metacomputer help` prints these comment lines as they are): which places get a label isn't data"),
+    ("bin/metacomputer", "#                                  hetzner (Hetzner Cloud), digitalocean, vultr, or cloud (anywhere but this Mac).",
+     "usage text, as above"),
+    ("bin/metacomputer", "#   vm create NAME --on server --host ADDRESS --user ACCOUNT [--port P] | --on oci [--size SIZE] [--egress internet|off]",
+     "usage text: its grouping of providers (Oracle Cloud alone, the hourly three together, Sprites apart) isn't "
+     "the registry's order, so it can't be made from the manifests without changing it"),
+    ("bin/metacomputer", "#             | --on hetzner|digitalocean|vultr [--size SIZE] [--region REGION] [--egress internet|off]",
+     "usage text, as above"),
+    ("bin/metacomputer", "#   vm create NAME --on sprites --org ORG [--sprite SPRITE] [--egress internet|off]", "usage text, as above"),
+    ("bin/metacomputer", "#                                  a Sprite on Fly.io, reached through Fly's tunnel (docs/sprites.md)",
+     "usage text, as above"),
+    ("bin/metacomputer", "#                                  what metacomputer made at a provider (oci, sprites, hetzner, digitalocean, vultr),",
+     "usage text, as above"),
+    ("scripts/vm-commands.sh", '*) die "usage: metacomputer vm list [--on PLACE] [--json] | create NAME',
+     "a usage message: it groups Oracle Cloud with the hourly three and lists Sprites last, which isn't the "
+     "registry's order, so it can't be made from the manifests without changing it"),
+    ("scripts/vm-commands.sh", '-*) die "unknown option $1 (metacomputer vm create NAME',
+     "a usage message whose grouping (Oracle Cloud, the hourly three, then Sprites) isn't the registry's order, as above"),
+    ("scripts/release.sh", "test_traces test_page_guest test_update test_agents test_cloud_adapters test_session_guard test_remote test_sprites",
+     "a test suite's name in the no-VM suites a release runs (the list CLAUDE.md and the release's tests check)"),
+    ("scripts/check-public.sh", "domain), phone numbers, home-directory paths, Fly.io machine ids, and every deny-list term;",
+     "the publish check looks for any Fly.io app's machine ids in any repository: not the Sprites provider"),
+    ("scripts/check-public.sh", "# A Fly.io machine id has letters; fourteen digits alone are a number",
+     "the publish check, as above"),
+    ("lib/mcp_hub.py", '"/dev/uinput, as on Fly Sprites; keys and typing always go in the foreground there, clicks on an "',
+     "the hub's note to the agent (user-facing text): making it from the manifests would load the provider registry "
+     "into the hub, which the provider packages leave unchanged"),
+    ("lib/mcp_hub.py", '"""On a computer without the driver\'s background input (Fly Sprites): input that would need its virtual devices is',
+     "the hub, left unchanged by the provider packages (as above)"),
+    ("lib/mcp_hub.py", "# A computer without the driver's background input (no /dev/uinput: Fly Sprites; its provider's manifest says",
+     "the hub, left unchanged by the provider packages (as above)"),
+]
+MARK_BEGIN, MARK_END = "# >>> generated by scripts/gen-providers.py", "# <<< generated by scripts/gen-providers.py"
+
+
+def provider_words():
+    """{provider: a pattern for the words that name it}: its name, place and transport in any case, its label's words
+    (less the generic "Cloud"), its credentials and the settings it alone reads, each as a whole word (letters and
+    digits around it don't count; an underscore does, so OCI_USER names oci)."""
+    from cloud import manifests as mf
+    out = {}
+    for n in cloud.registry.PROVIDERS:
+        m, c = mf.manifest(n), mf.cli(n)
+        ci = {n, m["place"]} | ({c["transport"]} if c["transport"] else set())
+        cs = ({w for w in m["label"].split() if w != "Cloud"} | set(c["credentials"]) | set(c["transport_settings"])
+              | ({c["python"]} if c["python"] else set()) | {e for _o, e in c["cloud_options"]})
+        alts = [f"(?i:{re.escape(w)})" for w in sorted(ci)] + [re.escape(w) for w in sorted(cs)]
+        out[n] = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(alts) + r")(?![A-Za-z0-9])")
+    return out
+
+
+def shared_files():
+    out = []
+    for top in SHARED:
+        full = os.path.join(LAB, top)
+        if os.path.isfile(full):
+            out.append(top)
+            continue
+        for d, ds, fs in os.walk(full):
+            ds[:] = sorted(x for x in ds if x != "__pycache__")
+            out += [os.path.relpath(os.path.join(d, f), LAB) for f in sorted(fs)]
+    return out
+
+
+def naming_lines(words, files):
+    """[(file, line number, line, providers it names)] of the shared files, less the allowed files and the generated
+    blocks; lines of files that aren't text are skipped."""
+    hits = []
+    for rel in files:
+        if rel in LINT_FILES:
+            continue
+        try:
+            with open(os.path.join(LAB, rel), encoding="utf-8") as f:
+                text = f.read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        generated = False
+        for i, line in enumerate(text.split("\n"), 1):
+            if line.startswith(MARK_BEGIN):
+                generated = True
+            if generated:
+                generated = not line.startswith(MARK_END)
+                continue
+            named = [n for n, p in words.items() if p.search(line)]
+            if named:
+                hits.append((rel, i, line, named))
+    return hits
+
+
+def packages():
+    print("\nprovider packages (providers/<name>/)")
+    from cloud import manifests as mf
+    reg = cloud.registry
+    check("the registry is an explicit list, in lib/cloud/registry.py, of names that are folders here",
+          isinstance(reg.PROVIDERS, tuple) and reg.PROVIDERS and len(set(reg.PROVIDERS)) == len(reg.PROVIDERS)
+          and all(os.path.isdir(os.path.join(LAB, "providers", n)) for n in reg.PROVIDERS), reg.PROVIDERS)
+    folders = sorted(d for d in os.listdir(os.path.join(LAB, "providers"))
+                     if os.path.isdir(os.path.join(LAB, "providers", d)) and d != "__pycache__")
+    check("...and every folder in providers/ is registered (a folder isn't loaded by being there)",
+          folders == sorted(reg.PROVIDERS), folders)
+    need = ("__init__.py", "adapter.py", "manifest.py", "settings.env", "README.md", "claims.tsv")
+    missing = [f"{n}/{f}" for n in reg.PROVIDERS for f in need if not os.path.isfile(os.path.join(LAB, "providers", n, f))]
+    check("each provider's folder has its adapter, manifest, settings, page and doc-claims", not missing, missing)
+    check("...its adapter registers itself under its folder's name (ADAPTER), and lib/cloud has it in the registry's "
+          "order, after this Mac's, the stand-in's and your own server's",
+          all(reg.adapter_class(n).name == n for n in reg.PROVIDERS)
+          and list(cloud.ADAPTERS)[3:] == list(reg.PROVIDERS), list(cloud.ADAPTERS))
+    bad = {n: mf.check_cli(n) for n in reg.PROVIDERS if mf.check_cli(n)}
+    check("each provider's CLI manifest is sound (lib/cloud/manifests.py check_cli)", not bad, bad)
+    check("...and a broken one is refused (an unknown key, a credential that isn't a variable's name, a shared option)",
+          bool(_cli_problems({"owners": ("@x",), "nope": 1})) and bool(_cli_problems({"owners": ("@x",), "credentials": ("bad name",)}))
+          and bool(_cli_problems({"owners": ("@x",), "create_options": (("--size", "a size", "", False),)}))
+          and not _cli_problems({"owners": ("@x",)}))
+    settings_bad = [n for n in reg.PROVIDERS
+                    if any(ln.strip() and not ln.startswith("#")
+                           for ln in open(os.path.join(LAB, "providers", n, "settings.env")).read().splitlines())]
+    check("...its settings.env holds comments only (nothing in it is read as a setting)", not settings_bad, settings_bad)
+    r = subprocess.run([sys.executable, os.path.join(LAB, "scripts", "gen-providers.py"), "--check"],
+                       capture_output=True, text=True, timeout=60)
+    check("what's made from the manifests is current: docs/providers.md, lib/cloud/providers.sh, the credential lines "
+          "and CODEOWNERS (scripts/gen-providers.py --check)", r.returncode == 0, r.stdout + r.stderr)
+    owners = open(os.path.join(LAB, ".github", "CODEOWNERS")).read().splitlines()
+    check("CODEOWNERS has each provider's folder, with its owners", all(
+        f"/providers/{n}/ {' '.join(mf.cli(n)['owners'])}" in owners for n in reg.PROVIDERS))
+    # The credential lines: every provider's credentials, in the three files, exactly what the generator writes.
+    creds = " ".join(mf.credentials())
+    lines = {f: [ln for ln in open(os.path.join(LAB, f)).read().splitlines() if 'do export -n "$mc_k"; done' in ln]
+             for f in ("bin/metacomputer", "scripts/lib.sh", "scripts/remote-build.sh")}
+    check("bin/metacomputer, scripts/lib.sh and scripts/remote-build.sh each take every provider's credentials off the "
+          "environment first thing, as the manifests name them", all(
+              v == [f'for mc_k in {creds}; do export -n "$mc_k"; done; unset mc_k'] for v in lines.values())
+          and __import__("remote").PROVIDER_ENV == mf.credentials(), lines)
+    # The lint: its pattern, tried on known hits and known misses first (a pattern that matches nothing passes all).
+    words = provider_words()
+    probes = {"PROVIDER=oci": {"oci"}, "export -n OCI_USER": {"oci"}, "Fly's sprite command": {"sprites"},
+              "SPRITE_ORG=x": {"sprites"}, "on Hetzner Cloud": {"hetzner"}, "HCLOUD_TOKEN": {"hetzner"},
+              "DIGITALOCEAN_TOKEN": {"digitalocean"}, "--on vultr": {"vultr"}, "Oracle Cloud": {"oci"},
+              "the associate's social voice": set(), "on the fly": set(), "spritecli-free text": set()}
+    seen = {t: {n for n, p in words.items() if p.search(t)} for t in probes}
+    check("the lint's pattern finds a provider's words and nothing else (tried on known lines first)", seen == probes, seen)
+    files = shared_files()
+    check("...it reads the shared code (bin/metacomputer, lib/remote.py, scripts/lib.sh, lib/cloud/vps.py among them)",
+          all(f in files for f in ("bin/metacomputer", "lib/remote.py", "scripts/lib.sh", "scripts/vm-commands.sh",
+                                   "scripts/remote-build.sh", "lib/cloud/vps.py")) and len(files) > 50, len(files))
+    hits = naming_lines(words, files)
+    used, unallowed = set(), []
+    for rel, i, line, named in hits:
+        k = next((j for j, (f, piece, _why) in enumerate(LINT_ALLOW) if f == rel and piece in line), None)
+        if k is None:
+            unallowed.append(f"{rel}:{i}: {line.strip()[:140]} ({', '.join(named)})")
+        else:
+            used.add(k)
+    check("no shared code names a provider outside its folder (allowed: the registry, the generated files and blocks, "
+          "and LINT_ALLOW's lines, each for its reason)", not unallowed, unallowed)
+    stale = [LINT_ALLOW[j][:2] for j in range(len(LINT_ALLOW)) if j not in used]
+    check("...and every allowed line is still there (a permission goes with its line)", not stale, stale)
+    check("...each allowed line says why", all(len(why) >= 15 for _f, _p, why in LINT_ALLOW))
+
+
+def _cli_problems(cli_dict):
+    """check_cli's problems for a made-up provider's CLI (the oci folder's manifest module, its CLI swapped for a moment)."""
+    from cloud import manifests as mf
+    mod = cloud.registry.manifest("oci")
+    real = mod.CLI
+    try:
+        mod.CLI = cli_dict
+        return mf.check_cli("oci")
+    finally:
+        mod.CLI = real
+
+
 def main():
     registry()
     for label, a in subjects():
@@ -459,6 +647,7 @@ def main():
     fake_lifecycle()
     manifests()
     resolver()
+    packages()
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed: ' + ', '.join(FAILS)}")
     return 1 if FAILS else 0
 

@@ -294,7 +294,7 @@ Sprites API's answers in a file under its HOME.
   as `mcomp-NAME`; bad organizations, Sprite names and command paths refused.
 - The network policy: `EGRESS=internet` (every name), `off` (no name), an allowlist (each name with its subdomains
   unless `--exact`); addresses and anything that isn't a DNS name refused; what's read back classified.
-- The adapter through `lib/spritecli.py`: create (refused over an existing Sprite), wake, sleep, status, delete
+- The adapter through `providers/sprites/cli.py`: create (refused over an existing Sprite), wake, sleep, status, delete
   (never another Sprite of the same name), checkpoints by name, the policy read back; the command gets HOME, PATH
   and LANG only, and `exec` never forwards ports back to the Mac.
 - `lib/remote.py`: the launch journal, a lost launch found by name and time and deleted (an older Sprite of that name
@@ -406,7 +406,7 @@ environment. The vault's remote binding (its address, alias and the computer's i
 
 ## Places and providers: `tests/test_cloud_adapters.py`
 
-`python3 tests/test_cloud_adapters.py` (194 checks, a second) needs no VM and makes no network call.
+`python3 tests/test_cloud_adapters.py` (about 390 checks, a second) needs no VM and makes no network call.
 - The contract every registered adapter passes (`local-lume`, the in-memory `fake`, and the stand-in with a
   bare manifest and a keeping one): a sound manifest under its registered name; every interface method
   answers, or refuses with a reason (`NotSupported`, or `HandledByCLI` naming a command `bin/metacomputer`
@@ -427,6 +427,16 @@ environment. The vault's remote binding (its address, alias and the computer's i
   providers (as data):
   a provider's one computer, the default among several, unclear otherwise, `cloud` across providers; `--vm`
   and `--on` agreeing and disagreeing, `--on` with a computer's name, and the CLI's exit status and output.
+- Provider packages (`providers/<name>/`, providers/README.md): the registry is an explicit list of the folders there,
+  each with its adapter (registered under its folder's name, in the registry's order), manifest, settings (comments
+  only), page and doc-claims rows; every `CLI` manifest is sound and a broken one refused; what's made from them is
+  current (`scripts/gen-providers.py --check`: docs/providers.md, lib/cloud/providers.sh, the credential lines,
+  CODEOWNERS); and no shared code (bin/, scripts/, lib/, install.sh, get.sh) names a provider: the lint's pattern is
+  tried on known lines first, and every line it allows (`LINT_ALLOW`) is still there and says why. A provider's own
+  tests stay in tests/ for now (each is one of release.sh's suites by its name): `test_sprites.py` for Fly Sprites,
+  `test_remote.py` for the providers on servers (Oracle Cloud, Hetzner Cloud, DigitalOcean, Vultr) and the shared
+  remote code; its doc-claims rows that read only its own files are in its `claims.tsv`, which
+  `tests/test_doc_claims.py` reads with the rest.
 
 ## An agent session's computer: `tests/test_session_guard.py`
 
