@@ -558,8 +558,10 @@ def runinfo_json(argv):
     comes checked (scripts/lib.sh netgw_pid: this VM's gw.json on its command line); the hub's from its own record."""
     vm, state, run_dir, netgw, gw, hub_file, watcher, vault_dir, kind = (argv + [""] * 9)[:9]
 
+    import procinfo             # ps, or the kernel where ps can't start (a sandbox)
+
     def started(pid):
-        out = subprocess.run(["ps", "-o", "lstart=", "-p", pid], capture_output=True, text=True).stdout.strip()
+        out = (procinfo.field(pid, "lstart", ps="ps") or "").strip()
         try:
             return time.mktime(time.strptime(" ".join(out.split()[:5]), "%a %b %d %H:%M:%S %Y"))
         except ValueError:
@@ -568,7 +570,7 @@ def runinfo_json(argv):
     def proc(pid):
         if not pid.isdigit():
             return None
-        cmdline = subprocess.run(["ps", "-o", "command=", "-p", pid], capture_output=True, text=True).stdout.strip()
+        cmdline = (procinfo.field(pid, "command", ps="ps") or "").strip()
         return {"pid": int(pid), "started": started(pid), "command": cmdline[:500]} if cmdline else None
     hub = None
     rec = read_json(hub_file) if hub_file else None

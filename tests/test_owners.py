@@ -13,11 +13,18 @@ runner). It checks that such a claim:
 while a Claude Code session's claim and a bridge's claim still go with their process.
 It also checks the owners lock: TimeoutError when another process holds it past the
 timeout, with no file left open, and free again once the holder leaves.
+
+And where /bin/ps can't start (macOS's sandbox runs no setuid program: here under sandbox-exec with a profile that
+allows everything, so only that refusal is left), what lib/procinfo.py reads from the kernel instead: the same pid,
+parent, start time, name, command line and executable as ps on this Mac's processes; claims, the process table and
+the gateway check working there; and every process whose name the kernel can't give as ps would counted as an
+unidentified agent (fail closed).
 """
 import json
 import os
 import pty
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -90,6 +97,282 @@ def detached_pty(argv, timeout=30):
         return int(data)
     except ValueError:
         return None
+
+
+# --- where ps can't start: lib/procinfo.py ----------------------------------------------------------------------------
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# A profile that allows everything: under sandbox-exec, macOS still runs no setuid program, /bin/ps included. That
+# refusal is all this reproduces (an agent session confined by a sandbox of its own).
+ALLOW_ALL = "(version 1)(allow default)"
+
+# Run inside (or, with --force-kernel, with ps made unstartable in-process): every process as metacomputer reads it
+# there. owners.ps_table for pid, parent, name and which names can't be told; procinfo for the command line (exact or
+# None), start time and executable.
+DUMP = r"""
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import owners, procinfo
+if "--force-kernel" in sys.argv:
+    procinfo.PS = "/nonexistent/ps"
+t = owners.ps_table(strict=True)
+out = {}
+for pid, (ppid, comm) in t.items():
+    out[pid] = {"ppid": ppid, "comm": comm, "inexact": pid in t.inexact, "command": procinfo.kernel_field(pid, "command"),
+                "start": procinfo.start(pid), "lstart": procinfo.kernel_field(pid, "lstart"), "exe": procinfo.exe(pid)}
+me = os.getpid()
+print(json.dumps({"procs": out, "me": me, "claude": owners.claude_of(me, t),
+                  "claude_kind": owners.agent_of(owners.claude_of(me, t), t), "complete": owners.ancestry_complete(me, t)}))
+"""
+
+
+def sandboxed(argv, **kw):
+    return subprocess.run([SANDBOX_EXEC, "-p", ALLOW_ALL, *argv], capture_output=True, text=True, timeout=120, **kw)
+
+
+def ps_snapshot():
+    """This Mac's processes as ps lists them: {pid: {ppid, comm, lstart (C locale), command}}."""
+    env = dict(os.environ, LC_ALL="C")
+    def rows(fmt, n):
+        out = {}
+        txt = subprocess.run(["/bin/ps", "-axww", "-o", fmt], capture_output=True, env=env).stdout.decode("utf-8", "replace")
+        for line in txt.splitlines():
+            parts = line.split(None, n)
+            if len(parts) >= n:
+                out[int(parts[0])] = parts[1:] + [""] * (n + 1 - len(parts))
+        return out
+    tab = rows("pid=,ppid=,comm=", 2)
+    cmd = rows("pid=,command=", 1)
+    lst = {}
+    txt = subprocess.run(["/bin/ps", "-axww", "-o", "pid=,lstart="], capture_output=True, env=env, text=True).stdout
+    for line in txt.splitlines():
+        a = line.split(None, 1)
+        if len(a) == 2:
+            lst[int(a[0])] = a[1].strip()
+    return {pid: {"ppid": int(v[0]), "comm": v[1], "command": cmd.get(pid, [""])[0].strip(), "lstart": lst.get(pid)}
+            for pid, v in tab.items()}
+
+
+def proc_fn(name):
+    """A function's text from scripts/lib.sh (`name() {` to its closing brace), to run by itself."""
+    src = open(os.path.join(LAB, "scripts", "lib.sh")).read().split("\n")
+    for i, line in enumerate(src):
+        if line.startswith(name + "() {"):
+            j = i
+            while not src[j].startswith("}"):
+                j += 1
+            return "\n".join(src[i:j + 1])
+    return ""
+
+
+def procinfo_checks():
+    lib = os.path.join(LAB, "lib")
+    sandbox = os.path.exists(SANDBOX_EXEC) and sandboxed(["/usr/bin/true"]).returncode == 0
+    r = sandboxed(["/bin/ps", "-o", "pid=", "-p", str(os.getpid())]) if sandbox else None
+    check("under sandbox-exec (a profile allowing everything), /bin/ps can't start: macOS runs no setuid program there",
+          sandbox and r.returncode != 0 and "Operation not permitted" in r.stderr, r and r.stderr[-200:])
+    run = (lambda argv: sandboxed(argv)) if sandbox else (
+        lambda argv: subprocess.run(argv + ["--force-kernel"], capture_output=True, text=True, timeout=120))
+
+    # Every process of this Mac, as ps lists it and as the kernel gives it where ps can't start: the same answers. A
+    # process that changed between the reads (one that renames itself, one started or ended meanwhile) is left out:
+    # ps is read before and after, and only what it says twice the same way is compared.
+    before = ps_snapshot()
+    r = run([sys.executable, "-c", DUMP, lib])
+    after = ps_snapshot()
+    try:
+        got = json.loads(r.stdout)
+        kern = {int(k): v for k, v in got["procs"].items()}
+    except (ValueError, KeyError):
+        got, kern = {}, {}
+    check("where ps can't start, the process table still reads (from the kernel), whole: this process's ancestry "
+          "reaches launchd", r.returncode == 0 and got.get("complete") is True and len(kern) > 50, r.stderr[-300:])
+    stable = {p: v for p, v in before.items() if after.get(p) == v and p in kern}
+    me = os.getuid()
+    diff = {"ppid": [], "lstart": [], "comm": [], "command": [], "exe": [], "start": []}
+    exact = own = 0
+    for pid, v in stable.items():
+        k = kern[pid]
+        if k["ppid"] != v["ppid"]:
+            diff["ppid"].append(pid)
+        if v["lstart"] and k["lstart"] != v["lstart"]:
+            diff["lstart"].append((pid, v["lstart"], k["lstart"]))
+        if k["start"] is None:
+            diff["start"].append(pid)
+        if not k["inexact"]:
+            exact += 1
+            if k["comm"] != v["comm"]:
+                diff["comm"].append((pid, v["comm"][:60], k["comm"][:60]))
+        if k["command"] is not None:
+            own += 1
+            if k["command"].strip() != v["command"]:
+                diff["command"].append((pid, v["command"][:60], k["command"][:60]))
+        if k["exe"] != owners_exe(pid):
+            diff["exe"].append(pid)
+    check(f"...the same pids as ps (all but those started or ended between the reads): {len(stable)} compared",
+          len(stable) > 50 and len(set(before) & set(after) - set(kern)) <= 3, sorted(set(before) & set(after) - set(kern))[:5])
+    check("...each one's parent the same as ps's", stable and not diff["ppid"], diff["ppid"][:5])
+    check("...and its start time: the kernel's, as ps's lstart prints it", stable and not diff["lstart"] and not diff["start"],
+          (diff["lstart"][:3], diff["start"][:3]))
+    check(f"...and its name (ps comm=, the executable as the process names it) wherever the kernel can tell it: {exact} "
+          "the same", exact > 20 and not diff["comm"], diff["comm"][:3])
+    check(f"...and its command line (ps command=), for every one the kernel can render exactly: {own} the same",
+          own > 20 and not diff["command"], diff["command"][:3])
+    check("...and its executable (its text image, which recognition reads) the same inside as outside",
+          stable and not diff["exe"], diff["exe"][:5])
+    others_ = [p for p, v in kern.items() if p in stable and v["inexact"]]
+    check("...and every name it can't tell (another account's process: only setuid-root ps reads those) marked so",
+          kern.get(1, {}).get("inexact") is True and others_ and all(kern[p]["command"] is None for p in others_),
+          others_[:5])
+
+    # The session's agent, from inside: the same as ps finds, or (where a name can't be told) an unidentified agent.
+    outside = subprocess.run([sys.executable, "-c", DUMP, lib], capture_output=True, text=True, timeout=120)
+    try:
+        o = json.loads(outside.stdout)
+    except ValueError:
+        o = {}
+    check("...the agent session above a command is the one ps finds, or an unidentified agent where the kernel can't "
+          "tell a name (fail closed): never none where ps finds one",
+          got and o and (got.get("claude") == o.get("claude") or got.get("claude_kind") == "unidentified agent")
+          and not (o.get("claude") and not got.get("claude")),
+          (o.get("claude"), o.get("claude_kind"), got.get("claude"), got.get("claude_kind")))
+
+    # The report's failures, inside a sandbox: a session's claim (`metacomputer sh`) and the gateway check (`status`).
+    td = tempfile.mkdtemp(prefix="mcomp-procinfo-")
+    try:
+        env = dict(os.environ, MCOMP_RUN_DIR=td, MCOMP_SSH_PORT=str(SSH_PORT), MCOMP_SESSIONS_DIR=os.path.join(td, "s"))
+        code = ("import json, os, sys; sys.path.insert(0, sys.argv[1]); import owners\n"
+                "if '--force-kernel' in sys.argv:\n    import procinfo; procinfo.PS = '/nonexistent/ps'\n"
+                "print(json.dumps(owners.claim_for_shell('vm_shell')))")
+        r = (sandboxed([sys.executable, "-c", code, lib], env=env) if sandbox else
+             subprocess.run([sys.executable, "-c", code, lib, "--force-kernel"], env=env, capture_output=True, text=True))
+        claims_ = [f for f in os.listdir(os.path.join(td, "owners")) if f.endswith(".json")] \
+            if os.path.isdir(os.path.join(td, "owners")) else []
+        check("where ps can't start, metacomputer sh's claim is still recorded (it failed: Operation not permitted: "
+              "'/bin/ps')", r.returncode == 0 and len(claims_) == 1, (r.returncode, r.stderr[-300:]))
+        gwdir = os.path.join(td, "run")
+        os.makedirs(gwdir)
+        # a stand-in gateway: its command line names this VM's gw.json, as the real one's does
+        gw = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-config", f"{gwdir}/gw.json"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            with open(os.path.join(gwdir, "netgw.pid"), "w") as f:
+                f.write(f"{gw.pid}\n")
+            script = "\n".join([proc_fn("proc_field"), proc_fn("netgw_pid"), 'netgw_pid; proc_field command "$1"'])
+            benv = dict(os.environ, RUN_DIR=gwdir, LAB_ROOT=LAB, PY=sys.executable)
+            r = (sandboxed(["/bin/bash", "-c", script, "_", str(gw.pid)], env=benv) if sandbox else None)
+            ps_cmd = subprocess.run(["/bin/ps", "-ww", "-o", "command=", "-p", str(gw.pid)], capture_output=True,
+                                    text=True).stdout.strip()
+            lines = r.stdout.split("\n") if r else []
+            check("...and the gateway check (scripts/lib.sh netgw_pid, `status`) finds this VM's gateway there",
+                  r is not None and lines[:1] == [str(gw.pid)], r and (r.stdout[-200:], r.stderr[-200:]))
+            check("...and proc_field gives ps's own words for it there (scripts/lib.sh, bin/metacomputer)",
+                  r is not None and len(lines) > 1 and lines[1] == ps_cmd, r and (lines, ps_cmd))
+        finally:
+            gw.kill()
+            gw.wait()
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+    # In detail, with ps unstartable in this process (procinfo.PS: no such program).
+    try:
+        import procinfo
+        import owners
+    except ImportError as e:
+        check(f"lib/procinfo.py: the kernel's reading where ps can't start ({e})", False)
+        return
+    kids = []
+    try:
+        def kid(argv0, *argv):
+            p = subprocess.Popen([argv0, "-c", "sleep 60; :", *argv], executable="/bin/sh", stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+            kids.append(p)
+            return p
+        inj = kid("x\n99999 1 claude")
+        uni = kid("café")
+        named = kid("claude")
+        tab = kid("tab\there")
+        time.sleep(0.5)
+        ps_comm = lambda p: subprocess.run(["/bin/ps", "-ww", "-o", "comm=", "-p", str(p)], capture_output=True,
+                                           text=True).stdout.rstrip("\n")
+        ps_cmdline = lambda p: subprocess.run(["/bin/ps", "-ww", "-o", "command=", "-p", str(p)], capture_output=True,
+                                              text=True).stdout.strip()
+        with_ps = owners.ps_table(strict=True)
+        real = procinfo.PS
+        procinfo.PS = "/nonexistent/ps"
+        try:
+            k = owners.ps_table(strict=True)
+            kcmd = {p.pid: owners.full_command(p.pid) for p in (inj, uni, named, tab)}
+            owners._AGENT_NAMES.clear()
+            name1 = owners.agent_name(1)
+            real_procs = procinfo.kernel_procs
+            procinfo.kernel_procs = lambda: None
+            try:
+                try:
+                    owners.ps_table(strict=True)
+                    strict_raised = False
+                except OSError:
+                    strict_raised = True
+                loose = owners.ps_table()
+            finally:
+                procinfo.kernel_procs = real_procs
+        finally:
+            procinfo.PS = real
+            owners._AGENT_NAMES.clear()
+        check("a process whose name holds a newline can't add a row to the kernel's table (written \\012, as ps does)",
+              k.get(inj.pid, (0, ""))[1] == ps_comm(inj.pid) == "x\\01299999 1 claude"
+              and (99999 not in k or 99999 in with_ps), (k.get(inj.pid), ps_comm(inj.pid)))
+        check("...a tab, and the rest of ps's encoding, the same in the command line",
+              k.get(tab.pid, (0, ""))[1] == ps_comm(tab.pid) and kcmd[tab.pid] == ps_cmdline(tab.pid) != "",
+              (k.get(tab.pid), kcmd[tab.pid], ps_cmdline(tab.pid)))
+        check("a name beyond ASCII (ps writes it by its locale) can't be told: an unidentified agent, its command "
+              "line empty (as from a ps that fails)",
+              uni.pid in k.inexact and owners.agent_of(uni.pid, k) == "unidentified agent" and kcmd[uni.pid] == ""
+              and owners.agent_of(uni.pid, with_ps) is None, (owners.agent_of(uni.pid, k), kcmd[uni.pid]))
+        check("another account's process (launchd, root's) is an unidentified agent there, never no agent; with ps it "
+              "is none", 1 in k.inexact and owners.agent_of(1, k) == "unidentified agent"
+              and owners.agent_of(1, with_ps) is None and not with_ps.inexact)
+        check("...and so is agent_name's answer for it (a claim's agent field)", name1 == "unidentified agent", name1)
+        check("an agent's name reads the same from the kernel as from ps (the session a claim goes with)",
+              owners.agent_of(named.pid, k) == owners.agent_of(named.pid, with_ps) == "Claude Code"
+              and kcmd[named.pid] == ps_cmdline(named.pid), (owners.agent_of(named.pid, k), kcmd[named.pid]))
+        check("neither ps nor the kernel readable: the strict table fails (OSError), the loose one is empty, as "
+              "when ps fails", strict_raised and len(loose) == 0)
+        c_ps = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(named.pid)], capture_output=True, text=True,
+                              env=dict(os.environ, LC_ALL="C")).stdout.strip()
+        fr_ps = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(named.pid)], capture_output=True, text=True,
+                               env=dict(os.environ, LC_ALL="fr_FR.UTF-8")).stdout.strip()
+        sec = procinfo.kernel_proc(named.pid).start[0]
+        check("a start time in ps's words where its locale writes the C locale's (\"%s\"); none where it writes "
+              "another's (\"%s\": storage's records compare these words)" % (c_ps, fr_ps),
+              procinfo.lstart_of(sec, {"LC_ALL": "C"}) == c_ps and procinfo.lstart_of(sec, {"LANG": "fr_FR.UTF-8"}) is None
+              and fr_ps != c_ps)
+        cli = [sys.executable, "-I", "-B", os.path.join(lib, "procinfo.py")]
+        r1 = subprocess.run(cli + ["command", str(named.pid)], capture_output=True, text=True)
+        r2 = subprocess.run(cli + ["comm", "1"], capture_output=True, text=True)
+        r3 = subprocess.run(cli + ["pgid", str(2 ** 22 + 7)], capture_output=True, text=True)
+        r4 = subprocess.run(cli + ["pgid", str(named.pid)], capture_output=True, text=True)
+        ps_pgid = subprocess.run(["/bin/ps", "-o", "pgid=", "-p", str(named.pid)], capture_output=True, text=True).stdout.strip()
+        check("procinfo.py (bash's fallback): ps's command line and process group for a process of yours; exit 3 for a "
+              "name it can't tell, 1 for no such process, nothing printed for either",
+              r1.returncode == 0 and r1.stdout.strip() == ps_cmdline(named.pid) and r4.stdout.strip() == ps_pgid
+              and r2.returncode == 3 and not r2.stdout and r3.returncode == 1 and not r3.stdout,
+              (r1.returncode, r1.stdout[:80], r2.returncode, r3.returncode, r4.stdout, ps_pgid))
+    finally:
+        for p in kids:
+            try:
+                os.killpg(p.pid, 9)          # its sleep too
+            except OSError:
+                pass
+            p.wait()
+
+
+def owners_exe(pid):
+    sys.path.insert(0, os.path.join(LAB, "lib"))
+    try:
+        import procinfo
+        return procinfo.exe(pid)
+    except ImportError:
+        return "no lib/procinfo.py"
 
 
 def main():
@@ -237,6 +520,8 @@ def main():
     check("...a terminal Codex gave its command isn't (exit 1)", rc_codex == 1, rc_codex)
     r = subprocess.run(at, stdin=subprocess.DEVNULL, capture_output=True)
     check("...nor is no terminal at all", r.returncode == 1, r.returncode)
+
+    procinfo_checks()
 
     print(f"\n{'all passed' if not FAILS else str(len(FAILS)) + ' failed'}")
     return 1 if FAILS else 0

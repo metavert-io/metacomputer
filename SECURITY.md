@@ -3728,8 +3728,11 @@ something waits for you:
   `-m` module), plus any of its arguments naming an agent's package by an identifier of its own (`@google/gemini-cli`,
   a `gemini-cli` or `openclaw` folder, `hermes_cli`, `hermes-agent`; as written, or what a file argument resolves to),
   which catches code like `node -pe "import('@google/gemini-cli')"`. A file merely named `gemini` is no agent. It can't
-  be told when its arguments or working folder can't be read or its script isn't there. It isn't a barrier against
-  your own account, since a program can open a pseudo-terminal outside an agent's process tree.
+  be told when its arguments or working folder can't be read or its script isn't there. Where `ps` can't start
+  (macOS's sandbox runs no setuid program, `/bin/ps` included), the process table is read from the kernel instead, and
+  a process whose name it can't give exactly as `ps` would (another account's, or one beyond ASCII) can't be told
+  either: it counts as an agent too. It isn't a barrier against your own account, since a program can open a
+  pseudo-terminal outside an agent's process tree.
 
   **Recognising agent sessions is best-effort defense in depth.** It's read from the process table, which any
   program running as you can arrange (a renamed interpreter, a process started outside the agent's tree), and it

@@ -21,7 +21,7 @@ All notable changes to metacomputer are recorded here. The format follows
   `.github/CODEOWNERS`) and the hooks each folder brings, and a test fails on a line that names one. Adding an agent
   is its folder, one registry line and a line here. The folder is `coding-agents/`, not `agents/`: Gemini CLI loads
   the repository's root as its extension. Nothing a user sees changes: every command, option, message, setting, file
-  location and package is as it was, except the one fix below.
+  location and package is as it was, except the `metacomputer learn` fix below.
 
 ### Fixed
 
@@ -29,6 +29,13 @@ All notable changes to metacomputer are recorded here. The format follows
   agents' sessions are still read, and the report's note names the agent whose weren't (`note: OpenClaw: its sessions
   weren't read (TypeError)`). Before, such an error in OpenClaw's or Hermes Agent's reader left both agents' sessions
   out of the report, and one while another agent's session files were listed ended the report.
+- **Inside macOS's sandbox** (an agent session run under `sandbox-exec`): `/bin/ps` is setuid, and the sandbox runs no
+  setuid program, so everything that asked it failed there: `metacomputer sh` and every session claim ("Operation not
+  permitted: '/bin/ps'"), the gateway check in `status` (READY ✗), and the checks on the event watcher, the storage
+  watcher, the network allowlist's timer and the hub. Where ps can't start, metacomputer now reads the same facts
+  from the kernel (`lib/procinfo.py`: the processes, their parents, start times, names and command lines, as ps prints
+  them); ps is still asked first everywhere else. A process whose name the kernel can't give exactly as ps would
+  (another account's, or one beyond ASCII) counts as an unidentified agent session, as when ps can't be read.
 
 ## [0.5.2] - 2026-11-25
 

@@ -2325,7 +2325,8 @@ def watcher_pid():
         os.kill(pid, 0)
     except (OSError, ValueError):
         return None
-    cmd = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+    import procinfo             # ps, or the kernel where ps can't start (a sandbox)
+    cmd = procinfo.field(pid, "command") or ""
     return pid if "events.py" in cmd and "watch" in cmd else None
 
 

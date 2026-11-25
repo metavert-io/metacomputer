@@ -958,6 +958,30 @@ kq.control(None, 1)                            # until that pid exits
 os._exit(0)' "$1" "$$" 2>/dev/null)" || return 1
   [ "$ok" = held ]
 }
+# A process's FIELD (command, comm, pgid or lstart) as `ps -o FIELD= -p PID` prints it, or nothing (no such process, or
+# a ps that fails). /bin/ps is setuid, and macOS's sandbox runs no setuid program: where ps can't start (exit 126, or
+# 127 without one), lib/procinfo.py reads the same from the kernel, and prints nothing when it can't tell exactly (as a
+# ps that fails). Safe under set -e / pipefail.
+proc_field() { # FIELD PID
+  local out rc=0
+  out="$(ps -ww -o "$1=" -p "$2" 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+    out="$("$PY" -I -B "$LAB_ROOT/lib/procinfo.py" "$1" "$2" 2>/dev/null)" || out=""
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  return 0
+}
+# Every process's command line, as `ps -axww -o command=` prints them; where ps can't start, those lib/procinfo.py can
+# give exactly (this account's).
+proc_commands() {
+  local out rc=0
+  out="$(ps -axww -o command= 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+    out="$("$PY" -I -B "$LAB_ROOT/lib/procinfo.py" commands 2>/dev/null)" || out=""
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  return 0
+}
 daemonize() { # [--keep-fd N] LOGFILE CMD ARGS...: in its own session, with no descriptors but 0-2 (so it never keeps
   # a lock), or with N too: a lock it is meant to keep (record_stream_start: the dispatch lock, until its stream is up)
   local keep=-1 log
@@ -984,7 +1008,7 @@ netgw_pid() {
   local p=""
   if [ -s "$RUN_DIR/netgw.pid" ]; then p="$(head -1 "$RUN_DIR/netgw.pid" 2>/dev/null | tr -cd '0-9')" || p=""; fi
   [ -n "$p" ] || return 0
-  case "$(ps -o command= -p "$p" 2>/dev/null || true)" in *" -config $RUN_DIR/gw.json"*) printf '%s\n' "$p" ;; esac
+  case "$(proc_field command "$p")" in *" -config $RUN_DIR/gw.json"*) printf '%s\n' "$p" ;; esac
   return 0
 }
 netgw_alive() { local p; p="$(netgw_pid)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }

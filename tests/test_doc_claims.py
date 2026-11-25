@@ -776,7 +776,8 @@ CLAIMS = [
      and 'if not eq and (flag in (DENO_VALUE_FLAGS if kind == "deno" else NODE_VALUE_FLAGS)):' in function_src("lib/owners.py", "script_agent")
      and "if let got = packageRule(argv.dropFirst(), cwd: cwd) { return got }" in raw("vault/Util.swift")
      and "if not where:\n            return _UNREADABLE" in function_src("lib/owners.py", "_resolve")
-     and '"gemini": "Gemini CLI"' in raw("coding-agents/gemini/recognition.json") and "proc_pidpath" in function_src("lib/owners.py", "proc_exe")
+     and '"gemini": "Gemini CLI"' in raw("coding-agents/gemini/recognition.json") and "proc_exe = procinfo.exe" in raw("lib/owners.py")
+     and "proc_pidpath" in function_src("lib/procinfo.py", "exe")
      and "NODE_VALUE_OPTIONS" not in raw("lib/owners.py") and "nodeValueOptions" not in raw("vault/Util.swift")
      and "if let x = exe, let k = nameKind(x) { return k }" in raw("vault/Util.swift")
      and "guard let w = cwd(), !w.isEmpty else { return .unreadable }" in raw("vault/Util.swift")
@@ -1929,12 +1930,24 @@ CLAIMS = [
     ("docs/commands.md", r"\*\*Not checked:\*\* a command that names its computer \(`--vm NAME`, `MCOMP_VM`, `MCOMP_CONFIG`, or a caller that pinned\s+it\)",
      lambda m: '[ -z "$MC_VM_SAID$MC_ENV_SAID${MCOMP_EXPECT_VM:-}" ] || return 0' in fn_src("bin/metacomputer", "session_guard")
      and 'MC_ENV_SAID="$MC_ENV_VM$MC_ENV_CONFIG"' in raw("bin/metacomputer")),
+    ("SECURITY.md", r"Where `ps` can't start \(macOS's sandbox runs no setuid program, `/bin/ps` included\), the process table is read "
+                    r"from the kernel instead, and a process whose name it can't give exactly as `ps` would \(another account's, or one "
+                    r"beyond ASCII\) can't be told either: it counts as an agent too",
+     lambda m: "except OSError:\n        pass" in function_src("lib/procinfo.py", "table")
+     and "procs = kernel_procs()" in function_src("lib/procinfo.py", "table")
+     and "inexact.add(p.pid)" in function_src("lib/procinfo.py", "table")
+     and "if o > 0x7F:\n            return None" in function_src("lib/procinfo.py", "vis")
+     and "if not args:\n        return None" in function_src("lib/procinfo.py", "_render")
+     and "out, rc, inexact = procinfo.table()" in function_src("lib/owners.py", "ps_table")
+     and "if pid in table.inexact:\n        return UNKNOWN_AGENT" in function_src("lib/owners.py", "agent_of")
+     and "_AGENT_NAMES[pid] = UNKNOWN_AGENT" in function_src("lib/owners.py", "agent_name")),
     ("docs/commands.md", r"Each names the session's process and the one that holds the computer\s+\(the MCP server, or the claim's holder\) by process id and start time, and counts only while those same processes are\s+there",
      lambda m: 'proc_start(h) != rec["holder_start"]' in py_top_fn("lib/sessionvm.py", "_stands")
      and "agent in owners.ancestors(h, table)" in py_top_fn("lib/sessionvm.py", "_stands")
      and 'rec.get("claude_pid") == agent and rec.get("bridge_pid") == holder' in py_top_fn("lib/sessionvm.py", "_session_claim")
      and 'if rec["agent_start"] == me and _stands(rec, agent, table):' in py_top_fn("lib/sessionvm.py", "held")
-     and "kp_proc.p_starttime" in py_top_fn("lib/sessionvm.py", "proc_start")),
+     and "return procinfo.start(pid)" in py_top_fn("lib/sessionvm.py", "proc_start")
+     and "kp_proc.p_starttime" in raw("lib/procinfo.py") and "p.start[0]" in function_src("lib/procinfo.py", "start")),
     ("docs/commands.md", r"A claim keeps the session's start time from when its holder took it \(a hub's lease for calls a session left\s+running keeps it through every refresh\), so a later process that reuses the pid isn't tied to it; a\s+claim without one \(written before they were kept\) can't be shown to be any session's, so it doesn't\s+count, and nothing gives it one later",
      lambda m: "_session_start" not in py_top_fn("lib/owners.py", "write_claim") and "proc_start(" not in py_top_fn("lib/owners.py", "write_claim")
      and '"claude_start": who[2] if len(who) > 2 else None' in py_top_fn("lib/owners.py", "claim_for_shell")

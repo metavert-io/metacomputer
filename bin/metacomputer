@@ -895,7 +895,7 @@ vault_disconnect() { # the vault's connections to this computer (its API proxy's
 view_tunnel_close() { # the live view's tunnel to a computer elsewhere, if this Mac's ssh holds it open
   local p
   for p in $(lsof -nP -iTCP:"$VNC_PORT" -sTCP:LISTEN -t 2>/dev/null); do
-    [ "$(ps -o comm= -p "$p" 2>/dev/null)" = ssh ] && kill "$p" 2>/dev/null || true
+    [ "$(proc_field comm "$p")" = ssh ] && kill "$p" 2>/dev/null || true
   done
 }
 view_tunnel() { # a computer elsewhere: an SSH tunnel from 127.0.0.1:VNC_PORT here to its live view (x11vnc on its own
@@ -1014,7 +1014,7 @@ storage_attach() { # the VM's answers are read with a size cap and a deadline (l
 # 5 min a cheap health probe (metacomputer _health). start starts it, stop stops it.
 events_watcher_pid() {
   local p; p="$(cat "$RUN_DIR/events-watcher.pid" 2>/dev/null)"
-  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && ps -o command= -p "$p" 2>/dev/null | grep -q 'events.py watch' && echo "$p"
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && proc_field command "$p" | grep -q 'events.py watch' && echo "$p"
   return 0
 }
 events_watcher_start() {
@@ -1031,7 +1031,7 @@ events_watcher_stop() {
   if [ -n "$p" ]; then
     # The watcher leads its own process group (daemonize), so signal the group: a health probe it
     # started (metacomputer _health and its ssh) stops with it.
-    target="$p"; [ "$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')" = "$p" ] && target="-$p"
+    target="$p"; [ "$(proc_field pgid "$p" | tr -d ' ')" = "$p" ] && target="-$p"
     kill -TERM -- "$target" 2>/dev/null
     while kill -0 "$p" 2>/dev/null && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
     kill -0 "$p" 2>/dev/null && kill -9 -- "$target" 2>/dev/null
@@ -2189,7 +2189,7 @@ task_sync_stop() { # NAME: ask the task's copier to end (it finishes a copy it's
   [[ "$pid" =~ ^[0-9]+$ ]] || return 0
   while kill -0 "$pid" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
   # Still there after 30 s, and still the copier (not a process that reused its number): its whole group goes.
-  if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -q "_task-sync $1\$"; then
+  if kill -0 "$pid" 2>/dev/null && proc_field command "$pid" | grep -q "_task-sync $1\$"; then
     kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
   fi
   [ -s "$RUN_DIR/task-sync.$1.log" ] || rm -f "$RUN_DIR/task-sync.$1.log"
