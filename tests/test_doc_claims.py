@@ -3064,7 +3064,7 @@ CLAIMS = [
     # Antigravity CLI (docs/antigravity.md; lib/agent_setup.py Antigravity, lib/owners.py, vault/Util.swift)
     ("docs/antigravity.md", r"It changes Antigravity CLI's MCP server `metacomputer` only when\s+there's none, by the rule it uses for the "
                             r"other agents.*?Anything else is never changed or removed",
-     lambda m: 'return [prog, "mcp", "add", NAME, link, *claude_mcp.MCP_ARGS]' in function_src("lib/agent_setup.py", "Antigravity.add_argv")
+     lambda m: 'return [prog, "mcp", "add", NAME, link, *claude_mcp.MCP_ARGS]' in function_src("coding-agents/antigravity/setup.py", "Antigravity.add_argv")
      and 'if classify(agent.read(prog, env), root, link) != "absent":' in function_src("lib/agent_setup.py", "_register")
      and "for n in manifests.generic():" in function_src("lib/agent_setup.py", "_agents")
      and '"antigravity",' in raw("lib/agentkit/registry.py")),
@@ -3073,10 +3073,10 @@ CLAIMS = [
                             r"file is still exactly what was read.*?A `mcp_config.json` that is a link \(a file you keep elsewhere\) is never "
                             r"replaced",
      lambda m: f"TOOL_TIMEOUT = {m[1]}" in raw("lib/agent_setup.py")
-     and 'if "timeoutSeconds" in entry:\n            return' in function_src("lib/agent_setup.py", "Antigravity.settle")
-     and 'classify(_entry_res(entry), root, link) != "ok"' in function_src("lib/agent_setup.py", "Antigravity.settle")
-     and "got = replace_if_unchanged(path, data," in function_src("lib/agent_setup.py", "Antigravity.settle")
-     and 'if got == "link":' in function_src("lib/agent_setup.py", "Antigravity.settle")
+     and 'if "timeoutSeconds" in entry:\n            return' in function_src("coding-agents/antigravity/setup.py", "Antigravity.settle")
+     and 'classify(_entry_res(entry), root, link) != "ok"' in function_src("coding-agents/antigravity/setup.py", "Antigravity.settle")
+     and "got = replace_if_unchanged(path, data," in function_src("coding-agents/antigravity/setup.py", "Antigravity.settle")
+     and 'if got == "link":' in function_src("coding-agents/antigravity/setup.py", "Antigravity.settle")
      and replaces_only_unchanged()),
     ("docs/antigravity.md", r"the run that adds metacomputer's MCP server also adds\s+metacomputer's own rule, exactly `mcp\(metacomputer/\*\)`, "
                             r"to `permissions.allow`.*?Nothing else in that file changes.*?Only plain JSON is written.*?one with "
@@ -3086,31 +3086,31 @@ CLAIMS = [
                             r"that rule once metacomputer's server is gone.*?and only when this install added it: the install notes that "
                             r"it did in\s+`~/.local/share/metacomputer/antigravity-rule.json`. The same rule written by you \(before the "
                             r"install, or after you\s+took it out\) stays",
-     lambda m: 'allow = f"mcp({NAME}/*)"' in raw("lib/agent_setup.py")
-     and "d = json.loads(data.decode(\"utf-8\"))" in function_src("lib/agent_setup.py", "Antigravity._settings_change")
-     and 'x == "mcp(*)" or x.startswith(f"mcp({NAME}/") or x == f"mcp({NAME})"' in function_src("lib/agent_setup.py", "Antigravity._settings_change")
-     and 'd.setdefault("permissions", perms)["allow"] = allow + [rule]' in function_src("lib/agent_setup.py", "Antigravity._settings_change")
-     and 'perms["allow"] = [x for x in allow if x != rule]' in function_src("lib/agent_setup.py", "Antigravity._settings_change")
-     and "got = replace_if_unchanged(path, data, new)" in function_src("lib/agent_setup.py", "Antigravity._settings_change")
+     lambda m: 'allow = f"mcp({NAME}/*)"' in raw("coding-agents/antigravity/setup.py")
+     and "d = json.loads(data.decode(\"utf-8\"))" in function_src("coding-agents/antigravity/setup.py", "Antigravity._settings_change")
+     and 'x == "mcp(*)" or x.startswith(f"mcp({NAME}/") or x == f"mcp({NAME})"' in function_src("coding-agents/antigravity/setup.py", "Antigravity._settings_change")
+     and 'd.setdefault("permissions", perms)["allow"] = allow + [rule]' in function_src("coding-agents/antigravity/setup.py", "Antigravity._settings_change")
+     and 'perms["allow"] = [x for x in allow if x != rule]' in function_src("coding-agents/antigravity/setup.py", "Antigravity._settings_change")
+     and "got = replace_if_unchanged(path, data, new)" in function_src("coding-agents/antigravity/setup.py", "Antigravity._settings_change")
      and "agent.added(prog, root, link, env, out)" in function_src("lib/agent_setup.py", "_register")
      and function_src("lib/agent_setup.py", "_register").count("agent.added(") == 1
      and function_src("lib/agent_setup.py", "_register").index("agent.run(agent.add_argv(prog, link), env)")
      < function_src("lib/agent_setup.py", "_register").index("agent.added(")
      and function_src("lib/agent_setup.py", "_unregister").count("agent.removed(env, out)") == 2
-     and 'if got == "added" and not self._remember(env, True):' in function_src("lib/agent_setup.py", "Antigravity.added")
-     and "if not self._recorded(env):" in function_src("lib/agent_setup.py", "Antigravity.removed")
-     and function_src("lib/agent_setup.py", "Antigravity.removed").split("if not self._recorded(env):", 1)[1]
+     and 'if got == "added" and not self._remember(env, True):' in function_src("coding-agents/antigravity/setup.py", "Antigravity.added")
+     and "if not self._recorded(env):" in function_src("coding-agents/antigravity/setup.py", "Antigravity.removed")
+     and function_src("coding-agents/antigravity/setup.py", "Antigravity.removed").split("if not self._recorded(env):", 1)[1]
      .split("\n        got = ", 1)[0].rstrip().endswith("return True")
-     and function_src("lib/agent_setup.py", "Antigravity.removed").index("self._recorded(env)")
-     < function_src("lib/agent_setup.py", "Antigravity.removed").index("self._settings_change(env, out, add=False)")
-     and 'd.get("rule") == self.allow and d.get("settings") == self.settings(env)' in function_src("lib/agent_setup.py", "Antigravity._recorded")
-     and '"link": "is a link' in function_src("lib/agent_setup.py", "Antigravity._settings_change")
+     and function_src("coding-agents/antigravity/setup.py", "Antigravity.removed").index("self._recorded(env)")
+     < function_src("coding-agents/antigravity/setup.py", "Antigravity.removed").index("self._settings_change(env, out, add=False)")
+     and 'd.get("rule") == self.allow and d.get("settings") == self.settings(env)' in function_src("coding-agents/antigravity/setup.py", "Antigravity._recorded")
+     and '"link": "is a link' in function_src("coding-agents/antigravity/setup.py", "Antigravity._settings_change")
      and replaces_only_unchanged()),
     ("docs/install.md", r"Antigravity CLI's files read again and compared right before they're replaced\. That\s+narrows the window to "
                         r"an instant without closing it: a file can't be compared and swapped against any writer",
      lambda m: replaces_only_unchanged()
-     and "got = replace_if_unchanged(" in function_src("lib/agent_setup.py", "Antigravity.settle")
-     and "got = replace_if_unchanged(path, data, new)" in function_src("lib/agent_setup.py", "Antigravity._settings_change")),
+     and "got = replace_if_unchanged(" in function_src("coding-agents/antigravity/setup.py", "Antigravity.settle")
+     and "got = replace_if_unchanged(path, data, new)" in function_src("coding-agents/antigravity/setup.py", "Antigravity._settings_change")),
     ("docs/antigravity.md", r"Antigravity CLI loads the first ([\d,]+) bytes of a skill's text.*?come first, within those bytes\s+"
                             r"\(`tests/test_agent_setup.py` fails when an edit pushes one of them past\)",
      lambda m: f"SKILL_BUDGET = {m[1].replace(',', '')}" in raw("tests/test_agent_setup.py")

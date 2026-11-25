@@ -859,13 +859,9 @@ agent_config_mentions() { # NAME: 0 when a file of the agent's configuration may
   local f g d
   # Every profile and location (profile folders by */: those it can't look into too, which a glob for the file inside
   # would leave out), whichever one the agent's CLI uses: the agent's own list (its setup.sh's ag_NAME_config_files)
-  if declare -F "ag_${1}_config_files" >/dev/null; then
-    AG_CONFIG_FILES=(); "ag_${1}_config_files"; set -- ${AG_CONFIG_FILES[@]+"${AG_CONFIG_FILES[@]}"}
-  else
-  case "$1" in
-    antigravity) set -- "$HOME/.gemini/config/mcp_config.json" ;;
-  esac
-  fi
+  AG_CONFIG_FILES=()
+  if declare -F "ag_${1}_config_files" >/dev/null; then "ag_${1}_config_files"; fi
+  set -- ${AG_CONFIG_FILES[@]+"${AG_CONFIG_FILES[@]}"}
   for f in "$@"; do
     if ! [ -e "$f" ] && ! [ -L "$f" ]; then
       # Not there, or behind a folder that can't be searched or listed (a profiles/* pattern left as it was): the
