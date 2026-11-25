@@ -1984,6 +1984,76 @@ pinned before the first connection, read over Fly's authenticated channel), with
 - **Fly holds what's in the VM**, as any provider does: use a VM on your Mac for work you wouldn't put there.
 - **What isn't there:** volumes and Mac folders, `SSH_AUTH=cert`, the event watcher's health checks, update timers.
 
+## Vercel Sandbox
+
+A computer can be a Vercel sandbox ([docs/vercel.md](docs/vercel.md)): a persistent VM whose disk Vercel snapshots at
+every stop. It's a computer elsewhere as above (the Mac stays the controller; keys of its own; a host key pinned before
+the first connection, read over Vercel's authenticated API), with these differences:
+
+- **The token stays in two processes.** A Vercel access token is team-wide (deployments, domains, environment
+  variables, every project of the team). `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID` come only from the
+  environment of the command that needs Vercel, are taken off every program's environment first thing (as every
+  provider's credentials are) and reach `lib/remote.py`, and from it the computer's **broker**
+  (`providers/vercel/broker.py`) on its standard input: never its arguments, its environment, a file or a log. ssh,
+  the hub, the vault and every helper reach the sandbox through the broker's socket (0600, in a 0700 folder of the
+  account's; a peer of another account is refused), which carries SSH connections to that one sandbox, answers whether
+  it's still the computer's own, and does nothing else: no request can make it act on another sandbox, run another
+  command or hand out the token. What Vercel says is scrubbed of the token and the team's and project's IDs before it's
+  printed or logged. The token never goes into the sandbox. Its REST calls go only to Vercel's API address, over HTTPS,
+  and never follow a redirect, the broker's kept-alive and streamed ones too (`lib/provider_http.py`, as for the
+  providers above).
+- **Vercel's agent port is refused to every account but root.** Every sandbox has a listener on tcp 23456, on every
+  address (IPv4 and IPv6), run as root by Vercel's agent outside the sandbox's PID namespace (no process in the
+  sandbox owns it; checked live). It speaks HTTP (Go's "404 page not found" to every one of about a hundred paths tried,
+  GET and POST, Vercel's command API's among them); the command API itself is on `/run/vercel/share/init.sock` (0600,
+  Vercel's `ubuntu` account) and refuses even root without Vercel's ed25519 signature ("missing signature header").
+  Nothing found lets an account in the sandbox use the port to change the network policy, read credentials or the
+  metadata service, act on other sandboxes or reach your Mac, but what it serves isn't documented, so metacomputer
+  treats it as it treats Fly's `/.sprite/api.sock`: refused by an nftables rule by uid (`tcp dport 23456 meta skuid != 0
+  reject with tcp reset`) that the boot script puts back at every start (a stop boots a fresh kernel, which clears it),
+  before sshd or anything of the desktop's runs, and stops the boot when it isn't in force. Checked live: the desktop's
+  account, Vercel's `ubuntu` account and an account in a user namespace of its own get a refused connection on every
+  address; root still gets its 404; no account but root can remove the rule (EPERM, from a user namespace too); Vercel's
+  command API, policy changes and snapshots work with it in force.
+- **Egress is Vercel's network policy, outside the VM, and nothing else.** Nothing in the sandbox, root included, can
+  change it. metacomputer always sets one: `EGRESS=internet` (every name and address but private, shared, link-local
+  and reserved IPv4 ranges, refused outright: checked live, a reset within 15 ms for 10/8, 172.16/12, 192.168/16,
+  100.64/10, the gateway and names resolving to them, the metadata address refused, where Vercel's own allow-all lets
+  them time out), `EGRESS=off` (deny-all: no name resolves, no address answers), or an allowlist of names (`net allow`,
+  the same ranges refused; addresses can't be listed). A change of the sandbox alone doesn't reach a running session
+  (found live: the old policy stayed in force), so the running session's policy is changed, which Vercel also keeps
+  for the next ones, and read back. A change whose resulting policy lets out anything the one in force doesn't runs
+  only at your own terminal, judged on where it ends; the one exception is a computer's own setup opening it for its
+  packages, until its setup has finished. Vercel's policy matches names by TLS SNI, so a listed name can carry traffic
+  for another site on the same servers (domain fronting), and it takes IPv4 ranges only (a sandbox has no IPv6 route
+  out). The manifest's `outside_egress` claims what was checked and nothing more. The browsers' own DNS over HTTPS is
+  locked off.
+- **SSH only through Vercel's API.** sshd listens on the sandbox's own loopback; each connection is a command the
+  broker runs through Vercel's API (`/opt/metacomputer/vercel/relay`, as Vercel's `ubuntu` account), then
+  metacomputer's own keys and the pinned host key. No port is published (a published port is a public URL Vercel
+  doesn't authenticate). The tunnel runs through the same wrapper as every provider's (`lib/proxywrap.py`: it ends the
+  tunnel when ssh goes, and leaves ssh's process group first). The broker never starts a stopped computer.
+- **The computer's own sandbox, and nothing else.** A sandbox's name in its project isn't its identity: one deleted and
+  made again under the name (by anyone) is another. Every sandbox is made tagged with its computer and its build's
+  operation, and the time Vercel made it is recorded. Every operation (the network policy, snapshots, restore, a
+  command, delete, each SSH connection right before its relay starts, and the broker again before it runs the relay)
+  checks that the sandbox of that name was made at that time and carries those tags, and does nothing otherwise. A
+  build whose answer was lost deletes only a sandbox carrying its operation's tag.
+- **Every snapshot is deleted with the computer.** Vercel keeps a sandbox's snapshots when the sandbox is deleted
+  unless they're orphans, deletes those later, and lists none of them by the sandbox's name once it's gone (all found
+  live), and snapshots bill: `vm delete` deletes each one (its checkpoints, recorded on the Mac, and those listed for
+  it before the sandbox goes), reads each again by its ID until Vercel says it's deleted, and keeps the computer's
+  record while one isn't.
+- **A stop is a power cut for programs.** Files are kept; every program closes, and the next session starts from the
+  snapshot with a new hostname: the boot script clears what the old session left (X, LibreOffice and Firefox locks,
+  the session's runtime folder, which is on the disk there) and starts the desktop again. A session also ends at its
+  timeout, in use or not at the plan's cap (45 minutes on Hobby).
+- **Input is foreground only** (no `/dev/uinput` in a sandbox's kernel): the hub sends keys and typing (aimed at an
+  element too) and pixel clicks in the foreground, and says so.
+- **Vercel holds what's in the VM**, as any provider does, and Vercel's own `ubuntu` account in it has sudo (the
+  controller's channel): use a VM on your Mac for work you wouldn't put there.
+- **What isn't there:** volumes and Mac folders, `SSH_AUTH=cert`, the event watcher's health checks, update timers.
+
 ## Secrets and logins (`metacomputer secrets`)
 
 Some tasks need a login or an API key. A password typed into the conversation lands

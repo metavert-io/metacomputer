@@ -286,6 +286,27 @@ runner's does.
   and name, what it starts as `$MCOMP_SELF` (the keeper's probes, its `secrets` calls) acts on demo too,
   and an acting subcommand prints the VM and vault first (`status` doesn't).
 
+## Vercel Sandbox: `tests/test_vercel.py`
+
+`python3 tests/test_vercel.py` needs no VM, no network and no Vercel account: a stand-in answers for Vercel's REST API in
+memory (its HTTP and its output stream).
+- The `vercel` transport: `providers/vercel/tunnel.py` as ssh's ProxyCommand through `lib/proxywrap.py`, the broker's
+  socket in a private folder; the network policy's shapes (internet with the private ranges refused, deny-all, an
+  allowlist of names), what Vercel reads back classified, widening.
+- The API client: teamId on every call, projectId on lookups, the create's body (persistent, snapshots never
+  expiring, tags), a stop with a body, the running session's policy changed, commands' standard input at offsets,
+  errors scrubbed of the token and the IDs.
+- The adapter: create, the identity checks (another creation time or tag refused), wake (boot as root; never an exec
+  that starts a session), stop (the replaced snapshot deleted, checkpoints kept), checkpoints, restore, delete with
+  every snapshot, status, rates.
+- `lib/remote.py` with the hooks: the launch journal, a lost launch found by its tag (one without it left alone),
+  abort, wake, delete, plan, the transport's checks from the record alone; `remote.py target` run with the credentials
+  prints none of them.
+- The broker in this process with a stand-in, and `tunnel.py` as a program: the identity check, random bytes both
+  ways, another sandbox's or a stopped one's connection refused (never started), the session extended only while a
+  connection is open, up to the plan's cap, quit; the credentials off every shell's environment; the guest's boot
+  script (the agent port's block before sshd), bootstrap and relay.
+
 ## Fly Sprites: `tests/test_sprites.py`
 
 `python3 tests/test_sprites.py` needs no VM, no network and no Fly account: a stand-in `sprite` command keeps the
@@ -433,7 +454,7 @@ environment. The vault's remote binding (its address, alias and the computer's i
   current (`scripts/gen-providers.py --check`: docs/providers.md, lib/cloud/providers.sh, the credential lines,
   CODEOWNERS); and no shared code (bin/, scripts/, lib/, install.sh, get.sh) names a provider: the lint's pattern is
   tried on known lines first, and every line it allows (`LINT_ALLOW`) is still there and says why. A provider's own
-  tests stay in tests/ for now (each is one of release.sh's suites by its name): `test_sprites.py` for Fly Sprites,
+  tests stay in tests/ for now (each is one of release.sh's suites by its name): `test_sprites.py` for Fly Sprites, `test_vercel.py` for Vercel Sandbox,
   `test_remote.py` for the providers on servers (Oracle Cloud, Hetzner Cloud, DigitalOcean, Vultr) and the shared
   remote code; its doc-claims rows that read only its own files are in its `claims.tsv`, which
   `tests/test_doc_claims.py` reads with the rest.

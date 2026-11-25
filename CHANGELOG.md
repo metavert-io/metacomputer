@@ -6,6 +6,24 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Vercel Sandbox as a place for a computer** (`metacomputer vm create NAME --on vercel`, [docs/vercel.md](docs/vercel.md);
+  `providers/vercel/`, the first provider built as a package from the start): a persistent Vercel sandbox (Ubuntu 26.04,
+  x86_64, 2x4, 4x8 or 8x16) with the same desktop, made, started, stopped, snapshotted and deleted through Vercel's
+  REST API with `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`. SSH reaches it through Vercel's command API:
+  a broker on the Mac (the only program besides `lib/remote.py` that holds the token: never ssh, the hub or the vault)
+  runs a relay to the sandbox's own sshd for each connection, after checking the sandbox is still the computer's own.
+  A stop snapshots the disk and closes every program (the boot script starts sshd and the desktop again at each start,
+  and clears the locks the stop left); the session's timeout is the idle stop (`IDLE_STOP` past the last use, up to the
+  plan's cap: 45 minutes on Hobby, which `vm create` and `start` say); checkpoints, `restore`, `baseline` and `reset`
+  are Vercel snapshots (taking or restoring one restarts the computer), never expiring by themselves, and `vm delete`
+  deletes every snapshot of it. Egress is Vercel's network policy, outside the VM: the internet without private,
+  shared, link-local and reserved ranges (refused, checked live), nothing, or an allowlist of names. Vercel's agent
+  port in the sandbox (tcp 23456, undocumented) is refused to every account but root by a rule the boot script puts back
+  at each start. Shared code gained a provider-neutral `wake` hook in `lib/remote.py`, and `lib/provider_http.py` a
+  kept-alive session and a streamed answer, under the same rules as its one call.
+
 ### Changed
 
 - **Each coding agent's code lives in its own folder** ([coding-agents/README.md](coding-agents/README.md)), for
