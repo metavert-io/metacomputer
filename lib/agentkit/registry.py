@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import threading
 import types
 
 AGENTS = (
@@ -30,6 +31,7 @@ ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.absp
 PACKAGE = "mcomp_agents"
 PART = re.compile(r"[a-z][a-z0-9_]{0,40}")
 _JSON = {}
+_LOCK = threading.RLock()           # one thread loads a module; another waits for it, never sees it half-made
 
 
 def folder(name):
@@ -79,22 +81,23 @@ def module(name, part):
     folder(name)
     if not PART.fullmatch(part):
         raise ValueError(f"not a module's name: {part!r}")
-    _package(name)
     full = f"{PACKAGE}.{ident(name)}.{part}"
-    mod = sys.modules.get(full)
-    if mod is not None:
+    with _LOCK:
+        _package(name)
+        mod = sys.modules.get(full)
+        if mod is not None:
+            return mod
+        spec = importlib.util.spec_from_file_location(full, os.path.join(folder(name), part + ".py"))
+        if spec is None:
+            raise ImportError(f"coding-agents/{name}/{part}.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[full] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except BaseException:
+            sys.modules.pop(full, None)
+            raise
         return mod
-    spec = importlib.util.spec_from_file_location(full, os.path.join(folder(name), part + ".py"))
-    if spec is None:
-        raise ImportError(f"coding-agents/{name}/{part}.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[full] = mod
-    try:
-        spec.loader.exec_module(mod)
-    except BaseException:
-        sys.modules.pop(full, None)
-        raise
-    return mod
 
 
 def hooks(name, part):

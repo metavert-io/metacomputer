@@ -11,5 +11,8 @@
   "install": {
     "missing": "line",
     "steps": "hooks"
+  },
+  "bench": {
+    "switch": "codex"
   }
 }

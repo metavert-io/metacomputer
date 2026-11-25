@@ -883,22 +883,25 @@ CLAIMS = [
     ("bench/README.md", r"Gemini CLI, Hermes Agent and OpenClaw sessions each run in a throwaway HOME,\s+made for that session.*?"
                         r"deleted\s+afterwards through `lib/safedelete.py`, whether the session ends, times out\s+or fails"
                         r".*?None runs with a yolo or approve-everything mode",
-     lambda m: 'ISOLATED = ("gemini", "hermes", "openclaw")' in raw("bench/bench.py")
+     lambda m: all("ISOLATED = True" in raw(f"coding-agents/{n}/bench.py") for n in ("gemini", "hermes", "openclaw"))
+     and all("ISOLATED = False" in raw(f"coding-agents/{n}/bench.py") for n in ("claude-code", "codex"))
      and 'home = tempfile.mkdtemp(prefix="mcomp-bench-home-")' in function_src("bench/bench.py", "run_session")
-     and "finally:\n        end_isolated(agent, claude, home)" in function_src("bench/bench.py", "run_session")
+     and "finally:\n        end_isolated(agent, prog, home)" in function_src("bench/bench.py", "run_session")
      and "safedelete.rmtree(home, quiet=True)" in function_src("bench/bench.py", "end_isolated")
-     and "yolo" not in function_src("bench/bench.py", "isolate_session").split('"""')[2]
-     and '"--approval-mode", "default"' in function_src("bench/bench.py", "isolate_session")
-     and '"exec": {"mode": "allowlist"}' in function_src("bench/bench.py", "isolate_session")
-     and '("approvals.mode", "manual")' in raw("bench/bench.py")),
+     and all("yolo" not in function_src(f"coding-agents/{n}/bench.py", "isolate").split('"""')[2]
+             for n in ("gemini", "hermes", "openclaw"))
+     and '"--approval-mode", "default"' in function_src("coding-agents/gemini/bench.py", "isolate")
+     and '"exec": {"mode": "allowlist"}' in function_src("coding-agents/openclaw/bench.py", "isolate")
+     and '("approvals.mode", "manual")' in raw("coding-agents/hermes/bench.py")),
     ("bench/README.md", r"\*\*Hermes Agent: nothing loaded from outside its home.\*\* Hermes loads its\s+installation's own `.env`"
                         r".*?the administrator-managed `/etc/hermes` \(`.env`,\s+`config.yaml`\).*?the run stops before it "
                         r"starts, naming the\s+file",
-     lambda m: 'HERMES_MANAGED = "/etc/hermes"' in raw("bench/bench.py")
+     lambda m: 'HERMES_MANAGED = "/etc/hermes"' in raw("coding-agents/hermes/bench.py")
      and 'for f in (os.path.join(m[1], ".env"), os.path.join(HERMES_MANAGED, ".env"), os.path.join(HERMES_MANAGED, "config.yaml")):'
-     in function_src("bench/bench.py", "hermes_outside_files")
-     and "refuse_hermes_outside_files(prog, env, home)" in function_src("bench/bench.py", "isolate_session")
-     and "refuse_hermes_outside_files(trusted_claude(None, \"hermes\"), env, home)" in function_src("bench/bench.py", "cmd_run")),
+     in function_src("coding-agents/hermes/bench.py", "hermes_outside_files")
+     and "refuse_hermes_outside_files(prog, env, home)" in function_src("coding-agents/hermes/bench.py", "isolate")
+     and "refuse_hermes_outside_files(prog, env, home)" in function_src("coding-agents/hermes/bench.py", "refuse")
+     and "h.refuse(B, sw, trusted_prog(None, prog_of(sw[\"agent\"])))" in function_src("bench/bench.py", "cmd_run")),
     ("bench/README.md", r"`--pass-env NAME\[,NAME...\]` \| `BENCH_PASS_ENV` \| none \| `gemini`, `hermes`, `openclaw`: the only variables of yours their sessions get",
      lambda m: '"pass_env": ""' in raw("bench/bench.py")
      and "for n in pass_env_names(sw):" in function_src("bench/bench.py", "session_env")

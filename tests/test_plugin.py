@@ -1874,7 +1874,7 @@ def test_prefixes():
     check("bench metrics: both prefixes count as metacomputer tools",
           metrics.mcp_tool("mcp__metacomputer__click") == "click" and metrics.mcp_tool(PLUGIN_PREFIX + "zoom") == "zoom"
           and metrics.mcp_tool("mcp__other__click") is None)
-    args, _ = bench.session_args({"prompt": "x"}, {"shell": "allow", "budget": 1, "model": "m", "effort": ""}, "cfg.json")
+    args, _ = bench.hooks("claude").args(bench, {"prompt": "x"}, {"shell": "allow", "budget": 1, "model": "m", "effort": ""}, "cfg.json")
     allowed = args[args.index("--allowedTools") + 1:]
     check("bench sessions allow both servers' tools",
           "mcp__metacomputer" in allowed and "mcp__plugin_metacomputer_metacomputer" in allowed, allowed)
