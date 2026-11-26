@@ -119,7 +119,7 @@ runner's does.
   mac` act on demo, the notice says so, `MCOMP_VM` still wins, `each main,...` is still the main VM.
   `list` is `vm list`, with `WHERE` and the default marked (`--json`: `place`, `where`, `default`, the old
   fields kept), `--vm` marks its VM and names the default; `list --on mac` the same, `--on cloud`, `fly`,
-  `cloudflare`: none, saying there are no cloud computers. `--on cloud` (and any other word, in any case)
+  `azure`, `cloudflare`: none, saying there are no cloud computers. `--on cloud` (and any other word, in any case)
   before a command: refused before anything runs (the runner asked nothing but its settings); `--vm` and
   `--on` that disagree, `--on` with a computer's name or nothing: refused. A pointer that doesn't resolve:
   commands refuse saying how to fix it; `list` (nothing marked, the problem shown), `default` (exit 1) and
@@ -307,6 +307,38 @@ memory (its HTTP and its output stream).
   connection is open, up to the plan's cap, quit; the credentials off every shell's environment; the guest's boot
   script (the agent port's block before sshd), bootstrap and relay.
 
+## Cloudflare Containers: `tests/test_cloudflare.py`
+
+`python3 tests/test_cloudflare.py` needs no VM, no network and no Cloudflare account: stand-ins answer for Cloudflare's
+REST API, the container registries (Docker Hub's and Cloudflare's) and each control Worker (which checks every
+request's signature with its secret, written again in the test, not imported).
+- The control Worker's own code (`providers/cloudflare/worker/`): `tests/cloudflare_worker_test.mjs`, run with node (20
+  or later) when it's on the Mac, a note when it isn't: the signature (another key, body, path, query, method or a
+  stale time refused; no key refuses everything; WebCrypto's verify), the allowlist handler's host check (another Host,
+  a subdomain, a port, credentials refused; never following a redirect), the egress plans (a restart between the
+  internet and off; live changes within off and allowlists; a removed name re-registered to Deny; 64 names), the
+  Durable Object against a fake container (start from the image or the latest snapshot with the recorded egress, stop =
+  quiesce, snapshot, destroy in that order, a failed snapshot stopping nothing, checkpoints, restore, exec closed after
+  the setup, the idle stop, a stop by Cloudflare, the refresh of snapshots 25 days old, forget).
+- The `cloudflare` transport, the egress as policies and widening; wire.py's signed requests (the key never sent),
+  workers.dev only, the websocket's handshake (the Durable Object's id read first) and frames.
+- api.py (the upload's bindings, secret, container and exports, sent once; the application with Cloudflare's SSH off;
+  errors scrubbed) and images.py (each part checked by its digest, Docker Hub's redirect followed without a
+  credential, an upload address elsewhere refused, what Cloudflare won't delete listed).
+- The adapter: create, every operation refused when the Worker answers for another computer, operation or Durable
+  Object or refuses the key, stop, start, checkpoints, restore, egress read back, delete (never another's; residue
+  with dates), status's notes.
+- `lib/remote.py` with the hooks: the launch journal, the key made first (0600) and given to the broker on its standard
+  input only, daily use with the key alone and delete refused without the token, a lost upload found by its bindings
+  over the visibility window (one without them left alone, one never seen looked for over the whole window), abort,
+  wake, a delete cut off and finished (what Cloudflare keeps said and noted, the key removed), plan, the transport's
+  checks from the record alone; `remote.py target` run with the credentials prints none of them, nor the key.
+- The broker in this process with a stand-in Worker, and `tunnel.py` as a program: the identity check, random bytes
+  both ways, a connection that reached another Durable Object closed before a byte, another Worker's or a stopped
+  computer's refused (never started), its end; the guest's boot script (its capability check run over a stand-in
+  /proc: a process of an account but root's holding one ends them all, sshd first), bootstrap, sshd on port 2222,
+  provision.sh's cloudflare target.
+
 ## Fly Sprites: `tests/test_sprites.py`
 
 `python3 tests/test_sprites.py` needs no VM, no network and no Fly account: a stand-in `sprite` command keeps the
@@ -454,7 +486,7 @@ environment. The vault's remote binding (its address, alias and the computer's i
   current (`scripts/gen-providers.py --check`: docs/providers.md, lib/cloud/providers.sh, the credential lines,
   CODEOWNERS); and no shared code (bin/, scripts/, lib/, install.sh, get.sh) names a provider: the lint's pattern is
   tried on known lines first, and every line it allows (`LINT_ALLOW`) is still there and says why. A provider's own
-  tests stay in tests/ for now (each is one of release.sh's suites by its name): `test_sprites.py` for Fly Sprites, `test_vercel.py` for Vercel Sandbox,
+  tests stay in tests/ for now (each is one of release.sh's suites by its name): `test_sprites.py` for Fly Sprites, `test_vercel.py` for Vercel Sandbox, `test_cloudflare.py` for Cloudflare Containers,
   `test_remote.py` for the providers on servers (Oracle Cloud, Hetzner Cloud, DigitalOcean, Vultr) and the shared
   remote code; its doc-claims rows that read only its own files are in its `claims.tsv`, which
   `tests/test_doc_claims.py` reads with the rest.

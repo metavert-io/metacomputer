@@ -417,7 +417,9 @@ the tunnel when ssh goes, so it never keeps a computer awake and billing). Fly S
 ([docs/sprites.md](sprites.md)); the vault's binding pins that program and runs it through itself (`mcomp-vault
 _tunnel`). Vercel Sandbox registers `providers/vercel/tunnel.py`, which asks the computer's broker (the one program on
 your Mac besides `lib/remote.py` that holds the token) to carry the connection through Vercel's API
-([docs/vercel.md](vercel.md)).
+([docs/vercel.md](vercel.md)). Cloudflare Containers registers `providers/cloudflare/tunnel.py`, which asks the
+computer's broker (the one program besides `lib/remote.py` that holds the computer's own key, never the account's token)
+to carry the connection through the computer's control Worker ([docs/cloudflare.md](cloudflare.md)).
 
 ## Settings (`config/vms/NAME.env`)
 

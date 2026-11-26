@@ -1,0 +1,49 @@
+# This provider's promises in the docs, pinned to its own files (tests/test_doc_claims.py reads every registered
+# provider's). One condition a line, tab-separated: the document, a phrase it must contain (a regular expression,
+# matched with the document's whitespace folded), a file in this folder, and text that file contains (a leading !:
+# must not contain; \n and \t as escapes). Lines with the same document and phrase are one promise: all must hold.
+# Promises whose check reads shared code too stay in tests/test_doc_claims.py.
+SECURITY.md	kept 0600 beside its SSH keys \(`~/\.ssh/metacomputer-NAME/cloudflare-key`, refused if it's a link or readable by anyone else\)	remote.py	fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+SECURITY.md	kept 0600 beside its SSH keys \(`~/\.ssh/metacomputer-NAME/cloudflare-key`, refused if it's a link or readable by anyone else\)	remote.py	fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+SECURITY.md	kept 0600 beside its SSH keys \(`~/\.ssh/metacomputer-NAME/cloudflare-key`, refused if it's a link or readable by anyone else\)	remote.py	stat.S_IMODE(st.st_mode) & 0o077
+SECURITY.md	handed to the computer's \*\*broker\*\* \(`providers/cloudflare/broker\.py`\) on its standard input: never its arguments, its environment or a log	remote.py	p.stdin.write(json.dumps(cfg).encode())
+SECURITY.md	handed to the computer's \*\*broker\*\* \(`providers/cloudflare/broker\.py`\) on its standard input: never its arguments, its environment or a log	remote.py	env=R.child_env({"PYTHONDONTWRITEBYTECODE": "1"})
+SECURITY.md	handed to the computer's \*\*broker\*\* \(`providers/cloudflare/broker\.py`\) on its standard input: never its arguments, its environment or a log	broker.py	raw = sys.stdin.buffer.read(65536)
+SECURITY.md	handed to the computer's \*\*broker\*\* \(`providers/cloudflare/broker\.py`\) on its standard input: never its arguments, its environment or a log	broker.py	self.worker.scrub(str(msg), 600)
+SECURITY.md	which the Worker checks in constant time \(WebCrypto's verify\) within 300 s of its own clock	worker/logic.js	await crypto.subtle.verify("HMAC", key, unhex(a.sig), enc.encode(data))
+SECURITY.md	which the Worker checks in constant time \(WebCrypto's verify\) within 300 s of its own clock	worker/logic.js	export const SKEW_S = 300;
+SECURITY.md	which the Worker checks in constant time \(WebCrypto's verify\) within 300 s of its own clock	worker/index.js	if (!auth.ok) return json({ error: "unauthorized" }, 401);
+SECURITY.md	which the Worker checks in constant time \(WebCrypto's verify\) within 300 s of its own clock	wire.py	hmac.new(key.encode(), data, hashlib.sha256).hexdigest()
+SECURITY.md	It can't run any other command once the computer is set up: the Worker refuses one \(403\) after the build's end, for good	worker/index.js	if (r.setup_done) throw L.refuse(403, "this computer is set up: commands through the Worker are closed");
+SECURITY.md	It can't run any other command once the computer is set up: the Worker refuses one \(403\) after the build's end, for good	build.sh	remote_py checkpoint --vm "$VM_NAME" create baseline --replace
+SECURITY.md	It can't run any other command once the computer is set up: the Worker refuses one \(403\) after the build's end, for good	remote.py	a.setup_done(s["VM_NAME"])
+SECURITY.md	metacomputer makes the application with it off and reads that back	api.py	"configuration": {"wrangler_ssh": {"enabled": False}}}
+SECURITY.md	metacomputer makes the application with it off and reads that back	adapter.py	raise AdapterError("Cloudflare's own SSH couldn't be turned off for the computer's container application")
+docs/cloudflare.md	with \*\*Cloudflare's own SSH turned off\*\*	api.py	"configuration": {"wrangler_ssh": {"enabled": False}}}
+docs/cloudflare.md	on \*\*workers\.dev only\*\*: no route on any of your domains	api.py	body={"enabled": True, "previews_enabled": False}
+docs/cloudflare.md	on \*\*workers\.dev only\*\*: no route on any of your domains	api.py	!/routes
+SECURITY.md	starts the X server and the desktop with `runuser`, which drops them, and then checks every process of every account but root's	guest/rootfs/opt/metacomputer/cloudflare/boot	setsid runuser -u "$U" -- /usr/bin/Xvfb
+SECURITY.md	starts the X server and the desktop with `runuser`, which drops them, and then checks every process of every account but root's	guest/rootfs/opt/metacomputer/cloudflare/boot	/^Cap(Prm|Eff|Amb):/ { if ($2 !~ /^0+$/) c = 1 }
+SECURITY.md	if any holds one, every such process is ended, sshd first, and the boot fails	guest/rootfs/opt/metacomputer/cloudflare/boot	  pkill -KILL -x sshd 2>/dev/null\n  for _ in 1 2 3 4 5; do
+SECURITY.md	sshd listens on port 2222 on the container's loopback and its own address	guest/rootfs/etc/ssh/sshd_config.d/05-metacomputer-cloudflare.conf	Port 2222
+SECURITY.md	sshd listens on port 2222 on the container's loopback and its own address	guest/rootfs/opt/metacomputer/cloudflare/boot	ListenAddress 127.0.0.1\nListenAddress $ADDR
+SECURITY.md	which must be the computer's before a byte goes through	broker.py	if not self.do or do != self.do:
+SECURITY.md	which must be the computer's before a byte goes through	worker/index.js	headers: { "x-mc-do": this.ctx.id.toString() }
+SECURITY.md	The broker never starts a stopped computer	broker.py	if not running:
+SECURITY.md	The handler checks that each request asks for exactly its name	worker/index.js	if (!L.hostAllowed(req.url, host)) return new Response(L.DENIED_HOST, { status: 403 });
+SECURITY.md	fetches only that name and never follows a redirect	worker/index.js	redirect: "manual"
+SECURITY.md	fetches only that name and never follows a redirect	worker/index.js	return fetch(`${u.protocol}//${host}${u.pathname}${u.search}`, init);
+docs/cloudflare.md	\*\*never follows a redirect\*\*	worker/index.js	redirect: "manual"
+SECURITY.md	Every start applies the recorded egress before the container runs \(one function, every start path	worker/index.js	const plan = refresh ? [[L.SENTINEL, "deny"]] : L.startIntercepts(internet, r.allow);
+SECURITY.md	Every start applies the recorded egress before the container runs \(one function, every start path	worker/index.js	this.c.start(opts);
+SECURITY.md	Every start applies the recorded egress before the container runs \(one function, every start path	worker/index.js	await this.launch(r, { snapshot: r.latest });
+SECURITY.md	a snapshot that fails stops nothing	worker/index.js	const s = await this.c.snapshotContainer({ name: L.snapName(r, why, t) });
+docs/cloudflare.md	every 30 s for `IDLE_STOP=1`	worker/logic.js	Math.max(10000, Math.min(MINUTE, Math.floor(r.idle_min * MINUTE / 2)))
+docs/cloudflare.md	the container's own inactivity timeout is `IDLE_STOP` plus 10 minutes	worker/logic.js	export const BACKSTOP_MIN = 10;
+docs/cloudflare.md	if the Worker's stop ever fails three times in a row	worker/index.js	if (r.idle_failures >= 3) return;
+docs/cloudflare.md	before its 30 days run out \(an alarm; a few seconds of runtime each, about every 25 days\)	worker/logic.js	export const REFRESH_MS = 25 * DAY;
+docs/cloudflare.md	before its 30 days run out \(an alarm; a few seconds of runtime each, about every 25 days\)	worker/index.js	await this.launch(r, { snapshot: due[0] }, true);
+docs/cloudflare.md	The list is also written to the computer's log folder \(`logs-vms/NAME/cloudflare-residue\.json`	remote.py	p = os.path.join(d, "cloudflare-residue.json")
+SECURITY.md	sshd listens on port 2222 on the container's loopback and its own address	guest/rootfs/opt/metacomputer/cloudflare/boot	[ "$(stat -c %u:%g /)" = 0:0 ] || chown 0:0 /
+docs/cloudflare.md	\*\*Only `vm create` and `vm delete` need them\.\*\*	cli.sh	pv_cloudflare_can_ask() { pv_cloudflare_has_token || { [ -n "${SSH_DIR:-}" ] && [ -s "$SSH_DIR/cloudflare-key" ]; }; }
+docs/cloudflare.md	\*\*Only `vm create` and `vm delete` need them\.\*\*	broker.py	!CLOUDFLARE_API_TOKEN

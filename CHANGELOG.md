@@ -6,6 +6,23 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Cloudflare Containers as a place for a computer** (`metacomputer vm create NAME --on cloudflare`,
+  [docs/cloudflare.md](docs/cloudflare.md); `providers/cloudflare/`): an Ubuntu 24.04 container (x86_64, `standard-2`,
+  `standard-3` or `standard-4`) with the same desktop, run by a small control Worker that metacomputer deploys into your
+  own Cloudflare account through its API (no wrangler or Docker needed), one per computer, on workers.dev only: its
+  Durable Object starts, stops and snapshots the container, carries SSH (a websocket piped to the container's sshd) and
+  stops it when idle. `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are needed for `vm create` and `vm delete`
+  only; everything else uses the computer's own key, made on the Mac, held by `lib/remote.py` and a broker, and never
+  sent (each request is signed with it). A stop snapshots the disk and closes every program; Cloudflare keeps each
+  snapshot 30 days after its last use and can't delete one (the Worker renews the ones the computer keeps, and `vm
+  delete` says which stay and until when; free during Cloudflare's beta). Cloudflare's own SSH is off; the desktop runs
+  without capabilities (checked at every start). Egress is Cloudflare's, outside the VM: the internet without private
+  ranges or the metadata service (checked live), nothing, or an allowlist of names through metacomputer's handler,
+  which checks each request's Host and never follows a redirect (Cloudflare's TLS interception: that traffic is seen
+  decrypted, which the docs say).
+
 ## [0.5.3] - 2026-11-25
 
 ### Added

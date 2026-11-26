@@ -364,6 +364,19 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   for every account but root before anything else, then starts sshd and the desktop. Every operation checks the
   sandbox's creation time and tags first; `vm delete` deletes every snapshot of it (Vercel keeps them otherwise).
   Tests: `python3 tests/test_vercel.py` (a stand-in for Vercel's API; no VM, no network).
+  Cloudflare Containers (docs/cloudflare.md; `PLACE=cloudflare`, `providers/cloudflare/`) is a container run by a control
+  Worker metacomputer deploys into the user's own account, one per computer, workers.dev only (`worker/index.js` and
+  `logic.js`, uploaded by `api.py` with the account's token, which only `vm create` and `vm delete` need). Everything
+  else uses the computer's own key (`$SSH_DIR/cloudflare-key`, 0600; read only by `providers/cloudflare/remote.py`,
+  handed to the broker on stdin; never ssh, the hub, the vault, the guest, a log or argv); every request to the Worker
+  is HMAC-signed with it and checked in constant time, and after the setup the Worker runs no command but the boot
+  script and the logs. Every operation checks the Worker's word (computer, operation, Durable Object: `_live`), or its
+  bindings with the token (`owns_script`). A stop snapshots then destroys; snapshots can't be deleted (30 days; the
+  Worker renews kept ones; `vm delete` says what stays). The boot script (`/opt/metacomputer/cloudflare/boot`) makes `/`
+  root's, starts the desktop with `runuser` (the platform's commands keep root's capabilities even as another user) and
+  ends every non-root process holding a capability. The allowlist is TLS interception through the Worker's `Allow`
+  handler (Host checked, no redirect followed). Tests: `python3 tests/test_cloudflare.py` (stand-ins; runs
+  `tests/cloudflare_worker_test.mjs` with node when it's there; no VM, no network).
   `scripts/lib.sh` (`mc_load_settings`) reads ONE settings file after the defaults (every
   settings file, anywhere, is read through `mc_source_strict`: readable, parses, silent on stderr) and
   refuses anything unclear (no settings for a name, two files for one VM, a per-VM file
@@ -499,7 +512,7 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `python3 tests/test_vault_ops.py`, `python3 tests/test_vault_tokens.py`, `python3 tests/test_vault_approvals.py`, `python3 tests/test_vault_import.py`, `python3 tests/test_secret_fill.py`, `python3 tests/test_vault_payments.py`, and the boundary checks
   `test_guest_import`, `test_termsafe`, `test_key_pinning`, `test_build_refusals`, `test_owners`,
   `test_bench_workdir`, `test_bench_checks`, `test_vm_runner`, `test_vm_stop`, `test_reset_sync`, `test_plugin`, `test_learn`, `test_storage`,
-  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup`, `test_vault_payments`, `test_help`, `test_acting`, `test_vercel` (no VM;
+  `test_install`, `test_events`, `test_doc_claims`, `test_release`, `test_handoff`, `test_hidden_text`, `test_multi_vm`, `test_vault_codes`, `test_guest_profiles`, `test_netpolicy`, `test_botcheck`, `test_traces`, `test_page_guest`, `test_update`, `test_agents`, `test_cloud_adapters`, `test_session_guard`, `test_remote`, `test_sprites`, `test_agent_setup`, `test_vault_payments`, `test_help`, `test_acting`, `test_vercel`, `test_cloudflare` (no VM;
   `scripts/release.sh` runs exactly these; the multi-VM one uses a fake runner, never this Mac's VMs),
   `tests/test_options.py` (test VM only; it switches the VM's SSH and driver settings),
   `tests/test_storage_vm.py` (test VM only; it stops, starts and resets it), and
