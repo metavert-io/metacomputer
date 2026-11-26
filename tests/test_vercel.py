@@ -1174,7 +1174,8 @@ def guest():
           and bs.rstrip().splitlines()[-1].startswith('echo "HOSTKEY'))
     prov = open(os.path.join(LAB, "provisioning", "guest", "provision.sh")).read()
     check("provision.sh: a vercel target, set up as a Sprite where they agree (nosysd), its own SSH listen settings",
-          "remote|sprite|vercel)" in prov and 'nosysd() { [ "$TARGET" = sprite ] || [ "$TARGET" = vercel ]; }' in prov
+          re.search(r"^  remote\|sprite\|vercel[|)]", prov, re.M)
+          and re.search(r'^nosysd\(\) \{ \[ "\$TARGET" = sprite \] \|\| \[ "\$TARGET" = vercel \][^\n]*; \}$', prov, re.M)
           and "05-metacomputer-vercel.conf" in prov and 'if [ "$TARGET" = vercel ]; then vercel_ssh; fi' in prov)
     for f in ("rootfs/opt/metacomputer/vercel/boot", "bootstrap.sh", "rootfs/opt/metacomputer/vercel/relay"):
         p = os.path.join(GUEST, f)

@@ -633,8 +633,8 @@ def default_computer(td):
         # is said to be none (the providers are your own server and Oracle Cloud).
         said = {"cloud": "has no cloud computers set up", "oci": "no computer on Oracle Cloud yet",
                 "server": "no computer on your own server yet", "fly": "no place called 'fly'",
-                "cloudflare": "no place called 'cloudflare'"}
-        for place in ("cloud", "oci", "server", "fly", "cloudflare"):
+                "azure": "no place called 'azure'", "cloudflare": "no computer on Cloudflare Containers yet"}
+        for place in ("cloud", "oci", "server", "fly", "azure", "cloudflare"):
             r = b.run("list", "--on", place)
             dj = json_of(b.run("list", "--on", place, "--json"))
             check(f"list --on {place}: none, saying so ({said[place]})", r.returncode == 0
@@ -643,7 +643,7 @@ def default_computer(td):
 
         # --on PLACE
         open(b.log, "w").close()
-        for place in ("cloud", "oci", "fly", "cloudflare", "Cloud"):
+        for place in ("cloud", "oci", "fly", "azure", "cloudflare", "Cloud"):
             r = b.run("--on", place, "status")
             check(f"--on {place} status: refused, saying there's nothing there ({said[place.lower()]}), nothing run",
                   r.returncode == 1 and said[place.lower()] in r.stderr and "nothing was done" in r.stderr
@@ -2879,6 +2879,8 @@ DELETE_EXCEPTIONS = [
     ("providers/sprites/build.sh", 'bash "$d/bootstrap.sh" "$d"; rc=$?; rm -rf "$d"; exit $rc', "guest"),
     # ...and a Vercel sandbox's, removed there by the command Vercel's API runs
     ("providers/vercel/build.sh", 'bash "$d/bootstrap.sh" "$d"; rc=$?; rm -rf "$d"; exit $rc', "guest"),
+    # ...and a Cloudflare container's, removed there by the command its control Worker runs
+    ("providers/cloudflare/build.sh", 'bash "$d/bootstrap.sh" "$d"; rc=$?; rm -rf "$d"; exit $rc', "guest"),
     ("install.sh", "rm -r $SSH_DIR; and last", "text"),
     ("install.sh", "is installed too: rm -rf ~/.local/share/lume-secure", "text"),
     ("install.sh", 'echo "    rm -rf ~/.local/share/lume-secure', "text"),

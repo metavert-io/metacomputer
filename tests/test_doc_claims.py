@@ -2208,7 +2208,7 @@ CLAIMS = [
     ("SECURITY.md", r"The REST calls to those three go only to their API\s+addresses, over HTTPS, and never follow a redirect",
      lambda m: "HOSTS = manifests.api_hosts()" in raw("lib/provider_http.py")
      and set(__import__("provider_http").HOSTS) == {"api.hetzner.cloud", "api.digitalocean.com", "api.vultr.com",
-                                                    "api.vercel.com"}
+                                                    "api.vercel.com", "api.cloudflare.com"}
      and 'if not url.startswith("https://") or host not in HOSTS:' in raw("lib/provider_http.py")
      and "return None             # the 3xx comes back as an HTTPError" in raw("lib/provider_http.py")
      and "_OPENER = urllib.request.build_opener(_NoRedirect)" in raw("lib/provider_http.py")),
