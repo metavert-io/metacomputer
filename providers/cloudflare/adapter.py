@@ -32,6 +32,7 @@ Identity: the computer's Worker by its name, whose Durable Object's id (fixed fo
 again under the name has another) is recorded with its build's operation: instance = <worker>-<first 16 hex digits of
 the object's id>. Every operation through the Worker checks its answer names this computer, its operation and that
 object (_live); the token's operations check the Worker's bindings (owns_script)."""
+import contextlib
 import re
 import time
 
@@ -57,7 +58,7 @@ MEM_GIB_HOUR = 0.009
 CPU_HOUR = 0.072
 DISK_GB_HOUR = 0.000252
 DESKTOP_CPU = 0.1
-STATES = {"running": "awake", "stopped": "stopped", "never": "stopped"}
+STATES = {"running": "awake", "stopped": "stopped", "never": "stopped", "stopping": "stopping"}
 
 
 def worker_of(settings):
@@ -182,6 +183,24 @@ def widens(cur_kind, cur_names, new_policy):
     if "*" in cur:
         return False
     return "*" in new or not new <= cur
+
+
+def refresh_words(trouble):
+    """The Worker's refresh trouble (logic.js refreshTrouble), in words: a kept snapshot whose renewal keeps failing, by
+    the names it's kept under, with its failures, its last error and the date it expires; or one that expired."""
+    out = []
+    for t in trouble or []:
+        if not isinstance(t, dict):
+            continue
+        names = "/".join(t.get("labels") or []) or "a kept snapshot"
+        if t.get("expired"):
+            out.append(f"{names}: its snapshot expired on {days(t.get('expires'))} (Cloudflare no longer has it)")
+        else:
+            out.append(f"{names}: its snapshot couldn't be renewed ({int(t.get('failures') or 0)} tries; last: "
+                       f"{str(t.get('error') or 'no answer')[:120]}): tried again until then, but it expires on "
+                       f"{days(t.get('expires'))} unless one works"
+                       + ("; a start and a stop make a new latest one" if "latest" in (t.get("labels") or []) else ""))
+    return out
 
 
 def days(ms):
@@ -352,12 +371,17 @@ class Cloudflare(RemoteVM):
                 and bool(op) and rest.plain(settings, "MCOMP_OP") == op)
 
     # lifecycle ------------------------------------------------------------------------------------------------------
-    def create(self, name, region=None, size=None, persist="auto", op=None, key=None, modules=None, made=None, log=None):
+    def create(self, name, region=None, size=None, persist="auto", op=None, key=None, modules=None, made=None, log=None,
+               guard=None):
         """The computer's control Worker, deployed: Ubuntu's image into the account's registry (by digest), the image
         prepared to run, the Worker uploaded (sent once; its bindings carry the computer and this operation; its secret
         the computer's key), its workers.dev address on, its container application made with Cloudflare's SSH off and
-        read back. Refused when a Worker of that name exists (never someone else's). `made(what, value)` journals each
-        part as it's made. Returns {worker, url, namespace, repo, digest, size}."""
+        read back. Refused when a Worker of that name exists (never someone else's): checked first, and again right
+        before the upload, under `guard(worker)` (lib's lock on this Mac, held from that check through the upload's
+        read-back: Cloudflare's upload has no condition to send it under, so it replaces whatever is there). After the
+        upload, the Worker's bindings must name this operation: another's (a create elsewhere that won the race) is left
+        alone and refused. `made(what, value)` journals each part as it's made. Returns {worker, url, namespace, repo,
+        digest, size}."""
         from cloud import capabilities
         worker = self._worker_name(name)
         if not OP_RE.fullmatch(op or ""):
@@ -389,8 +413,19 @@ class Cloudflare(RemoteVM):
         if status != "ready":
             raise AdapterError(f"Cloudflare didn't prepare the image to run ({status or 'no answer'}{': ' + why if why else ''})")
         say(f"the image is in the account's registry and ready to run ({round(time.monotonic() - t0, 1)} s)")
-        made("worker_sent", worker)
-        rest.upload(worker, modules, {"MCOMP_COMPUTER": name, "MCOMP_OP": op, "MCOMP_SIZE": size}, key, ref, size)
+        with (guard or (lambda w: contextlib.nullcontext()))(worker):
+            # The image's copy and preparation take minutes: another create may have made a Worker of this name since.
+            if rest.script_settings(worker) is not None:
+                raise AdapterError(f"a Worker named {worker} appeared in the Cloudflare account while the image was "
+                                   "prepared (another vm create, here or elsewhere?): metacomputer leaves it alone and "
+                                   "uploaded nothing (choose another name: vm create --worker NAME)")
+            made("worker_sent", worker)
+            rest.upload(worker, modules, {"MCOMP_COMPUTER": name, "MCOMP_OP": op, "MCOMP_SIZE": size}, key, ref, size)
+            got = rest.script_settings(worker)
+        if got is not None and not self.owns_script(name, got, op, rest):
+            raise AdapterError(f"the Worker named {worker} carries another computer's or operation's bindings just after "
+                               "this upload (another vm create replaced it): metacomputer leaves it alone, and this "
+                               "computer wasn't made")
         made("made_worker", worker)
         rest.enable_workers_dev(worker)
         ns = None
@@ -459,12 +494,34 @@ class Cloudflare(RemoteVM):
         s, _st = self._live(name)
         if not s.get("running"):
             return {"name": name, "place": self.manifest["place"], "state": "stopped", "note": "it was stopped already"}
-        out = self.ask("stop", {}, 900)
+        try:
+            out = self.ask("stop", {}, 900)
+        except AdapterError:
+            now = self._stopping(name)
+            if now:
+                raise AdapterError(now) from None
+            raise
         snap = out.get("snapshot") or {}
         return {"name": name, "place": self.manifest["place"], "state": "stopped",
                 "stopped_in_s": round((out.get("ms") or 0) / 1000.0, 2),
                 "snapshot_gb": round((snap.get("size") or 0) / 1e9, 2),
                 "note": f"its disk was snapshotted, then the container was ended: {STOP_KEEPS}"}
+
+    def _stopping(self, name):
+        """What's true after a stop that answered an error: the words for a computer whose disk was saved but whose
+        container Cloudflare didn't end (its Worker says "stopping"), or None (anything else: the error stands)."""
+        try:
+            s = self.ask("status", {}, 60)
+        except AdapterError:
+            return None
+        if s.get("state") != "stopping":
+            return None
+        p = s.get("stop_pending") or {}
+        latest = s.get("latest") or {}
+        return (f"{name}'s disk was saved (its latest snapshot, kept until {days(latest.get('expires'))}), but Cloudflare "
+                f"didn't end its container ({str(p.get('error') or 'no answer')[:120]}): it's still running, and its "
+                "control Worker tries to end it again every minute. Nothing is lost. metacomputer status says when it's "
+                "stopped; stop again to try now, or start to take it up again")
 
     def exec(self, name, argv, input=None, timeout=None, max_output=None):
         """A command in the container as root, through the Worker, only until the computer is set up (the Worker refuses
@@ -562,9 +619,9 @@ class Cloudflare(RemoteVM):
             if "isn't there" in str(e):
                 return {"name": name, "place": self.manifest["place"], "state": "absent", "note": str(e)}
             raise
-        word = "running" if s.get("running") else str(s.get("state") or "stopped")
+        word = "stopping" if s.get("state") == "stopping" else ("running" if s.get("running") else str(s.get("state") or "stopped"))
         out = {"name": name, "place": self.manifest["place"], "state": STATES.get(word, "stopped"),
-               "provider_state": "RUNNING" if s.get("running") else "STOPPED", "persist": "disk",
+               "provider_state": word.upper() if word in ("stopping", "running") else "STOPPED", "persist": "disk",
                "size": s.get("size"), "worker": self._worker_name(name), "arch": "x86_64",
                "egress": (s.get("egress") or {}).get("setting")}
         notes = []
@@ -572,12 +629,16 @@ class Cloudflare(RemoteVM):
         if lost:
             notes.append(f"Cloudflare stopped it on {days(lost.get('at'))} without warning: what changed after its last "
                          f"snapshot ({days(lost.get('since'))}) was lost")
+        if word == "stopping":
+            p = s.get("stop_pending") or {}
+            notes.append(f"stopping: its disk was saved, but Cloudflare hasn't ended its container yet "
+                         f"({str(p.get('error') or 'no answer')[:120]}; tried {p.get('tries') or 1} time(s), again every "
+                         "minute). Nothing is lost")
         latest = s.get("latest") or {}
         if latest.get("expires"):
             notes.append(f"its latest snapshot is kept until {days(latest['expires'])} (renewed before then)")
-        if latest.get("failed"):
-            notes.append(f"its latest snapshot couldn't be renewed ({str(latest['failed'])[:120]})")
-        if s.get("running"):
+        notes.extend(refresh_words(s.get("refresh")))
+        if s.get("running") and word != "stopping":
             notes.append(f"it stops by itself {s.get('idle_min')} min after the last connection closes")
         if notes:
             out["note"] = "; ".join(notes)
@@ -705,8 +766,15 @@ class Cloudflare(RemoteVM):
             out.append({"check": f"{n}: an egress metacomputer set", "ok": kind in ("internet", "off", "allowlist"), "detail": kind})
             exp = [r for r in w.get("residue") or [] if r.get("labels")]
             soon = [r for r in exp if r.get("expires", 0) - (w.get("now") or 0) < 3 * DAY_MS]
-            out.append({"check": f"{n}: its kept snapshots are renewed before they expire", "ok": not soon,
-                        "detail": ", ".join(f"{'/'.join(r['labels'])} until {days(r['expires'])}" for r in exp) or "none yet"})
+            trouble = refresh_words(w.get("refresh"))
+            out.append({"check": f"{n}: its kept snapshots are renewed before they expire", "ok": not soon and not trouble,
+                        "detail": "; ".join(trouble) or ", ".join(f"{'/'.join(r['labels'])} until {days(r['expires'])}"
+                                                                  for r in exp) or "none yet"})
+            if w.get("state") == "stopping":
+                p = w.get("stop_pending") or {}
+                out.append({"check": f"{n}: its last stop ended the container", "ok": False,
+                            "detail": f"its disk was saved, but Cloudflare hasn't ended it ({str(p.get('error') or '')[:120]}; "
+                                      "tried again every minute)"})
             if self._rest is not None:
                 app = self.rest.application((self.states.get(n) or {}).get("namespace") or "0" * 32)
                 ssh = ((app or {}).get("configuration") or {}).get("wrangler_ssh", {}).get("enabled")

@@ -3,11 +3,16 @@
 // providers/cloudflare/api.py uploads this file and logic.js through Cloudflare's API.
 //
 // - The entry (default): every request must be signed with the computer's own key (logic.js verify, in constant
-//   time); anything else is refused (401) before it reaches the computer. Only the routes in logic.js ROUTES exist.
+//   time); anything else is refused (401) before it reaches the computer, and before a byte of its body is read
+//   (logic.js preAuth: the header's shape and time), a body being read only up to its route's cap (413 past it). Only
+//   the routes in logic.js ROUTES exist. The computer's object refuses a request it has seen (its nonce, kept for as
+//   long as the request could be fresh).
 // - Computer: one Durable Object, the computer's, which runs its container (the durable_object scheduling policy):
 //   start (its latest snapshot, or the image the first time), stop (its disk snapshotted, then the container
 //   destroyed: a stop keeps files, not programs), checkpoints, egress, SSH (a websocket piped to the container's
-//   sshd), the idle stop and the refresh that keeps its snapshots from expiring (the alarm).
+//   sshd), the idle stop and the refresh that keeps its snapshots from expiring (the alarm). A second object of the
+//   class, the refresher (never reachable from outside: the entry sends everything to the computer's), restores each
+//   snapshot due in a container of its own and ends it at once, so a running computer's are renewed too.
 // - Allow and Deny: the outbound handlers of an allowlist (the internet off, each allowed name intercepted): Allow
 //   checks the request asks for exactly its name (the runtime builds the URL from the Host header, not the TLS name)
 //   and fetches only that name, never following a redirect; Deny answers 403.
@@ -18,8 +23,8 @@ import * as L from "./logic.js";
 const BOOT = "/opt/metacomputer/cloudflare/boot";
 // PID 1 of every start: ends on SIGTERM (a platform stop's grace period), so nothing waits on it.
 const ENTRY = ["/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"];
-const MAX_BODY = 72 << 20;
 const MAX_OUT = 4 << 20;
+const SNAP_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 
 const json = (o, status = 200, headers = {}) =>
   new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json", ...headers } });
@@ -41,22 +46,25 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     const ws = (req.headers.get("upgrade") || "").toLowerCase() === "websocket";
+    if (req.method !== (ws ? "GET" : "POST")) return json({ error: "unauthorized" }, 401);
+    const header = req.headers.get("x-mc-auth");
+    // Nothing of the body is read for a request whose header can't be a fresh signature.
+    if (!L.preAuth(env.MCOMP_KEY, header, Date.now()).ok) return json({ error: "unauthorized" }, 401);
     let body = new Uint8Array(0);
     if (!ws) {
-      if (req.method !== "POST") return json({ error: "unauthorized" }, 401);
-      const len = Number(req.headers.get("content-length") || 0);
-      if (len > MAX_BODY) return json({ error: "too large" }, 413);
-      body = new Uint8Array(await req.arrayBuffer());
-      if (body.length > MAX_BODY) return json({ error: "too large" }, 413);
-    } else if (req.method !== "GET") {
-      return json({ error: "unauthorized" }, 401);
+      const cap = L.bodyCap(url.pathname);
+      const len = req.headers.get("content-length");
+      if (len !== null && !(Number(len) <= cap)) return json({ error: "too large" }, 413);
+      body = await L.readCapped(req.body, cap);
+      if (!body) return json({ error: "too large" }, 413);
     }
-    const auth = await L.verify(env.MCOMP_KEY, req.method, url, req.headers.get("x-mc-auth"), body, Date.now());
+    const auth = await L.verify(env.MCOMP_KEY, req.method, url, header, body, Date.now());
     if (!auth.ok) return json({ error: "unauthorized" }, 401);
     if (!L.ROUTES.has(url.pathname) || (url.pathname === "/v1/tcp") !== ws) return json({ error: "no such request" }, 404);
     const stub = env.COMPUTER.get(env.COMPUTER.idFromName("computer"));
     if (ws) return stub.fetch(req);
-    return stub.fetch("https://computer" + url.pathname, { method: "POST", body, headers: { "content-type": "application/json" } });
+    return stub.fetch("https://computer" + url.pathname, { method: "POST", body,
+      headers: { "content-type": "application/json", "x-mc-auth": header } });
   },
 };
 
@@ -84,6 +92,8 @@ export class Computer extends DurableObject {
     this.lastActivity = 0;
     this.busy = 0;
     this.chain = Promise.resolve();
+    this.seen = new Map();                                       // nonces of requests seen: nonce -> when to forget it
+    this.noted = 0;
     ctx.blockConcurrencyWhile(async () => {
       const r = await ctx.storage.get("rec");
       this.lastActivity = (r && r.last_activity) || 0;
@@ -119,9 +129,32 @@ export class Computer extends DurableObject {
     return this.ctx.container;
   }
 
+  // A request seen before (its nonce) is refused: a signed request can't be sent again, not even within its time.
+  // Checked in memory first (at once, so two copies at the same moment can't both pass), then in storage (an object
+  // that restarted in between).
+  async once(header) {
+    const a = L.parseAuth(header);
+    if (!a) return false;
+    const now = Date.now();
+    if (this.seen.has(a.nonce)) return false;
+    this.seen.set(a.nonce, L.nonceExpiry(a.ts));
+    if (await this.ctx.storage.get("n:" + a.nonce)) return false;
+    await this.ctx.storage.put("n:" + a.nonce, L.nonceExpiry(a.ts));
+    if (++this.noted % 64 === 0 || this.seen.size > 512) {
+      for (const [n, t] of this.seen) if (t < now) this.seen.delete(n);
+      try {
+        const old = [...(await this.ctx.storage.list({ prefix: "n:", limit: 1000 })).entries()]
+          .filter(([, t]) => t < now).map(([k]) => k);
+        for (let i = 0; i < old.length; i += 128) await this.ctx.storage.delete(old.slice(i, i + 128));
+      } catch {}
+    }
+    return true;
+  }
+
   async fetch(req) {
     const p = new URL(req.url).pathname;
     if (!this.c) return json({ error: "no container binding" }, 500);
+    if (!(await this.once(req.headers.get("x-mc-auth")))) return json({ error: "unauthorized (a request sent again)" }, 401);
     if (p === "/v1/tcp") return this.tcp(req);
     let b = {};
     try {
@@ -154,11 +187,21 @@ export class Computer extends DurableObject {
   }
 
   // A container the record says runs but the platform has stopped (a host event, the backstop): a stop, with what
-  // changed since its last snapshot lost. Said in status until the next start. Outside the lock (status, a connection)
-  // it's left alone while a change runs: a stop or a restore ends the container before it records that it did.
+  // changed since its last snapshot lost. Said in status until the next start. A stop whose container hadn't ended
+  // (stopping: its disk saved first) and has now: stopped, nothing lost. Outside the lock (status, a connection) it's
+  // left alone while a change runs: a stop or a restore ends the container before it records that it did.
   async reconcile(r, outside = false) {
     if (outside && this.busy) return r;
-    if (r.state === "running" && !this.c.running) {
+    if (r.state === "stopping" && !this.c.running) {
+      const p = r.stop_pending || {};
+      r.state = "stopped";
+      r.stop_reason = p.why || "stop";
+      r.stopped_at = Date.now();
+      r.force = null;
+      r.stop_pending = null;
+      await this.save(r);
+      await this.schedule(r);
+    } else if (r.state === "running" && !this.c.running) {
       const now = Date.now();
       r.state = "stopped";
       r.stop_reason = "cloudflare";
@@ -181,6 +224,7 @@ export class Computer extends DurableObject {
       size: r.size, idle_min: r.idle_min, setup_done: r.setup_done,
       egress: { setting: L.egressWord(r.internet, r.allow), allow: r.allow, in_force: this.c.running ? r.force : null },
       latest: L.snapInfo(r, r.latest), checkpoints: cps, lost: r.lost, stop_reason: r.stop_reason || null,
+      stop_pending: r.state === "stopping" ? r.stop_pending : null, refresh: L.refreshTrouble(r, now),
       sockets: this.sockets, last_activity: Math.max(r.last_activity || 0, this.lastActivity || 0),
       residue: L.residue(r, now), now,
     };
@@ -233,22 +277,19 @@ export class Computer extends DurableObject {
       throw L.refuse(502, `the container didn't start (${ready.last || "no answer"})`);
     }
     try { await this.c.setInactivityTimeout(L.backstopMs(r.idle_min)); } catch {}
+    if (refresh) return ready.ms;                                // the refresher's: it keeps no record
     const now = Date.now();
-    if (source.snapshot && r.snaps[source.snapshot]) {
-      r.snaps[source.snapshot].fresh = now;
-      delete r.snaps[source.snapshot].failed;
-    }
-    if (!refresh) {
-      r.state = "running";
-      r.started_at = now;
-      r.force = force;
-      r.ever_started = true;
-      r.lost = null;
-      r.idle_failures = 0;
-      this.lastActivity = now;
-    }
+    if (source.snapshot && r.snaps[source.snapshot]) L.refreshDone(r.snaps[source.snapshot], now);
+    r.state = "running";
+    r.started_at = now;
+    r.force = force;
+    r.ever_started = true;
+    r.lost = null;
+    r.idle_failures = 0;
+    r.stop_pending = null;
+    this.lastActivity = now;
     await this.save(r);
-    if (!refresh) await this.schedule(r);
+    await this.schedule(r);
     return ready.ms;
   }
 
@@ -277,8 +318,38 @@ export class Computer extends DurableObject {
   async start(b) {
     const r = await this.reconcile(await this.rec());
     if (b.idle_min !== undefined) r.idle_min = L.checkIdle(b.idle_min);
+    if (this.c.running && r.state === "stopping") {
+      // A stop saved the disk but Cloudflare hadn't ended the container: ended now, then started as after any stop.
+      // If it still won't end, it's taken up again as it is (its disk is what that snapshot holds), unless the egress
+      // asked for since needs a new container.
+      try {
+        await this.finishStop(r);
+      } catch (e) {
+        const plan = L.planNet(r.force, { internet: r.internet, allow: r.allow });
+        if (!r.force || plan.restart) throw e;
+        for (const [n, k] of plan.register) {
+          await this.intercept(n, k);
+          r.force.names[n] = k;
+        }
+        const now = Date.now();
+        r.state = "running";
+        r.started_at = now;
+        r.stop_pending = null;
+        r.idle_failures = 0;
+        this.lastActivity = now;
+        await this.save(r);
+        await this.schedule(r);
+        const booted = b.boot ? await this.boot() : null;
+        return { already: true, resumed: true, booted_ms: booted, egress: L.egressWord(r.internet, r.allow) };
+      }
+    }
+    if (this.c.running && r.state !== "running") {
+      // A container no record names (an object that restarted in the middle of a start): ended before the start.
+      try { await this.c.destroy(); } catch (e) {
+        throw L.refuse(503, `a container from before is still there and Cloudflare didn't end it (${L.say(e, 120)}): try again in a minute`);
+      }
+    }
     if (this.c.running) {
-      if (r.state !== "running") throw L.refuse(409, "a snapshot is being refreshed: try again in a minute");
       const booted = b.boot ? await this.boot() : null;
       await this.save(r);
       return { already: true, booted_ms: booted, egress: L.egressWord(r.internet, r.allow) };
@@ -294,12 +365,15 @@ export class Computer extends DurableObject {
   }
 
   // A stop: the desktop's programs ended (so they save), the disk snapshotted while the container still runs, the
-  // snapshot recorded, and only then the container destroyed. A snapshot that fails stops nothing.
+  // snapshot recorded (stopping), and only then the container destroyed (stopped). A snapshot that fails stops
+  // nothing. A container Cloudflare doesn't end stays "stopping", said as it is: the error names the saved snapshot,
+  // the alarm tries again within a minute, and a start takes it up again or ends it (finishStop).
   async stop(r, why) {
     if (!this.c.running) {
       await this.reconcile(r);
       return { already: true };
     }
+    if (r.state === "stopping") return { ...(await this.finishStop(r)), snapshot: L.snapInfo(r, r.latest) };
     const t = Date.now();
     if (r.setup_done) {
       try { await this.run([BOOT, "quiesce"], null, 60000, 4096); } catch {}
@@ -310,15 +384,37 @@ export class Computer extends DurableObject {
     const prev = r.latest;
     r.latest = s.id;
     const dropped = L.dropUnused(r, prev, now);
+    r.state = "stopping";
+    r.stop_pending = { why, at: now, tries: 0, error: null };
     await this.save(r);
-    try { await this.c.destroy(); } catch {}
+    const out = await this.finishStop(r);
+    return { ...out, snapshot: L.snapInfo(r, s.id), snapshot_ms: now - t, ms: Date.now() - t, let_go: dropped };
+  }
+
+  // The end of a stop whose disk is saved: the container destroyed, then recorded as stopped. When Cloudflare doesn't
+  // end it: recorded as it is (still running, its disk saved), the alarm set to try again soon, and an error that says so.
+  async finishStop(r) {
+    const p = r.stop_pending || { why: "stop", at: Date.now(), tries: 0, error: null };
+    try {
+      await this.c.destroy();
+    } catch (e) {
+      p.tries = (p.tries || 0) + 1;
+      p.error = L.say(e, 160);
+      r.stop_pending = p;
+      await this.save(r);
+      await this.schedule(r);
+      const snap = L.snapInfo(r, r.latest);
+      throw L.refuse(503, `its disk was saved (snapshot ${snap ? snap.id : "?"}), but Cloudflare didn't end the container ` +
+        `(${p.error}): it still runs, and its Worker tries to end it again within a minute; nothing is lost`);
+    }
     r.state = "stopped";
-    r.stop_reason = why;
+    r.stop_reason = p.why;
     r.stopped_at = Date.now();
     r.force = null;
+    r.stop_pending = null;
     await this.save(r);
     await this.schedule(r);
-    return { snapshot: L.snapInfo(r, s.id), snapshot_ms: now - t, ms: Date.now() - t, let_go: dropped };
+    return { stopped: true };
   }
 
   async stopVerb() {
@@ -328,7 +424,7 @@ export class Computer extends DurableObject {
   async checkpoint(b) {
     const r = await this.reconcile(await this.rec());
     const label = L.checkLabel(b.label);
-    if (!this.c.running) throw L.refuse(409, "it's stopped: a checkpoint is taken of a running computer");
+    if (!this.c.running || r.state !== "running") throw L.refuse(409, "it's stopped: a checkpoint is taken of a running computer");
     if (r.checkpoints[label] && !b.replace) throw L.refuse(409, `checkpoint ${label} exists`);
     const t = Date.now();
     const s = await this.c.snapshotContainer({ name: L.snapName(r, "ckpt", t) });
@@ -351,12 +447,15 @@ export class Computer extends DurableObject {
     if (Date.now() - r.snaps[id].fresh >= L.EXPIRE_MS) throw L.refuse(410, `checkpoint ${label} has expired`);
     const t = Date.now();
     if (this.c.running) {
-      try { await this.c.destroy(); } catch {}
+      try { await this.c.destroy(); } catch (e) {
+        throw L.refuse(503, `Cloudflare didn't end the running container (${L.say(e, 120)}): nothing was changed; try again`);
+      }
     }
     const prev = r.latest;
     r.latest = id;
     r.state = "stopped";
     r.force = null;
+    r.stop_pending = null;
     const dropped = L.dropUnused(r, prev, Date.now());
     await this.save(r);
     const ms = await this.launch(r, { snapshot: id });
@@ -470,39 +569,70 @@ export class Computer extends DurableObject {
   async alarm() {
     await this.lock(async () => {
       const stored = await this.ctx.storage.get("rec");
-      if (!stored) return;                                       // forgotten (vm delete)
-      const r = await this.reconcile(stored);
+      if (!stored) return;                                       // forgotten (vm delete), or the refresher
+      let r = await this.reconcile(stored);
       const now = Date.now();
-      if (this.c.running && r.state !== "running") {
-        // A refresh's container left over (the object restarted in the middle of one): ended.
+      if (this.c.running && r.state === "stopping") {
+        try { await this.finishStop(r); } catch {}               // said by status; tried again (nextAlarm)
+      } else if (this.c.running && r.state !== "running") {
+        // A container no record names (the object restarted in the middle of a start): ended.
         try { await this.c.destroy(); } catch {}
-      } else if (this.c.running) {
+      } else if (this.c.running && (r.idle_failures || 0) < L.IDLE_TRIES) {
         const d = L.idleDecision(r, this.sockets, Math.max(this.lastActivity, r.last_activity || 0), now);
         if (d.stop) {
           try {
             await this.stop(r, "idle");
           } catch (e) {
-            r.idle_failures = (r.idle_failures || 0) + 1;
-            r.idle_error = L.say(e, 200);
-            await this.save(r);
-            // Three failed snapshots: no more tries. The container's own inactivity timeout then ends it, without a
-            // snapshot (a stop by Cloudflare, said in status), so it doesn't run and bill unattended.
-            if (r.idle_failures >= 3) return;
+            // A snapshot that failed: tried again at the next look, IDLE_TRIES times in all. Then the container's own
+            // inactivity timeout ends it, without a snapshot (a stop by Cloudflare, said in status), so it doesn't run
+            // and bill unattended. (A container that didn't end after its snapshot is "stopping": tried again.)
+            if (r.state !== "stopping") {
+              r.idle_failures = (r.idle_failures || 0) + 1;
+              r.idle_error = L.say(e, 200);
+              await this.save(r);
+            }
           }
-        }
-      } else {
-        const due = L.dueRefresh(r, now);
-        if (due.length) {
-          try {
-            await this.launch(r, { snapshot: due[0] }, true);
-          } catch (e) {
-            r.snaps[due[0]].failed = L.say(e, 200);
-            await this.save(r);
-          }
-          try { await this.c.destroy(); } catch {}
         }
       }
+      // The refresh, running or not: one snapshot due per look, in the refresher's container.
+      r = await this.rec();
+      await this.refreshDue(r, Date.now());
       await this.schedule(await this.rec());
+    });
+  }
+
+  // One kept snapshot due for its refresh: restored by the refresher (its own object and container, so this computer's
+  // keeps running), and recorded: renewed, or failed and tried again after its back-off (logic.js refreshFailed).
+  async refreshDue(r, now) {
+    const due = L.dueRefresh(r, now);
+    if (!due.length || !this.env.COMPUTER) return;
+    const id = due[0];
+    try {
+      const stub = this.env.COMPUTER.get(this.env.COMPUTER.idFromName(L.REFRESHER));
+      await stub.refreshSnapshot(id, r.size);
+      if (r.snaps[id]) L.refreshDone(r.snaps[id], Date.now());
+    } catch (e) {
+      if (r.snaps[id]) L.refreshFailed(r.snaps[id], L.say(e, 200), Date.now());
+    }
+    await this.save(r);
+  }
+
+  // The refresher's one request (RPC from the computer's object; the entry never reaches it): the snapshot started in
+  // this object's container with the internet off and ended at once. Refused in an object that keeps a computer.
+  async refreshSnapshot(id, size) {
+    if (typeof id !== "string" || !SNAP_ID.test(id)) throw L.refuse(400, "not a snapshot's id");
+    return this.lock(async () => {
+      if (await this.ctx.storage.get("rec")) throw L.refuse(409, "the computer's own object renews no snapshot itself");
+      if (!this.c) throw L.refuse(500, "no container binding");
+      if (this.c.running) await this.c.destroy();                // one left from a try that was cut off
+      const tmp = { size: L.SIZES.includes(size) ? size : "standard-3", idle_min: L.IDLE_MIN, internet: false, allow: [] };
+      let ms;
+      try {
+        ms = await this.launch(tmp, { snapshot: id }, true);
+      } finally {
+        try { await this.c.destroy(); } catch {}
+      }
+      return { ms };
     });
   }
 

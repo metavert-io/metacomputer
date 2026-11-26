@@ -369,10 +369,13 @@ metacomputer learn report | review | approve ID | list   # lessons from your own
   `logic.js`, uploaded by `api.py` with the account's token, which only `vm create` and `vm delete` need). Everything
   else uses the computer's own key (`$SSH_DIR/cloudflare-key`, 0600; read only by `providers/cloudflare/remote.py`,
   handed to the broker on stdin; never ssh, the hub, the vault, the guest, a log or argv); every request to the Worker
-  is HMAC-signed with it and checked in constant time, and after the setup the Worker runs no command but the boot
+  is HMAC-signed with it (with a nonce the Durable Object never takes twice) and checked in constant time, no body is
+  read before the header could be a fresh signature, and after the setup the Worker runs no command but the boot
   script and the logs. Every operation checks the Worker's word (computer, operation, Durable Object: `_live`), or its
-  bindings with the token (`owns_script`). A stop snapshots then destroys; snapshots can't be deleted (30 days; the
-  Worker renews kept ones; `vm delete` says what stays). The boot script (`/opt/metacomputer/cloudflare/boot`) makes `/`
+  bindings with the token (`owns_script`); `vm create` checks the name again under a lock right before its
+  unconditional upload and reads the bindings back. A stop snapshots then destroys (a container Cloudflare doesn't end
+  stays `stopping`, said and retried); snapshots can't be deleted (30 days; the Worker's refresher, a second Durable
+  Object, renews kept ones running or stopped, retrying failures with a back-off; `vm delete` says what stays). The boot script (`/opt/metacomputer/cloudflare/boot`) makes `/`
   root's, starts the desktop with `runuser` (the platform's commands keep root's capabilities even as another user) and
   ends every non-root process holding a capability. The allowlist is TLS interception through the Worker's `Allow`
   handler (Host checked, no redirect followed). Tests: `python3 tests/test_cloudflare.py` (stand-ins; runs

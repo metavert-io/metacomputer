@@ -19,6 +19,7 @@ Worker, its snapshots as checkpoints, the boot script and the logs through the W
 The computer's key is made here at create (64 hex digits, 0600, beside its SSH keys: $SSH_DIR/cloudflare-key), read
 only here, and handed to the broker (providers/cloudflare/broker.py) on its standard input: never its arguments, its
 environment, a log or another program. The account's token never reaches the broker: it's for create and delete."""
+import contextlib
 import json
 import os
 import stat
@@ -309,6 +310,39 @@ def delete_everything(R, s, a, rd, st):
     return out
 
 
+CREATE_LOCK_WAIT_S = 120
+
+
+def create_lock(R, s):
+    """vm create's lock on this Mac for a Worker's name (a flock in this account's private folder for the computers'
+    brokers), held from the check that no Worker of that name exists through the upload and its read-back: two creates
+    here can't both upload one. Cloudflare's upload takes no condition, so a create on another Mac is caught only by
+    the read-back (adapter.create)."""
+    import flockwait
+    d = cf.broker_paths(R.LAB, s["VM_NAME"])[0]
+
+    @contextlib.contextmanager
+    def lock(worker):
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            pass
+        info = os.lstat(d)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise R.Refused(f"{d} isn't a private folder of this account's (0700): nothing was uploaded")
+        fd = os.open(os.path.join(d, f"create-{worker}.lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                flockwait.exclusive(fd, CREATE_LOCK_WAIT_S, 0.2)
+            except BlockingIOError:
+                raise R.Refused(f"another vm create on this Mac is uploading a Worker named {worker}: nothing was "
+                                "uploaded") from None
+            yield
+        finally:
+            os.close(fd)
+    return lock
+
+
 def create(R, s, a, rd, st, op):
     """The computer's control Worker, journaled like any launch (a lost upload is found by its Worker's bindings,
     looked for over a visibility window); its key made first (it's the Worker's secret); then its identity (the
@@ -341,7 +375,7 @@ def create(R, s, a, rd, st, op):
     print(f"metacomputer: making {s['VM_NAME']} on {a.manifest['label']} (its control Worker {worker}, {size})",
           file=sys.stderr)
     got = a.create(s["VM_NAME"], size=size, persist=s.get("PERSIST") or "auto", op=op, key=key, modules=modules(),
-                   made=made, log=lambda m: print(f"  {m}", file=sys.stderr))
+                   made=made, log=lambda m: print(f"  {m}", file=sys.stderr), guard=create_lock(R, s))
     w = make_worker(got["url"], key)
     a.attach_worker(w)
     try:

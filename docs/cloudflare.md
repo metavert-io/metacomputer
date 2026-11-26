@@ -70,7 +70,10 @@ agrees). The build (`metacomputer --vm work build`, about 5 minutes):
    prepared to run by Cloudflare (it converts it once), the Worker uploaded (sent once: an upload whose answer is
    lost is found again only by its Worker's settings naming this computer and this build's operation, looked for again
    every 10 s until two minutes of lookups have found nothing), its workers.dev address, its container application.
-   A build that fails deletes what it made and nothing else (`build --keep-on-failure` stops it instead). Then its
+   Cloudflare's upload replaces any Worker of the name and takes no condition, so the name is checked again right
+   before it, under a lock on this Mac held through the upload, and the Worker read back after it must carry this
+   build's operation: another create's Worker (made while the image was prepared, here or elsewhere) is left alone and
+   the build stops. A build that fails deletes what it made and nothing else (`build --keep-on-failure` stops it instead). Then its
    first start, from the image, with the internet on for the setup's downloads.
 2. **The first step through the Worker**, as root: `providers/cloudflare/guest/bootstrap.sh` makes the accounts `cua`
    (the desktop, no sudo) and `cuaadmin` (maintenance), each reached only with keys made on your Mac for this computer,
@@ -94,7 +97,10 @@ Everything works as on any computer: `metacomputer --vm work status`, the MCP to
   the boot script (sshd, the X server, the desktop) and the broker on your Mac. **A stop closes every program**: the
   desktop's programs are ended first (so they save), the disk is snapshotted while the container still runs (about 20
   s for a desktop's 1-2 GB), and only then is the container ended. Files and installed packages are kept; open apps are
-  closed (the boot script clears the locks they left). `start` and `stop` say so.
+  closed (the boot script clears the locks they left). `start` and `stop` say so. If Cloudflare doesn't end the
+  container after the snapshot, `stop` says that, as an error: the disk is saved, the container still runs (`status`:
+  stopping), and the Worker tries to end it again every minute; a `start` then ends it and starts from the snapshot, or,
+  if it still won't end, takes it up again as it is.
 - **The idle stop is the Worker's.** It stops the computer (a snapshot, then the stop) `IDLE_STOP` minutes after its
   last connection closed (the hub's, a command's, the live view's), looking every minute (every 30 s for
   `IDLE_STOP=1`); while one is open it never does. Under it, the container's own inactivity timeout is `IDLE_STOP` plus
@@ -124,8 +130,12 @@ Cloudflare keeps every snapshot **30 days after it was made or last restored**, 
 
 - **While the computer exists**, its Worker restores each snapshot it keeps (its latest, its baseline, its checkpoints)
   before its 30 days run out (an alarm; a few seconds of runtime each, about every 25 days), so nothing it needs
-  expires, even if it's stopped for months. `status` says when its latest is kept until; `cloud doctor cloudflare`
-  checks every kept one.
+  expires, whether it's stopped for months or runs for weeks: a second object of the Worker, the refresher, restores
+  each in a container of its own and ends it at once, so a running computer isn't interrupted. A refresh that fails
+  (no room at Cloudflare, say) is tried again 5 minutes later, then 10, 20 and so on, 6 hours at most between tries,
+  until one works; it's never given up on before the snapshot expires. `status` says when its latest is kept until,
+  and names any kept snapshot whose refresh keeps failing, with its tries, its last error and the date it expires;
+  `cloud doctor cloudflare` checks every kept one and fails while one is failing.
 - **A snapshot the computer lets go** (the one a stop replaced, a checkpoint deleted or replaced) isn't renewed: it
   expires 30 days after its last use. A computer stopped every day has about a month of them at Cloudflare.
 - **`vm delete`** deletes the Worker, its container, its application and the image, and then **says plainly what
@@ -146,8 +156,11 @@ through the Worker at every start.
 Nothing in a container is reachable from the internet. metacomputer reaches it through its own Worker:
 
 - **Every request to the Worker is signed** with the computer's key: an HMAC-SHA256 of the method, the path, the query,
-  the time and the body's hash, which the Worker checks in constant time and within 5 minutes of its own clock. The key
-  itself never travels. A request without a valid signature is refused (401) before it reaches the computer.
+  the time, a nonce new to each request and the body's hash, which the Worker checks in constant time and within 5
+  minutes of its own clock; the computer's Durable Object refuses a nonce it has seen, so a request can't be sent again,
+  not even within those 5 minutes. The key itself never travels. A request without a valid signature is refused (401)
+  before it reaches the computer, and before its body is read: a body is read only once the header has a fresh
+  signature's shape, and only up to 64 KB (72 MB for the setup's commands; 413 past it).
 - **The broker** (`providers/cloudflare/broker.py`) runs on your Mac, one per computer, started by `start` (and the
   build) with the key on its standard input. It's the only program besides `lib/remote.py` that holds the key: ssh,
   the hub, the vault and every helper never do. It listens on a private socket (`/tmp/mcomp-UID-cloudflare/HASH.sock`,

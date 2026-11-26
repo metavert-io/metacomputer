@@ -115,6 +115,8 @@ class FakeDO:
         self.execs = []
         self.exec_answer = lambda argv, stdin: (0, b"", b"")
         self.answer_as = None          # {"computer"/"op"/"do": ...} overrides in status, to play another computer
+        self.fail_destroy = 0          # stops whose container Cloudflare doesn't end (the Worker's "stopping")
+        self.refresh = []              # the Worker's refresh trouble (logic.js refreshTrouble), as status says it
 
     def script(self):
         return self.cf.scripts[self.name]
@@ -139,7 +141,7 @@ class FakeDO:
                           "allow": r["allow"], "in_force": r["force"] if r["running"] else None},
                "latest": r["snaps"].get(r["latest"]), "checkpoints": {k: r["snaps"].get(v) for k, v in r["checkpoints"].items()},
                "lost": r["lost"], "residue": [dict(v, labels=[]) for v in r["snaps"].values()] + r["dropped"],
-               "now": int(time.time() * 1000)}
+               "stop_pending": r.get("stop_pending"), "refresh": self.refresh, "now": int(time.time() * 1000)}
         out.update(self.answer_as or {})
         return out
 
@@ -161,9 +163,17 @@ class FakeDO:
         if verb == "stop":
             if not r["running"]:
                 return 200, {"already": True}
-            sid = self.snap()
-            r.update(latest=sid, running=False, state="stopped", force=None)
-            return 200, {"snapshot": r["snaps"][sid], "ms": 20000}
+            if r["state"] != "stopping":
+                r["latest"] = self.snap()
+            if self.fail_destroy > 0:
+                self.fail_destroy -= 1
+                tries = (r.get("stop_pending") or {}).get("tries", 0) + 1
+                r.update(state="stopping", stop_pending={"why": "stop", "tries": tries, "error": "internal error"})
+                return 503, {"error": f"its disk was saved (snapshot {r['latest']}), but Cloudflare didn't end the "
+                                      "container (internal error): it still runs, and its Worker tries to end it again "
+                                      "within a minute; nothing is lost"}
+            r.update(running=False, state="stopped", force=None, stop_pending=None)
+            return 200, {"snapshot": r["snaps"][r["latest"]], "ms": 20000}
         if verb == "snapshot":
             if not r["running"]:
                 return 409, {"error": "it's stopped"}
@@ -236,6 +246,8 @@ class CF:
         self.pw = "p" * 30
         self.n = 0
         self.upload_location_host = None
+        self.nonces = set()
+        self.on_prepare = None                # called at each image-preparation poll (another create racing this one)
 
     # REST
     def http(self, method, url, headers, body=None, timeout=60):
@@ -291,6 +303,8 @@ class CF:
         if p == "/workers/durable_objects/namespaces":
             return self.ok([{"id": ns, "script": s, "class": "Computer", "name": f"{s}_Computer"} for s, ns in self.namespaces.items()])
         if p == "/containers/image-preparations":
+            if self.on_prepare:
+                self.on_prepare(self)
             return self.ok({"status": self.prepare.pop(0) if len(self.prepare) > 1 else self.prepare[0]})
         m2 = re.fullmatch(r"/containers/applications(?:/([0-9a-f]{32}))?", p)
         if m2 and method == "POST":
@@ -327,8 +341,10 @@ class CF:
             if worker not in self.scripts:
                 return 404, {}, b"<html>nothing here</html>"
             key = next(b["text"] for b in self.scripts[worker]["bindings"] if b["name"] == "MCOMP_KEY")
-            if not verify_sig(key, method, path, headers.get("X-Mc-Auth", ""), body or b""):
+            auth = headers.get("X-Mc-Auth", "")
+            if not verify_sig(key, method, path, auth, body or b"") or auth.split(".")[2] in self.nonces:
                 return 401, {}, b'{"error":"unauthorized"}'
+            self.nonces.add(auth.split(".")[2])
             verb = path[len("/v1/"):]
             st, obj = self.dos[worker].handle(verb, json.loads(body or b"{}"))
             return st, {}, json.dumps(obj).encode()
@@ -396,13 +412,14 @@ class CF:
 
 
 def verify_sig(key, method, path, header, body):
-    """The Worker's check, written again here (not imported): HMAC-SHA256 of v1, method, path, query, time, body hash."""
-    m = re.fullmatch(r"v1\.([0-9]{9,12})\.([0-9a-f]{64})", header or "")
+    """The Worker's check, written again here (not imported): HMAC-SHA256 of v1, method, path, query, time, nonce, body
+    hash."""
+    m = re.fullmatch(r"v1\.([0-9]{9,12})\.([0-9a-f]{24})\.([0-9a-f]{64})", header or "")
     if not m or abs(int(time.time()) - int(m.group(1))) > 300:
         return False
     p, _, q = path.partition("?")
-    data = "\n".join(["v1", method, p, q, m.group(1), hashlib.sha256(body).hexdigest()]).encode()
-    return hmac.compare_digest(hmac.new(key.encode(), data, hashlib.sha256).hexdigest(), m.group(2))
+    data = "\n".join(["v1", method, p, q, m.group(1), m.group(2), hashlib.sha256(body).hexdigest()]).encode()
+    return hmac.compare_digest(hmac.new(key.encode(), data, hashlib.sha256).hexdigest(), m.group(3))
 
 
 def parse_multipart(ctype, body):
@@ -1326,6 +1343,165 @@ def guest(td):
           and "if [ -e /etc/metacomputer/cloudflare ]; then" in adm)
 
 
+# --- the review's findings (audits/codex-cloudflare.md): each check tagged; a section that raises fails ------------------
+def review_fixes():
+    print("\nthe review's findings")
+    old = cf.IMAGE_DIGEST
+    cf.IMAGE_DIGEST = FAKE_DIGEST
+    try:
+        for tag, fn in (("[P2-create]", _create_race), ("[P2-stop]", _stop_honest), ("[P1]", _refresh_said),
+                        ("[replay]", _nonce)):
+            try:
+                fn()
+            except Exception as e:      # noqa: BLE001
+                check(f"{tag} (the section raised: {type(e).__name__}: {str(e)[:120]})", False)
+    finally:
+        cf.IMAGE_DIGEST = old
+
+
+def _another(c, name, op, computer="box"):
+    """A Worker of `name` made by another operation (another vm create), straight into the stand-in."""
+    c.scripts[name] = {"bindings": [{"name": "MCOMP_COMPUTER", "type": "plain_text", "text": computer},
+                                    {"name": "MCOMP_OP", "type": "plain_text", "text": op},
+                                    {"name": "MCOMP_KEY", "type": "secret_text", "text": "e" * 64}], "meta": {}, "modules": {}}
+    c.namespaces[name] = hashlib.md5(f"other{name}".encode()).hexdigest()
+    c.dos[name] = FakeDO(c, name)
+
+
+def _create_race():
+    other = "f" * 32
+    c = CF()
+    c.prepare = ["pending", "pending", "ready"]
+    c.on_prepare = lambda cf_: (_another(cf_, "metacomputer-box", other) if "metacomputer-box" not in cf_.scripts else None)
+    rest = rest_on(c)
+    a = cf.Cloudflare({"box": computer("box", SSH_DIR="/nonexistent")}, {}, rest=rest, images=images.Registries(rest, send=c.send))
+    journal = []
+    e = raises(a.create, "box", op=OP, key="c" * 64, modules={"index.js": b"x", "logic.js": b"y"},
+               made=lambda what, v: journal.append(what))
+    puts = [x for x in c.log if x[0] == "PUT" and x[1].startswith(f"/accounts/{ACCOUNT}/workers/scripts/")]
+    check("[P2-create] another operation's Worker of the name appears while the image is prepared: refused, nothing "
+          "uploaded, its Worker untouched", e and "appeared" in e and not puts and "worker_sent" not in journal
+          and next(b["text"] for b in c.scripts["metacomputer-box"]["bindings"] if b["name"] == "MCOMP_OP") == other, (e, journal))
+    # The upload's read-back: another create (elsewhere) replaced it between the upload and the read.
+    c2 = CF()
+    real_route = c2.route
+
+    def racing(method, p, qs, body, headers):
+        out = real_route(method, p, qs, body, headers)
+        if method == "PUT" and re.fullmatch(r"/workers/scripts/metacomputer-box", p):
+            _another(c2, "metacomputer-box", other)
+        return out
+    c2.route = racing
+    rest2 = rest_on(c2)
+    a2 = cf.Cloudflare({"box": computer("box", SSH_DIR="/nonexistent")}, {}, rest=rest2, images=images.Registries(rest2, send=c2.send))
+    journal2 = []
+    e = raises(a2.create, "box", op=OP, key="c" * 64, modules={"index.js": b"x", "logic.js": b"y"},
+               made=lambda what, v: journal2.append(what))
+    check("[P2-create] ...replaced by another operation's right after the upload: caught by the read-back, refused, left alone",
+          e and "another computer's or operation's bindings" in e and "made_worker" not in journal2
+          and next(b["text"] for b in c2.scripts["metacomputer-box"]["bindings"] if b["name"] == "MCOMP_OP") == other, (e, journal2))
+    # The lock on this Mac: a second create of the same Worker name waits for the first, and is refused when it can't.
+    c3 = CF()
+    rest3 = rest_on(c3)
+    s3 = computer("race7", SSH_DIR="/nonexistent")
+    a3 = cf.Cloudflare({"race7": s3}, {}, rest=rest3, images=images.Registries(rest3, send=c3.send))
+    order = []
+
+    def guard(worker):
+        order.append(("guard", worker))
+        return hooks.create_lock(remote, s3)(worker)
+    real3 = c3.route
+
+    def logged(method, p, qs, body, headers):
+        if re.fullmatch(r"/workers/scripts/metacomputer-race7(/settings)?", p):
+            order.append((method, p.rsplit("/", 1)[-1]))
+        return real3(method, p, qs, body, headers)
+    c3.route = logged
+    d = cf.broker_paths(remote.LAB, "race7")[0]
+    lockf = os.path.join(d, "create-metacomputer-race7.lock")
+    old_wait = hooks.CREATE_LOCK_WAIT_S
+    hooks.CREATE_LOCK_WAIT_S = 0.3
+    import fcntl
+    try:
+        with hooks.create_lock(remote, s3)("metacomputer-race7"):
+            fd = os.open(lockf, os.O_RDWR)
+            try:
+                held = raises(fcntl.flock, fd, fcntl.LOCK_EX | fcntl.LOCK_NB, kind=OSError)
+            finally:
+                os.close(fd)
+            e = raises(a3.create, "race7", op=OP, key="c" * 64, modules={"index.js": b"x", "logic.js": b"y"}, guard=guard)
+        check("[P2-create] the check and the upload run under a lock on this Mac: a second create of the name while one "
+              "holds it is refused, nothing uploaded", held is not None and e and "another vm create on this Mac" in e
+              and "metacomputer-race7" not in c3.scripts, e)
+        order.clear()
+        got = a3.create("race7", op=OP, key="c" * 64, modules={"index.js": b"x", "logic.js": b"y"}, guard=guard)
+        check("[P2-create] ...free: the name checked again under it, then the upload, then its read-back",
+              got["worker"] == "metacomputer-race7" and order[order.index(("guard", "metacomputer-race7")) + 1:][:3]
+              == [("GET", "settings"), ("PUT", "metacomputer-race7"), ("GET", "settings")], order)
+        info = os.lstat(d)
+        check("[P2-create] ...the lock in this account's private folder (0700), as the brokers' sockets are",
+              info.st_uid == os.getuid() and (info.st_mode & 0o777) == 0o700 and os.path.isfile(lockf))
+    finally:
+        hooks.CREATE_LOCK_WAIT_S = old_wait
+        try:
+            os.unlink(lockf)
+        except OSError:
+            pass
+
+
+def _stop_honest():
+    c = CF()
+    a, _got, _j = made(c)
+    do = c.dos["metacomputer-box"]
+    a._worker.call("start", {"from_image": True, "boot": False})
+    do.fail_destroy = 1
+    e = raises(a.sleep, "box")
+    check("[P2-stop] a stop whose container Cloudflare doesn't end: an error that says the disk was saved, it still runs, "
+          "nothing is lost, and what to do", e and e.startswith("box's disk was saved") and "still running" in e
+          and "Nothing is lost" in e and "metacomputer status" in e, e)
+    st = a.status("box")
+    check("[P2-stop] ...status: stopping (not awake, not stopped), saying why", st["state"] == "stopping"
+          and st["provider_state"] == "STOPPING" and "its disk was saved, but Cloudflare hasn't ended its container" in st.get("note", ""), st)
+    doc = {d["check"]: d for d in a.doctor()}
+    k = "box: its last stop ended the container"
+    check("[P2-stop] ...cloud doctor: a failed check, saying so", k in doc and doc[k]["ok"] is False)
+    out = a.sleep("box")
+    check("[P2-stop] ...stop again once Cloudflare ends it: stopped", out["state"] == "stopped" and a.status("box")["state"] == "stopped", out)
+
+
+def _refresh_said():
+    c = CF()
+    a, _got, _j = made(c)
+    do = c.dos["metacomputer-box"]
+    exp = int(time.time() * 1000) + 3 * 86400000
+    do.refresh = [{"id": "snap-x", "labels": ["baseline"], "failures": 4, "error": "no capacity in the region",
+                   "retry_at": exp - 86400000, "expires": exp, "expired": False}]
+    st = a.status("box")
+    check("[P1] status: a kept snapshot whose renewal keeps failing is said, by name, with its tries, its last error and "
+          "the date it expires", "baseline: its snapshot couldn't be renewed (4 tries; last: no capacity in the region)" in st.get("note", "")
+          and cf.days(exp) in st.get("note", ""), st.get("note"))
+    doc = {d["check"]: d for d in a.doctor()}
+    k = "box: its kept snapshots are renewed before they expire"
+    check("[P1] ...cloud doctor: that check fails, saying so", doc[k]["ok"] is False and "couldn't be renewed" in doc[k]["detail"], doc[k])
+    do.refresh = [{"id": "snap-y", "labels": ["latest"], "failures": 9, "error": "x", "expires": exp - 40 * 86400000, "expired": True}]
+    check("[P1] ...one that expired: said as expired", "latest: its snapshot expired on" in a.status("box").get("note", ""))
+    do.refresh = []
+    doc = {d["check"]: d for d in a.doctor()}
+    check("[P1] ...none failing: the check passes", doc[k]["ok"] is True, doc[k])
+
+
+def _nonce():
+    key = "c" * 64
+    h1 = wire.sign(key, "POST", "/v1/status", "", b"{}", now=1800000000)
+    h2 = wire.sign(key, "POST", "/v1/status", "", b"{}", now=1800000000)
+    check("[replay] every signed request carries a new nonce: the same request twice in one second is signed twice "
+          "differently", h1 != h2 and all(re.fullmatch(r"v1\.1800000000\.[0-9a-f]{24}\.[0-9a-f]{64}", h) for h in (h1, h2)), (h1, h2))
+    c = CF()
+    a, _got, _j = made(c)
+    ok = [a._worker.call("status") for _ in range(3)]
+    check("[replay] ...so a Worker that refuses a nonce it has seen takes each of them", len(ok) == 3 and len(c.nonces) >= 4)
+
+
 def main():
     td = tempfile.mkdtemp(prefix="mcomp-cf-")
     try:
@@ -1339,6 +1515,7 @@ def main():
         broker_tests(td)
         credentials_off_env()
         guest(td)
+        review_fixes()
     finally:
         shutil.rmtree(td, ignore_errors=True)
     print(f"\n{len(FAILS)} failed" + (": " + ", ".join(FAILS) if FAILS else ": all passed"))

@@ -2,9 +2,11 @@
 // they're tested with node (tests/cloudflare_worker_test.mjs, run by tests/test_cloudflare.py). index.js is the
 // runtime's part: the Worker's entry, the Durable Object that runs the computer's container, and the outbound handlers.
 //
-// Every request carries an HMAC-SHA256 of its method, path, query, time and body's hash, made on the Mac with the
-// computer's own key (the Worker's secret MCOMP_KEY): verify() checks it in constant time (WebCrypto's verify), within
-// SKEW_S of the Worker's clock. The key itself never travels.
+// Every request carries an HMAC-SHA256 of its method, path, query, time, a one-time nonce and its body's hash, made on
+// the Mac with the computer's own key (the Worker's secret MCOMP_KEY): verify() checks it in constant time (WebCrypto's
+// verify), within SKEW_S of the Worker's clock, and the computer's object refuses a nonce it has seen (a request sent
+// again). The key itself never travels. Before a byte of a body is read, the header's shape and time are checked
+// (preAuth), and a body is read only up to its route's cap (bodyCap, readCapped).
 
 export const ROUTES = new Set(["/v1/status", "/v1/start", "/v1/stop", "/v1/snapshot", "/v1/restore", "/v1/uncheckpoint",
   "/v1/net", "/v1/exec", "/v1/boot", "/v1/logs", "/v1/setup-done", "/v1/settings", "/v1/forget", "/v1/tcp"]);
@@ -20,6 +22,14 @@ export const SENTINEL = "metacomputer.invalid";        // registered (denied) at
                                                        // runtime writes its interception CA only when one HTTPS name is
 export const IDLE_MIN = 1, IDLE_MAX = 350;             // IDLE_STOP in minutes; the platform's own timeout is 6 h at most
 export const BACKSTOP_MIN = 10;                        // the container's own inactivity timeout: IDLE_STOP + this
+export const IDLE_TRIES = 3;                           // failed idle stops (snapshots) before the alarm leaves it to that
+export const RETRY_MIN_MS = 5 * 60000;                 // a failed refresh is tried again after 5 min, then 10, 20, ...
+export const RETRY_MAX_MS = 6 * 3600000;               // ...6 h at most between tries, until one works or it expires
+export const STOP_RETRY_MS = 60000;                    // a container a stop couldn't end: tried again every minute...
+export const STOP_RETRY_MAX_MS = 10 * 60000;           // ...then less often, 10 min at most
+export const MAX_BODY = 72 << 20;                      // a request's body: the setup's exec (its payload on stdin)...
+export const SMALL_BODY = 64 << 10;                    // ...every other route's
+export const REFRESHER = "refresher";                  // the object (never the computer's) that renews snapshots
 export const MAX_DROPPED = 200;
 export const LABEL = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
 export const HOST = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?=[a-z0-9-]*[a-z])[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -41,14 +51,52 @@ export async function sha256hex(bytes) {
   return hex(await crypto.subtle.digest("SHA-256", bytes || new Uint8Array(0)));
 }
 
-export function canonical(method, path, query, ts, bodyHash) {
-  return ["v1", method, path, query, ts, bodyHash].join("\n");
+export function canonical(method, path, query, ts, nonce, bodyHash) {
+  return ["v1", method, path, query, ts, nonce, bodyHash].join("\n");
 }
 
-// The X-Mc-Auth header: v1.<unix seconds>.<64 hex digits>
+// The X-Mc-Auth header: v1.<unix seconds>.<nonce: 24 hex digits>.<HMAC: 64 hex digits>
 export function parseAuth(h) {
-  const m = /^v1\.([0-9]{9,12})\.([0-9a-f]{64})$/.exec(h || "");
-  return m ? { ts: m[1], sig: m[2] } : null;
+  const m = /^v1\.([0-9]{9,12})\.([0-9a-f]{24})\.([0-9a-f]{64})$/.exec(h || "");
+  return m ? { ts: m[1], nonce: m[2], sig: m[3] } : null;
+}
+
+// What can be checked before a byte of the body is read: the Worker has its key, and the header has the signature's
+// shape and a time within SKEW_S of the Worker's clock. {ok, why, a}
+export function preAuth(keyText, header, nowMs) {
+  if (typeof keyText !== "string" || keyText.length < 32) return { ok: false, why: "not configured" };
+  const a = parseAuth(header);
+  if (!a) return { ok: false, why: "no signature" };
+  if (Math.abs(Math.floor(nowMs / 1000) - Number(a.ts)) > SKEW_S) return { ok: false, why: "stale" };
+  return { ok: true, a };
+}
+
+// When the computer's object may forget a nonce: once a request carrying it would be refused as stale anyway.
+export const nonceExpiry = (ts) => (Number(ts) + SKEW_S) * 1000 + 60000;
+
+export const bodyCap = (path) => (path === "/v1/exec" ? MAX_BODY : SMALL_BODY);
+
+// A request's body, read to at most `cap` bytes: null (and the rest left unread) when it's longer.
+export async function readCapped(stream, cap) {
+  if (!stream) return new Uint8Array(0);
+  const reader = stream.getReader();
+  const parts = [];
+  let n = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+    n += chunk.length;
+    if (n > cap) {
+      try { await reader.cancel(); } catch {}
+      return null;
+    }
+    parts.push(chunk);
+  }
+  const out = new Uint8Array(n);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
+  return out;
 }
 
 function unhex(s) {
@@ -60,16 +108,15 @@ function unhex(s) {
 // {ok, why}: whether the request was signed with the computer's key. keyText is the Worker's secret (MCOMP_KEY): a
 // Worker without one (or a short one) refuses everything.
 export async function verify(keyText, method, url, header, body, nowMs) {
-  if (typeof keyText !== "string" || keyText.length < 32) return { ok: false, why: "not configured" };
-  const a = parseAuth(header);
-  if (!a) return { ok: false, why: "no signature" };
-  if (Math.abs(Math.floor(nowMs / 1000) - Number(a.ts)) > SKEW_S) return { ok: false, why: "stale" };
+  const pre = preAuth(keyText, header, nowMs);
+  if (!pre.ok) return pre;
+  const a = pre.a;
   const u = typeof url === "string" ? new URL(url) : url;
-  const data = canonical(method, u.pathname, u.search.replace(/^\?/, ""), a.ts, await sha256hex(body));
+  const data = canonical(method, u.pathname, u.search.replace(/^\?/, ""), a.ts, a.nonce, await sha256hex(body));
   const key = await crypto.subtle.importKey("raw", enc.encode(keyText), { name: "HMAC", hash: "SHA-256" }, false,
     ["verify"]);
   const ok = await crypto.subtle.verify("HMAC", key, unhex(a.sig), enc.encode(data));
-  return ok ? { ok: true } : { ok: false, why: "bad signature" };
+  return ok ? { ok: true, ts: a.ts, nonce: a.nonce } : { ok: false, why: "bad signature" };
 }
 
 // What a message may say: no account ID (a run of exactly 32 hex digits, as in an image's reference), no control
@@ -121,6 +168,7 @@ export function newRecord(env) {
     size: SIZES.includes(env.MCOMP_SIZE) ? env.MCOMP_SIZE : "standard-3", idle_min: 15,
     internet: true, allow: [], state: "never", latest: null, snaps: {}, checkpoints: {}, dropped: [],
     setup_done: false, ever_started: false, force: null, lost: null, last_activity: 0, idle_failures: 0,
+    stop_pending: null,
   };
 }
 
@@ -191,8 +239,15 @@ export function dropUnused(r, id, now) {
 
 export function snapInfo(r, id) {
   const s = id && r.snaps[id];
-  return s ? { id, size: s.size, made: s.made, fresh: s.fresh, expires: s.fresh + EXPIRE_MS, failed: s.failed || null } : null;
+  if (!s) return null;
+  const out = { id, size: s.size, made: s.made, fresh: s.fresh, expires: s.fresh + EXPIRE_MS, refresh: null };
+  if (s.refresh_failures) {
+    out.refresh = { failures: s.refresh_failures, error: s.refresh_error || null, retry_at: s.retry_at || null };
+  }
+  return out;
 }
+
+export const expired = (s, now) => now - s.fresh >= EXPIRE_MS;
 
 // Every snapshot of the computer that still exists at Cloudflare, as far as the record knows: those it keeps (their
 // expiry 30 days after their last refresh) and those it let go that haven't expired.
@@ -209,16 +264,62 @@ export function residue(r, now) {
   return out.sort((a, b) => a.expires - b.expires);
 }
 
-// The kept snapshots whose 30 days run out within the next five: each is started and ended at once (a restore resets
-// its expiry), oldest first.
+// The kept snapshots whose 30 days run out within the next five, whether the computer runs or not: each is started
+// and ended at once in an object of its own (a restore resets its expiry), oldest first. One whose refresh failed is
+// tried again after its back-off (refreshFailed), until one works or it has expired: never given up on before.
 export function dueRefresh(r, now) {
-  return [...keptIds(r)].map((id) => r.snaps[id]).filter((s) => s && !s.failed && now - s.fresh >= REFRESH_MS)
+  return [...keptIds(r)].map((id) => r.snaps[id])
+    .filter((s) => s && !expired(s, now) && now - s.fresh >= REFRESH_MS && (s.retry_at || 0) <= now)
     .sort((a, b) => a.fresh - b.fresh).map((s) => s.id);
 }
 
+export const retryDelay = (failures) => Math.min(RETRY_MIN_MS * 2 ** Math.max(0, failures - 1), RETRY_MAX_MS);
+
+export function refreshFailed(s, why, now) {
+  s.refresh_failures = (s.refresh_failures || 0) + 1;
+  s.refresh_error = String(why || "").slice(0, 200);
+  s.retry_at = now + retryDelay(s.refresh_failures);
+  return s;
+}
+
+export function refreshDone(s, now) {
+  s.fresh = now;
+  delete s.refresh_failures;
+  delete s.refresh_error;
+  delete s.retry_at;
+  delete s.failed;
+  return s;
+}
+
+// When the next refresh (or the next try of a failed one) of a kept snapshot is due: null when none is kept that
+// hasn't expired.
+export function refreshAt(r, now) {
+  const ts = [...keptIds(r)].map((id) => r.snaps[id]).filter((s) => s && !expired(s, now))
+    .map((s) => Math.max(s.fresh + REFRESH_MS, s.retry_at || 0));
+  return ts.length ? Math.min(...ts) : null;
+}
+
+// The kept snapshots whose refresh is failing or that have expired: said by status (and cloud doctor) while there's
+// time to act, with the names the computer keeps them under.
+export function refreshTrouble(r, now) {
+  const labels = {};
+  for (const [l, id] of Object.entries(r.checkpoints || {})) (labels[id] = labels[id] || []).push(l);
+  if (r.latest) (labels[r.latest] = labels[r.latest] || []).push("latest");
+  const out = [];
+  for (const id of keptIds(r)) {
+    const s = r.snaps[id];
+    if (!s || !(s.refresh_failures || expired(s, now))) continue;
+    out.push({ id, labels: (labels[id] || []).sort(), failures: s.refresh_failures || 0, error: s.refresh_error || null,
+               retry_at: s.retry_at || null, expires: s.fresh + EXPIRE_MS, expired: expired(s, now) });
+  }
+  return out.sort((a, b) => a.expires - b.expires);
+}
+
 // --- the alarm ------------------------------------------------------------------------------------------------------
-// Running: the idle stop (nothing connected for IDLE_STOP minutes: snapshot, then destroy), looked at every half of
-// IDLE_STOP, a minute at most. Stopped: the next refresh due (a day at most between looks).
+// The earliest of: a stop whose container hasn't ended (tried again, STOP_RETRY_MS on); running, the idle stop
+// (nothing connected for IDLE_STOP minutes: snapshot, then destroy), looked at every half of IDLE_STOP, a minute at
+// most, until IDLE_TRIES snapshots have failed; the next refresh of a kept snapshot due, running or not (a day at most
+// between looks).
 export function idleDecision(r, sockets, lastActivity, now) {
   const idleMs = r.idle_min * MINUTE;
   const every = Math.max(10000, Math.min(MINUTE, Math.floor(idleMs / 2)));
@@ -227,11 +328,17 @@ export function idleDecision(r, sockets, lastActivity, now) {
 }
 
 export function nextAlarm(r, running, now) {
-  if (running) return now + Math.max(10000, Math.min(MINUTE, Math.floor(r.idle_min * MINUTE / 2)));
-  const ids = [...keptIds(r)].map((id) => r.snaps[id]).filter((s) => s && !s.failed);
-  if (!ids.length) return null;
-  const due = Math.min(...ids.map((s) => s.fresh + REFRESH_MS));
-  return Math.max(now + 1000, Math.min(due, now + DAY));
+  const at = [];
+  if (r.state === "stopping") {
+    const tries = (r.stop_pending && r.stop_pending.tries) || 1;
+    at.push(now + Math.min(STOP_RETRY_MS * tries, STOP_RETRY_MAX_MS));
+  }
+  if (running && (r.idle_failures || 0) < IDLE_TRIES) {
+    at.push(now + Math.max(10000, Math.min(MINUTE, Math.floor(r.idle_min * MINUTE / 2))));
+  }
+  const due = refreshAt(r, now);
+  if (due !== null) at.push(Math.max(now + 1000, Math.min(due, now + DAY)));
+  return at.length ? Math.min(...at) : null;
 }
 
 export function snapName(r, why, now) {

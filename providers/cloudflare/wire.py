@@ -6,9 +6,10 @@ may be (a Worker's workers.dev name; registry.cloudflare.com; Docker Hub's); red
 follows Docker Hub's one blob redirect itself, with no credential, and checks the blob by its digest); answers read to
 a cap; an error's text never carries a request (so never a signature or a credential).
 
-The Worker's key never travels: each request carries X-Mc-Auth, v1.<unix time>.<HMAC-SHA256 of "v1", the method, the
-path, the query, that time and the body's SHA-256, one per line>, which the Worker checks in constant time within 300 s
-(providers/cloudflare/worker/logic.js verify).
+The Worker's key never travels: each request carries X-Mc-Auth, v1.<unix time>.<nonce>.<HMAC-SHA256 of "v1", the method,
+the path, the query, that time, the nonce and the body's SHA-256, one per line>, which the Worker checks in constant
+time within 300 s (providers/cloudflare/worker/logic.js verify); the nonce (12 random bytes, new for every request) is
+refused when it comes again, so a request can't be sent twice.
 
     Worker(url, key).call(verb, body)        one request: its JSON answer, or WorkerError (its status, what it said)
     Worker(url, key).tcp()                   a websocket to the computer's sshd (WebSocket), its Durable Object's id
@@ -70,10 +71,11 @@ def check_worker_url(url):
     return host
 
 
-def sign(key, method, path, query, body, now=None):
+def sign(key, method, path, query, body, now=None, nonce=None):
     ts = str(int(time.time() if now is None else now))
-    data = "\n".join(["v1", method, path, query or "", ts, hashlib.sha256(body or b"").hexdigest()]).encode()
-    return "v1.%s.%s" % (ts, hmac.new(key.encode(), data, hashlib.sha256).hexdigest())
+    nonce = nonce or os.urandom(12).hex()
+    data = "\n".join(["v1", method, path, query or "", ts, nonce, hashlib.sha256(body or b"").hexdigest()]).encode()
+    return "v1.%s.%s.%s" % (ts, nonce, hmac.new(key.encode(), data, hashlib.sha256).hexdigest())
 
 
 def _context():

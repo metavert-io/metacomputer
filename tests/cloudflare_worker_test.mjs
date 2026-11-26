@@ -27,16 +27,23 @@ function check(name, cond, detail) {
   else { fails++; console.log("FAIL " + name + (detail !== undefined ? "  (" + JSON.stringify(detail) + ")" : "")); }
 }
 async function rejects(p) { try { await p; return null; } catch (e) { return e; } }
+// The review's findings (audits/codex-cloudflare.md): their checks are tagged, in sections; a section that throws fails.
+async function section(tag, fn) {
+  try { await fn(); } catch (e) { check(`${tag} (the section threw: ${String(e && e.message || e).slice(0, 120)})`, false); }
+}
 const enc = new TextEncoder();
 const hexOf = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 const KEY = "k".repeat(64);
 
-async function sign(key, method, url, body, ts) {
+const newNonce = () => hexOf(crypto.getRandomValues(new Uint8Array(12)));
+async function sign(key, method, url, body, ts, nonce = newNonce()) {
   const u = new URL(url);
-  const data = L.canonical(method, u.pathname, u.search.replace(/^\?/, ""), String(ts), await L.sha256hex(body));
+  const data = L.canonical(method, u.pathname, u.search.replace(/^\?/, ""), String(ts), nonce, await L.sha256hex(body));
   const k = await crypto.subtle.importKey("raw", enc.encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  return `v1.${ts}.${hexOf(await crypto.subtle.sign("HMAC", k, enc.encode(data)))}`;
+  return `v1.${ts}.${nonce}.${hexOf(await crypto.subtle.sign("HMAC", k, enc.encode(data)))}`;
 }
+// The header the entry passes on to the computer's object (the object checks only its nonce: the entry checked the rest).
+const doAuth = () => `v1.${Math.floor(Date.now() / 1000)}.${newNonce()}.${"0".repeat(64)}`;
 
 // --- logic.js: the signature ------------------------------------------------------------------------------------------
 {
@@ -54,6 +61,16 @@ async function sign(key, method, url, body, ts) {
   check("...no header, or a malformed one: refused", !(await L.verify(KEY, "POST", url, null, body, now)).ok
         && !(await L.verify(KEY, "POST", url, "v1." + ts + ".zz", body, now)).ok
         && !(await L.verify(KEY, "POST", url, "Bearer " + KEY, body, now)).ok);
+  await section("[replay]", async () => {
+    check("[replay] verify: the nonce is signed: the same signature with another nonce is refused", (await L.verify(KEY, "POST", url, h, body, now)).ok
+          && !(await L.verify(KEY, "POST", url, h.replace(/^(v1\.[0-9]+\.)[0-9a-f]{24}/, "$1" + "0".repeat(24)), body, now)).ok);
+  });
+  await section("[P2-body]", async () => {
+    check("[P2-body] preAuth: the header's shape and time, checked without the body", L.preAuth(KEY, h, now).ok
+          && L.preAuth(KEY, "v1." + ts + ".zz", now).why === "no signature" && L.preAuth(KEY, null, now).why === "no signature"
+          && L.preAuth(KEY, await sign(KEY, "POST", url, body, ts - 301), now).why === "stale"
+          && L.preAuth("", h, now).why === "not configured");
+  });
   check("...a Worker without a key (or a short one) refuses everything", (await L.verify("", "POST", url, h, body, now)).why === "not configured"
         && (await L.verify("short", "POST", url, h, body, now)).why === "not configured"
         && (await L.verify(undefined, "POST", url, h, body, now)).why === "not configured");
@@ -132,9 +149,32 @@ check("...anything else refused", !!(() => { try { L.wantNet({ egress: "open" })
   check("...one let go that has expired isn't listed", L.residue(r, t + L.EXPIRE_MS + 1).every((x) => x.id !== "s1"));
   check("dueRefresh: nothing due before 25 days", L.dueRefresh(r, t + L.REFRESH_MS - 10).length === 0);
   check("...each kept one due at 25 days, oldest first", JSON.stringify(L.dueRefresh(r, t + L.REFRESH_MS + 5000)) === '["s2","s3"]');
-  r.snaps.s2.failed = "gone";
-  check("...one whose refresh failed isn't tried again", JSON.stringify(L.dueRefresh(r, t + L.REFRESH_MS + 5000)) === '["s3"]');
-  delete r.snaps.s2.failed;
+  await section("[P1]", async () => {
+    const due = t + L.REFRESH_MS + 5000;
+    L.refreshFailed(r.snaps.s2, "no capacity", due);
+    check("[P1] ...one whose refresh failed: not tried again before its back-off (5 min after the first failure)",
+          JSON.stringify(L.dueRefresh(r, due + 1000)) === '["s3"]' && r.snaps.s2.retry_at === due + 5 * L.MINUTE);
+    check("[P1] ...then tried again (a failed refresh is never given up on before the snapshot expires)",
+          JSON.stringify(L.dueRefresh(r, due + 5 * L.MINUTE)) === '["s2","s3"]');
+    L.refreshFailed(r.snaps.s2, "no capacity", due + 5 * L.MINUTE);
+    L.refreshFailed(r.snaps.s2, "no capacity", due + 15 * L.MINUTE);
+    check("[P1] ...the back-off doubles (5, 10, 20 min), 6 h at most", r.snaps.s2.retry_at === due + 35 * L.MINUTE
+          && L.retryDelay(20) === 6 * 3600000 && r.snaps.s2.refresh_failures === 3);
+    check("[P1] ...the alarm stays set for its next try (not given up on)", L.nextAlarm({ ...r, checkpoints: { baseline: "s2" }, latest: null }, false, due + 16 * L.MINUTE) === due + 35 * L.MINUTE);
+    const tr = L.refreshTrouble(r, due + 16 * L.MINUTE);
+    check("[P1] refreshTrouble: a failing refresh said with its names, its failures, its last error and its expiry",
+          tr.length === 1 && tr[0].id === "s2" && tr[0].labels.join() === "baseline" && tr[0].failures === 3
+          && tr[0].error === "no capacity" && tr[0].expires === r.snaps.s2.fresh + L.EXPIRE_MS && !tr[0].expired);
+    check("[P1] ...and in its snapshot's info", L.snapInfo(r, "s2").refresh.failures === 3);
+    check("[P1] ...one that expired anyway: said as expired, not tried again, no alarm for it",
+          L.refreshTrouble(r, t + L.EXPIRE_MS + 2000).some((x) => x.id === "s2" && x.expired)
+          && !L.dueRefresh(r, t + L.EXPIRE_MS + 2000).includes("s2"));
+    L.refreshDone(r.snaps.s2, t + 1000);
+    check("[P1] refreshDone: renewed, the failures forgotten", r.snaps.s2.fresh === t + 1000 && !r.snaps.s2.refresh_failures
+          && !r.snaps.s2.retry_at && L.snapInfo(r, "s2").refresh === null);
+  });
+  r.snaps.s2.fresh = t + 1000;
+  for (const k of ["refresh_failures", "refresh_error", "retry_at", "failed"]) delete r.snaps.s2[k];
   check("nextAlarm: stopped, the next refresh due (a day at most between looks)", L.nextAlarm(r, false, t + 3000) === t + 3000 + L.DAY);
   check("...due sooner than a day: then", L.nextAlarm(r, false, t + L.REFRESH_MS - 1000) === t + 1000 + L.REFRESH_MS);
   check("...nothing kept: no alarm", L.nextAlarm(L.newRecord({}), false, t) === null);
@@ -142,6 +182,10 @@ check("...anything else refused", !!(() => { try { L.wantNet({ egress: "open" })
   check("...running: every half of IDLE_STOP, a minute at most", L.nextAlarm(r, true, t) === t + L.MINUTE);
   r.idle_min = 1;
   check("...IDLE_STOP=1: every 30 s (two looks within it)", L.nextAlarm(r, true, t) === t + 30000);
+  check("[P1] nextAlarm, running after three failed idle stops: the refresh's look still (a day at most), not none",
+        L.nextAlarm({ ...r, idle_failures: 3 }, true, t + 3000) === t + 3000 + L.DAY);
+  check("[P2-stop] nextAlarm: a stop whose container didn't end: tried again within a minute",
+        L.nextAlarm({ ...r, state: "stopping", stop_pending: { tries: 1 } }, false, t + 3000) === t + 3000 + L.MINUTE);
   check("idleDecision: a connection open: never stopped", L.idleDecision(r, 1, 0, t).stop === false);
   check("...none open, IDLE_STOP since the last: stopped", L.idleDecision(r, 0, t - 60000, t).stop === true);
   check("...none open, less than IDLE_STOP: not yet", L.idleDecision(r, 0, t - 59000, t).stop === false);
@@ -199,9 +243,15 @@ check("...anything else refused", !!(() => { try { L.wantNet({ egress: "open" })
 
 // --- index.js: the computer, against a fake container -----------------------------------------------------------------
 class FakeContainer {
-  constructor() { this.running = false; this.images = { ubuntu: "registry.cloudflare.com/" + "0".repeat(32) + "/repo@sha256:" + "a".repeat(64) }; this.log = []; this.n = 0; this.failSnapshot = false; this.execCode = 0; this.names = {}; }
-  start(opts) { this.running = true; this.opts = opts; this.log.push(["start", opts]); }
-  async destroy() { this.running = false; this.names = {}; this.log.push(["destroy"]); }
+  constructor() { this.running = false; this.images = { ubuntu: "registry.cloudflare.com/" + "0".repeat(32) + "/repo@sha256:" + "a".repeat(64) }; this.log = []; this.n = 0; this.failSnapshot = false; this.execCode = 0; this.names = {}; this.failStart = 0; this.failDestroy = 0; }
+  start(opts) {
+    if (this.failStart > 0) { this.failStart--; this.log.push(["start-failed", opts]); throw new Error("no capacity in the region"); }
+    this.running = true; this.opts = opts; this.log.push(["start", opts]);
+  }
+  async destroy() {
+    if (this.failDestroy > 0) { this.failDestroy--; this.log.push(["destroy-failed"]); throw new Error("internal error"); }
+    this.running = false; this.names = {}; this.log.push(["destroy"]);
+  }
   async setInactivityTimeout(ms) { this.timeout = ms; }
   async interceptOutboundHttps(n, h) { this.names[n] = h.kind; this.log.push(["https", n, h.kind, h.props && h.props.host]); }
   async interceptOutboundHttp(n, h) { this.log.push(["http", n, h.kind]); }
@@ -213,21 +263,43 @@ class FakeContainer {
   }
   ops() { return this.log.map((x) => x[0]); }
 }
-function makeDO(c) {
+function makeObject(c, env, idText) {
   const store = new Map();
   const ctx = {
-    id: { toString: () => "ab".repeat(32) }, container: c,
+    id: { toString: () => idText }, container: c,
     exports: { Allow: (o) => ({ kind: "allow", props: o.props }), Deny: { kind: "deny" } },
     storage: { get: async (k) => structuredClone(store.get(k)), put: async (k, v) => { store.set(k, structuredClone(v)); },
+               list: async (o) => new Map([...store].filter(([k]) => k.startsWith(o.prefix)).slice(0, o.limit)),
+               delete: async (keys) => { for (const k of [].concat(keys)) store.delete(k); },
                deleteAll: async () => store.clear(), setAlarm: async (t) => { ctx.alarm = t; }, deleteAlarm: async () => { ctx.alarm = null; } },
     blockConcurrencyWhile: (fn) => fn(), alarm: null,
   };
-  const d = new I.Computer(ctx, { MCOMP_COMPUTER: "box", MCOMP_OP: "op1", MCOMP_SIZE: "standard-3" });
-  d.ctx = ctx;
+  const o = new I.Computer(ctx, env);
+  o.ctx = ctx;
+  return { o, ctx, store };
+}
+// The computer's object, and the refresher (an object of the same class with a container of its own) behind the
+// Worker's namespace binding, as the runtime gives both.
+function makeDO(c, rc = new FakeContainer()) {
+  const objects = {};
+  const env = { MCOMP_COMPUTER: "box", MCOMP_OP: "op1", MCOMP_SIZE: "standard-3",
+                COMPUTER: { idFromName: (n) => n, get: (id) => objects[id] } };
+  const { o: d, ctx, store } = makeObject(c, env, "ab".repeat(32));
+  const ref = makeObject(rc, env, "cd".repeat(32));
+  objects.computer = d;
+  objects.refresher = ref.o;
+  d.refresher = ref.o;
+  d.rc = rc;
   d.idleSince = (ms) => { d.lastActivity = ms; const r = structuredClone(store.get("rec")); r.last_activity = ms; store.set("rec", r); };
-  d.call = async (verb, body = {}) => {
-    const r = await d.fetch(new Request("https://computer/v1/" + verb, { method: "POST", body: JSON.stringify(body) }));
+  d.call = async (verb, body = {}, auth = doAuth()) => {
+    const r = await d.fetch(new Request("https://computer/v1/" + verb, { method: "POST", body: JSON.stringify(body),
+      headers: { "x-mc-auth": auth } }));
     return { status: r.status, body: await r.json() };
+  };
+  d.age = (days, which) => {                       // the record's snapshots made (and last renewed) `days` ago
+    const r = structuredClone(store.get("rec"));
+    for (const id of Object.keys(r.snaps)) if (!which || which.includes(id)) { r.snaps[id].fresh = Date.now() - days * L.DAY; r.snaps[id].made = r.snaps[id].fresh; }
+    store.set("rec", r);
   };
   return { d, ctx, store };
 }
@@ -336,16 +408,15 @@ function makeDO(c) {
   check("a stop by Cloudflare: said as a stop, with what changed since the last snapshot lost", r.body.state === "stopped"
         && r.body.stop_reason === "cloudflare" && r.body.lost && r.body.lost.since > 0);
   // The refresh.
-  const rec = structuredClone(store.get("rec"));
-  for (const id of Object.keys(rec.snaps)) rec.snaps[id].fresh = Date.now() - 26 * L.DAY;
-  store.set("rec", rec);
+  d.age(26);
   const starts = c.log.filter((x) => x[0] === "start").length;
   await d.alarm();
-  const lastStart = c.log.filter((x) => x[0] === "start").at(-1)[1];
-  check("alarm, stopped, a kept snapshot 26 days old: started (the internet off) and destroyed at once, its expiry renewed",
-        c.log.filter((x) => x[0] === "start").length === starts + 1 && !c.running && lastStart.enableInternet === false
+  const lastStart = (d.rc.log.filter((x) => x[0] === "start").at(-1) || [null, {}])[1];
+  check("alarm, stopped, a kept snapshot 26 days old: started by the refresher (the internet off) and destroyed at once, its expiry renewed",
+        c.log.filter((x) => x[0] === "start").length === starts && !d.rc.running && lastStart.enableInternet === false
+        && (lastStart.containerSnapshot || {}).id === (await d.call("status")).body.latest.id
         && Date.now() - (await d.call("status")).body.latest.fresh < 60000);
-  check("...the computer stays stopped", (await d.call("status")).body.state === "stopped");
+  check("...the computer stays stopped", (await d.call("status")).body.state === "stopped" && !c.running);
   r = await d.call("net", { egress: "internet" });
   check("net while stopped: recorded, applied at the next start", r.status === 200 && r.body.at_next_start === true);
   r = await d.call("forget");
@@ -389,6 +460,210 @@ function makeDO(c) {
   check("...after three failures no alarm is set again (the platform's inactivity timeout, under it, ends it)",
         ctx.alarm === null && c.running && (await d.call("status")).body.state === "running");
 }
+
+// --- The review's findings (audits/codex-cloudflare.md) ------------------------------------------------------------------
+const realNow = Date.now;
+let skew = 0;
+Date.now = () => realNow() + skew;
+const atStart = (c) => c.log.filter((x) => x[0] === "start");
+
+// [P1] A refresh that fails once (no capacity) is tried again after its back-off, never given up on, and said.
+await section("[P1]", async () => {
+  skew = 0;
+  const c = new FakeContainer(), rc = new FakeContainer();
+  const { d, ctx } = makeDO(c, rc);
+  await d.call("start", { from_image: true, boot: false });
+  await d.call("stop");
+  d.age(26);
+  c.failStart = 1; rc.failStart = 1;
+  await d.alarm();
+  c.failStart = 0;
+  let st = (await d.call("status")).body;
+  check("[P1] a refresh that fails (no capacity): recorded with its error, the snapshot still kept, said in status",
+        Array.isArray(st.refresh) && st.refresh.length === 1 && st.refresh[0].failures === 1 && /no capacity/.test(st.refresh[0].error)
+        && st.refresh[0].labels.join() === "latest" && !st.refresh[0].expired && st.latest.refresh && st.latest.refresh.failures === 1, st.refresh);
+  check("[P1] ...the alarm still set, for its next try (5 min on)", typeof ctx.alarm === "number"
+        && ctx.alarm > Date.now() + 4 * L.MINUTE && ctx.alarm <= Date.now() + 5 * L.MINUTE + 2000, ctx.alarm - Date.now());
+  await d.alarm();
+  check("[P1] ...not tried again before its back-off", atStart(rc).length === 0);
+  skew += 5 * L.MINUTE + 1000;
+  await d.alarm();
+  st = (await d.call("status")).body;
+  check("[P1] ...tried again after it, once Cloudflare has room: renewed, the failure forgotten",
+        atStart(rc).length === 1 && st.refresh.length === 0 && Date.now() - st.latest.fresh < 60000 && !rc.running, st.refresh);
+  rc.failStart = 100;
+  d.age(26);
+  for (let i = 0; i < 6; i++) { skew += 6 * 3600000; await d.alarm(); }
+  st = (await d.call("status")).body;
+  check("[P1] a refresh that keeps failing: tried again and again (6 tries in 36 h), said each time, the alarm kept",
+        st.refresh.length === 1 && st.refresh[0].failures >= 6 && typeof ctx.alarm === "number" && !st.refresh[0].expired, st.refresh);
+  skew += 4 * L.DAY;
+  st = (await d.call("status")).body;
+  check("[P1] ...one that expired all the same: said as expired", st.refresh.length === 1 && st.refresh[0].expired === true);
+  skew = 0;
+});
+
+// [P2-running] Kept snapshots of a computer that keeps running (a connection open) are renewed without stopping it.
+await section("[P2-running]", async () => {
+  skew = 0;
+  const c = new FakeContainer(), rc = new FakeContainer();
+  const { d } = makeDO(c, rc);
+  await d.call("start", { from_image: true, boot: false });
+  await d.call("stop");
+  await d.call("start", { boot: false });
+  const base = (await d.call("snapshot", { label: "baseline" })).body.snapshot.id;
+  const latest = (await d.call("status")).body.latest.id;
+  d.sockets = 1;
+  d.idleSince(Date.now());
+  d.age(26);
+  const n0 = c.n, starts0 = atStart(c).length;
+  await d.alarm();
+  await d.alarm();
+  let st = (await d.call("status")).body;
+  check("[P2-running] a connection open, the baseline and the latest snapshot 26 days old: both renewed by the refresher",
+        Date.now() - st.checkpoints.baseline.fresh < 60000 && Date.now() - st.latest.fresh < 60000
+        && atStart(rc).map((x) => x[1].containerSnapshot.id).sort().join() === [base, latest].sort().join(), atStart(rc).length);
+  check("[P2-running] ...the computer kept running throughout: never stopped, snapshotted or started again",
+        c.running && c.n === n0 && atStart(c).length === starts0 && st.state === "running");
+  skew += 5 * L.DAY;                               // the baseline made 31 days ago
+  const r = await d.call("restore", { label: "baseline" });
+  check("[P2-running] ...31 days after the baseline was made, it still restores (not 410)", r.status === 200
+        && c.opts.containerSnapshot.id === base, r);
+  skew = 0;
+});
+
+// [P2-stop] A stop whose container Cloudflare doesn't end: said as it is, tried again soon, and a start isn't blocked.
+await section("[P2-stop]", async () => {
+  skew = 0;
+  const c = new FakeContainer(), rc = new FakeContainer();
+  const { d, ctx } = makeDO(c, rc);
+  await d.call("start", { from_image: true, boot: false });
+  c.failDestroy = 1;
+  let r = await d.call("stop");
+  let st = (await d.call("status")).body;
+  check("[P2-stop] destroy fails after the snapshot: the stop answers an error (not success) that says the disk was saved and it still runs",
+        r.status >= 500 && /disk was saved/.test(r.body.error) && /still runs/.test(r.body.error) && /nothing is lost/.test(r.body.error), r);
+  check("[P2-stop] ...recorded as it is: stopping, still running, the snapshot its latest", st.state === "stopping" && st.running === true
+        && st.latest && st.latest.id === "snap-1" && st.stop_pending && st.stop_pending.tries === 1, st);
+  check("[P2-stop] ...the alarm set to try again within a minute (not a day)", typeof ctx.alarm === "number" && ctx.alarm - Date.now() <= 61000);
+  await d.alarm();
+  st = (await d.call("status")).body;
+  check("[P2-stop] ...the next alarm ends it: stopped, by the stop, nothing lost", st.state === "stopped" && !c.running
+        && st.stop_reason === "stop" && !st.lost && !st.stop_pending, st);
+  // A start while it's stopping: the container ended then, and started from the stop's snapshot.
+  await d.call("start", { boot: false });
+  c.failDestroy = 1;
+  await d.call("stop");
+  r = await d.call("start", { boot: true });
+  check("[P2-stop] a start while stopping: the container ended, started again from the stop's snapshot (no 409)",
+        r.status === 200 && c.opts.containerSnapshot.id === (await d.call("status")).body.latest.id
+        && (await d.call("status")).body.state === "running", r);
+  // A start while it's stopping and Cloudflare still won't end it: taken up again as it is.
+  c.failDestroy = 2;
+  await d.call("stop");
+  const starts = atStart(c).length;
+  r = await d.call("start", { boot: true });
+  st = (await d.call("status")).body;
+  check("[P2-stop] ...and when Cloudflare still won't end it: taken up again as it is (resumed, booted), not refused",
+        r.status === 200 && r.body.resumed === true && st.state === "running" && c.running && atStart(c).length === starts
+        && c.log.at(-1)[0] === "exec", r);
+  // A start while stopping whose egress changed to one that needs a new container: refused, said.
+  c.failDestroy = 2;
+  await d.call("stop");
+  await d.call("net", { egress: "off" });
+  r = await d.call("start", { boot: false });
+  check("[P2-stop] ...unless the egress asked for since needs a new container: an error saying the disk is saved",
+        r.status >= 500 && /disk was saved/.test(r.body.error) && (await d.call("status")).body.state === "stopping", r);
+  c.failDestroy = 0;
+  await d.alarm();
+  check("[P2-stop] ...then the alarm ends it", (await d.call("status")).body.state === "stopped" && !c.running);
+  // A restore whose destroy fails changes nothing.
+  await d.call("start", { boot: false });
+  await d.call("snapshot", { label: "ck" });
+  const before = (await d.call("status")).body.latest.id;
+  c.failDestroy = 1;
+  r = await d.call("restore", { label: "ck" });
+  check("[P2-stop] a restore whose destroy fails: an error, nothing changed", r.status >= 500
+        && (await d.call("status")).body.latest.id === before && (await d.call("status")).body.state === "running", r);
+});
+
+// [P2-body] The entry reads no body before the header could be a fresh signature, and no more than its route's cap.
+await section("[P2-body]", async () => {
+  skew = 0;
+  const base = "https://w.example.workers.dev";
+  const seen = [];
+  const env = { MCOMP_KEY: KEY, COMPUTER: { idFromName: (n) => n, get: () => ({ fetch: async (u, init) => { seen.push(String(u.url || u)); return new Response("{}"); } }) } };
+  const counting = (chunks, size = 1 << 16) => {
+    const st = { pulled: 0 };
+    st.stream = new ReadableStream({ pull(ctrl) { st.pulled++; ctrl.enqueue(new Uint8Array(size)); if (st.pulled >= chunks) ctrl.close(); } }, { highWaterMark: 0 });
+    return st;
+  };
+  let b = counting(1000);
+  let res = await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: b.stream, duplex: "half" }), env);
+  check("[P2-body] an unsigned POST: 401, and not a byte of its body read", res.status === 401 && b.pulled === 0, b.pulled);
+  b = counting(1000);
+  const ts = Math.floor(Date.now() / 1000);
+  res = await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: b.stream, duplex: "half",
+    headers: { "x-mc-auth": await sign(KEY, "POST", base + "/v1/status", new Uint8Array(0), ts - 400) } }), env);
+  check("[P2-body] ...a stale signature: 401, nothing read", res.status === 401 && b.pulled === 0, b.pulled);
+  b = counting(1000);
+  res = await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: b.stream, duplex: "half",
+    headers: { "x-mc-auth": `v1.${ts}.${"0".repeat(24)}.${"1".repeat(64)}`, "content-length": String(1 << 30) } }), env);
+  check("[P2-body] ...a content-length past the route's cap: 413, nothing read", res.status === 413 && b.pulled === 0, b.pulled);
+  b = counting(1000);
+  res = await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: b.stream, duplex: "half",
+    headers: { "x-mc-auth": `v1.${ts}.${"0".repeat(24)}.${"1".repeat(64)}` } }), env);
+  check("[P2-body] ...a streamed body past the cap (no length said): 413, reading stopped at the cap (64 KiB, not 64 MB)",
+        res.status === 413 && b.pulled <= 3 && seen.length === 0, b.pulled);
+  const big = new Uint8Array(1 << 20).fill(7);
+  res = await I.default.fetch(new Request(base + "/v1/exec", { method: "POST", body: big,
+    headers: { "x-mc-auth": await sign(KEY, "POST", base + "/v1/exec", big, ts) } }), env);
+  check("[P2-body] ...the setup's exec still takes a large signed body (1 MB)", res.status === 200 && seen.length === 1, res.status);
+  const small = enc.encode("{}");
+  res = await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: small,
+    headers: { "x-mc-auth": await sign(KEY, "POST", base + "/v1/status", small, ts) } }), env);
+  check("[P2-body] ...and a signed request within its cap reaches the computer", res.status === 200 && seen.length === 2);
+});
+
+// [replay] A signed request can't be sent again: the computer's object remembers its nonce while it could be fresh.
+await section("[replay]", async () => {
+  skew = 0;
+  const base = "https://w.example.workers.dev";
+  const c = new FakeContainer();
+  const { d, ctx, store } = makeDO(c);
+  // The runtime hands the object a Request, whatever the stub's fetch was given.
+  const stubOf = (o) => ({ fetch: (u, init) => o.fetch(u instanceof Request ? u : new Request(u, init)) });
+  const env = { MCOMP_KEY: KEY, COMPUTER: { idFromName: (n) => n, get: () => stubOf(d) } };
+  const body = enc.encode(JSON.stringify({ from_image: true, boot: false }));
+  const ts = Math.floor(Date.now() / 1000);
+  const h = await sign(KEY, "POST", base + "/v1/start", body, ts);
+  const send = () => I.default.fetch(new Request(base + "/v1/start", { method: "POST", body, headers: { "x-mc-auth": h } }), env);
+  const r1 = await send();
+  await d.call("stop");
+  const r2 = await send();
+  check("[replay] the same signed request sent again (a start replayed after a stop, within its 300 s): refused, nothing done",
+        r1.status === 200 && r2.status === 401 && !c.running, [r1.status, r2.status]);
+  const again = new I.Computer(ctx, { MCOMP_COMPUTER: "box", MCOMP_OP: "op1", COMPUTER: env.COMPUTER });
+  const r3 = await I.default.fetch(new Request(base + "/v1/start", { method: "POST", body, headers: { "x-mc-auth": h } }),
+    { ...env, COMPUTER: { idFromName: (n) => n, get: () => stubOf(again) } });
+  check("[replay] ...also after the object restarted (the nonce kept in its storage)", r3.status === 401 && !c.running, r3.status);
+  const fresh = doAuth();
+  const two = await Promise.all([d.call("status", {}, fresh), d.call("status", {}, fresh)]);
+  check("[replay] ...two copies of a new one at the same moment: exactly one passes", two.filter((x) => x.status === 200).length === 1
+        && two.filter((x) => x.status === 401).length === 1, two.map((x) => x.status));
+  const h2 = await sign(KEY, "POST", base + "/v1/status", enc.encode("{}"), ts);
+  const h3 = await sign(KEY, "POST", base + "/v1/status", enc.encode("{}"), ts);
+  check("[replay] identical requests in the same second, each with its own nonce: both pass", h2 !== h3
+        && (await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: "{}", headers: { "x-mc-auth": h2 } }), env)).status === 200
+        && (await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: "{}", headers: { "x-mc-auth": h3 } }), env)).status === 200);
+  const nonces = () => [...store.keys()].filter((k) => k.startsWith("n:")).length;
+  const had = nonces();
+  skew += 10 * L.MINUTE;
+  for (let i = 0; i < 64; i++) await d.call("status");
+  check("[replay] nonces are forgotten once their requests would be stale anyway", had > 0 && nonces() <= 64, [had, nonces()]);
+  skew = 0;
+});
+Date.now = realNow;
 
 console.log(`${passes} passed, ${fails} failed`);
 process.exit(Math.min(fails, 100));

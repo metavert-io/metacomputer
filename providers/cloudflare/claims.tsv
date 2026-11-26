@@ -40,10 +40,25 @@ SECURITY.md	Every start applies the recorded egress before the container runs \(
 SECURITY.md	a snapshot that fails stops nothing	worker/index.js	const s = await this.c.snapshotContainer({ name: L.snapName(r, why, t) });
 docs/cloudflare.md	every 30 s for `IDLE_STOP=1`	worker/logic.js	Math.max(10000, Math.min(MINUTE, Math.floor(r.idle_min * MINUTE / 2)))
 docs/cloudflare.md	the container's own inactivity timeout is `IDLE_STOP` plus 10 minutes	worker/logic.js	export const BACKSTOP_MIN = 10;
-docs/cloudflare.md	if the Worker's stop ever fails three times in a row	worker/index.js	if (r.idle_failures >= 3) return;
+docs/cloudflare.md	if the Worker's stop ever fails three times in a row	worker/logic.js	export const IDLE_TRIES = 3;
+docs/cloudflare.md	if the Worker's stop ever fails three times in a row	worker/index.js	} else if (this.c.running && (r.idle_failures || 0) < L.IDLE_TRIES) {
 docs/cloudflare.md	before its 30 days run out \(an alarm; a few seconds of runtime each, about every 25 days\)	worker/logic.js	export const REFRESH_MS = 25 * DAY;
-docs/cloudflare.md	before its 30 days run out \(an alarm; a few seconds of runtime each, about every 25 days\)	worker/index.js	await this.launch(r, { snapshot: due[0] }, true);
+docs/cloudflare.md	before its 30 days run out \(an alarm; a few seconds of runtime each, about every 25 days\)	worker/index.js	ms = await this.launch(tmp, { snapshot: id }, true);
 docs/cloudflare.md	The list is also written to the computer's log folder \(`logs-vms/NAME/cloudflare-residue\.json`	remote.py	p = os.path.join(d, "cloudflare-residue.json")
 SECURITY.md	sshd listens on port 2222 on the container's loopback and its own address	guest/rootfs/opt/metacomputer/cloudflare/boot	[ "$(stat -c %u:%g /)" = 0:0 ] || chown 0:0 /
 docs/cloudflare.md	\*\*Only `vm create` and `vm delete` need them\.\*\*	cli.sh	pv_cloudflare_can_ask() { pv_cloudflare_has_token || { [ -n "${SSH_DIR:-}" ] && [ -s "$SSH_DIR/cloudflare-key" ]; }; }
 docs/cloudflare.md	\*\*Only `vm create` and `vm delete` need them\.\*\*	broker.py	!CLOUDFLARE_API_TOKEN
+SECURITY.md	The computer's Durable Object refuses a nonce it has seen	worker/index.js	if (this.seen.has(a.nonce)) return false;
+SECURITY.md	The computer's Durable Object refuses a nonce it has seen	worker/index.js	if (await this.ctx.storage.get("n:" + a.nonce)) return false;
+SECURITY.md	The computer's Durable Object refuses a nonce it has seen	wire.py	nonce = nonce or os.urandom(12).hex()
+SECURITY.md	and before its body is read \(only a header with a fresh signature's shape gets a body read, and only to its route's cap	worker/index.js	if (!L.preAuth(env.MCOMP_KEY, header, Date.now()).ok) return json({ error: "unauthorized" }, 401);
+SECURITY.md	and before its body is read \(only a header with a fresh signature's shape gets a body read, and only to its route's cap	worker/index.js	body = await L.readCapped(req.body, cap);
+SECURITY.md	and before its body is read \(only a header with a fresh signature's shape gets a body read, and only to its route's cap	worker/index.js	!await req.arrayBuffer()
+docs/cloudflare.md	it's never given up on before the snapshot expires	worker/logic.js	.filter((s) => s && !expired(s, now) && now - s.fresh >= REFRESH_MS && (s.retry_at || 0) <= now)
+docs/cloudflare.md	it's never given up on before the snapshot expires	worker/logic.js	s.retry_at = now + retryDelay(s.refresh_failures);
+docs/cloudflare.md	a second object of the Worker, the refresher, restores each in a container of its own	worker/index.js	this.env.COMPUTER.get(this.env.COMPUTER.idFromName(L.REFRESHER))
+docs/cloudflare.md	a second object of the Worker, the refresher, restores each in a container of its own	worker/index.js	// The refresh, running or not: one snapshot due per look, in the refresher's container.\n      r = await this.rec();\n      await this.refreshDue(r, Date.now());
+SECURITY.md	under a lock on this Mac held through it, and the Worker read back after it must carry this build's operation	remote.py	guard=create_lock(R, s)
+SECURITY.md	under a lock on this Mac held through it, and the Worker read back after it must carry this build's operation	adapter.py	if got is not None and not self.owns_script(name, got, op, rest):
+SECURITY.md	a container Cloudflare doesn't end after it is recorded and said as it is \(stopping	worker/index.js	r.state = "stopping";
+SECURITY.md	a container Cloudflare doesn't end after it is recorded and said as it is \(stopping	worker/index.js	!try { await this.c.destroy(); } catch {}\n    r.state = "stopped";

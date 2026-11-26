@@ -2078,9 +2078,12 @@ Worker's signed channel), with these differences:
   kept 0600 beside its SSH keys (`~/.ssh/metacomputer-NAME/cloudflare-key`, refused if it's a link or readable by
   anyone else), uploaded once as the Worker's secret, read only by `lib/remote.py`, and handed to the computer's
   **broker** (`providers/cloudflare/broker.py`) on its standard input: never its arguments, its environment or a log.
-  The key never travels: each request carries an HMAC-SHA256 of its method, path, query, time and body's hash, which
-  the Worker checks in constant time (WebCrypto's verify) within 300 s of its own clock; a request without a valid one
-  is refused (401) before it reaches the computer (checked live: a wrong key, no signature, a GET). What Cloudflare
+  The key never travels: each request carries an HMAC-SHA256 of its method, path, query, time, a one-time nonce and
+  body's hash, which the Worker checks in constant time (WebCrypto's verify) within 300 s of its own clock; a request
+  without a valid one is refused (401) before it reaches the computer (checked live: a wrong key, no signature, a GET),
+  and before its body is read (only a header with a fresh signature's shape gets a body read, and only to its route's
+  cap: 64 KB, or 72 MB for the setup's commands). The computer's Durable Object refuses a nonce it has seen (kept, in
+  its storage too, while the request could be fresh), so a captured request can't be replayed within the 300 s. What Cloudflare
   says is scrubbed of the token, the account's ID and anything shaped like a credential before it's printed or
   logged; an image's reference names the account, so it's never said. The REST calls go only to Cloudflare's API
   address and the Worker's requests only to its workers.dev address, over HTTPS, never following a redirect.
@@ -2092,7 +2095,9 @@ Worker's signed channel), with these differences:
 - **Only what's the computer's, named after it, on workers.dev only.** For each computer: a Worker, its Durable Object
   namespace, its container application and a registry repository, all named after its Worker, the Worker reachable
   only at its workers.dev address (no route on any domain, no DNS record). Nothing else of the account is listed by
-  content, read or changed. `vm create` refuses a Worker name that exists; every operation checks that the Worker
+  content, read or changed. `vm create` refuses a Worker name that exists, checked again right before the upload
+  (which Cloudflare runs unconditionally) under a lock on this Mac held through it, and the Worker read back after it
+  must carry this build's operation, or the build stops and leaves it alone; every operation checks that the Worker
   answers, with the computer's key, for this computer, the operation that made it and the Durable Object recorded for
   it (`_live`); `vm delete`, a failed build's clean-up and a lost launch check the Worker's settings (its bindings name
   the computer and the operation) before anything is deleted, and leave a Worker that doesn't carry them alone.
@@ -2131,13 +2136,15 @@ Worker's signed channel), with these differences:
   opening it for its packages, until its setup has finished. The manifest's `outside_egress` claims what was checked
   and nothing more. The browsers' own DNS over HTTPS is locked off.
 - **A stop is a power cut for programs, and Cloudflare may make one.** The stop ends the desktop's programs, snapshots
-  the disk and only then ends the container; a snapshot that fails stops nothing. Cloudflare can end a container
+  the disk and only then ends the container; a snapshot that fails stops nothing, and a container Cloudflare doesn't
+  end after it is recorded and said as it is (stopping: the disk saved, still running), tried again every minute. Cloudflare can end a container
   without warning: what changed since the last snapshot is lost, and the Worker says so. The idle stop is the Worker's
   (no connection for `IDLE_STOP` minutes: a snapshot, then the stop); the container's own inactivity timeout,
   `IDLE_STOP` plus 10 minutes, is the backstop that ends it unattended if the Worker's stop fails three times.
 - **Snapshots can't be deleted.** Cloudflare keeps each 30 days after it was made or last restored and refuses to
-  delete one through its API. The Worker renews the ones the computer keeps before they expire; the others expire by
-  themselves. `vm delete` deletes everything else and says which snapshots stay and until when (also written to the
+  delete one through its API. The Worker renews the ones the computer keeps before they expire, running or stopped
+  (in a container of its own, so a running computer isn't interrupted), trying a failed renewal again with a back-off
+  until one works and saying it in `status` and `cloud doctor` meanwhile; the others expire by themselves. `vm delete` deletes everything else and says which snapshots stay and until when (also written to the
   computer's log folder). Each holds the disk as it was: files, browser profiles, anything typed. Use a VM on your Mac
   for work you need gone on demand.
 - **Cloudflare holds what's in the VM**, as any provider does, and the container's root is the Worker's (the
