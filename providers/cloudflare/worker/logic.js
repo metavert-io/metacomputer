@@ -2,11 +2,13 @@
 // they're tested with node (tests/cloudflare_worker_test.mjs, run by tests/test_cloudflare.py). index.js is the
 // runtime's part: the Worker's entry, the Durable Object that runs the computer's container, and the outbound handlers.
 //
-// Every request carries an HMAC-SHA256 of its method, path, query, time, a one-time nonce and its body's hash, made on
-// the Mac with the computer's own key (the Worker's secret MCOMP_KEY): verify() checks it in constant time (WebCrypto's
-// verify), within SKEW_S of the Worker's clock, and the computer's object refuses a nonce it has seen (a request sent
-// again). The key itself never travels. Before a byte of a body is read, the header's shape and time are checked
-// (preAuth), and a body is read only up to its route's cap (bodyCap, readCapped).
+// Every request carries an HMAC-SHA256 of its method, path, query, time, a one-time nonce and its body's length and
+// SHA-256, made on the Mac with the computer's own key (the Worker's secret MCOMP_KEY). The body's length and hash
+// travel in a header of their own (X-Mc-Body), so verify() checks the signature, in constant time (WebCrypto's verify)
+// and within SKEW_S of the Worker's clock, before a byte of the body is read, and the computer's object refuses a nonce
+// it has seen (a request sent again) before then too. Only then is the body read (readSigned): to the length signed at
+// most (its route's cap: bodyCap), into one buffer of that size, hashed as it comes, and refused unless it is exactly
+// what was signed. The key itself never travels.
 
 export const ROUTES = new Set(["/v1/status", "/v1/start", "/v1/stop", "/v1/snapshot", "/v1/restore", "/v1/uncheckpoint",
   "/v1/net", "/v1/exec", "/v1/boot", "/v1/logs", "/v1/setup-done", "/v1/settings", "/v1/forget", "/v1/tcp"]);
@@ -51,8 +53,20 @@ export async function sha256hex(bytes) {
   return hex(await crypto.subtle.digest("SHA-256", bytes || new Uint8Array(0)));
 }
 
-export function canonical(method, path, query, ts, nonce, bodyHash) {
-  return ["v1", method, path, query, ts, nonce, bodyHash].join("\n");
+export function canonical(method, path, query, ts, nonce, length, bodyHash) {
+  return ["v1", method, path, query, ts, nonce, String(length), bodyHash].join("\n");
+}
+
+// The X-Mc-Body header: <the body's length in bytes>.<its SHA-256, 64 hex digits>. A websocket's request has no body.
+export const EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+export const NO_BODY = { length: 0, hash: EMPTY_SHA };
+export function parseBody(h) {
+  const m = /^([0-9]{1,9})\.([0-9a-f]{64})$/.exec(h || "");
+  return m ? { length: Number(m[1]), hash: m[2] } : null;
+}
+export async function declare(bytes) {
+  const b = bytes || new Uint8Array(0);
+  return { length: b.length, hash: await sha256hex(b) };
 }
 
 // The X-Mc-Auth header: v1.<unix seconds>.<nonce: 24 hex digits>.<HMAC: 64 hex digits>
@@ -76,27 +90,42 @@ export const nonceExpiry = (ts) => (Number(ts) + SKEW_S) * 1000 + 60000;
 
 export const bodyCap = (path) => (path === "/v1/exec" ? MAX_BODY : SMALL_BODY);
 
-// A request's body, read to at most `cap` bytes: null (and the rest left unread) when it's longer.
-export async function readCapped(stream, cap) {
-  if (!stream) return new Uint8Array(0);
-  const reader = stream.getReader();
-  const parts = [];
+// A signed request's body, read once its signature and nonce have passed: into one buffer of the length signed (no
+// second copy), never past it (the rest left unread), hashed as it comes (the runtime's DigestStream; one digest of the
+// buffer where there's none), and refused (400) unless it's exactly the length and hash that were signed.
+// {ok, body} or {ok: false, status, why}
+export async function readSigned(stream, declared, DigestStream) {
+  const out = new Uint8Array(declared.length);
+  const ds = DigestStream ? new DigestStream("SHA-256") : null;
+  const w = ds ? ds.getWriter() : null;
   let n = 0;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-    n += chunk.length;
-    if (n > cap) {
-      try { await reader.cancel(); } catch {}
-      return null;
+  if (stream) {
+    const reader = stream.getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      if (n + chunk.length > out.length) {
+        try { await reader.cancel(); } catch {}
+        return { ok: false, status: 400, why: "the body is longer than the one signed" };
+      }
+      out.set(chunk, n);
+      n += chunk.length;
+      if (w) await w.write(chunk);
     }
-    parts.push(chunk);
   }
-  const out = new Uint8Array(n);
-  let off = 0;
-  for (const p of parts) { out.set(p, off); off += p.length; }
-  return out;
+  if (n !== out.length) return { ok: false, status: 400, why: "the body is shorter than the one signed" };
+  let got;
+  if (w) {
+    await w.close();
+    got = hex(await ds.digest);
+  } else {
+    got = await sha256hex(out);
+  }
+  let diff = got.length ^ declared.hash.length;
+  for (let i = 0; i < got.length && i < declared.hash.length; i++) diff |= got.charCodeAt(i) ^ declared.hash.charCodeAt(i);
+  if (diff) return { ok: false, status: 400, why: "the body isn't the one signed" };
+  return { ok: true, body: out };
 }
 
 function unhex(s) {
@@ -107,12 +136,17 @@ function unhex(s) {
 
 // {ok, why}: whether the request was signed with the computer's key. keyText is the Worker's secret (MCOMP_KEY): a
 // Worker without one (or a short one) refuses everything.
-export async function verify(keyText, method, url, header, body, nowMs) {
+// The signature, from the headers alone: `declared` is the body's length and hash as X-Mc-Body says them (parseBody), or
+// NO_BODY; the body itself is checked against them when it's read (readSigned).
+export async function verify(keyText, method, url, header, declared, nowMs) {
   const pre = preAuth(keyText, header, nowMs);
   if (!pre.ok) return pre;
+  if (!declared || !Number.isSafeInteger(declared.length) || !/^[0-9a-f]{64}$/.test(declared.hash || "")) {
+    return { ok: false, why: "no body's length and hash" };
+  }
   const a = pre.a;
   const u = typeof url === "string" ? new URL(url) : url;
-  const data = canonical(method, u.pathname, u.search.replace(/^\?/, ""), a.ts, a.nonce, await sha256hex(body));
+  const data = canonical(method, u.pathname, u.search.replace(/^\?/, ""), a.ts, a.nonce, declared.length, declared.hash);
   const key = await crypto.subtle.importKey("raw", enc.encode(keyText), { name: "HMAC", hash: "SHA-256" }, false,
     ["verify"]);
   const ok = await crypto.subtle.verify("HMAC", key, unhex(a.sig), enc.encode(data));

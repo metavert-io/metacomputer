@@ -7,9 +7,11 @@ follows Docker Hub's one blob redirect itself, with no credential, and checks th
 a cap; an error's text never carries a request (so never a signature or a credential).
 
 The Worker's key never travels: each request carries X-Mc-Auth, v1.<unix time>.<nonce>.<HMAC-SHA256 of "v1", the method,
-the path, the query, that time, the nonce and the body's SHA-256, one per line>, which the Worker checks in constant
-time within 300 s (providers/cloudflare/worker/logic.js verify); the nonce (12 random bytes, new for every request) is
-refused when it comes again, so a request can't be sent twice.
+the path, the query, that time, the nonce, the body's length and its SHA-256, one per line>, and X-Mc-Body,
+<the body's length>.<its SHA-256>, so the Worker checks the signature in constant time within 300 s
+(providers/cloudflare/worker/logic.js verify) before it reads a byte of the body, and then that the body is exactly
+the one signed; the nonce (12 random bytes, new for every request) is refused when it comes again, so a request can't
+be sent twice.
 
     Worker(url, key).call(verb, body)        one request: its JSON answer, or WorkerError (its status, what it said)
     Worker(url, key).tcp()                   a websocket to the computer's sshd (WebSocket), its Durable Object's id
@@ -71,10 +73,16 @@ def check_worker_url(url):
     return host
 
 
+def body_header(body):
+    """X-Mc-Body: the body's length and SHA-256, which the signature covers."""
+    return "%d.%s" % (len(body or b""), hashlib.sha256(body or b"").hexdigest())
+
+
 def sign(key, method, path, query, body, now=None, nonce=None):
     ts = str(int(time.time() if now is None else now))
     nonce = nonce or os.urandom(12).hex()
-    data = "\n".join(["v1", method, path, query or "", ts, nonce, hashlib.sha256(body or b"").hexdigest()]).encode()
+    data = "\n".join(["v1", method, path, query or "", ts, nonce, str(len(body or b"")),
+                       hashlib.sha256(body or b"").hexdigest()]).encode()
     return "v1.%s.%s.%s" % (ts, nonce, hmac.new(key.encode(), data, hashlib.sha256).hexdigest())
 
 
@@ -127,7 +135,7 @@ class Worker:
         path = f"/v1/{verb}"
         data = json.dumps(body or {}).encode()
         headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "metacomputer",
-                   "X-Mc-Auth": sign(self.__key, "POST", path, "", data, self._clock())}
+                   "X-Mc-Auth": sign(self.__key, "POST", path, "", data, self._clock()), "X-Mc-Body": body_header(data)}
         status, _h, answer = self._send(self.host, "POST", path, headers, data, timeout)
         try:
             j = json.loads(answer) if answer.strip() else {}

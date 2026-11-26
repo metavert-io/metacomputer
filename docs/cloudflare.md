@@ -156,11 +156,14 @@ through the Worker at every start.
 Nothing in a container is reachable from the internet. metacomputer reaches it through its own Worker:
 
 - **Every request to the Worker is signed** with the computer's key: an HMAC-SHA256 of the method, the path, the query,
-  the time, a nonce new to each request and the body's hash, which the Worker checks in constant time and within 5
-  minutes of its own clock; the computer's Durable Object refuses a nonce it has seen, so a request can't be sent again,
-  not even within those 5 minutes. The key itself never travels. A request without a valid signature is refused (401)
-  before it reaches the computer, and before its body is read: a body is read only once the header has a fresh
-  signature's shape, and only up to 64 KB (72 MB for the setup's commands; 413 past it).
+  the time, a nonce new to each request and the body's length and hash (sent in a header of their own), which the
+  Worker checks in constant time and within 5 minutes of its own clock; the computer's Durable Object refuses a nonce
+  it has seen, so a request can't be sent again, not even within those 5 minutes. The key itself never travels. A
+  request without a valid signature is refused (401) before it reaches the computer, and **before a byte of its body is
+  read**: the signature and the nonce are checked from the headers alone, and only then is the body read, to the length
+  signed at most (64 KB, or 72 MB for the setup's commands; 413 past it), and refused (400) unless it's exactly the one
+  signed. Once `vm delete` has told the Worker to forget the computer, it refuses every request for good (410), even
+  if deleting the Worker then fails.
 - **The broker** (`providers/cloudflare/broker.py`) runs on your Mac, one per computer, started by `start` (and the
   build) with the key on its standard input. It's the only program besides `lib/remote.py` that holds the key: ssh,
   the hub, the vault and every helper never do. It listens on a private socket (`/tmp/mcomp-UID-cloudflare/HASH.sock`,

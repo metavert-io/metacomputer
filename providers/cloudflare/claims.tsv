@@ -51,9 +51,6 @@ docs/cloudflare.md	\*\*Only `vm create` and `vm delete` need them\.\*\*	broker.p
 SECURITY.md	The computer's Durable Object refuses a nonce it has seen	worker/index.js	if (this.seen.has(a.nonce)) return false;
 SECURITY.md	The computer's Durable Object refuses a nonce it has seen	worker/index.js	if (await this.ctx.storage.get("n:" + a.nonce)) return false;
 SECURITY.md	The computer's Durable Object refuses a nonce it has seen	wire.py	nonce = nonce or os.urandom(12).hex()
-SECURITY.md	and before its body is read \(only a header with a fresh signature's shape gets a body read, and only to its route's cap	worker/index.js	if (!L.preAuth(env.MCOMP_KEY, header, Date.now()).ok) return json({ error: "unauthorized" }, 401);
-SECURITY.md	and before its body is read \(only a header with a fresh signature's shape gets a body read, and only to its route's cap	worker/index.js	body = await L.readCapped(req.body, cap);
-SECURITY.md	and before its body is read \(only a header with a fresh signature's shape gets a body read, and only to its route's cap	worker/index.js	!await req.arrayBuffer()
 docs/cloudflare.md	it's never given up on before the snapshot expires	worker/logic.js	.filter((s) => s && !expired(s, now) && now - s.fresh >= REFRESH_MS && (s.retry_at || 0) <= now)
 docs/cloudflare.md	it's never given up on before the snapshot expires	worker/logic.js	s.retry_at = now + retryDelay(s.refresh_failures);
 docs/cloudflare.md	a second object of the Worker, the refresher, restores each in a container of its own	worker/index.js	this.env.COMPUTER.get(this.env.COMPUTER.idFromName(L.REFRESHER))
@@ -62,3 +59,12 @@ SECURITY.md	under a lock on this Mac held through it, and the Worker read back a
 SECURITY.md	under a lock on this Mac held through it, and the Worker read back after it must carry this build's operation	adapter.py	if got is not None and not self.owns_script(name, got, op, rest):
 SECURITY.md	a container Cloudflare doesn't end after it is recorded and said as it is \(stopping	worker/index.js	r.state = "stopping";
 SECURITY.md	a container Cloudflare doesn't end after it is recorded and said as it is \(stopping	worker/index.js	!try { await this.c.destroy(); } catch {}\n    r.state = "stopped";
+SECURITY.md	and before a byte of its body is read: the signature covers the body's length and hash, sent in a header	worker/index.js	const auth = await L.verify(env.MCOMP_KEY, req.method, url, header, declared, Date.now());\n    if (!auth.ok) return json({ error: "unauthorized" }, 401);
+SECURITY.md	and before a byte of its body is read: the signature covers the body's length and hash, sent in a header	worker/index.js	const claim = await stub.claim(header);
+SECURITY.md	and before a byte of its body is read: the signature covers the body's length and hash, sent in a header	worker/index.js	const got = await L.readSigned(req.body, declared, globalThis.crypto && globalThis.crypto.DigestStream);
+SECURITY.md	and before a byte of its body is read: the signature covers the body's length and hash, sent in a header	worker/logic.js	return ["v1", method, path, query, ts, nonce, String(length), bodyHash].join(
+SECURITY.md	and before a byte of its body is read: the signature covers the body's length and hash, sent in a header	wire.py	"X-Mc-Body": body_header(data)
+SECURITY.md	and before a byte of its body is read: the signature covers the body's length and hash, sent in a header	worker/index.js	!await req.arrayBuffer()
+SECURITY.md	after `vm delete`'s forget it keeps a tombstone and refuses every request \(410\)	worker/index.js	await this.ctx.storage.put("tombstone", { at: Date.now() });
+SECURITY.md	after `vm delete`'s forget it keeps a tombstone and refuses every request \(410\)	worker/index.js	if (await this.ctx.storage.get("tombstone")) return { ok: false, status: 410, why: "this computer was deleted" };
+SECURITY.md	after `vm delete`'s forget it keeps a tombstone and refuses every request \(410\)	worker/index.js	!await this.ctx.storage.deleteAll();

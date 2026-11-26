@@ -2081,9 +2081,12 @@ Worker's signed channel), with these differences:
   The key never travels: each request carries an HMAC-SHA256 of its method, path, query, time, a one-time nonce and
   body's hash, which the Worker checks in constant time (WebCrypto's verify) within 300 s of its own clock; a request
   without a valid one is refused (401) before it reaches the computer (checked live: a wrong key, no signature, a GET),
-  and before its body is read (only a header with a fresh signature's shape gets a body read, and only to its route's
-  cap: 64 KB, or 72 MB for the setup's commands). The computer's Durable Object refuses a nonce it has seen (kept, in
-  its storage too, while the request could be fresh), so a captured request can't be replayed within the 300 s. What Cloudflare
+  and before a byte of its body is read: the signature covers the body's length and hash, sent in a header, so it and
+  the nonce are checked from the headers alone; the body is then read to the length signed at most (its route's cap:
+  64 KB, or 72 MB for the setup's commands) and refused (400) unless it's the one signed. The computer's Durable Object
+  refuses a nonce it has seen (kept, in its storage too, while the request could be fresh), so a captured request can't
+  be replayed within the 300 s; after `vm delete`'s forget it keeps a tombstone and refuses every request (410), so a
+  delete cut off before the Worker is gone can't reopen the requests it saw. What Cloudflare
   says is scrubbed of the token, the account's ID and anything shaped like a credential before it's printed or
   logged; an image's reference names the account, so it's never said. The REST calls go only to Cloudflare's API
   address and the Worker's requests only to its workers.dev address, over HTTPS, never following a redirect.

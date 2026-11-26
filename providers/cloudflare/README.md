@@ -33,6 +33,11 @@ computer's own key instead: made by `vm create`, kept 0600 beside its SSH keys (
 `lib/remote.py`, given to the broker on its standard input, uploaded once as the Worker's secret. It never travels:
 each request carries an HMAC made with it. ssh, the hub, the vault, the tunnel and the guest never get either.
 
+**Changing the Worker's protocol** (its signature, its routes, its answers) needs an upgrade path for computers already
+made: a computer's Worker is uploaded once, by `vm create`, so a Mac speaking a newer protocol can't talk to an older
+Worker. Nothing has been released before this protocol; a later change must redeploy existing Workers (with the token)
+or accept both protocols for a release.
+
 **What keeps it apart**: Cloudflare's outbound rules, outside the container (the internet with private ranges and the
 metadata address refused, nothing, or metacomputer's handlers for an allowlist, which see that traffic decrypted);
 Cloudflare's own SSH off on the application; the boot script starts the desktop with `runuser` (the platform's commands

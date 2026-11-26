@@ -3,10 +3,11 @@
 // providers/cloudflare/api.py uploads this file and logic.js through Cloudflare's API.
 //
 // - The entry (default): every request must be signed with the computer's own key (logic.js verify, in constant
-//   time); anything else is refused (401) before it reaches the computer, and before a byte of its body is read
-//   (logic.js preAuth: the header's shape and time), a body being read only up to its route's cap (413 past it). Only
-//   the routes in logic.js ROUTES exist. The computer's object refuses a request it has seen (its nonce, kept for as
-//   long as the request could be fresh).
+//   time, over its headers: the body's length and hash are signed in X-Mc-Body); anything else is refused (401)
+//   before it reaches the computer and before a byte of its body is read. The computer's object then claims the
+//   request's nonce (a request seen before is refused, 401; after the computer's forget, every request is, 410), and
+//   only then is the body read: to the length signed at most (its route's cap, 413 past it), and refused (400) unless
+//   it's the one signed (logic.js readSigned). Only the routes in logic.js ROUTES exist.
 // - Computer: one Durable Object, the computer's, which runs its container (the durable_object scheduling policy):
 //   start (its latest snapshot, or the image the first time), stop (its disk snapshotted, then the container
 //   destroyed: a stop keeps files, not programs), checkpoints, egress, SSH (a websocket piped to the container's
@@ -48,23 +49,23 @@ export default {
     const ws = (req.headers.get("upgrade") || "").toLowerCase() === "websocket";
     if (req.method !== (ws ? "GET" : "POST")) return json({ error: "unauthorized" }, 401);
     const header = req.headers.get("x-mc-auth");
-    // Nothing of the body is read for a request whose header can't be a fresh signature.
+    // Nothing of the body is read before its signature and its nonce have passed: the signature covers the body's
+    // length and hash, which travel in a header.
     if (!L.preAuth(env.MCOMP_KEY, header, Date.now()).ok) return json({ error: "unauthorized" }, 401);
-    let body = new Uint8Array(0);
-    if (!ws) {
-      const cap = L.bodyCap(url.pathname);
-      const len = req.headers.get("content-length");
-      if (len !== null && !(Number(len) <= cap)) return json({ error: "too large" }, 413);
-      body = await L.readCapped(req.body, cap);
-      if (!body) return json({ error: "too large" }, 413);
-    }
-    const auth = await L.verify(env.MCOMP_KEY, req.method, url, header, body, Date.now());
+    const declared = ws ? L.NO_BODY : L.parseBody(req.headers.get("x-mc-body"));
+    if (!declared) return json({ error: "unauthorized" }, 401);
+    if (declared.length > L.bodyCap(url.pathname)) return json({ error: "too large" }, 413);
+    const auth = await L.verify(env.MCOMP_KEY, req.method, url, header, declared, Date.now());
     if (!auth.ok) return json({ error: "unauthorized" }, 401);
     if (!L.ROUTES.has(url.pathname) || (url.pathname === "/v1/tcp") !== ws) return json({ error: "no such request" }, 404);
     const stub = env.COMPUTER.get(env.COMPUTER.idFromName("computer"));
+    const claim = await stub.claim(header);
+    if (!claim || !claim.ok) return json({ error: (claim && claim.why) || "unauthorized" }, (claim && claim.status) || 401);
     if (ws) return stub.fetch(req);
-    return stub.fetch("https://computer" + url.pathname, { method: "POST", body,
-      headers: { "content-type": "application/json", "x-mc-auth": header } });
+    const got = await L.readSigned(req.body, declared, globalThis.crypto && globalThis.crypto.DigestStream);
+    if (!got.ok) return json({ error: got.why }, got.status);
+    return stub.fetch("https://computer" + url.pathname, { method: "POST", body: got.body,
+      headers: { "content-type": "application/json" } });
   },
 };
 
@@ -151,10 +152,19 @@ export class Computer extends DurableObject {
     return true;
   }
 
+  // The entry's call for each signed request, before its body is read: its nonce claimed (never twice), or, once the
+  // computer has been forgotten (vm delete), every request refused for good (the tombstone outlives a restart, so a
+  // delete cut off before the Worker goes can't reopen the requests it saw). A plain answer: RPC keeps no error's status.
+  async claim(header) {
+    if (await this.ctx.storage.get("tombstone")) return { ok: false, status: 410, why: "this computer was deleted" };
+    if (!(await this.once(header))) return { ok: false, status: 401, why: "unauthorized (a request sent again)" };
+    return { ok: true };
+  }
+
   async fetch(req) {
     const p = new URL(req.url).pathname;
     if (!this.c) return json({ error: "no container binding" }, 500);
-    if (!(await this.once(req.headers.get("x-mc-auth")))) return json({ error: "unauthorized (a request sent again)" }, 401);
+    if (await this.ctx.storage.get("tombstone")) return json({ error: "this computer was deleted" }, 410);
     if (p === "/v1/tcp") return this.tcp(req);
     let b = {};
     try {
@@ -547,16 +557,19 @@ export class Computer extends DurableObject {
     return { idle_min: r.idle_min };
   }
 
-  // vm delete: the container ended, this object's storage and alarm gone (nothing is refreshed again), and what the
-  // platform keeps (its snapshots, which can't be deleted) said with when each expires.
+  // vm delete: a tombstone first (kept for good: every request after it is refused, 410, a captured one too, even
+  // when the Worker's deletion fails and the object restarts), the container ended, the record and the alarm gone
+  // (nothing is refreshed again; the nonces seen stay, under the tombstone), and what the platform keeps (its
+  // snapshots, which can't be deleted) said with when each expires.
   async forget() {
     const r = await this.rec();
     const res = L.residue(r, Date.now());
+    await this.ctx.storage.put("tombstone", { at: Date.now() });
     if (this.c.running) {
       try { await this.c.destroy(); } catch {}
     }
     await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.deleteAll();
+    await this.ctx.storage.delete("rec");
     return { residue: res };
   }
 

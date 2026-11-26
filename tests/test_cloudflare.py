@@ -344,6 +344,8 @@ class CF:
             auth = headers.get("X-Mc-Auth", "")
             if not verify_sig(key, method, path, auth, body or b"") or auth.split(".")[2] in self.nonces:
                 return 401, {}, b'{"error":"unauthorized"}'
+            if method == "POST" and headers.get("X-Mc-Body") != "%d.%s" % (len(body or b""), hashlib.sha256(body or b"").hexdigest()):
+                return 400, {}, b'{"error":"the body is not the one signed"}'
             self.nonces.add(auth.split(".")[2])
             verb = path[len("/v1/"):]
             st, obj = self.dos[worker].handle(verb, json.loads(body or b"{}"))
@@ -412,13 +414,13 @@ class CF:
 
 
 def verify_sig(key, method, path, header, body):
-    """The Worker's check, written again here (not imported): HMAC-SHA256 of v1, method, path, query, time, nonce, body
-    hash."""
+    """The Worker's check, written again here (not imported): HMAC-SHA256 of v1, method, path, query, time, nonce, the
+    body's length and its hash."""
     m = re.fullmatch(r"v1\.([0-9]{9,12})\.([0-9a-f]{24})\.([0-9a-f]{64})", header or "")
     if not m or abs(int(time.time()) - int(m.group(1))) > 300:
         return False
     p, _, q = path.partition("?")
-    data = "\n".join(["v1", method, p, q, m.group(1), m.group(2), hashlib.sha256(body).hexdigest()]).encode()
+    data = "\n".join(["v1", method, p, q, m.group(1), m.group(2), str(len(body)), hashlib.sha256(body).hexdigest()]).encode()
     return hmac.compare_digest(hmac.new(key.encode(), data, hashlib.sha256).hexdigest(), m.group(3))
 
 
@@ -1350,7 +1352,7 @@ def review_fixes():
     cf.IMAGE_DIGEST = FAKE_DIGEST
     try:
         for tag, fn in (("[P2-create]", _create_race), ("[P2-stop]", _stop_honest), ("[P1]", _refresh_said),
-                        ("[replay]", _nonce)):
+                        ("[replay]", _nonce), ("[N1-body]", _body_signed)):
             try:
                 fn()
             except Exception as e:      # noqa: BLE001
@@ -1488,6 +1490,21 @@ def _refresh_said():
     do.refresh = []
     doc = {d["check"]: d for d in a.doctor()}
     check("[P1] ...none failing: the check passes", doc[k]["ok"] is True, doc[k])
+
+
+def _body_signed():
+    key = "c" * 64
+    sent = []
+
+    def send(host, method, path, headers, body=None, timeout=60):
+        sent.append((dict(headers), body))
+        return 200, {}, b"{}"
+    w = wire.Worker(f"https://mc-box.{SUB}.workers.dev", key, send=send)
+    w.call("exec", {"argv": ["id"], "stdin_b64": "aGk="})
+    h, body = sent[-1]
+    check("[N1-body] every request says its body's length and SHA-256 (X-Mc-Body), and its signature covers them, so the "
+          "Worker can check it before reading the body", h.get("X-Mc-Body") == "%d.%s" % (len(body), hashlib.sha256(body).hexdigest())
+          and verify_sig(key, "POST", "/v1/exec", h["X-Mc-Auth"], body), h)
 
 
 def _nonce():

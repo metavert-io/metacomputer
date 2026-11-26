@@ -38,32 +38,40 @@ const KEY = "k".repeat(64);
 const newNonce = () => hexOf(crypto.getRandomValues(new Uint8Array(12)));
 async function sign(key, method, url, body, ts, nonce = newNonce()) {
   const u = new URL(url);
-  const data = L.canonical(method, u.pathname, u.search.replace(/^\?/, ""), String(ts), nonce, await L.sha256hex(body));
+  const b = body || new Uint8Array(0);
+  const data = L.canonical(method, u.pathname, u.search.replace(/^\?/, ""), String(ts), nonce, b.length, await L.sha256hex(b));
   const k = await crypto.subtle.importKey("raw", enc.encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return `v1.${ts}.${nonce}.${hexOf(await crypto.subtle.sign("HMAC", k, enc.encode(data)))}`;
 }
+// X-Mc-Body for a body: its length and SHA-256 (signed with it).
+const bodyHeader = async (body) => `${(body || new Uint8Array(0)).length}.${await L.sha256hex(body || new Uint8Array(0))}`;
+// The body's length and hash as X-Mc-Body declares them (logic.js parseBody's answer), worked out here.
+const declareOf = async (b) => ({ length: (b || new Uint8Array(0)).length, hash: await L.sha256hex(b || new Uint8Array(0)) });
+// A signed request's headers, as the Mac sends them.
+const signed = async (key, method, url, body, ts) => ({ "x-mc-auth": await sign(key, method, url, body, ts), "x-mc-body": await bodyHeader(body) });
 // The header the entry passes on to the computer's object (the object checks only its nonce: the entry checked the rest).
 const doAuth = () => `v1.${Math.floor(Date.now() / 1000)}.${newNonce()}.${"0".repeat(64)}`;
 
 // --- logic.js: the signature ------------------------------------------------------------------------------------------
-{
+await section("the signature", async () => {
   const now = Date.now(), ts = Math.floor(now / 1000), url = "https://w.example.workers.dev/v1/status";
   const body = enc.encode("{}");
   const h = await sign(KEY, "POST", url, body, ts);
-  check("verify: a request signed with the key passes", (await L.verify(KEY, "POST", url, h, body, now)).ok);
-  check("...with another key: refused", !(await L.verify("x".repeat(64), "POST", url, h, body, now)).ok);
-  check("...with another body: refused", !(await L.verify(KEY, "POST", url, h, enc.encode("{\"a\":1}"), now)).ok);
-  check("...on another path: refused", !(await L.verify(KEY, "POST", "https://w.example.workers.dev/v1/stop", h, body, now)).ok);
-  check("...with a query added: refused", !(await L.verify(KEY, "POST", url + "?x=1", h, body, now)).ok);
-  check("...as another method: refused", !(await L.verify(KEY, "GET", url, h, body, now)).ok);
-  check("...301 s old: refused (stale)", (await L.verify(KEY, "POST", url, await sign(KEY, "POST", url, body, ts - 301), body, now)).why === "stale");
-  check("...299 s old: passes", (await L.verify(KEY, "POST", url, await sign(KEY, "POST", url, body, ts - 299), body, now)).ok);
-  check("...no header, or a malformed one: refused", !(await L.verify(KEY, "POST", url, null, body, now)).ok
-        && !(await L.verify(KEY, "POST", url, "v1." + ts + ".zz", body, now)).ok
-        && !(await L.verify(KEY, "POST", url, "Bearer " + KEY, body, now)).ok);
+  const dec = await declareOf(body);
+  check("verify: a request signed with the key passes (from its headers: the body's length and hash declared)", (await L.verify(KEY, "POST", url, h, dec, now)).ok);
+  check("...with another key: refused", !(await L.verify("x".repeat(64), "POST", url, h, dec, now)).ok);
+  check("...with another body declared: refused", !(await L.verify(KEY, "POST", url, h, await declareOf(enc.encode("{\"a\":1}")), now)).ok);
+  check("...on another path: refused", !(await L.verify(KEY, "POST", "https://w.example.workers.dev/v1/stop", h, dec, now)).ok);
+  check("...with a query added: refused", !(await L.verify(KEY, "POST", url + "?x=1", h, dec, now)).ok);
+  check("...as another method: refused", !(await L.verify(KEY, "GET", url, h, dec, now)).ok);
+  check("...301 s old: refused (stale)", (await L.verify(KEY, "POST", url, await sign(KEY, "POST", url, body, ts - 301), dec, now)).why === "stale");
+  check("...299 s old: passes", (await L.verify(KEY, "POST", url, await sign(KEY, "POST", url, body, ts - 299), dec, now)).ok);
+  check("...no header, or a malformed one: refused", !(await L.verify(KEY, "POST", url, null, dec, now)).ok
+        && !(await L.verify(KEY, "POST", url, "v1." + ts + ".zz", dec, now)).ok
+        && !(await L.verify(KEY, "POST", url, "Bearer " + KEY, dec, now)).ok);
   await section("[replay]", async () => {
-    check("[replay] verify: the nonce is signed: the same signature with another nonce is refused", (await L.verify(KEY, "POST", url, h, body, now)).ok
-          && !(await L.verify(KEY, "POST", url, h.replace(/^(v1\.[0-9]+\.)[0-9a-f]{24}/, "$1" + "0".repeat(24)), body, now)).ok);
+    check("[replay] verify: the nonce is signed: the same signature with another nonce is refused", (await L.verify(KEY, "POST", url, h, dec, now)).ok
+          && !(await L.verify(KEY, "POST", url, h.replace(/^(v1\.[0-9]+\.)[0-9a-f]{24}/, "$1" + "0".repeat(24)), dec, now)).ok);
   });
   await section("[P2-body]", async () => {
     check("[P2-body] preAuth: the header's shape and time, checked without the body", L.preAuth(KEY, h, now).ok
@@ -71,12 +79,12 @@ const doAuth = () => `v1.${Math.floor(Date.now() / 1000)}.${newNonce()}.${"0".re
           && L.preAuth(KEY, await sign(KEY, "POST", url, body, ts - 301), now).why === "stale"
           && L.preAuth("", h, now).why === "not configured");
   });
-  check("...a Worker without a key (or a short one) refuses everything", (await L.verify("", "POST", url, h, body, now)).why === "not configured"
-        && (await L.verify("short", "POST", url, h, body, now)).why === "not configured"
-        && (await L.verify(undefined, "POST", url, h, body, now)).why === "not configured");
+  check("...a Worker without a key (or a short one) refuses everything", (await L.verify("", "POST", url, h, dec, now)).why === "not configured"
+        && (await L.verify("short", "POST", url, h, dec, now)).why === "not configured"
+        && (await L.verify(undefined, "POST", url, h, dec, now)).why === "not configured");
   check("...the signature is checked with WebCrypto's verify (constant time), never compared as text",
         /crypto\.subtle\.verify\("HMAC"/.test((await import("node:fs")).readFileSync(path.join(W, "logic.js"), "utf8")));
-}
+});
 
 // --- logic.js: the host check of an allowlist's handler -----------------------------------------------------------
 check("hostAllowed: the allowed name over https and http", L.hostAllowed("https://example.com/x?y", "example.com")
@@ -208,11 +216,12 @@ check("...anything else refused", !!(() => { try { L.wantNet({ egress: "open" })
 // --- index.js: the entry ---------------------------------------------------------------------------------------------
 {
   const seen = [];
-  const env = { MCOMP_KEY: KEY, COMPUTER: { idFromName: (n) => n, get: () => ({ fetch: async (u, init) => { seen.push([String(u.url || u), init && init.method]); return new Response("{}"); } }) } };
+  const env = { MCOMP_KEY: KEY, COMPUTER: { idFromName: (n) => n, get: () => ({ claim: async () => ({ ok: true }),
+    fetch: async (u, init) => { seen.push([String(u.url || u), init && init.method]); return new Response("{}"); } }) } };
   const base = "https://w.example.workers.dev";
   const now = Math.floor(Date.now() / 1000);
   const post = async (p, key = KEY, body = "{}") => I.default.fetch(new Request(base + p, {
-    method: "POST", body, headers: { "x-mc-auth": await sign(key, "POST", base + p, enc.encode(body), now) } }), env);
+    method: "POST", body, headers: await signed(key, "POST", base + p, enc.encode(body), now) }), env);
   check("the entry: an unsigned request is refused (401) before the computer sees it",
         (await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: "{}" }), env)).status === 401 && seen.length === 0);
   check("...one signed with another key: 401", (await post("/v1/status", "z".repeat(64))).status === 401 && seen.length === 0);
@@ -222,7 +231,7 @@ check("...anything else refused", !!(() => { try { L.wantNet({ egress: "open" })
   check("...the tcp route only as a websocket", (await post("/v1/tcp")).status === 404);
   const noKey = { ...env, MCOMP_KEY: undefined };
   check("...a Worker without its key refuses everything", (await I.default.fetch(new Request(base + "/v1/status", {
-    method: "POST", body: "{}", headers: { "x-mc-auth": await sign(KEY, "POST", base + "/v1/status", enc.encode("{}"), now) } }), noKey)).status === 401);
+    method: "POST", body: "{}", headers: await signed(KEY, "POST", base + "/v1/status", enc.encode("{}"), now) }), noKey)).status === 401);
 }
 
 // --- index.js: the outbound handlers ---------------------------------------------------------------------------------
@@ -419,12 +428,13 @@ function makeDO(c, rc = new FakeContainer()) {
   check("...the computer stays stopped", (await d.call("status")).body.state === "stopped" && !c.running);
   r = await d.call("net", { egress: "internet" });
   check("net while stopped: recorded, applied at the next start", r.status === 200 && r.body.at_next_start === true);
-  r = await d.call("forget");
-  check("forget: the residue said (each snapshot with its date), the storage and the alarm gone", r.status === 200
-        && r.body.residue.length >= 2 && r.body.residue.every((x) => x.expires > Date.now()) && store.size === 0 && ctx.alarm === null);
-  check("...after it, a new record (never started)", (await d.call("status")).body.state === "never");
   r = await d.call("settings", { idle_min: 351 });
   check("settings: IDLE_STOP past 350: refused", r.status === 400);
+  r = await d.call("forget");
+  check("forget: the residue said (each snapshot with its date), the record and the alarm gone", r.status === 200
+        && r.body.residue.length >= 2 && r.body.residue.every((x) => x.expires > Date.now()) && !store.has("rec") && ctx.alarm === null);
+  check("[N2-tomb] ...a tombstone left, and every request after it refused (410)", store.has("tombstone")
+        && (await d.call("status")).status === 410 && (await d.call("start", { from_image: true })).status === 410 && !c.running);
 }
 // A status asked while a stop runs (outside the lock): the container is gone before the stop records it, which must not
 // be taken for a stop by Cloudflare.
@@ -587,42 +597,83 @@ await section("[P2-stop]", async () => {
         && (await d.call("status")).body.latest.id === before && (await d.call("status")).body.state === "running", r);
 });
 
-// [P2-body] The entry reads no body before the header could be a fresh signature, and no more than its route's cap.
+// [P2-body], [N1-body] The entry reads no body before its signature (over the body's declared length and hash) and its
+// nonce have passed, never past the length signed, and refuses a body that isn't the one signed.
 await section("[P2-body]", async () => {
   skew = 0;
   const base = "https://w.example.workers.dev";
-  const seen = [];
-  const env = { MCOMP_KEY: KEY, COMPUTER: { idFromName: (n) => n, get: () => ({ fetch: async (u, init) => { seen.push(String(u.url || u)); return new Response("{}"); } }) } };
+  const seen = [], claimed = [];
+  const env = { MCOMP_KEY: KEY, COMPUTER: { idFromName: (n) => n, get: () => ({ claim: async (h) => { claimed.push(h); return { ok: true }; },
+    fetch: async (u, init) => { seen.push([String(u.url || u), init && init.body]); return new Response("{}"); } }) } };
   const counting = (chunks, size = 1 << 16) => {
-    const st = { pulled: 0 };
-    st.stream = new ReadableStream({ pull(ctrl) { st.pulled++; ctrl.enqueue(new Uint8Array(size)); if (st.pulled >= chunks) ctrl.close(); } }, { highWaterMark: 0 });
+    const st = { pulled: 0, bytes: 0 };
+    st.stream = new ReadableStream({ pull(ctrl) { st.pulled++; st.bytes += size; ctrl.enqueue(new Uint8Array(size)); if (st.pulled >= chunks) ctrl.close(); } }, { highWaterMark: 0 });
     return st;
   };
+  const ts = Math.floor(Date.now() / 1000);
   let b = counting(1000);
   let res = await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: b.stream, duplex: "half" }), env);
   check("[P2-body] an unsigned POST: 401, and not a byte of its body read", res.status === 401 && b.pulled === 0, b.pulled);
   b = counting(1000);
-  const ts = Math.floor(Date.now() / 1000);
   res = await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: b.stream, duplex: "half",
-    headers: { "x-mc-auth": await sign(KEY, "POST", base + "/v1/status", new Uint8Array(0), ts - 400) } }), env);
+    headers: await signed(KEY, "POST", base + "/v1/status", new Uint8Array(0), ts - 400) }), env);
   check("[P2-body] ...a stale signature: 401, nothing read", res.status === 401 && b.pulled === 0, b.pulled);
+  // The review's case: a made-up header of the right shape, on /v1/exec, with 72 MB behind it.
+  const forged = `v1.${ts}.${"0".repeat(24)}.${"1".repeat(64)}`;
+  b = counting(1152);
+  res = await I.default.fetch(new Request(base + "/v1/exec", { method: "POST", body: b.stream, duplex: "half",
+    headers: { "x-mc-auth": forged, "x-mc-body": `${72 << 20}.${"2".repeat(64)}` } }), env);
+  check("[N1-body] a forged header of the right shape on /v1/exec, 72 MB behind it: 401 before a byte is read, no nonce claimed",
+        res.status === 401 && b.bytes === 0 && claimed.length === 0 && seen.length === 0, [res.status, b.bytes]);
+  b = counting(1152);
+  res = await I.default.fetch(new Request(base + "/v1/exec", { method: "POST", body: b.stream, duplex: "half",
+    headers: { "x-mc-auth": forged } }), env);
+  check("[N1-body] ...the same without its body's length and hash: 401, nothing read", res.status === 401 && b.bytes === 0, b.bytes);
   b = counting(1000);
   res = await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: b.stream, duplex: "half",
-    headers: { "x-mc-auth": `v1.${ts}.${"0".repeat(24)}.${"1".repeat(64)}`, "content-length": String(1 << 30) } }), env);
-  check("[P2-body] ...a content-length past the route's cap: 413, nothing read", res.status === 413 && b.pulled === 0, b.pulled);
-  b = counting(1000);
-  res = await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: b.stream, duplex: "half",
-    headers: { "x-mc-auth": `v1.${ts}.${"0".repeat(24)}.${"1".repeat(64)}` } }), env);
-  check("[P2-body] ...a streamed body past the cap (no length said): 413, reading stopped at the cap (64 KiB, not 64 MB)",
-        res.status === 413 && b.pulled <= 3 && seen.length === 0, b.pulled);
+    headers: { "x-mc-auth": forged, "x-mc-body": `${100000000}.${"2".repeat(64)}` } }), env);
+  check("[P2-body] ...a length past the route's cap: 413, nothing read", res.status === 413 && b.pulled === 0, b.pulled);
+  // Signed correctly, but the body sent isn't the one signed.
+  const body = enc.encode(JSON.stringify({ argv: ["id"] }));
+  const tampered = enc.encode(JSON.stringify({ argv: ["sh"] }));
+  res = await I.default.fetch(new Request(base + "/v1/exec", { method: "POST", body: tampered,
+    headers: await signed(KEY, "POST", base + "/v1/exec", body, ts) }), env);
+  check("[N1-body] a valid signature with a tampered body (same length): refused (400) once read, the computer never sees it",
+        res.status === 400 && /isn't the one signed/.test((await res.json()).error) && seen.length === 0 && claimed.length === 1, res.status);
+  b = counting(40);
+  const sig16 = new Uint8Array(1 << 16);
+  res = await I.default.fetch(new Request(base + "/v1/exec", { method: "POST", body: b.stream, duplex: "half",
+    headers: await signed(KEY, "POST", base + "/v1/exec", sig16, ts) }), env);
+  check("[N1-body] ...a body longer than the one signed: 400, reading stopped just past the length signed",
+        res.status === 400 && b.pulled === 2 && seen.length === 0, [res.status, b.pulled]);
+  res = await I.default.fetch(new Request(base + "/v1/exec", { method: "POST", body: sig16.subarray(0, 100),
+    headers: await signed(KEY, "POST", base + "/v1/exec", sig16, ts) }), env);
+  check("[N1-body] ...shorter than signed: 400", res.status === 400 && seen.length === 0, res.status);
   const big = new Uint8Array(1 << 20).fill(7);
   res = await I.default.fetch(new Request(base + "/v1/exec", { method: "POST", body: big,
-    headers: { "x-mc-auth": await sign(KEY, "POST", base + "/v1/exec", big, ts) } }), env);
-  check("[P2-body] ...the setup's exec still takes a large signed body (1 MB)", res.status === 200 && seen.length === 1, res.status);
+    headers: await signed(KEY, "POST", base + "/v1/exec", big, ts) }), env);
+  check("[P2-body] ...the setup's exec still takes a large signed body (1 MB), whole", res.status === 200 && seen.length === 1
+        && seen[0][1].length === big.length && seen[0][1].every((x) => x === 7), res.status);
   const small = enc.encode("{}");
   res = await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: small,
-    headers: { "x-mc-auth": await sign(KEY, "POST", base + "/v1/status", small, ts) } }), env);
+    headers: await signed(KEY, "POST", base + "/v1/status", small, ts) }), env);
   check("[P2-body] ...and a signed request within its cap reaches the computer", res.status === 200 && seen.length === 2);
+  // readSigned on its own: one buffer of the signed length, hashed as it comes with the runtime's DigestStream.
+  const { createHash } = await import("node:crypto");
+  let wrote = 0;
+  class DS {
+    constructor() { const h = createHash("sha256"); let done; this.digest = new Promise((r) => { done = r; });
+      this.w = { write: async (c) => { wrote += c.length; h.update(c); }, close: async () => done(h.digest().buffer) }; }
+    getWriter() { return this.w; }
+  }
+  const data = new Uint8Array(200000).fill(3);
+  const st = new ReadableStream({ start(c) { for (let i = 0; i < 200000; i += 50000) c.enqueue(data.subarray(i, i + 50000)); c.close(); } });
+  const got = await L.readSigned(st, await declareOf(data), DS);
+  check("[N1-body] readSigned: hashed as it comes (the runtime's DigestStream), into one buffer of the length signed",
+        got.ok && got.body.length === 200000 && wrote === 200000 && got.body.buffer.byteLength === 200000);
+  const st2 = new ReadableStream({ start(c) { c.enqueue(data); c.close(); } });
+  check("[N1-body] ...and with no DigestStream (one digest of that buffer): the same",
+        (await L.readSigned(st2, await declareOf(data))).ok && !(await L.readSigned(new ReadableStream({ start(c) { c.enqueue(data); c.close(); } }), await declareOf(tampered))).ok);
 });
 
 // [replay] A signed request can't be sent again: the computer's object remembers its nonce while it could be fresh.
@@ -631,37 +682,76 @@ await section("[replay]", async () => {
   const base = "https://w.example.workers.dev";
   const c = new FakeContainer();
   const { d, ctx, store } = makeDO(c);
-  // The runtime hands the object a Request, whatever the stub's fetch was given.
-  const stubOf = (o) => ({ fetch: (u, init) => o.fetch(u instanceof Request ? u : new Request(u, init)) });
+  // The runtime hands the object a Request, whatever the stub's fetch was given; claim is its RPC method.
+  const stubOf = (o) => ({ fetch: (u, init) => o.fetch(u instanceof Request ? u : new Request(u, init)), claim: (h) => o.claim(h) });
   const env = { MCOMP_KEY: KEY, COMPUTER: { idFromName: (n) => n, get: () => stubOf(d) } };
   const body = enc.encode(JSON.stringify({ from_image: true, boot: false }));
   const ts = Math.floor(Date.now() / 1000);
-  const h = await sign(KEY, "POST", base + "/v1/start", body, ts);
-  const send = () => I.default.fetch(new Request(base + "/v1/start", { method: "POST", body, headers: { "x-mc-auth": h } }), env);
+  const hs = await signed(KEY, "POST", base + "/v1/start", body, ts);
+  const send = () => I.default.fetch(new Request(base + "/v1/start", { method: "POST", body, headers: hs }), env);
   const r1 = await send();
   await d.call("stop");
   const r2 = await send();
   check("[replay] the same signed request sent again (a start replayed after a stop, within its 300 s): refused, nothing done",
         r1.status === 200 && r2.status === 401 && !c.running, [r1.status, r2.status]);
   const again = new I.Computer(ctx, { MCOMP_COMPUTER: "box", MCOMP_OP: "op1", COMPUTER: env.COMPUTER });
-  const r3 = await I.default.fetch(new Request(base + "/v1/start", { method: "POST", body, headers: { "x-mc-auth": h } }),
+  const r3 = await I.default.fetch(new Request(base + "/v1/start", { method: "POST", body, headers: hs }),
     { ...env, COMPUTER: { idFromName: (n) => n, get: () => stubOf(again) } });
   check("[replay] ...also after the object restarted (the nonce kept in its storage)", r3.status === 401 && !c.running, r3.status);
-  const fresh = doAuth();
-  const two = await Promise.all([d.call("status", {}, fresh), d.call("status", {}, fresh)]);
+  const fresh = await signed(KEY, "POST", base + "/v1/status", enc.encode("{}"), ts);
+  const statusWith = (h) => I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: "{}", headers: h }), env);
+  const two = await Promise.all([statusWith(fresh), statusWith(fresh)]);
   check("[replay] ...two copies of a new one at the same moment: exactly one passes", two.filter((x) => x.status === 200).length === 1
         && two.filter((x) => x.status === 401).length === 1, two.map((x) => x.status));
-  const h2 = await sign(KEY, "POST", base + "/v1/status", enc.encode("{}"), ts);
-  const h3 = await sign(KEY, "POST", base + "/v1/status", enc.encode("{}"), ts);
-  check("[replay] identical requests in the same second, each with its own nonce: both pass", h2 !== h3
-        && (await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: "{}", headers: { "x-mc-auth": h2 } }), env)).status === 200
-        && (await I.default.fetch(new Request(base + "/v1/status", { method: "POST", body: "{}", headers: { "x-mc-auth": h3 } }), env)).status === 200);
+  const h2 = await signed(KEY, "POST", base + "/v1/status", enc.encode("{}"), ts);
+  const h3 = await signed(KEY, "POST", base + "/v1/status", enc.encode("{}"), ts);
+  check("[replay] identical requests in the same second, each with its own nonce: both pass", h2["x-mc-auth"] !== h3["x-mc-auth"]
+        && (await statusWith(h2)).status === 200 && (await statusWith(h3)).status === 200);
   const nonces = () => [...store.keys()].filter((k) => k.startsWith("n:")).length;
   const had = nonces();
   skew += 10 * L.MINUTE;
-  for (let i = 0; i < 64; i++) await d.call("status");
+  for (let i = 0; i < 64; i++) await statusWith(await signed(KEY, "POST", base + "/v1/status", enc.encode("{}"), Math.floor(Date.now() / 1000)));
   check("[replay] nonces are forgotten once their requests would be stale anyway", had > 0 && nonces() <= 64, [had, nonces()]);
   skew = 0;
+});
+// [N2-tomb] A delete cut off after the Worker's forget (its deletion failed, the object restarted within the requests'
+// 300 s) can't let a request it saw through again: the tombstone refuses every request, whatever its nonce.
+await section("[N2-tomb]", async () => {
+  skew = 0;
+  const base = "https://w.example.workers.dev";
+  const c = new FakeContainer();
+  const { d, ctx, store } = makeDO(c);
+  const stubOf = (o) => ({ fetch: (u, init) => o.fetch(u instanceof Request ? u : new Request(u, init)), claim: (h) => o.claim(h) });
+  const envOf = (o) => ({ MCOMP_KEY: KEY, COMPUTER: { idFromName: (n) => n, get: () => stubOf(o) } });
+  const body = enc.encode(JSON.stringify({ from_image: true, boot: false }));
+  const ts = Math.floor(Date.now() / 1000);
+  const hs = await signed(KEY, "POST", base + "/v1/start", body, ts);
+  const startWith = (o, h) => I.default.fetch(new Request(base + "/v1/start", { method: "POST", body, headers: h }), envOf(o));
+  const r1 = await startWith(d, hs);
+  const fh = await signed(KEY, "POST", base + "/v1/forget", enc.encode("{}"), ts);
+  const r2 = await I.default.fetch(new Request(base + "/v1/forget", { method: "POST", body: "{}", headers: fh }), envOf(d));
+  const reloaded = new I.Computer(ctx, { MCOMP_COMPUTER: "box", MCOMP_OP: "op1" });
+  const r3 = await startWith(reloaded, hs);
+  check("[N2-tomb] forget, the object reloaded, then the start it saw sent again: refused (410), nothing started",
+        r1.status === 200 && r2.status === 200 && r3.status === 410 && !c.running && store.has("tombstone"), [r1.status, r2.status, r3.status]);
+  const r4 = await startWith(reloaded, await signed(KEY, "POST", base + "/v1/start", body, ts));
+  const r5 = await I.default.fetch(new Request(base + "/v1/tcp", { headers: { upgrade: "websocket",
+    "x-mc-auth": await sign(KEY, "GET", base + "/v1/tcp", new Uint8Array(0), ts) } }), envOf(reloaded));
+  check("[N2-tomb] ...and a new request with a new nonce too, and a new SSH connection: 410", r4.status === 410 && r5.status === 410
+        && !c.running, [r4.status, r5.status]);
+  await reloaded.alarm();
+  check("[N2-tomb] ...its alarm does nothing (no record, no refresh)", !c.running && !store.has("rec") && ctx.alarm === null);
+  // The same at the object itself (the review's reproduction): a request it took, forget, a reload, the request again.
+  const c2 = new FakeContainer();
+  const m = makeDO(c2);
+  const seenAuth = doAuth();
+  const a1 = await m.d.call("start", { from_image: true, boot: false }, seenAuth);
+  await m.d.call("forget");
+  const back = new I.Computer(m.ctx, { MCOMP_COMPUTER: "box", MCOMP_OP: "op1" });
+  const res = await back.fetch(new Request("https://computer/v1/start", { method: "POST",
+    body: JSON.stringify({ from_image: true, boot: false }), headers: { "x-mc-auth": seenAuth } }));
+  check("[N2-tomb] at the object: a start it took, then forget, a reload and the same start again: refused (410), nothing started",
+        a1.status === 200 && res.status === 410 && !c2.running, [a1.status, res.status, c2.running]);
 });
 Date.now = realNow;
 
