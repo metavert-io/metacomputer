@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-26
+
 ### Added
 
 - **Cloudflare Containers as a place for a computer** (`metacomputer vm create NAME --on cloudflare`,
