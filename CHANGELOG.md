@@ -6,6 +6,8 @@ All notable changes to metacomputer are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-25
+
 ### Added
 
 - **Vercel Sandbox as a place for a computer** (`metacomputer vm create NAME --on vercel`, [docs/vercel.md](docs/vercel.md);
