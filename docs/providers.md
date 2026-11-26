@@ -12,6 +12,7 @@ Where metacomputer can make a computer besides this Mac and your own server (doc
 | DigitalOcean | `digitalocean` | `stop-start` | disk | no | `guest-firewall` | private ranges refused, can be turned off | `full` | yes | `DIGITALOCEAN_TOKEN` | [docs/remote.md](remote.md) | [providers/digitalocean/](../providers/digitalocean/) |
 | Vultr | `vultr` | `stop-start` | disk | no | `guest-firewall` | none (only its own firewall) | `full` | yes | `VULTR_API_KEY` | [docs/remote.md](remote.md) | [providers/vultr/](../providers/vultr/) |
 | Vercel Sandbox | `vercel` | `stop-start` | disk | yes | `network-policy` | private ranges refused, metadata refused, can be turned off | `storage` | no (foreground) | `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID` | [docs/vercel.md](vercel.md) | [providers/vercel/](../providers/vercel/) |
+| Cloudflare Containers | `cloudflare` | `stop-start` | disk | yes | `http-intercept` | private ranges refused, metadata refused, can be turned off | `storage` | no (foreground) | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | [docs/cloudflare.md](cloudflare.md) | [providers/cloudflare/](../providers/cloudflare/) |
 
 What each bills while stopped (`Stopped bills`): `storage` its disk only, `full` everything, as if it ran. `Sleep`: `stop-start` (metacomputer stops and starts it through the provider), `auto-sleep` (it sleeps by itself when nothing is connected).
 
@@ -56,3 +57,10 @@ What each bills while stopped (`Stopped bills`): `storage` its disk only, `full`
 - Input: no /dev/uinput in a Vercel sandbox: keys, typing and pixel clicks go in the foreground; actions on an element through accessibility.
 - Sizes: `2x4`, `4x8`, `8x16`.
 - Regions: `iad1`, `arn1`, `bom1`, `cdg1`, `cle1`, `cpt1`, `dub1`, `fra1`, `gru1`, `hkg1`, `hnd1`, `icn1`, `kix1`, `lhr1`, `pdx1`, `sfo1`, `sin1`, `syd1`, `yul1`.
+
+## Cloudflare Containers
+
+- Billing: stopped: its snapshots' storage, free during Cloudflare's beta; running: its memory and disk as provisioned and the CPU it uses (Workers Paid, $5 a month, includes some).
+- Input: no /dev/uinput in a Cloudflare container: keys, typing and pixel clicks go in the foreground; actions on an element through accessibility.
+- Sizes: `standard-2`, `standard-3`, `standard-4`.
+- Regions: not chosen per computer.
