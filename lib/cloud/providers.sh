@@ -1,15 +1,15 @@
 # metacomputer's providers, as bash reads them: made from providers/<name>/manifest.py by
 # scripts/gen-providers.py (don't edit by hand: its --check fails a copy that isn't current). Sourced by
 # scripts/lib.sh; data and one lookup only, nothing runs.
-MC_PROVIDERS='oci sprites hetzner digitalocean vultr vercel'
-MC_PROVIDER_ENV='OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY VERCEL_TOKEN VERCEL_TEAM_ID VERCEL_PROJECT_ID'
+MC_PROVIDERS='oci sprites hetzner digitalocean vultr vercel cloudflare'
+MC_PROVIDER_ENV='OCI_USER OCI_TENANCY OCI_FINGERPRINT OCI_REGION OCI_API_KEY_PEM OCI_COMPARTMENT HCLOUD_TOKEN DIGITALOCEAN_TOKEN VULTR_API_KEY VERCEL_TOKEN VERCEL_TEAM_ID VERCEL_PROJECT_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID'
 MC_PROVIDER_COPY_KEYS='OCI_PYTHON'
-MC_PROVIDER_CREATE_OPTIONS='--org --sprite --sandbox'
-MC_PROVIDER_CREATE_ONLY='--sprite --sandbox'
+MC_PROVIDER_CREATE_OPTIONS='--org --sprite --sandbox --worker'
+MC_PROVIDER_CREATE_ONLY='--sprite --sandbox --worker'
 MC_PROVIDER_CLOUD_OPTIONS='--org'
 MC_PROVIDER_CLOUD_USAGE=' [--org ORG]'
 MC_PROVIDER_CLOUD_VALUES='--org= '
-MC_TRANSPORT_SETTINGS='SPRITE_ORG SPRITE_NAME SPRITE_CLI VERCEL_SANDBOX'
+MC_TRANSPORT_SETTINGS='SPRITE_ORG SPRITE_NAME SPRITE_CLI VERCEL_SANDBOX CLOUDFLARE_WORKER'
 mc_pv() { # PROVIDER KEY: that provider's word for KEY (lib/cloud/manifests.py shell_words); status 1: none
   case "$1:$2" in
     oci:label) printf '%s' 'Oracle Cloud' ;;
@@ -81,6 +81,21 @@ mc_pv() { # PROVIDER KEY: that provider's word for KEY (lib/cloud/manifests.py s
     vercel:status_baseline) printf '%s' 'a snapshot at Vercel (metacomputer checkpoints)' ;;
     vercel:status_network) printf '%s' 'Vercel'\''s network policy: EGRESS={egress} (net status reads what'\''s in force), SSH only through Vercel'\''s API   stop: the session'\''s timeout (IDLE_STOP) or metacomputer stop' ;;
     vercel:status_uinput) printf '%s' '  (none in a Vercel sandbox: foreground input)' ;;
+    cloudflare:label) printf '%s' 'Cloudflare Containers' ;;
+    cloudflare:place) printf '%s' 'cloudflare' ;;
+    cloudflare:place_words) printf '%s' 'cloudflare (Cloudflare Containers)' ;;
+    cloudflare:label_place) printf '%s' 'Cloudflare Containers (cloudflare)' ;;
+    cloudflare:docs) printf '%s' 'docs/cloudflare.md' ;;
+    cloudflare:credential_words) printf '%s' 'CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID' ;;
+    cloudflare:ask_needs) printf '%s' 'CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID' ;;
+    cloudflare:background_input) printf '%s' 'off' ;;
+    cloudflare:teardown) printf '%s' 'no' ;;
+    cloudflare:transport) printf '%s' 'cloudflare' ;;
+    cloudflare:vm_create_confirm) printf '%s' 'This puts a control Worker for it into your Cloudflare account, then installs the desktop (about 5 minutes).' ;;
+    cloudflare:instance_word) printf '%s' 'control Worker and container' ;;
+    cloudflare:status_baseline) printf '%s' 'a snapshot at Cloudflare (metacomputer checkpoints)' ;;
+    cloudflare:status_network) printf '%s' 'Cloudflare'\''s outbound rules: EGRESS={egress} (net status reads what'\''s in force), SSH only through its control Worker   stop: IDLE_STOP after the last connection, or metacomputer stop' ;;
+    cloudflare:status_uinput) printf '%s' '  (none in a Cloudflare container: foreground input)' ;;
     *) return 1 ;;
   esac
 }
@@ -93,6 +108,8 @@ mc_pv_option() { # OPTION KEY: a provider's own vm create option's needs, defaul
     --sprite:provider) printf '%s' 'sprites' ;;
     --sandbox:needs) printf '%s' 'the sandbox'\''s name' ;;
     --sandbox:provider) printf '%s' 'vercel' ;;
+    --worker:needs) printf '%s' 'the control Worker'\''s name' ;;
+    --worker:provider) printf '%s' 'cloudflare' ;;
     *) return 1 ;;
   esac
 }

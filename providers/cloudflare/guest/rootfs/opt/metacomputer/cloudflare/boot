@@ -1,0 +1,206 @@
+#!/bin/bash
+# metacomputer on Cloudflare Containers: what a start needs, run as root through the computer's control Worker at every
+# start (its boot request: the Mac's metacomputer start, a restore, an egress change that restarts it) and by the
+# build. A stop keeps the disk (a snapshot), not the programs, and every start is a fresh kernel:
+#   0. / owned by root: the platform gives it an unmapped owner, and sshd then refuses the root-owned key lists
+#      (StrictModes checks every folder up to /: found live).
+#   1. /dev/shm at 2 GB (Cloudflare gives 64 MB; Firefox and Chrome need more).
+#   2. The hostname in /etc/hosts (sudo, X and LibreOffice look it up): the platform's own file has it (read-only).
+#   3. The interception CA: the platform writes a new one at every start whose egress is off or an allowlist
+#      (/etc/cloudflare/certs/cloudflare-containers-ca.crt; the computer's control Worker sees the allowed names'
+#      traffic in plain text). Trusted while it's there (the system's store, Firefox through its policy, Chrome's NSS
+#      store for the desktop's account), taken out when it isn't.
+#   4. sshd on port 2222: on the container's loopback and its own address (06-metacomputer-cloudflare-listen.conf,
+#      written here: the platform's TCP route from the Worker arrives at that address).
+#   5. Once the desktop is set up (/var/lib/metacomputer/provisioned): what a stop left behind cleared (the X lock,
+#      LibreOffice's and Firefox's profile locks, the session's runtime folder), a new X cookie, Xvfb, then XFCE on its
+#      own D-Bus session with accessibility on, each started as the desktop's account with runuser: a command the
+#      platform runs holds root's capabilities, even one it's told to run as another user, and runuser drops them. It
+#      waits until the session is ready.
+#   6. Every process of every account but root's checked: none may hold a capability. If one does, every one of them is
+#      ended, sshd first, and the boot fails.
+#   boot                    all of the above (what runs already is left running)
+#   boot restart-desktop    the desktop's processes ended first, then all of the above
+#   boot quiesce            the desktop's programs ended (so they save what they hold), then sync: before a stop's
+#                           snapshot
+#   boot logs N             the last N lines of the setup's log and this script's
+# metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
+# exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
+# refused (exit 2), and nothing is done.
+mc_usage="boot [restart-desktop | quiesce | logs N]"
+case "$*" in -h|--help) echo "usage: $mc_usage"; exit 0 ;; esac
+for mc_a in "$@"; do case "$mc_a" in -*) echo "boot: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac; done
+case "$#:${1:-}" in 0:|1:restart-desktop|1:quiesce|2:logs) ;; *) echo "boot: usage: $mc_usage (nothing was run)" >&2; exit 2 ;; esac
+case "${1:-}:${2:-}" in logs:|logs:*[!0-9]*) echo "boot: usage: $mc_usage (N: a number; nothing was run)" >&2; exit 2 ;; esac
+# end of the command-line rules
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+[ "$(id -u)" = 0 ] || { echo "boot: run it as root" >&2; exit 1; }
+LOG=/var/log/metacomputer-cloudflare-boot.log
+if [ "${1:-}" = logs ]; then
+  tail -n "$2" /var/log/metacomputer-provision.log 2>/dev/null; echo "== $LOG"; tail -n "$2" "$LOG" 2>/dev/null
+  exit 0
+fi
+T0=$(date +%s%N)
+say() { local m; m="boot: $* ($(( ($(date +%s%N) - T0) / 1000000 )) ms)"; echo "$m"; echo "$(date -Is) $m" >> "$LOG"; }
+fail() { say "FAILED: $*"; exit 1; }
+install -d -m 0755 /run/metacomputer
+exec 9> /run/metacomputer/cloudflare-boot.lock
+flock -w 120 9 || fail "another boot is running"
+
+U=cua
+[ ! -s /etc/metacomputer/cloudflare.env ] || . /etc/metacomputer/cloudflare.env
+U="${GUEST_USER:-cua}"; D="${DISPLAY_NUM:-0}"; G="${SCREEN:-1920x1080}"
+UID_="$(id -u "$U" 2>/dev/null)" || UID_=""
+HOME_="$(getent passwd "$U" | cut -d: -f6)"; XA="$HOME_/.Xauthority"; RUN="/run/user/$UID_"
+
+# The desktop's processes ended, gently first (so Firefox and LibreOffice save), then for good.
+end_desktop() {
+  [ -n "$UID_" ] || return 0
+  pkill -TERM -u "$U" 2>/dev/null; pkill -TERM -x Xvfb 2>/dev/null
+  for _ in $(seq 1 100); do pgrep -u "$U" >/dev/null || pgrep -x Xvfb >/dev/null || break; sleep 0.1; done
+  pkill -KILL -u "$U" 2>/dev/null; pkill -KILL -x Xvfb 2>/dev/null
+}
+
+if [ "${1:-}" = quiesce ]; then
+  [ ! -e /var/lib/metacomputer/provisioned ] || end_desktop
+  sync
+  say "the desktop's programs ended and the disk synced, for the stop's snapshot"
+  exit 0
+fi
+
+# Every process whose real, effective and saved uids are all another account's than root's must hold no capability
+# (permitted, effective or ambient). If one does, they're all ended, sshd first, and the boot fails.
+caps_check() {
+  local f bad=""
+  for f in /proc/[0-9]*/status; do
+    awk '/^Uid:/ { u = ($2 != 0 && $3 != 0 && $4 != 0) }
+         /^Cap(Prm|Eff|Amb):/ { if ($2 !~ /^0+$/) c = 1 }
+         END { exit !(u && c) }' "$f" 2>/dev/null && bad="$bad ${f#/proc/}"
+  done
+  [ -z "$bad" ] && return 0
+  pkill -KILL -x sshd 2>/dev/null
+  for _ in 1 2 3 4 5; do
+    left=""
+    for p in $(ps -eo pid=,uid= | awk '$2 != 0 { print $1 }'); do left=1; kill -KILL "$p" 2>/dev/null; done
+    [ -n "$left" ] || break
+  done
+  fail "a process of an account but root's held capabilities (${bad# }): every such process and sshd were ended"
+}
+
+# 0. / owned by root (sshd's StrictModes).
+[ "$(stat -c %u:%g /)" = 0:0 ] || chown 0:0 / || fail "/ isn't root's and couldn't be made so: sshd would refuse every key"
+# 1. /dev/shm.
+size="$(df -k --output=size /dev/shm 2>/dev/null | tail -1 | tr -d ' ')"
+if [ -n "$size" ] && [ "$size" -lt 2000000 ]; then mount -o remount,size=2g /dev/shm || say "couldn't enlarge /dev/shm"; fi
+
+# 2. The hostname: the platform's /etc/hosts (mounted read-only) names it; added only if it ever doesn't.
+H="$(hostname)"
+if ! grep -qw -- "$H" /etc/hosts 2>/dev/null; then
+  { echo "127.0.1.1 $H # metacomputer-cloudflare" >> /etc/hosts; } 2>/dev/null || say "the hostname isn't in /etc/hosts, which can't be written"
+fi
+
+# 3. The interception CA (an allowlist's: the egress off or a list of names).
+CA_SRC=/etc/cloudflare/certs/cloudflare-containers-ca.crt
+CA_DST=/usr/local/share/ca-certificates/metacomputer-cloudflare-intercept.crt
+NSS_NAME=metacomputer-cloudflare-intercept
+nss() { # add|remove: Chrome's store for the desktop's account (Firefox takes it from its policy)
+  [ -n "$UID_" ] && [ -d "$HOME_" ] && command -v certutil >/dev/null || return 0
+  local db="$HOME_/.pki/nssdb"
+  runuser -u "$U" -- env HOME="$HOME_" sh -c 'mkdir -p "$1" && { [ -e "$1/cert9.db" ] || certutil -d "sql:$1" -N --empty-password; }' _ "$db" >/dev/null 2>&1 || return 0
+  runuser -u "$U" -- env HOME="$HOME_" certutil -d "sql:$db" -D -n "$NSS_NAME" >/dev/null 2>&1
+  [ "$1" != add ] || runuser -u "$U" -- env HOME="$HOME_" certutil -d "sql:$db" -A -t "C,," -n "$NSS_NAME" -i "$CA_DST" >/dev/null 2>&1 \
+    || say "Chrome's store didn't take the interception CA"
+}
+if [ -s "$CA_SRC" ]; then
+  if ! cmp -s "$CA_SRC" "$CA_DST"; then
+    install -m 0644 "$CA_SRC" "$CA_DST" && update-ca-certificates >/dev/null 2>&1 || fail "the system's store didn't take the interception CA"
+  fi
+  nss add
+  say "the platform's interception CA trusted (an allowlist or no egress: the control Worker's handlers see the allowed names' traffic)"
+elif [ -e "$CA_DST" ]; then
+  rm -f "$CA_DST"; update-ca-certificates --fresh >/dev/null 2>&1
+  nss remove
+  say "no interception CA this start (the egress is the internet): an earlier one taken out"
+fi
+
+# 4. sshd: port 2222, on the loopback and the container's own address.
+DEV="$(ip -4 route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
+ADDR="$(ip -4 -o addr show ${DEV:+dev "$DEV"} scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); if ($4 !~ /^127\./) { print $4; exit } }')"
+[[ "$ADDR" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || fail "the container has no address of its own (ip addr)"
+LISTEN=/etc/ssh/sshd_config.d/06-metacomputer-cloudflare-listen.conf
+want="# metacomputer (written by /opt/metacomputer/cloudflare/boot at every start): where the Worker's route arrives
+ListenAddress 127.0.0.1
+ListenAddress $ADDR"
+if [ "$(cat "$LISTEN" 2>/dev/null)" != "$want" ]; then
+  printf '%s\n' "$want" > "$LISTEN.new" && chmod 0644 "$LISTEN.new" && mv "$LISTEN.new" "$LISTEN"
+  pkill -x sshd 2>/dev/null
+fi
+[ -s /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key
+install -d -m 0755 /run/sshd
+if ! pgrep -x sshd >/dev/null; then
+  /usr/sbin/sshd -t || fail "sshd refused its settings"
+  /usr/sbin/sshd < /dev/null > /dev/null 2>> "$LOG" 9>&- || fail "sshd didn't start"
+fi
+for _ in $(seq 1 50); do (exec 3<>"/dev/tcp/$ADDR/2222") 2>/dev/null && break; sleep 0.1; done
+(exec 3<>"/dev/tcp/$ADDR/2222") 2>/dev/null || fail "sshd isn't listening on $ADDR:2222"
+say "sshd on 127.0.0.1 and $ADDR, port 2222"
+
+# 5. The desktop, once it's set up.
+if [ ! -e /var/lib/metacomputer/provisioned ]; then
+  caps_check
+  say "the desktop isn't set up yet: nothing more"
+  exit 0
+fi
+[ -n "$UID_" ] && [ -n "$HOME_" ] || fail "no account $U"
+if [ "${1:-}" = restart-desktop ]; then
+  end_desktop
+  say "the desktop's processes ended"
+fi
+if pgrep -x Xvfb >/dev/null && pgrep -u "$U" -x xfce4-session >/dev/null && [ -s "$RUN/metacomputer/session-ready" ]; then
+  caps_check
+  say "the desktop runs already"
+  exit 0
+fi
+# What a stop left behind (no process survives one), each only when nothing of the desktop's runs.
+if ! pgrep -u "$U" >/dev/null && ! pgrep -x Xvfb >/dev/null; then
+  rm -f "/tmp/.X$D-lock" "/tmp/.X11-unix/X$D"
+  rm -rf --one-file-system "$RUN"
+  rm -f "$HOME_/.config/libreoffice/4/.lock"
+  find "$HOME_" -xdev -type f -name '.~lock.*#' -user "$U" -delete 2>/dev/null
+  for d in "$HOME_/.mozilla/firefox" "$HOME_/.config/mozilla/firefox"; do
+    [ -d "$d" ] && find "$d" -mindepth 2 -maxdepth 2 \( -name lock -o -name .parentlock \) \( -type l -o -type f \) -delete 2>/dev/null
+  done
+  for d in "$HOME_/.config/google-chrome"; do
+    [ -d "$d" ] && find "$d" -maxdepth 1 \( -name SingletonLock -o -name SingletonSocket -o -name SingletonCookie \) -delete 2>/dev/null
+  done
+  say "stale locks from the stop cleared"
+fi
+install -d -o "$U" -g "$U" -m 0700 "$RUN"
+install -d -m 1777 /tmp/.X11-unix
+if ! pgrep -x Xvfb >/dev/null; then
+  rm -f "$XA"
+  runuser -u "$U" -- touch "$XA"
+  runuser -u "$U" -- xauth -q -f "$XA" add ":$D" MIT-MAGIC-COOKIE-1 "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  setsid runuser -u "$U" -- /usr/bin/Xvfb ":$D" -screen 0 "${G}x24" -dpi 96 -nolisten tcp -nolisten local -auth "$XA" \
+    +extension RANDR >> /var/log/metacomputer-cloudflare-xvfb.log 2>&1 < /dev/null 9>&- &
+  for _ in $(seq 1 100); do [ -S "/tmp/.X11-unix/X$D" ] && break; sleep 0.1; done
+  [ -S "/tmp/.X11-unix/X$D" ] || fail "Xvfb didn't start (/var/log/metacomputer-cloudflare-xvfb.log)"
+  say "Xvfb on :$D ($G)"
+fi
+if ! pgrep -u "$U" -x xfce4-session >/dev/null; then
+  setsid runuser -u "$U" -- env -i \
+    HOME="$HOME_" USER="$U" LOGNAME="$U" SHELL=/bin/bash PATH=/usr/local/bin:/usr/bin:/bin \
+    LANG=en_US.UTF-8 DISPLAY=":$D" XAUTHORITY="$XA" XDG_RUNTIME_DIR="$RUN" \
+    XDG_SESSION_TYPE=x11 XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=xfce \
+    GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0 GNOME_ACCESSIBILITY=1 QT_ACCESSIBILITY=1 \
+    QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 SAL_USE_VCLPLUGIN=gtk3 MOZ_ENABLE_WAYLAND=0 \
+    CUA_DRIVER_RS_TELEMETRY_ENABLED=0 CUA_DRIVER_RS_UPDATE_CHECK=0 CUA_TELEMETRY_ENABLED=0 \
+    /usr/bin/dbus-run-session -- /usr/bin/xfce4-session >> /var/log/metacomputer-cloudflare-desktop.log 2>&1 < /dev/null 9>&- &
+fi
+for _ in $(seq 1 300); do [ -s "$RUN/metacomputer/session-ready" ] && break; sleep 0.2; done
+[ -s "$RUN/metacomputer/session-ready" ] || fail "the desktop session didn't become ready in 60 s (/var/log/metacomputer-cloudflare-desktop.log)"
+# 6. Nothing of the desktop's (nor any account but root's) holds a capability.
+caps_check
+say "the desktop is ready; no process of an account but root's holds a capability"

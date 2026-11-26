@@ -800,6 +800,14 @@ policy outside it, snapshots for `reset`, and a session cap of 45 minutes on Hob
 metacomputer vm create cloudbox --on vercel                                # with VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID
 ```
 
+Or a Cloudflare container, run by a control Worker metacomputer puts into your own Cloudflare account (Workers Paid),
+whose disk is snapshotted at every stop, with Cloudflare's outbound rules outside it; the account's token is needed
+only to make and delete it, and Cloudflare keeps each snapshot 30 days ([docs/cloudflare.md](docs/cloudflare.md)):
+
+```bash
+metacomputer vm create cloudbox --on cloudflare                            # with CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
+```
+
 ## Troubleshooting
 
 | Symptom | What to do |

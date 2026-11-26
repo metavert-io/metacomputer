@@ -20,6 +20,12 @@
 # off: `nosysd`) except where Vercel differs: its own SSH listen settings, and the desktop started by its boot script
 # (providers/vercel/guest/rootfs/opt/metacomputer/vercel/boot), which Vercel's API runs at every session (a stop keeps
 # the disk, not the programs).
+# MCOMP_TARGET=cloudflare (a Cloudflare container, docs/cloudflare.md: providers/cloudflare/guest/bootstrap.sh made the
+# accounts and sshd, through the computer's control Worker) is set up as a Vercel sandbox is (`nosysd`, Ubuntu 24.04
+# here) except where Cloudflare differs: its own SSH listen settings (port 2222), the desktop started by its boot script
+# (providers/cloudflare/guest/rootfs/opt/metacomputer/cloudflare/boot), which the Worker runs at every start, and the
+# browsers told to trust the interception CA the platform writes when an allowlist is in force (the boot script puts it
+# in place, or takes it out).
 # metacomputer's command-line rules (scripts/strictargs.sh; this runs in the VM on its own, so they're here):
 # exactly -h or --help shows the usage; an option, anything shaped like one, or a form it doesn't take is
 # refused (exit 2), and nothing is done.
@@ -53,12 +59,12 @@ TARGET="${MCOMP_TARGET:-lume}"
 ARCH="$(dpkg --print-architecture)"
 case "$TARGET" in
   lume) ;;
-  remote|sprite|vercel) [ "$ARCH" = "${MCOMP_GUEST_ARCH:-$ARCH}" ] || { echo "the payload is for ${MCOMP_GUEST_ARCH}, this is $ARCH"; false; } ;;
-  *) echo "MCOMP_TARGET must be lume, remote, sprite or vercel, not $TARGET"; false ;;
+  remote|sprite|vercel|cloudflare) [ "$ARCH" = "${MCOMP_GUEST_ARCH:-$ARCH}" ] || { echo "the payload is for ${MCOMP_GUEST_ARCH}, this is $ARCH"; false; } ;;
+  *) echo "MCOMP_TARGET must be lume, remote, sprite, vercel or cloudflare, not $TARGET"; false ;;
 esac
 # A computer with no systemd, cloud-init or display manager, whose provider's policy outside it is the boundary (a Fly
-# Sprite, a Vercel sandbox): set up the same way but where each says otherwise.
-nosysd() { [ "$TARGET" = sprite ] || [ "$TARGET" = vercel ]; }
+# Sprite, a Vercel sandbox, a Cloudflare container): set up the same way but where each says otherwise.
+nosysd() { [ "$TARGET" = sprite ] || [ "$TARGET" = vercel ] || [ "$TARGET" = cloudflare ]; }
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 # Cua Driver: no telemetry, no update checks - for every process in this
 # guest (SSH sessions included), set before the driver binary ever runs.
@@ -217,6 +223,21 @@ vercel_ssh() {
   chmod 0644 /etc/metacomputer/vnc-listen /etc/metacomputer/vercel.env /etc/metacomputer/egress
 }
 if [ "$TARGET" = vercel ]; then vercel_ssh; fi
+# A Cloudflare container: the same, with its own settings (sshd on port 2222; the boot script writes where it listens at
+# every start: the platform's TCP route from the control Worker arrives at the container's own address).
+cloudflare_ssh() {
+  step "SSH settings (Cloudflare container: sshd on port 2222, reached through the computer's control Worker)"
+  install -m 0644 "$PAYLOAD/remote/rootfs/etc/ssh/sshd_config.d/17-metacomputer-view.conf" /etc/ssh/sshd_config.d/
+  install -m 0644 "$PAYLOAD/cloudflare/rootfs/etc/ssh/sshd_config.d/05-metacomputer-cloudflare.conf" /etc/ssh/sshd_config.d/
+  rm -f /etc/ssh/sshd_config.d/09-metacomputer-bootstrap.conf
+  sshd -t
+  pkill -HUP -x sshd || true
+  printf '127.0.0.1\n' > /etc/metacomputer/vnc-listen
+  printf 'GUEST_USER=%s\nDISPLAY_NUM=0\nSCREEN=%s\n' "$GUSER" "${MCOMP_SCREEN:-1920x1080}" > /etc/metacomputer/cloudflare.env
+  printf '%s\n' "${MCOMP_EGRESS:-internet}" > /etc/metacomputer/egress
+  chmod 0644 /etc/metacomputer/vnc-listen /etc/metacomputer/cloudflare.env /etc/metacomputer/egress
+}
+if [ "$TARGET" = cloudflare ]; then cloudflare_ssh; fi
 chown -R "$GUSER:$GUSER" "/home/$GUSER"
 install -d -m 0755 /etc/apt/keyrings
 # Only the pinned key (scripts/pin-gpg-key.sh on the Mac); mozilla.sources names it in Signed-By.
@@ -305,6 +326,8 @@ if nosysd; then
   kept=(); for p in "${PKGS[@]}"; do case "$drop" in *" $p "*) ;; *) kept+=("$p") ;; esac; done
   PKGS=("${kept[@]}" xvfb dbus dbus-x11 libatk-bridge2.0-0t64 libglib2.0-bin openssh-server)
   [ "$TARGET" != vercel ] || PKGS+=(nftables)
+  # A Cloudflare container: certutil, for Chrome's store of the interception CA (the boot script).
+  [ "$TARGET" != cloudflare ] || PKGS+=(libnss3-tools iproute2)
 fi
 "${APT[@]}" install --no-install-recommends "${PKGS[@]}"
 # Nothing that locks the screen or syncs the host clipboard may be present.
@@ -327,6 +350,14 @@ if nosysd; then
     printf '{"DnsOverHttpsMode": "off"}\n' > /etc/opt/chrome/policies/managed/metacomputer-dns.json
     chmod 0644 /etc/opt/chrome/policies/managed/metacomputer-dns.json
   fi
+fi
+if [ "$TARGET" = cloudflare ]; then
+  # An allowlist's HTTPS goes through Cloudflare's TLS interception, with a CA the platform makes at each start: Firefox
+  # trusts the copy the boot script puts in the system's store, while it's there (a missing file is skipped).
+  pol=/etc/firefox/policies/policies.json
+  jq '.policies.Certificates = {"Install": ["/usr/local/share/ca-certificates/metacomputer-cloudflare-intercept.crt"]}' \
+    < "$pol" > "$pol.new" && mv "$pol.new" "$pol"
+  chmod 0644 "$pol"
 fi
 
 # After Chrome's install, and after a run of its daily job (the same code), APT may
@@ -563,6 +594,8 @@ elif [ "$TARGET" = sprite ]; then
   WP_TEXT="metacomputer  |  Ubuntu $(. /etc/os-release; echo "$VERSION_ID") x86_64 on Fly Sprites  |  not the user's computer"
 elif [ "$TARGET" = vercel ]; then
   WP_TEXT="metacomputer  |  Ubuntu $(. /etc/os-release; echo "$VERSION_ID") x86_64 on Vercel Sandbox  |  not the user's computer"
+elif [ "$TARGET" = cloudflare ]; then
+  WP_TEXT="metacomputer  |  Ubuntu $(. /etc/os-release; echo "$VERSION_ID") x86_64 on Cloudflare Containers  |  not the user's computer"
 fi
 IM=convert; command -v magick >/dev/null 2>&1 && IM=magick      # ImageMagick 7 (26.04) is `magick`
 "$IM" -size 1920x1080 xc:'#17324d' -gravity center \
@@ -578,6 +611,8 @@ if [ "$TARGET" = sprite ]; then
   step "the desktop: Sprites services (xvfb, desktop), made when the setup has checked it (scripts/remote-build.sh)"
 elif [ "$TARGET" = vercel ]; then
   step "the desktop: started by /opt/metacomputer/vercel/boot, which Vercel's API runs at every session (scripts/remote-build.sh runs it first)"
+elif [ "$TARGET" = cloudflare ]; then
+  step "the desktop: started by /opt/metacomputer/cloudflare/boot, which the control Worker runs at every start (scripts/remote-build.sh runs it first)"
 else
 step "display manager: LightDM autologin into XFCE on Xorg"
 systemctl set-default graphical.target
@@ -594,6 +629,8 @@ if [ "$TARGET" = sprite ]; then
   step "egress: Fly's network policy, outside the VM (set from the Mac: EGRESS=${MCOMP_EGRESS:-internet}); no guest firewall"
 elif [ "$TARGET" = vercel ]; then
   step "egress: Vercel's network policy, outside the VM (set from the Mac: EGRESS=${MCOMP_EGRESS:-internet}); no guest firewall"
+elif [ "$TARGET" = cloudflare ]; then
+  step "egress: Cloudflare's outbound rules, outside the container (set from the Mac: EGRESS=${MCOMP_EGRESS:-internet}); no guest firewall"
 elif [ "$TARGET" = remote ]; then
   step "the guest firewall, as the setup leaves it (it was put in place before anything was upgraded)"
   /opt/metacomputer/bin/guest-firewall apply
@@ -653,4 +690,4 @@ if [ "${MCOMP_TARGET:-}" = remote ]; then
   touch /etc/cloud/cloud-init.disabled
 fi
 date -Is > "$STATE/provisioned"
-step "provisioning complete; $(case "$TARGET" in sprite) echo "the desktop starts as Sprites services" ;; vercel) echo "the desktop starts by the boot script" ;; *) echo "cloud-init will reboot into the desktop" ;; esac)"
+step "provisioning complete; $(case "$TARGET" in sprite) echo "the desktop starts as Sprites services" ;; vercel|cloudflare) echo "the desktop starts by the boot script" ;; *) echo "cloud-init will reboot into the desktop" ;; esac)"

@@ -2063,6 +2063,99 @@ the first connection, read over Vercel's authenticated API), with these differen
   controller's channel): use a VM on your Mac for work you wouldn't put there.
 - **What isn't there:** volumes and Mac folders, `SSH_AUTH=cert`, the event watcher's health checks, update timers.
 
+## Cloudflare Containers
+
+A computer can be a Cloudflare container ([docs/cloudflare.md](docs/cloudflare.md)): an Ubuntu microVM run by a
+control Worker that metacomputer deploys into your own Cloudflare account, one per computer. It's a computer elsewhere
+as above (the Mac stays the controller; keys of its own; a host key pinned before the first connection, read over the
+Worker's signed channel), with these differences:
+
+- **Two credentials, kept apart.** The account's API token and ID (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`)
+  come only from the environment of `vm create` and `vm delete`, are taken off every program's environment first thing
+  (as every provider's credentials are) and reach `lib/remote.py` only: never the broker, ssh, the hub, the vault, a
+  file, an argument, a log or the container. Everything else (start, stop, checkpoints, the egress, the boot script,
+  the logs, each SSH connection) uses **the computer's own key**: 64 random hex digits made on the Mac by `vm create`,
+  kept 0600 beside its SSH keys (`~/.ssh/metacomputer-NAME/cloudflare-key`, refused if it's a link or readable by
+  anyone else), uploaded once as the Worker's secret, read only by `lib/remote.py`, and handed to the computer's
+  **broker** (`providers/cloudflare/broker.py`) on its standard input: never its arguments, its environment or a log.
+  The key never travels: each request carries an HMAC-SHA256 of its method, path, query, time, a one-time nonce and
+  body's hash, which the Worker checks in constant time (WebCrypto's verify) within 300 s of its own clock; a request
+  without a valid one is refused (401) before it reaches the computer (checked live: a wrong key, no signature, a GET),
+  and before a byte of its body is read: the signature covers the body's length and hash, sent in a header, so it and
+  the nonce are checked from the headers alone; the body is then read to the length signed at most (its route's cap:
+  64 KB, or 72 MB for the setup's commands) and refused (400) unless it's the one signed. The computer's Durable Object
+  refuses a nonce it has seen (kept, in its storage too, while the request could be fresh), so a captured request can't
+  be replayed within the 300 s; after `vm delete`'s forget it keeps a tombstone and refuses every request (410), so a
+  delete cut off before the Worker is gone can't reopen the requests it saw. What Cloudflare
+  says is scrubbed of the token, the account's ID and anything shaped like a credential before it's printed or
+  logged; an image's reference names the account, so it's never said. The REST calls go only to Cloudflare's API
+  address and the Worker's requests only to its workers.dev address, over HTTPS, never following a redirect.
+- **The key's reach.** It can start, stop, snapshot and restore the computer, change its egress, run its boot script,
+  read its logs and open SSH connections (where metacomputer's own keys and the pinned host key still apply). It can't
+  run any other command once the computer is set up: the Worker refuses one (403) after the build's end, for good.
+  The account's token reaches further (every Worker in the account, its containers and registry): an account-owned
+  token in a Cloudflare account of its own for metacomputer keeps that apart from anything else you run there.
+- **Only what's the computer's, named after it, on workers.dev only.** For each computer: a Worker, its Durable Object
+  namespace, its container application and a registry repository, all named after its Worker, the Worker reachable
+  only at its workers.dev address (no route on any domain, no DNS record). Nothing else of the account is listed by
+  content, read or changed. `vm create` refuses a Worker name that exists, checked again right before the upload
+  (which Cloudflare runs unconditionally) under a lock on this Mac held through it, and the Worker read back after it
+  must carry this build's operation, or the build stops and leaves it alone; every operation checks that the Worker
+  answers, with the computer's key, for this computer, the operation that made it and the Durable Object recorded for
+  it (`_live`); `vm delete`, a failed build's clean-up and a lost launch check the Worker's settings (its bindings name
+  the computer and the operation) before anything is deleted, and leave a Worker that doesn't carry them alone.
+- **Cloudflare's own SSH is off.** Cloudflare's SSH server in the container gives root to any key listed for the
+  application. metacomputer makes the application with it off and reads that back (checked live: the API answers
+  `SSH_NOT_ALLOWED`, and nothing listens on port 22 in the container).
+- **The desktop holds no privilege.** A command the platform runs in the container keeps root's capabilities as
+  ambient capabilities, even when told to run as another user (found by the spike: `nobody` held all of them).
+  metacomputer never uses that: the boot script, run as root by the Worker at every start, starts the X server and the
+  desktop with `runuser`, which drops them, and then checks every process of every account but root's (permitted,
+  effective and ambient sets); if any holds one, every such process is ended, sshd first, and the boot fails. sshd's
+  sessions drop them as they change to their account. Checked live: 42 processes of accounts but root's, none
+  holding one.
+- **SSH only through the Worker.** sshd listens on port 2222 on the container's loopback and its own address, which is
+  where the platform's TCP route from the Durable Object arrives (found live: not the loopback); nothing outside the
+  container reaches either but that route. Each connection: `lib/proxywrap.py` asks the broker for the computer's
+  identity as its Worker says it now and refuses unless it's the recorded one; the broker opens a signed websocket,
+  whose answer names the Durable Object it reached, which must be the computer's before a byte goes through. The broker
+  never starts a stopped computer.
+- **Egress is Cloudflare's outbound rules, outside the VM, and nothing else.** Nothing in the container, root
+  included, can change them. `EGRESS=internet`: the platform refuses private, shared and link-local ranges (checked
+  live from inside: 10/8, 172.16/12, 192.168/16, 100.64/10, the gateway and IPv6 ULAs reset at the first byte, the
+  metadata address 169.254.169.254 silent). `EGRESS=off`: the container's internet off; nothing leaves but an
+  allowlist's names. **An allowlist is TLS interception**: the internet off, and each name registered with
+  metacomputer's own handler in the Worker, through Cloudflare's runtime, which terminates the HTTPS with a CA it makes
+  at each start; the boot script makes the guest trust that CA while it's there, so **Cloudflare and that handler see
+  the allowed names' traffic decrypted**. The handler checks that each request asks for exactly its name (the runtime
+  builds the request from its Host header, not the TLS name: the spike reached another site through an allowed name
+  this way), on the default port, refuses anything else (403), fetches only that name and never follows a redirect.
+  HTTP and HTTPS only, 63 names at most, exact names only. Every start applies the recorded egress before the
+  container runs (one function, every start path: a user's start, a restore, a restart for an egress change, the
+  refresh, which starts it with the internet off); a change between the internet and off restarts the container (its
+  disk snapshotted first); within off and allowlists, changes apply live (a name taken off is re-registered to the deny
+  handler: the runtime can't remove one while it runs). A change whose resulting egress lets out anything the one in
+  force doesn't runs only at your own terminal, judged on where it ends; the one exception is a computer's own setup
+  opening it for its packages, until its setup has finished. The manifest's `outside_egress` claims what was checked
+  and nothing more. The browsers' own DNS over HTTPS is locked off.
+- **A stop is a power cut for programs, and Cloudflare may make one.** The stop ends the desktop's programs, snapshots
+  the disk and only then ends the container; a snapshot that fails stops nothing, and a container Cloudflare doesn't
+  end after it is recorded and said as it is (stopping: the disk saved, still running), tried again every minute. Cloudflare can end a container
+  without warning: what changed since the last snapshot is lost, and the Worker says so. The idle stop is the Worker's
+  (no connection for `IDLE_STOP` minutes: a snapshot, then the stop); the container's own inactivity timeout,
+  `IDLE_STOP` plus 10 minutes, is the backstop that ends it unattended if the Worker's stop fails three times.
+- **Snapshots can't be deleted.** Cloudflare keeps each 30 days after it was made or last restored and refuses to
+  delete one through its API. The Worker renews the ones the computer keeps before they expire, running or stopped
+  (in a container of its own, so a running computer isn't interrupted), trying a failed renewal again with a back-off
+  until one works and saying it in `status` and `cloud doctor` meanwhile; the others expire by themselves. `vm delete` deletes everything else and says which snapshots stay and until when (also written to the
+  computer's log folder). Each holds the disk as it was: files, browser profiles, anything typed. Use a VM on your Mac
+  for work you need gone on demand.
+- **Cloudflare holds what's in the VM**, as any provider does, and the container's root is the Worker's (the
+  controller's channel): use a VM on your Mac for work you wouldn't put there.
+- **Input is foreground only** (no `/dev/uinput`): the hub sends keys and typing (aimed at an element too) and pixel
+  clicks in the foreground, and says so.
+- **What isn't there:** volumes and Mac folders, `SSH_AUTH=cert`, the event watcher's health checks, update timers.
+
 ## Secrets and logins (`metacomputer secrets`)
 
 Some tasks need a login or an API key. A password typed into the conversation lands

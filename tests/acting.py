@@ -138,6 +138,11 @@ PROGRAMS = {
     "providers/vercel/broker.py": THROUGH,
     "providers/vercel/tunnel.py": {"relay": THROUGH,        # ssh's connection (its commands wait on their own)
                                    "check": NONE},          # the sandbox's identity, asked of the broker
+    # A Cloudflare computer's broker, as Vercel's: started by lib/remote.py's create, wake, restore and egress hooks
+    # (each waits), it carries the connections of commands that wait on their own.
+    "providers/cloudflare/broker.py": THROUGH,
+    "providers/cloudflare/tunnel.py": {"relay": THROUGH,    # ssh's connection (its commands wait on their own)
+                                       "check": NONE},      # the computer's identity, asked of the broker
     # save starts the guest's recorder stream: it checks a --hold-fd it's handed is a hold, else looks for itself
     "lib/recording.py": {"sidecar": NONE, "finalize": NONE, "moments": NONE, "probe": NONE, "unsynced": NONE,
                          "save": ACTS, "capture": THROUGH},      # capture: the caller's command, a read of the guest
@@ -181,7 +186,8 @@ for _p in ("provisioning/guest/finalize.sh", "provisioning/guest/provision.sh", 
            R + "remote-uninstall", S + "hide-sprite-api", S + "in-session", S + "services", S + "svc-desktop",
            S + "svc-session", S + "svc-sshd", S + "svc-xvfb", S + "xvfb-inner", "providers/vercel/guest/bootstrap.sh",
            "providers/vercel/guest/rootfs/opt/metacomputer/vercel/boot",
-           "providers/vercel/guest/rootfs/opt/metacomputer/vercel/relay"):
+           "providers/vercel/guest/rootfs/opt/metacomputer/vercel/relay", "providers/cloudflare/guest/bootstrap.sh",
+           "providers/cloudflare/guest/rootfs/opt/metacomputer/cloudflare/boot"):
     PROGRAMS[_p] = GUEST
 # Programs whose first words are a group's: the subcommand is the first two (`volume sync`).
 GROUPS = {"lib/storage.py": ("volume", "refdisk")}

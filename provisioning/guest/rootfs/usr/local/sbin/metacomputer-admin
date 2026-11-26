@@ -56,6 +56,22 @@ if [ -e /etc/metacomputer/vercel ]; then
     idle) echo "idle: a Vercel sandbox stops by itself at its session's timeout (IDLE_STOP, set from the Mac)" >&2; exit 2 ;;
   esac
 fi
+# A Cloudflare container (/etc/metacomputer/cloudflare): no systemd. Its sshd and desktop are started by its boot
+# script, which only the computer's control Worker runs (the Mac's metacomputer start, desktop-restart, logs); its
+# egress is Cloudflare's outbound rules.
+if [ -e /etc/metacomputer/cloudflare ]; then
+  case "${1:-}" in
+    restart-desktop|reboot|poweroff|updates)
+      echo "$1: in a Cloudflare container this is done from the Mac (metacomputer desktop-restart, stop, logs; a new computer for updates)" >&2; exit 2 ;;
+    status) echo "a Cloudflare container: sshd and the desktop are started by its boot script (metacomputer logs on the Mac)"; exit 0 ;;
+    logs) N="${2:-200}"; case "$N" in ''|*[!0-9]*) echo "logs: N must be a number" >&2; exit 2 ;; esac
+          tail -n "$N" /var/log/metacomputer-provision.log 2>/dev/null; exit 0 ;;
+    firewall) echo "none for egress in the guest: Cloudflare's outbound rules, outside the container (metacomputer net status on the Mac)"; exit 0 ;;
+    egress) [ "${2:-}" = status ] && { echo provider; exit 0; }
+            echo "egress: Cloudflare's outbound rules, set from the Mac (metacomputer net egress)" >&2; exit 2 ;;
+    idle) echo "idle: a Cloudflare container is stopped by its control Worker IDLE_STOP after its last connection (set from the Mac)" >&2; exit 2 ;;
+  esac
+fi
 case "${1:-}" in
   restart-desktop) systemctl restart lightdm ;;
   reboot)          systemctl reboot ;;
